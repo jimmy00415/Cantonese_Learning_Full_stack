@@ -17,9 +17,56 @@ const ttsPill = document.getElementById('ttsPill');
 const clearChatBtn = document.getElementById('clearChat');
 const speedSelect = document.getElementById('speed');
 const replayBtn = document.getElementById('replay');
+const starterChipsEl = document.getElementById('starterChips');
 
 let sessionId = null;
 let lastTtsAudio = null;
+let isPlaying = false;
+
+const starterPhrases = {
+  default: ['你好，我想練習日常對話', '可唔可以幫我糾正發音？', '講個笑話俾我聽吓？'],
+  '餐廳點餐 (At the Restaurant)': ['我想點一碗雲吞麵', '呢度有冇素食選擇？', '可唔可以少冰少甜？'],
+  '認識新朋友 (Meeting New People)': ['你好，我叫阿明，第一次嚟香港', '你平時有咩興趣？', '可唔可以同我講慢啲？'],
+  '去香港旅行 (Traveling in Hong Kong)': ['點樣去太平山頂最方便？', '附近有咩地道小食推介？', '可唔可以講下八達通點用？'],
+  '購物閒聊 (Shopping Small Talk)': ['有冇其他顏色同尺碼？', '可唔可以平啲呀？', '呢件衫可唔可以試下？'],
+  '工作寒暄 (Workplace Small Talk)': ['今日開會會講啲乜？', '你哋通常點分工？', '可唔可以幫我review一下文件？']
+};
+
+function scenarioKey(val) {
+  return starterPhrases[val] ? val : 'default';
+}
+
+function renderStarterChips(val) {
+  if (!starterChipsEl) return;
+  const phrases = starterPhrases[scenarioKey(val)] || starterPhrases.default;
+  starterChipsEl.innerHTML = '';
+  phrases.forEach((p) => {
+    const chip = document.createElement('button');
+    chip.className = 'chip';
+    chip.type = 'button';
+    chip.textContent = p;
+    chip.addEventListener('click', () => {
+      textInput.value = p;
+      textInput.focus();
+    });
+    starterChipsEl.appendChild(chip);
+  });
+}
+
+function renderEmptyState() {
+  if (!transcriptEl) return;
+  transcriptEl.innerHTML = '';
+  const box = document.createElement('div');
+  box.className = 'empty-state';
+  box.innerHTML = '<strong>開始你的第一句</strong><p>選一個情景或點擊上方建議句子，然後按住麥克風或直接輸入。</p>';
+  transcriptEl.appendChild(box);
+}
+
+function clearEmptyState() {
+  if (!transcriptEl) return;
+  const empty = transcriptEl.querySelector('.empty-state');
+  if (empty) empty.remove();
+}
 
 function setNotice(text, kind = 'info') {
   noticeEl.textContent = text || '';
@@ -46,6 +93,7 @@ function fmtTime(ts) {
 }
 
 function renderMessage({ role, text, ttsAudio, timestamp }) {
+  clearEmptyState();
   const div = document.createElement('div');
   div.className = `message ${role}`;
   const meta = document.createElement('div');
@@ -58,13 +106,25 @@ function renderMessage({ role, text, ttsAudio, timestamp }) {
   meta.appendChild(badge);
   meta.appendChild(time);
 
-  if (ttsAudio) {
+  if (ttsAudio && role === 'ai') {
+    const controls = document.createElement('div');
+    controls.className = 'controls-inline';
+
     const play = document.createElement('button');
     play.className = 'play-btn';
     play.type = 'button';
     play.textContent = '播放';
-    play.addEventListener('click', () => playAudio(ttsAudio, getPlaybackRate()));
-    meta.appendChild(play);
+    play.addEventListener('click', () => playAudioWithButton(ttsAudio, getPlaybackRate(), play));
+
+    const replay = document.createElement('button');
+    replay.className = 'play-btn';
+    replay.type = 'button';
+    replay.textContent = '重播';
+    replay.addEventListener('click', () => playAudioWithButton(ttsAudio, getPlaybackRate(), replay));
+
+    controls.appendChild(play);
+    controls.appendChild(replay);
+    meta.appendChild(controls);
   }
 
   const body = document.createElement('div');
@@ -89,6 +149,23 @@ async function playAudio(ttsAudio, rate = 1) {
   }
 }
 
+async function playAudioWithButton(ttsAudio, rate, btn) {
+  if (!ttsAudio || isPlaying) return;
+  isPlaying = true;
+  const original = btn.textContent;
+  btn.textContent = '播放中…';
+  btn.classList.add('is-playing');
+  btn.disabled = true;
+  try {
+    await playAudio(ttsAudio, rate);
+  } finally {
+    btn.textContent = original;
+    btn.classList.remove('is-playing');
+    btn.disabled = false;
+    isPlaying = false;
+  }
+}
+
 async function fetchJSON(path, options) {
   const res = await fetch(`${API_BASE}${path}`, {
     headers: { 'Content-Type': 'application/json' },
@@ -108,6 +185,7 @@ async function loadScenarios() {
     scenarioSelect.appendChild(opt);
   });
   scenarioPill.textContent = `情景：${scenarioSelect.value || '自由對話'}`;
+  renderStarterChips(scenarioSelect.value);
 }
 
 async function startSession() {
@@ -115,6 +193,7 @@ async function startSession() {
   sessionId = sid;
   transcriptEl.innerHTML = '';
   feedbackEl.textContent = '';
+  renderEmptyState();
   renderMessage({ role: 'ai', text: '你好！我係你嘅廣東話導師，講句嘢嚟聽下？', timestamp: Date.now() });
   setStatus(`已建立對話：${sessionId.slice(0, 8)}`);
   sessionPill.textContent = `會話 ${sessionId.slice(0, 8)}`;
@@ -176,10 +255,12 @@ clearChatBtn.addEventListener('click', () => {
   transcriptEl.innerHTML = '';
   feedbackEl.textContent = '';
   setNotice('已清除對話記錄', 'info');
+  renderEmptyState();
 });
 
 scenarioSelect.addEventListener('change', () => {
   scenarioPill.textContent = `情景：${scenarioSelect.value}`;
+  renderStarterChips(scenarioSelect.value);
 });
 
 function getPlaybackRate() {
@@ -192,7 +273,27 @@ replayBtn.addEventListener('click', () => {
     setNotice('暫時未有可重播的導師語音', 'info');
     return;
   }
-  playAudio(lastTtsAudio, getPlaybackRate());
+  playAudioWithButton(lastTtsAudio, getPlaybackRate(), replayBtn);
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey && e.key === 'Enter') {
+    e.preventDefault();
+    const text = textInput.value.trim();
+    sendUtterance(text);
+  }
+  if (e.ctrlKey && e.shiftKey && (e.key === 'r' || e.key === 'R')) {
+    e.preventDefault();
+    replayBtn.click();
+  }
+  if (e.ctrlKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+    e.preventDefault();
+    const options = Array.from(speedSelect.options);
+    const idx = speedSelect.selectedIndex;
+    const next = e.key === 'ArrowUp' ? Math.max(0, idx - 1) : Math.min(options.length - 1, idx + 1);
+    speedSelect.selectedIndex = next;
+    setNotice(`播放速度：${speedSelect.value}x`, 'info');
+  }
 });
 
 (async function init() {
