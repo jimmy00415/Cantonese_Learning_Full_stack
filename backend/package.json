@@ -1,0 +1,22 @@
+{
+  "name": "cantonese-tutor-backend",
+  "version": "0.1.0",
+  "description": "Backend API for Cantonese Conversation Tutor (mock ASR/LLM/TTS).",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "node-fetch": "^3.3.2",
+    "morgan": "^1.10.0",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}

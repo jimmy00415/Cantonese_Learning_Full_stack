@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-HK">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cantonese Conversation Tutor</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div>
+        <h1>廣東話對話導師</h1>
+        <p class="subtitle">桌面網頁體驗 · 模擬語音對話 · 立即練習</p>
+        <div class="badges">
+          <span class="pill">AI 導師</span>
+          <span class="pill">語音對話</span>
+          <span class="pill">實時反饋</span>
+        </div>
+      </div>
+      <div class="status" id="status">連線中...</div>
+    </header>
+
+    <section class="hero">
+      <div>
+        <p class="hero-kicker">練口語 · 聽語感 · 改發音</p>
+        <h2>和 AI 對話，像真人陪練</h2>
+        <p class="hero-body">按住說話或輸入文字，獲取即時廣東話回應與語音播報，適合桌面麥克風場景。</p>
+      </div>
+    </section>
+
+    <div class="panel">
+      <section class="controls">
+        <label for="scenario">情景：</label>
+        <select id="scenario"></select>
+        <button id="newSession">開始新對話</button>
+      </section>
+
+      <div id="notice" class="notice" role="status" aria-live="polite"></div>
+      <section class="transcript" aria-label="對話內容">
+        <div class="transcript-header">
+          <div>
+            <div class="pill" id="scenarioPill">情景：自由對話</div>
+            <div class="pill pill-secondary" id="sessionPill">未開始</div>
+            <div class="pill pill-secondary" id="ttsPill">語音：偵測中</div>
+          </div>
+          <button id="clearChat" class="ghost">清除記錄</button>
+        </div>
+        <div id="transcript" class="transcript-body"></div>
+      </section>
+
+      <section class="input-panel">
+        <button id="holdToSpeak" class="mic">按住說話（模擬）</button>
+        <input id="textInput" type="text" placeholder="或輸入一句廣東話..." />
+        <div class="audio-controls">
+          <label for="speed">速度</label>
+          <select id="speed">
+            <option value="0.9">0.9x</option>
+            <option value="1" selected>1.0x</option>
+            <option value="1.1">1.1x</option>
+            <option value="1.2">1.2x</option>
+          </select>
+          <button id="replay">重播</button>
+        </div>
+        <button id="sendText">發送</button>
+      </section>
+
+      <section class="feedback" id="feedback"></section>
+    </div>
+
+    <section class="info-grid">
+      <div class="info-card">
+        <h3>如何開始</h3>
+        <ol>
+          <li>選擇情景後按「開始新對話」。</li>
+          <li>按住麥克風按鈕說話，或直接輸入文字。</li>
+          <li>點「播放」或「重播」聽導師語音，可調整速度。</li>
+        </ol>
+      </div>
+      <div class="info-card">
+        <h3>小貼士</h3>
+        <ul>
+          <li>放慢語速，讓導師更準確給出反饋。</li>
+          <li>用「餐廳點餐」等情景，練習實用對話。</li>
+          <li>重播時可調速度，聽清楚聲調與語氣。</li>
+        </ul>
+      </div>
+    </section>
+
+    <footer class="footer">© 2025 Cantonese Tutor · 桌面版體驗 · 支持實時語音與文字輸入</footer>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

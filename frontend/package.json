@@ -1,0 +1,11 @@
+{
+  "name": "cantonese-tutor-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "start": "serve -l 5173 ."
+  },
+  "devDependencies": {
+    "serve": "^14.2.5"
+  }
+}
