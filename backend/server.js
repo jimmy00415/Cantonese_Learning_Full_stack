@@ -52,6 +52,10 @@ const politeOpeners = [
   '正啊！'
 ];
 
+// Cache synthesized TTS by text to avoid repeat calls; keep it small.
+const ttsCache = new Map();
+const MAX_TTS_CACHE = 50;
+
 function mockAiReply(userText, scenario) {
   const opener = politeOpeners[Math.floor(Math.random() * politeOpeners.length)];
   const seed = promptSeeds[Math.floor(Math.random() * promptSeeds.length)];
@@ -124,9 +128,13 @@ async function synthesizeAzure(text) {
   const tokenEndpoint = `https://${azureTtsRegion}.api.cognitive.microsoft.com/sts/v1.0/issueToken`;
   const ttsEndpoint = `https://${azureTtsRegion}.tts.speech.microsoft.com/cognitiveservices/v1`;
 
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 6000);
+
   const tokenRes = await fetch(tokenEndpoint, {
     method: 'POST',
-    headers: { 'Ocp-Apim-Subscription-Key': azureTtsKey }
+    headers: { 'Ocp-Apim-Subscription-Key': azureTtsKey },
+    signal: controller.signal
   });
   if (!tokenRes.ok) throw new Error(`Azure token error ${tokenRes.status}`);
   const token = await tokenRes.text();
@@ -138,8 +146,10 @@ async function synthesizeAzure(text) {
       'X-Microsoft-OutputFormat': 'audio-16khz-128kbitrate-mono-mp3',
       Authorization: `Bearer ${token}`
     },
-    body: ssml
+    body: ssml,
+    signal: controller.signal
   });
+  clearTimeout(timeout);
   if (!ttsRes.ok) throw new Error(`Azure TTS error ${ttsRes.status}`);
   const buffer = Buffer.from(await ttsRes.arrayBuffer());
   return `data:audio/mpeg;base64,${buffer.toString('base64')}`;
@@ -153,6 +163,7 @@ export async function handler(req, res) {
 const originalHandler = app._router.stack.find((layer) => layer.route && layer.route.path === '/api/recognize-and-respond').route.stack[0].handle;
 app._router.stack.find((layer) => layer.route && layer.route.path === '/api/recognize-and-respond').route.stack[0].handle = async (req, res, next) => {
   try {
+    const started = Date.now();
     const { sessionId, userText = '', scenario = '' } = req.body || {};
     if (!sessionId) return res.status(400).json({ error: 'sessionId is required' });
 
@@ -171,10 +182,28 @@ app._router.stack.find((layer) => layer.route && layer.route.path === '/api/reco
     conversations.set(sessionId, history);
 
     let ttsAudio = null;
+    let ttsProviderUsed = 'mock';
+    let ttsError = null;
+
+    const cacheKey = aiText;
+    if (ttsCache.has(cacheKey)) {
+      ttsAudio = ttsCache.get(cacheKey);
+    }
+
     if (ttsProvider === 'azure') {
       try {
-        ttsAudio = await synthesizeAzure(aiText);
+        ttsAudio = ttsAudio || (await synthesizeAzure(aiText));
+        ttsProviderUsed = 'azure';
+        // Maintain small cache
+        if (!ttsCache.has(cacheKey)) {
+          ttsCache.set(cacheKey, ttsAudio);
+          if (ttsCache.size > MAX_TTS_CACHE) {
+            const firstKey = ttsCache.keys().next().value;
+            ttsCache.delete(firstKey);
+          }
+        }
       } catch (err) {
+        ttsError = err.message || 'Azure TTS failed';
         console.warn('Azure TTS failed, falling back to mock:', err.message);
       }
     }
@@ -182,7 +211,18 @@ app._router.stack.find((layer) => layer.route && layer.route.path === '/api/reco
       ttsAudio = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
     }
 
-    res.json({ aiText, feedback, ttsAudio, history });
+    const latencyMs = Date.now() - started;
+
+    res.json({
+      aiText,
+      feedback,
+      ttsAudio,
+      history,
+      latencyMs,
+      ttsProvider: ttsProviderUsed,
+      ttsError,
+      ttsFallback: ttsProviderUsed === 'mock' && ttsProvider === 'azure'
+    });
   } catch (err) {
     next(err);
   }

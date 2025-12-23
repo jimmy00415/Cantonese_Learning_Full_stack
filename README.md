@@ -37,6 +37,19 @@ npm run start             # or npx serve -l 5173 .
 # serves static site on http://localhost:5173
 ```
 
+### Root scripts (convenience)
+From repo root:
+```powershell
+# install root tools (concurrently)
+npm install
+
+# run dev servers separately
+npm run dev:backend
+npm run dev:frontend
+
+# or run both together (backend + frontend)
+npm run start:all
+```
 Open http://localhost:5173 in a desktop browser. The page will call the backend at http://localhost:4000.
 
 ## How it works (mocked)
