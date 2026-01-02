@@ -4,8 +4,14 @@ import dotenv from 'dotenv';
 import morgan from 'morgan';
 import fetch from 'node-fetch';
 import { v4 as uuidv4 } from 'uuid';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 
-dotenv.config();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// Load .env from backend directory
+dotenv.config({ path: join(__dirname, '.env') });
 
 const app = express();
 const port = process.env.PORT || 4000;
@@ -17,12 +23,24 @@ const azureTtsRegion = process.env.AZURE_SPEECH_REGION;
 const azureVoice = process.env.AZURE_TTS_VOICE || 'zh-HK-HiuMaanNeural';
 const azureRate = process.env.AZURE_TTS_RATE || '0%';
 const azurePitch = process.env.AZURE_TTS_PITCH || '0%';
+const hkbuApiKey = process.env.HKBU_API_KEY;
+const hkbuBaseUrl = process.env.HKBU_BASE_URL || 'https://genai.hkbu.edu.hk/api/v0/rest';
+const hkbuModel = process.env.HKBU_MODEL || 'gpt-5';
+const hkbuApiVersion = process.env.HKBU_API_VERSION || '2024-12-01-preview';
 
 app.disable('x-powered-by');
 app.use(morgan(process.env.LOG_FORMAT || 'dev'));
 
 app.use(cors({ origin: clientOrigin, credentials: true }));
 app.use(express.json({ limit: '2mb' }));
+app.use((req, res, next) => {
+  req.startTime = Date.now();
+  next();
+});
+app.use((req, res, next) => {
+  req.startTime = Date.now();
+  next();
+});
 
 // In-memory conversation store; in production use a DB or cache.
 const conversations = new Map();
@@ -56,12 +74,90 @@ const politeOpeners = [
 const ttsCache = new Map();
 const MAX_TTS_CACHE = 50;
 
+async function generateAIResponse(userText, scenario, history) {
+  console.log('🤖 generateAIResponse called with:', { userText: userText.substring(0, 20), scenario, hasApiKey: !!hkbuApiKey });
+  
+  if (!hkbuApiKey) {
+    console.warn('⚠️ HKBU API key not configured, using mock');
+    return mockAiReply(userText, scenario);
+  }
+  
+  try {
+    const systemMessage = `你係一個友善嘅廣東話老師。你嘅工作係幫學生練習廣東話對話。
+場景：${scenario || '日常對話'}
+
+指引：
+1. 用地道廣東話回應
+2. 語氣自然親切
+3. 如果學生有文法或用詞錯誤，溫柔地糾正
+4. 鼓勵學生繼續練習
+5. 回應長度保持 1-3 句，唔好太長
+6. 用繁體中文書寫`;
+
+    const messages = [
+      { role: 'system', content: systemMessage },
+      ...history.slice(-6).map(h => ({ 
+        role: h.role === 'user' ? 'user' : 'assistant', 
+        content: h.text 
+      })),
+      { role: 'user', content: userText }
+    ];
+
+    const url = `${hkbuBaseUrl}/deployments/${hkbuModel}/chat/completions?api-version=${hkbuApiVersion}`;
+    console.log('📡 Calling HKBU API:', url);
+    
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'accept': 'application/json',
+        'Content-Type': 'application/json',
+        'api-key': hkbuApiKey,
+      },
+      body: JSON.stringify({
+        messages: messages,
+        temperature: 1.0,
+        max_tokens: 150,
+        stream: false
+      })
+    });
+
+    console.log('📥 HKBU API response status:', response.status, response.statusText);
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('❌ HKBU API error response:', errorText);
+      throw new Error(`LLM API failed: ${response.status} ${response.statusText} - ${errorText}`);
+    }
+
+    const data = await response.json();
+    console.log('📦 HKBU API response data:', JSON.stringify(data).substring(0, 200));
+    
+    const aiResponse = data.choices?.[0]?.message?.content || '';
+    
+    if (aiResponse) {
+      console.log('✅ LLM Response generated:', aiResponse.substring(0, 50));
+      return aiResponse.trim();
+    }
+    
+    throw new Error('No content in LLM response');
+  } catch (err) {
+    console.error('❌ LLM API error:', err.message);
+    console.log('⚠️ Falling back to mock response');
+    return mockAiReply(userText, scenario);
+  }
+}
+
 function mockAiReply(userText, scenario) {
   const opener = politeOpeners[Math.floor(Math.random() * politeOpeners.length)];
   const seed = promptSeeds[Math.floor(Math.random() * promptSeeds.length)];
   const scenarioHint = scenario ? `（情景：${scenario}）` : '';
   const echo = userText ? `你啱啱講：「${userText}」` : '你可以先講講你想練習嘅內容。';
   return `${opener} ${echo} ${scenarioHint} ${seed}`.trim();
+}
+
+function generateMockTtsDataUri() {
+  // Minimal valid WAV file (silent audio)
+  return 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
 }
 
 app.get('/api/health', (_req, res) => {
@@ -83,7 +179,74 @@ app.post('/api/session', (_req, res) => {
   res.json({ sessionId });
 });
 
-app.post('/api/recognize-and-respond', (req, res) => {
+// Speech-to-Text endpoint (Azure ASR for Cantonese)
+app.post('/api/speech-to-text', async (req, res) => {
+  const { audioData } = req.body;
+  
+  if (!audioData) {
+    return res.status(400).json({ error: 'Missing audioData' });
+  }
+
+  const ttsProvider = process.env.TTS_PROVIDER || 'mock';
+  
+  if (ttsProvider === 'azure') {
+    try {
+      const speechKey = process.env.AZURE_SPEECH_KEY;
+      const speechRegion = process.env.AZURE_SPEECH_REGION || 'eastasia';
+      
+      if (!speechKey) {
+        throw new Error('AZURE_SPEECH_KEY not configured');
+      }
+
+      // Convert base64 to buffer
+      const audioBuffer = Buffer.from(audioData.replace(/^data:audio\/\w+;base64,/, ''), 'base64');
+
+      const response = await fetch(
+        `https://${speechRegion}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=zh-HK`,
+        {
+          method: 'POST',
+          headers: {
+            'Ocp-Apim-Subscription-Key': speechKey,
+            'Content-Type': 'audio/wav; codec=audio/pcm; samplerate=16000',
+          },
+          body: audioBuffer,
+        }
+      );
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        console.error('Azure ASR error response:', errorBody);
+        throw new Error(`Azure ASR failed: ${response.status} ${response.statusText} - ${errorBody}`);
+      }
+
+      const result = await response.json();
+      
+      return res.json({
+        transcript: result.DisplayText || '',
+        confidence: result.RecognitionStatus === 'Success' ? 0.9 : 0.5,
+        provider: 'azure',
+      });
+    } catch (err) {
+      console.error('Azure ASR error:', err.message);
+      // Fallback to mock
+      return res.json({
+        transcript: '(模擬) 你好，我想練習廣東話',
+        confidence: 0.8,
+        provider: 'mock',
+        error: err.message,
+      });
+    }
+  }
+
+  // Mock ASR fallback
+  res.json({
+    transcript: '(模擬) 你好，我想練習廣東話',
+    confidence: 0.8,
+    provider: 'mock',
+  });
+});
+
+app.post('/api/recognize-and-respond', async (req, res) => {
   const { sessionId, userText = '', scenario = '' } = req.body || {};
   if (!sessionId) {
     return res.status(400).json({ error: 'sessionId is required' });
@@ -97,17 +260,92 @@ app.post('/api/recognize-and-respond', (req, res) => {
     conversations.set(sessionId, []);
   }
 
-  const history = conversations.get(sessionId);
-  const aiText = mockAiReply(trimmedUserText, scenarioText);
-  const feedback = trimmedUserText
-    ? '（模擬）聲調不錯，試下放慢少少再講一次。'
-    : '請試下講一句你想練習嘅句子。';
+  let history = conversations.get(sessionId);
+  
+  // Generate AI response using real LLM
+  const aiText = await generateAIResponse(trimmedUserText, scenarioText, history);
+  
+  // Generate intelligent feedback using LLM
+  let feedback = '';
+  if (trimmedUserText && hkbuApiKey) {
+    try {
+      const feedbackPrompt = `分析以下廣東話句子嘅發音同文法，提供簡短建議（1句話）：「${trimmedUserText}」`;
+      feedback = await generateAIResponse(feedbackPrompt, '發音分析', []);
+      feedback = `（分析）${feedback}`;
+    } catch (err) {
+      feedback = '（分析）繼續練習，你做得好好！';
+    }
+  } else {
+    feedback = trimmedUserText ? '（分析）繼續練習，你做得好好！' : '請試下講一句你想練習嘅句子。';
+  }
 
-  history.push({ userText: trimmedUserText, aiText, scenario: scenarioText, timestamp: Date.now() });
-  if (history.length > 10) history.shift();
+  history.push({ role: 'user', text: trimmedUserText, timestamp: Date.now() });
+  history.push({ role: 'ai', text: aiText, timestamp: Date.now() });
+  if (history.length > 20) history = history.slice(-20);
   conversations.set(sessionId, history);
 
-  res.json({ aiText, feedback, ttsAudio: null, history });
+  // TTS Synthesis
+  let ttsAudio = null;
+  let ttsError = null;
+  let ttsFallback = false;
+  const ttsStartTime = Date.now();
+  
+  if (ttsProvider === 'azure' && azureTtsKey) {
+    try {
+      const cacheKey = aiText.trim().toLowerCase();
+      if (ttsCache.has(cacheKey)) {
+        ttsAudio = ttsCache.get(cacheKey);
+        console.log('✓ TTS cache hit');
+      } else {
+        console.log('Synthesizing Azure TTS for:', aiText.substring(0, 30) + '...');
+        ttsAudio = await synthesizeAzure(aiText);
+        if (ttsAudio) {
+          console.log('✓ TTS synthesized, length:', ttsAudio.length);
+          ttsCache.set(cacheKey, ttsAudio);
+          if (ttsCache.size > 50) {
+            const firstKey = ttsCache.keys().next().value;
+            ttsCache.delete(firstKey);
+          }
+        } else {
+          console.warn('⚠ TTS synthesis returned null');
+        }
+      }
+    } catch (err) {
+      console.error('✗ Azure TTS failed:', err.message);
+      ttsError = err.message;
+      ttsFallback = true;
+    }
+  } else {
+    console.log('TTS provider not configured, using mock');
+  }
+  
+  if (!ttsAudio) {
+    console.log('Generating mock TTS audio');
+    ttsAudio = generateMockTtsDataUri();
+    if (!ttsFallback) ttsFallback = true;
+  }
+  
+  const ttsLatency = Date.now() - ttsStartTime;
+  const totalLatency = Date.now() - (req.startTime || Date.now());
+
+  console.log('Sending response:', {
+    aiTextLength: aiText.length,
+    ttsAudioLength: ttsAudio ? ttsAudio.length : 0,
+    ttsProvider: ttsAudio && !ttsFallback ? 'azure' : 'mock',
+    latencyMs: totalLatency
+  });
+
+  res.json({ 
+    aiText, 
+    feedback, 
+    ttsAudio, 
+    history,
+    latencyMs: totalLatency,
+    ttsProvider: ttsAudio && !ttsFallback ? 'azure' : 'mock',
+    ttsLatency,
+    ttsError,
+    ttsFallback
+  });
 });
 
 // Centralized error guard
@@ -119,116 +357,64 @@ app.use((err, _req, res, _next) => {
 
 async function synthesizeAzure(text) {
   if (!azureTtsKey || !azureTtsRegion) throw new Error('Azure TTS key/region missing');
+  
+  // Escape XML special characters
+  const escapedText = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+  
   const ssml = `<?xml version="1.0" encoding="utf-8"?>
 <speak version="1.0" xml:lang="zh-HK">
   <voice name="${azureVoice}">
-    <prosody rate="${azureRate}" pitch="${azurePitch}">${text}</prosody>
+    <prosody rate="${azureRate}" pitch="${azurePitch}">${escapedText}</prosody>
   </voice>
 </speak>`;
-  const tokenEndpoint = `https://${azureTtsRegion}.api.cognitive.microsoft.com/sts/v1.0/issueToken`;
   const ttsEndpoint = `https://${azureTtsRegion}.tts.speech.microsoft.com/cognitiveservices/v1`;
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 6000);
+  const timeout = setTimeout(() => controller.abort(), 10000);
 
-  const tokenRes = await fetch(tokenEndpoint, {
-    method: 'POST',
-    headers: { 'Ocp-Apim-Subscription-Key': azureTtsKey },
-    signal: controller.signal
-  });
-  if (!tokenRes.ok) throw new Error(`Azure token error ${tokenRes.status}`);
-  const token = await tokenRes.text();
-
-  const ttsRes = await fetch(ttsEndpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/ssml+xml',
-      'X-Microsoft-OutputFormat': 'audio-16khz-128kbitrate-mono-mp3',
-      Authorization: `Bearer ${token}`
-    },
-    body: ssml,
-    signal: controller.signal
-  });
-  clearTimeout(timeout);
-  if (!ttsRes.ok) throw new Error(`Azure TTS error ${ttsRes.status}`);
-  const buffer = Buffer.from(await ttsRes.arrayBuffer());
-  return `data:audio/mpeg;base64,${buffer.toString('base64')}`;
+  try {
+    const ttsRes = await fetch(ttsEndpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/ssml+xml',
+        'X-Microsoft-OutputFormat': 'audio-16khz-128kbitrate-mono-mp3',
+        'Ocp-Apim-Subscription-Key': azureTtsKey
+      },
+      body: ssml,
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+    
+    if (!ttsRes.ok) {
+      const errorBody = await ttsRes.text();
+      console.error('Azure TTS error response:', errorBody);
+      throw new Error(`Azure TTS error ${ttsRes.status}: ${errorBody}`);
+    }
+    
+    const buffer = Buffer.from(await ttsRes.arrayBuffer());
+    return `data:audio/mpeg;base64,${buffer.toString('base64')}`;
+  } catch (err) {
+    clearTimeout(timeout);
+    throw err;
+  }
 }
 
 export async function handler(req, res) {
   // not used in this runtime
 }
 
-// Patch recognize-and-respond to include TTS
-const originalHandler = app._router.stack.find((layer) => layer.route && layer.route.path === '/api/recognize-and-respond').route.stack[0].handle;
-app._router.stack.find((layer) => layer.route && layer.route.path === '/api/recognize-and-respond').route.stack[0].handle = async (req, res, next) => {
-  try {
-    const started = Date.now();
-    const { sessionId, userText = '', scenario = '' } = req.body || {};
-    if (!sessionId) return res.status(400).json({ error: 'sessionId is required' });
-
-    const trimmedUserText = typeof userText === 'string' ? userText.slice(0, 400).trim() : '';
-    const scenarioText = typeof scenario === 'string' ? scenario.slice(0, 120) : '';
-
-    if (!conversations.has(sessionId)) conversations.set(sessionId, []);
-    const history = conversations.get(sessionId);
-    const aiText = mockAiReply(trimmedUserText, scenarioText);
-    const feedback = trimmedUserText
-      ? '（模擬）聲調不錯，試下放慢少少再講一次。'
-      : '請試下講一句你想練習嘅句子。';
-
-    history.push({ userText: trimmedUserText, aiText, scenario: scenarioText, timestamp: Date.now() });
-    if (history.length > 10) history.shift();
-    conversations.set(sessionId, history);
-
-    let ttsAudio = null;
-    let ttsProviderUsed = 'mock';
-    let ttsError = null;
-
-    const cacheKey = aiText;
-    if (ttsCache.has(cacheKey)) {
-      ttsAudio = ttsCache.get(cacheKey);
-    }
-
-    if (ttsProvider === 'azure') {
-      try {
-        ttsAudio = ttsAudio || (await synthesizeAzure(aiText));
-        ttsProviderUsed = 'azure';
-        // Maintain small cache
-        if (!ttsCache.has(cacheKey)) {
-          ttsCache.set(cacheKey, ttsAudio);
-          if (ttsCache.size > MAX_TTS_CACHE) {
-            const firstKey = ttsCache.keys().next().value;
-            ttsCache.delete(firstKey);
-          }
-        }
-      } catch (err) {
-        ttsError = err.message || 'Azure TTS failed';
-        console.warn('Azure TTS failed, falling back to mock:', err.message);
-      }
-    }
-    if (!ttsAudio) {
-      ttsAudio = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
-    }
-
-    const latencyMs = Date.now() - started;
-
-    res.json({
-      aiText,
-      feedback,
-      ttsAudio,
-      history,
-      latencyMs,
-      ttsProvider: ttsProviderUsed,
-      ttsError,
-      ttsFallback: ttsProviderUsed === 'mock' && ttsProvider === 'azure'
-    });
-  } catch (err) {
-    next(err);
-  }
-};
-
 app.listen(port, () => {
   console.log(`Backend listening on port ${port}`);
   console.log(`Allowing origin: ${clientOrigin}`);
+  console.log(`TTS Provider: ${ttsProvider}`);
+  console.log(`HKBU API configured: ${hkbuApiKey ? 'YES ✓' : 'NO ✗'}`);
+  if (hkbuApiKey) {
+    console.log(`HKBU Model: ${hkbuModel}`);
+    console.log(`HKBU Base URL: ${hkbuBaseUrl}`);
+  }
 });

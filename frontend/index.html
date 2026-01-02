@@ -18,7 +18,13 @@
           <span class="pill">實時反饋</span>
         </div>
       </div>
-      <div class="status" id="status">連線中...</div>
+      <div class="header-status">
+        <div class="system-state" id="systemState" role="status" aria-live="polite">
+          <span class="state-icon" id="stateIcon" aria-hidden="true"></span>
+          <span class="state-label" id="stateLabel">就緒</span>
+        </div>
+        <div class="status" id="status">連線中...</div>
+      </div>
     </header>
 
     <section class="hero">
@@ -73,8 +79,46 @@
         <button id="sendText">發送</button>
       </section>
 
-      <section class="feedback" id="feedback"></section>
+      <section class="feedback-panel">
+        <div class="feedback-immediate" id="feedbackImmediate">
+          <h3>即時反饋</h3>
+          <div id="topCorrections" class="corrections-list"></div>
+        </div>
+        <details class="feedback-deep" id="feedbackDeep">
+          <summary>詳細分析</summary>
+          <div id="feedbackDetails" class="feedback-details"></div>
+        </details>
+      </section>
     </div>
+
+    <!-- Mic Permission Dialog -->
+    <dialog id="micPermissionDialog" class="modal" aria-labelledby="micDialogTitle">
+      <div class="modal-content">
+        <h2 id="micDialogTitle">麥克風權限</h2>
+        <p>我哋需要您嘅麥克風權限，先可以聽到您嘅廣東話發音並提供反饋。</p>
+        <div class="modal-actions">
+          <button id="micDenyBtn" class="ghost">使用打字代替</button>
+          <button id="micAllowBtn">允許麥克風</button>
+        </div>
+      </div>
+    </dialog>
+
+    <!-- Mic Blocked Help Dialog -->
+    <dialog id="micBlockedDialog" class="modal" aria-labelledby="micBlockedTitle">
+      <div class="modal-content">
+        <h2 id="micBlockedTitle">麥克風被阻擋</h2>
+        <p>請喺瀏覽器設置中允許呢個網站使用麥克風：</p>
+        <ol>
+          <li>點擊地址欄左側嘅鎖形圖標</li>
+          <li>揀「網站設置」或「權限」</li>
+          <li>將麥克風設為「允許」</li>
+        </ol>
+        <div class="modal-actions">
+          <button id="micBlockedClose" class="ghost">使用打字代替</button>
+          <button id="micBlockedRetry">重試</button>
+        </div>
+      </div>
+    </dialog>
 
     <section class="info-grid">
       <div class="info-card">
