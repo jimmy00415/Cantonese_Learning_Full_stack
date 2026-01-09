@@ -16,10 +16,11 @@ dotenv.config({ path: join(__dirname, '.env') });
 const app = express();
 const port = process.env.PORT || 4000;
 const clientOrigin = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
-// Allow Azure frontend domain
+// Allow Azure frontend domain and GitHub Pages
 const allowedOrigins = [
   clientOrigin,
-  'https://hongkongtutor-f4b5gzd3fbfdhxdw.eastasia-01.azurewebsites.net'
+  'https://hongkongtutor-f4b5gzd3fbfdhxdw.eastasia-01.azurewebsites.net',
+  'https://jimmy00415.github.io'
 ];
 const appVersion = process.env.APP_VERSION || '0.1.0-prototype';
 const ttsProvider = (process.env.TTS_PROVIDER || 'mock').toLowerCase();
