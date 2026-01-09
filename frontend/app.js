@@ -1,5 +1,7 @@
 const META_API = document.querySelector('meta[name="api-base"]');
-const DEFAULT_API_BASE = `${window.location.protocol}//${window.location.hostname}:4000/api`;
+const DEFAULT_API_BASE = window.location.hostname === 'localhost' 
+  ? `${window.location.protocol}//${window.location.hostname}:4000/api`
+  : 'https://hongkongtutor-f4b5gzd3fbfdhxdw.eastasia-01.azurewebsites.net/api';
 const API_BASE = window.__API_BASE__ || META_API?.content || DEFAULT_API_BASE;
 
 const statusEl = document.getElementById('status');

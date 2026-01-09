@@ -16,6 +16,11 @@ dotenv.config({ path: join(__dirname, '.env') });
 const app = express();
 const port = process.env.PORT || 4000;
 const clientOrigin = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
+// Allow Azure frontend domain
+const allowedOrigins = [
+  clientOrigin,
+  'https://hongkongtutor-f4b5gzd3fbfdhxdw.eastasia-01.azurewebsites.net'
+];
 const appVersion = process.env.APP_VERSION || '0.1.0-prototype';
 const ttsProvider = (process.env.TTS_PROVIDER || 'mock').toLowerCase();
 const azureTtsKey = process.env.AZURE_SPEECH_KEY;
@@ -31,7 +36,16 @@ const hkbuApiVersion = process.env.HKBU_API_VERSION || '2024-12-01-preview';
 app.disable('x-powered-by');
 app.use(morgan(process.env.LOG_FORMAT || 'dev'));
 
-app.use(cors({ origin: clientOrigin, credentials: true }));
+app.use(cors({ 
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true 
+}));
 app.use(express.json({ limit: '2mb' }));
 app.use((req, res, next) => {
   req.startTime = Date.now();
