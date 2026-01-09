@@ -51,10 +51,9 @@ app.use((req, res, next) => {
   req.startTime = Date.now();
   next();
 });
-app.use((req, res, next) => {
-  req.startTime = Date.now();
-  next();
-});
+
+// Serve frontend static files
+app.use(express.static(join(__dirname, 'public')));
 
 // In-memory conversation store; in production use a DB or cache.
 const conversations = new Map();

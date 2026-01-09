@@ -1,0 +1,8 @@
+{
+    "appService.zipIgnorePattern": [
+        "node_modules{,/**}",
+        ".vscode{,/**}"
+    ],
+    "appService.defaultWebAppToDeploy": "/subscriptions/8cd98106-bf3f-4331-86b9-cdf784b35f4c/resourceGroups/Cantonese_Tutor/providers/Microsoft.Web/sites/HongKongTutor",
+    "appService.deploySubpath": "backend"
+}
