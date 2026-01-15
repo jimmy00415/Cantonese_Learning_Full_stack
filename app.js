@@ -758,20 +758,22 @@ async function initSpeechSDK() {
   if (speechConfig) return; // Already initialized
   
   try {
+    // Check if Speech SDK is loaded
+    if (!window.SpeechSDK && !window.Microsoft) {
+      throw new Error('Azure Speech SDK not loaded');
+    }
+    
     // Get auth token from backend (secure - doesn't expose API key)
     const tokenResponse = await fetchJSON('/speech-token', { method: 'GET' });
     if (!tokenResponse.token || !tokenResponse.region) {
-      throw new Error('Failed to get speech token');
+      throw new Error('Failed to get speech token from backend');
     }
     
     const { token, region } = tokenResponse;
     const SpeechSDK = window.SpeechSDK || window.Microsoft.CognitiveServices.Speech;
     
-    // Create Speech Translation config with LID support
-    speechConfig = SpeechSDK.SpeechTranslationConfig.fromAuthorizationToken(token, region);
-    
-    // Set endpoint to v2 universal for multi-lingual support
-    speechConfig.endpointId = `wss://${region}.stt.speech.microsoft.com/speech/universal/v2`;
+    // Create Speech Config (not Translation config - we're doing recognition with LID)
+    speechConfig = SpeechSDK.SpeechConfig.fromAuthorizationToken(token, region);
     
     // Set initial recognition language (required by SDK even though LID will detect)
     speechConfig.speechRecognitionLanguage = 'zh-CN';
@@ -779,7 +781,7 @@ async function initSpeechSDK() {
     // Configure audio from microphone
     audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
     
-    console.log('Azure Speech SDK initialized with LID support');
+    console.log('Azure Speech SDK initialized with region:', region);
   } catch (err) {
     console.error('Speech SDK init error:', err);
     throw err;
@@ -814,8 +816,8 @@ async function handleRecordStart() {
     // Create recognizer with Language Identification
     speechRecognizer = SpeechSDK.SpeechRecognizer.FromConfig(
       speechConfig,
-      autoDetectConfig,
-      audioConfig
+      audioConfig,
+      autoDetectConfig
     );
     
     console.log('Speech recognizer created with LID for zh-CN and yue-CN');
