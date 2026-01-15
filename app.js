@@ -755,13 +755,16 @@ let audioConfig = null;
 
 // Initialize Azure Speech SDK with Language Identification
 async function initSpeechSDK() {
-  if (speechConfig) return; // Already initialized
+  if (speechConfig && audioConfig) {
+    console.log('Speech SDK already initialized');
+    return; // Already initialized
+  }
   
   try {
     // Wait for SDK to load if needed
     let attempts = 0;
     while (!window.SpeechSDK && !window.Microsoft && attempts < 10) {
-      console.log('Waiting for Speech SDK to load...');
+      console.log('Waiting for Speech SDK to load...', attempts);
       await new Promise(resolve => setTimeout(resolve, 300));
       attempts++;
     }
@@ -776,7 +779,7 @@ async function initSpeechSDK() {
       throw new Error('Speech SDK namespace not found');
     }
     
-    console.log('Speech SDK loaded successfully');
+    console.log('Speech SDK loaded successfully, namespace:', Object.keys(SpeechSDK).slice(0, 10));
     
     // Get auth token from backend (secure - doesn't expose API key)
     const tokenResponse = await fetchJSON('/speech-token', { method: 'GET' });
@@ -785,19 +788,33 @@ async function initSpeechSDK() {
     }
     
     const { token, region } = tokenResponse;
+    console.log('Got speech token for region:', region);
     
     // Create Speech Config (not Translation config - we're doing recognition with LID)
     speechConfig = SpeechSDK.SpeechConfig.fromAuthorizationToken(token, region);
     
+    if (!speechConfig) {
+      throw new Error('Failed to create speech config');
+    }
+    
     // Set initial recognition language (required by SDK even though LID will detect)
     speechConfig.speechRecognitionLanguage = 'zh-CN';
+    
+    console.log('Speech config created successfully');
     
     // Configure audio from microphone
     audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
     
-    console.log('Azure Speech SDK initialized with region:', region);
+    if (!audioConfig) {
+      throw new Error('Failed to create audio config');
+    }
+    
+    console.log('Audio config created successfully');
+    console.log('Azure Speech SDK fully initialized');
   } catch (err) {
     console.error('Speech SDK init error:', err);
+    speechConfig = null;
+    audioConfig = null;
     throw err;
   }
 }
@@ -821,19 +838,39 @@ async function handleRecordStart() {
     
     const SpeechSDK = window.SpeechSDK || window.Microsoft.CognitiveServices.Speech;
     
+    if (!speechConfig) {
+      throw new Error('Speech config not initialized');
+    }
+    
+    if (!audioConfig) {
+      throw new Error('Audio config not initialized');
+    }
+    
+    console.log('Creating recognizer with configs:', {
+      hasSpeechConfig: !!speechConfig,
+      hasAudioConfig: !!audioConfig,
+      hasSpeechSDK: !!SpeechSDK
+    });
+    
     // Create auto-detect config with Mandarin and Cantonese as candidates
     const autoDetectConfig = SpeechSDK.AutoDetectSourceLanguageConfig.fromLanguages([
       'zh-CN',  // Mandarin (Simplified Chinese)
       'yue-CN'  // Cantonese (Cantonese, China)
     ]);
     
+    console.log('Auto-detect config created:', autoDetectConfig);
+    
     // Create recognizer with Language Identification
-    // Correct API: SpeechRecognizer.FromConfig(speechConfig, autoDetectConfig, audioConfig)
-    speechRecognizer = new SpeechSDK.SpeechRecognizer(
+    // Use FromConfig static method with correct parameter order
+    speechRecognizer = SpeechSDK.SpeechRecognizer.FromConfig(
       speechConfig,
       autoDetectConfig,
       audioConfig
     );
+    
+    if (!speechRecognizer) {
+      throw new Error('Failed to create speech recognizer');
+    }
     
     console.log('Speech recognizer created with LID for zh-CN and yue-CN');
     
