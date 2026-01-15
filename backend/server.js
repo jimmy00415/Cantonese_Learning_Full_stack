@@ -33,6 +33,11 @@ const hkbuApiKey = process.env.HKBU_API_KEY;
 const hkbuBaseUrl = process.env.HKBU_BASE_URL || 'https://genai.hkbu.edu.hk/api/v0/rest';
 const hkbuModel = process.env.HKBU_MODEL || 'gpt-5';
 const hkbuApiVersion = process.env.HKBU_API_VERSION || '2024-12-01-preview';
+const azureOpenAIKey = process.env.AZURE_OPENAI_KEY;
+const azureOpenAIEndpoint = process.env.AZURE_OPENAI_ENDPOINT;
+const azureOpenAIDeployment = process.env.AZURE_OPENAI_DEPLOYMENT || 'gpt-4o';
+const azureOpenAIApiVersion = process.env.AZURE_OPENAI_API_VERSION || '2024-08-01-preview';
+const llmProvider = (process.env.LLM_PROVIDER || 'hkbu').toLowerCase();
 
 app.disable('x-powered-by');
 app.use(morgan(process.env.LOG_FORMAT || 'dev'));
@@ -89,10 +94,14 @@ const ttsCache = new Map();
 const MAX_TTS_CACHE = 50;
 
 async function generateAIResponse(userText, scenario, history) {
-  console.log('🤖 generateAIResponse called with:', { userText: userText.substring(0, 20), scenario, hasApiKey: !!hkbuApiKey });
+  console.log('🤖 generateAIResponse called with:', { userText: userText.substring(0, 20), scenario, provider: llmProvider });
   
-  if (!hkbuApiKey) {
-    console.warn('⚠️ HKBU API key not configured, using mock');
+  // Check if any LLM provider is configured
+  const hasAzureOpenAI = azureOpenAIKey && azureOpenAIEndpoint;
+  const hasHKBU = hkbuApiKey;
+  
+  if (!hasAzureOpenAI && !hasHKBU) {
+    console.warn('⚠️ No LLM API key configured, using mock');
     return mockAiReply(userText, scenario);
   }
   
@@ -117,34 +126,56 @@ async function generateAIResponse(userText, scenario, history) {
       { role: 'user', content: userText }
     ];
 
-    const url = `${hkbuBaseUrl}/deployments/${hkbuModel}/chat/completions?api-version=${hkbuApiVersion}`;
-    console.log('📡 Calling HKBU API:', url);
+    let url, headers, body;
     
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
+    // Use Azure OpenAI if configured and selected
+    if (llmProvider === 'azure-openai' && hasAzureOpenAI) {
+      url = `${azureOpenAIEndpoint}/openai/deployments/${azureOpenAIDeployment}/chat/completions?api-version=${azureOpenAIApiVersion}`;
+      headers = {
+        'api-key': azureOpenAIKey,
+        'Content-Type': 'application/json'
+      };
+      body = {
+        messages: messages,
+        temperature: 0.7,
+        max_tokens: 150
+      };
+      console.log('📡 Calling Azure OpenAI:', url);
+    } else if (hasHKBU) {
+      // Fallback to HKBU if Azure OpenAI not available
+      url = `${hkbuBaseUrl}/deployments/${hkbuModel}/chat/completions?api-version=${hkbuApiVersion}`;
+      headers = {
         'accept': 'application/json',
         'Content-Type': 'application/json',
         'api-key': hkbuApiKey,
-      },
-      body: JSON.stringify({
+      };
+      body = {
         messages: messages,
         temperature: 1.0,
         max_tokens: 150,
         stream: false
-      })
+      };
+      console.log('📡 Calling HKBU API:', url);
+    } else {
+      throw new Error('No valid LLM provider configured');
+    }
+    
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: headers,
+      body: JSON.stringify(body)
     });
 
-    console.log('📥 HKBU API response status:', response.status, response.statusText);
+    console.log('📥 LLM API response status:', response.status, response.statusText);
     
     if (!response.ok) {
       const errorText = await response.text();
-      console.error('❌ HKBU API error response:', errorText);
+      console.error('❌ LLM API error response:', errorText);
       throw new Error(`LLM API failed: ${response.status} ${response.statusText} - ${errorText}`);
     }
 
     const data = await response.json();
-    console.log('📦 HKBU API response data:', JSON.stringify(data).substring(0, 200));
+    console.log('📦 LLM API response data:', JSON.stringify(data).substring(0, 200));
     
     const aiResponse = data.choices?.[0]?.message?.content || '';
     
@@ -426,9 +457,13 @@ app.listen(port, () => {
   console.log(`Backend listening on port ${port}`);
   console.log(`Allowing origin: ${clientOrigin}`);
   console.log(`TTS Provider: ${ttsProvider}`);
+  console.log(`LLM Provider: ${llmProvider}`);
+  console.log(`Azure OpenAI configured: ${azureOpenAIKey && azureOpenAIEndpoint ? 'YES ✓' : 'NO ✗'}`);
+  if (azureOpenAIKey && azureOpenAIEndpoint) {
+    console.log(`Azure OpenAI Deployment: ${azureOpenAIDeployment}`);
+  }
   console.log(`HKBU API configured: ${hkbuApiKey ? 'YES ✓' : 'NO ✗'}`);
   if (hkbuApiKey) {
     console.log(`HKBU Model: ${hkbuModel}`);
-    console.log(`HKBU Base URL: ${hkbuBaseUrl}`);
   }
 });
