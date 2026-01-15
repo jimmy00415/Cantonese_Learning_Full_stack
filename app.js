@@ -658,7 +658,16 @@ textInput.addEventListener('keyup', (e) => {
   if (e.key === 'Enter') sendBtn.click();
 });
 
-holdBtn.addEventListener('mousedown', async () => {
+holdBtn.addEventListener('mousedown', handleRecordStart);
+holdBtn.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  handleRecordStart();
+});
+
+document.addEventListener('mouseup', handleRecordStop);
+document.addEventListener('touchend', handleRecordStop);
+
+async function handleRecordStart() {
   const hasPermission = await requestMicPermission();
   if (!hasPermission) {
     setNotice('需要麥克風權限，已切換至打字模式', 'info');
@@ -669,10 +678,22 @@ holdBtn.addEventListener('mousedown', async () => {
     setSystemState(STATES.LISTENING);
     holdBtn.textContent = '錄音中... 放開即發送';
     
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const stream = await navigator.mediaDevices.getUserMedia({ 
+      audio: {
+        channelCount: 1,
+        sampleRate: 16000,
+        echoCancellation: true,
+        noiseSuppression: true
+      } 
+    });
     audioChunks = [];
     
-    mediaRecorder = new MediaRecorder(stream);
+    // Use audio/webm or audio/wav based on browser support
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') 
+      ? 'audio/webm;codecs=opus' 
+      : 'audio/wav';
+    
+    mediaRecorder = new MediaRecorder(stream, { mimeType });
     
     mediaRecorder.ondataavailable = (event) => {
       if (event.data.size > 0) {
@@ -689,7 +710,7 @@ holdBtn.addEventListener('mousedown', async () => {
         return;
       }
       
-      const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+      const audioBlob = new Blob(audioChunks, { type: mimeType });
       await processAudioRecording(audioBlob);
     };
     
@@ -701,14 +722,14 @@ holdBtn.addEventListener('mousedown', async () => {
     setTimeout(() => setSystemState(STATES.IDLE), 2000);
     holdBtn.textContent = '按住說話';
   }
-});
+}
 
-holdBtn.addEventListener('mouseup', () => {
+function handleRecordStop() {
   if (mediaRecorder && mediaRecorder.state === 'recording') {
     mediaRecorder.stop();
     holdBtn.textContent = '按住說話';
   }
-});
+}
 
 newSessionBtn.addEventListener('click', startSession);
 clearChatBtn.addEventListener('click', () => {
