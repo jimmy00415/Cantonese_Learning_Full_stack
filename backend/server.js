@@ -224,6 +224,40 @@ app.post('/api/session', (_req, res) => {
   res.json({ sessionId });
 });
 
+// Token endpoint for Azure Speech SDK (secure - doesn't expose API key)
+app.get('/api/speech-token', async (_req, res) => {
+  const speechKey = process.env.AZURE_SPEECH_KEY;
+  const speechRegion = process.env.AZURE_SPEECH_REGION || 'eastasia';
+  
+  if (!speechKey) {
+    return res.status(500).json({ error: 'AZURE_SPEECH_KEY not configured' });
+  }
+  
+  try {
+    const response = await fetch(
+      `https://${speechRegion}.api.cognitive.microsoft.com/sts/v1.0/issueToken`,
+      {
+        method: 'POST',
+        headers: {
+          'Ocp-Apim-Subscription-Key': speechKey,
+          'Content-Type': 'application/x-www-form-urlencoded'
+        }
+      }
+    );
+    
+    if (!response.ok) {
+      throw new Error(`Token request failed: ${response.status}`);
+    }
+    
+    const token = await response.text();
+    res.json({ token, region: speechRegion });
+  } catch (err) {
+    console.error('Speech token error:', err.message);
+    res.status(500).json({ error: 'Failed to get speech token' });
+  }
+});
+
+
 // Speech-to-Text endpoint (Azure ASR for Cantonese)
 app.post('/api/speech-to-text', async (req, res) => {
   const { audioData } = req.body;

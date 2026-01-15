@@ -748,6 +748,44 @@ holdBtn.addEventListener('touchstart', (e) => {
   handleRecordStart();
 });
 
+// Azure Speech SDK recognizer (initialized on demand)
+let speechRecognizer = null;
+let speechConfig = null;
+let audioConfig = null;
+
+// Initialize Azure Speech SDK with Language Identification
+async function initSpeechSDK() {
+  if (speechConfig) return; // Already initialized
+  
+  try {
+    // Get auth token from backend (secure - doesn't expose API key)
+    const tokenResponse = await fetchJSON('/speech-token', { method: 'GET' });
+    if (!tokenResponse.token || !tokenResponse.region) {
+      throw new Error('Failed to get speech token');
+    }
+    
+    const { token, region } = tokenResponse;
+    const SpeechSDK = window.SpeechSDK || window.Microsoft.CognitiveServices.Speech;
+    
+    // Create Speech Translation config with LID support
+    speechConfig = SpeechSDK.SpeechTranslationConfig.fromAuthorizationToken(token, region);
+    
+    // Set endpoint to v2 universal for multi-lingual support
+    speechConfig.endpointId = `wss://${region}.stt.speech.microsoft.com/speech/universal/v2`;
+    
+    // Set initial recognition language (required by SDK even though LID will detect)
+    speechConfig.speechRecognitionLanguage = 'zh-CN';
+    
+    // Configure audio from microphone
+    audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
+    
+    console.log('Azure Speech SDK initialized with LID support');
+  } catch (err) {
+    console.error('Speech SDK init error:', err);
+    throw err;
+  }
+}
+
 document.addEventListener('mouseup', handleRecordStop);
 document.addEventListener('touchend', handleRecordStop);
 
@@ -762,51 +800,71 @@ async function handleRecordStart() {
     setSystemState(STATES.LISTENING);
     holdBtn.textContent = '錄音中... 放開即發送';
     
-    const stream = await navigator.mediaDevices.getUserMedia({ 
-      audio: {
-        channelCount: 1,
-        sampleRate: 16000,
-        echoCancellation: true,
-        noiseSuppression: true
-      } 
-    });
-    audioChunks = [];
+    // Initialize Speech SDK if needed
+    await initSpeechSDK();
     
-    // Try to use OGG format first (Azure ASR supports it better)
-    let mimeType = 'audio/webm';
-    if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
-      mimeType = 'audio/ogg;codecs=opus';
-    } else if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
-      mimeType = 'audio/webm;codecs=opus';
-    } else if (MediaRecorder.isTypeSupported('audio/wav')) {
-      mimeType = 'audio/wav';
-    }
+    const SpeechSDK = window.SpeechSDK || window.Microsoft.CognitiveServices.Speech;
     
-    mediaRecorder = new MediaRecorder(stream, { mimeType });
-    console.log('Recording with MIME type:', mimeType);
+    // Create auto-detect config with Mandarin and Cantonese as candidates
+    const autoDetectConfig = SpeechSDK.AutoDetectSourceLanguageConfig.fromLanguages([
+      'zh-CN',  // Mandarin (Simplified Chinese)
+      'yue-CN'  // Cantonese (Cantonese, China)
+    ]);
     
-    mediaRecorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        audioChunks.push(event.data);
-      }
-    };
+    // Create recognizer with Language Identification
+    speechRecognizer = SpeechSDK.SpeechRecognizer.FromConfig(
+      speechConfig,
+      autoDetectConfig,
+      audioConfig
+    );
     
-    mediaRecorder.onstop = async () => {
-      stream.getTracks().forEach(track => track.stop());
-      
-      if (audioChunks.length === 0) {
-        setNotice('錄音失敗，請重試', 'error');
+    console.log('Speech recognizer created with LID for zh-CN and yue-CN');
+    
+    // Handle recognition results
+    speechRecognizer.recognized = (s, e) => {
+      if (e.result.reason === SpeechSDK.ResultReason.RecognizedSpeech) {
+        const detectedLanguage = e.result.language || 'unknown';
+        const transcript = e.result.text;
+        console.log(`Detected language: ${detectedLanguage}, Transcript: ${transcript}`);
+        
+        // Show detected language to user
+        const langName = detectedLanguage === 'zh-CN' ? '普通話' : (detectedLanguage === 'yue-CN' ? '廣東話' : detectedLanguage);
+        setNotice(`已識別：${langName}`, 'success');
+        
+        // Send transcript to AI
+        if (transcript) {
+          sendUtterance(transcript);
+        }
+      } else if (e.result.reason === SpeechSDK.ResultReason.NoMatch) {
+        console.error('No speech recognized');
+        setNotice('未能識別語音，請重試', 'error');
         setSystemState(STATES.IDLE);
-        return;
       }
-      
-      const audioBlob = new Blob(audioChunks, { type: mimeType });
-      console.log('Recording stopped, blob size:', audioBlob.size, 'type:', audioBlob.type);
-      await processAudioRecording(audioBlob);
     };
     
-    mediaRecorder.start();
-    console.log('Recording started');
+    // Handle errors
+    speechRecognizer.canceled = (s, e) => {
+      console.error('Recognition canceled:', e.errorDetails);
+      setNotice('語音識別失敗：' + e.errorDetails, 'error');
+      setSystemState(STATES.ERROR);
+      setTimeout(() => setSystemState(STATES.IDLE), 2000);
+      if (speechRecognizer) {
+        speechRecognizer.close();
+        speechRecognizer = null;
+      }
+    };
+    
+    // Start continuous recognition
+    speechRecognizer.startContinuousRecognitionAsync(
+      () => console.log('Recognition started'),
+      (err) => {
+        console.error('Failed to start recognition:', err);
+        setNotice('無法啟動錄音', 'error');
+        setSystemState(STATES.ERROR);
+        setTimeout(() => setSystemState(STATES.IDLE), 2000);
+      }
+    );
+    
   } catch (err) {
     console.error('Recording error:', err);
     setNotice('無法啟動錄音：' + err.message, 'error');
@@ -817,9 +875,27 @@ async function handleRecordStart() {
 }
 
 function handleRecordStop() {
-  if (mediaRecorder && mediaRecorder.state === 'recording') {
-    mediaRecorder.stop();
-    holdBtn.textContent = '按住說話';
+  if (speechRecognizer) {
+    speechRecognizer.stopContinuousRecognitionAsync(
+      () => {
+        console.log('Recognition stopped');
+        if (speechRecognizer) {
+          speechRecognizer.close();
+          speechRecognizer = null;
+        }
+        holdBtn.textContent = '按住說話';
+        setSystemState(STATES.IDLE);
+      },
+      (err) => {
+        console.error('Error stopping recognition:', err);
+        if (speechRecognizer) {
+          speechRecognizer.close();
+          speechRecognizer = null;
+        }
+        holdBtn.textContent = '按住說話';
+        setSystemState(STATES.IDLE);
+      }
+    );
   }
 }
 
