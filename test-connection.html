@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Backend Connection Test</title>
+</head>
+<body>
+    <h1>Testing Backend Connection</h1>
+    <div id="result"></div>
+    <script>
+        const API_BASE = 'http://hongkongtutor.azurewebsites.net/api';
+        
+        async function test() {
+            const result = document.getElementById('result');
+            result.innerHTML = '<p>Testing...</p>';
+            
+            try {
+                console.log('Fetching:', API_BASE + '/health');
+                const response = await fetch(API_BASE + '/health');
+                console.log('Response status:', response.status);
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                
+                const data = await response.json();
+                console.log('Data:', data);
+                
+                result.innerHTML = `
+                    <p style="color: green;">✓ Connection successful!</p>
+                    <pre>${JSON.stringify(data, null, 2)}</pre>
+                `;
+            } catch (error) {
+                console.error('Error:', error);
+                result.innerHTML = `
+                    <p style="color: red;">✗ Connection failed!</p>
+                    <p>Error: ${error.message}</p>
+                    <p>Check browser console for details (F12)</p>
+                `;
+            }
+        }
+        
+        test();
+    </script>
+</body>
+</html>
