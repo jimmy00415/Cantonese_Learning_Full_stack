@@ -1,7 +1,7 @@
 const META_API = document.querySelector('meta[name="api-base"]');
 const DEFAULT_API_BASE = window.location.hostname === 'localhost' 
   ? `${window.location.protocol}//${window.location.hostname}:4000/api`
-  : 'https://hongkongtutor-f4b5gzd3fbfdhxdw.eastasia-01.azurewebsites.net/api';
+  : 'http://hongkongtutor.azurewebsites.net/api';
 const API_BASE = window.__API_BASE__ || META_API?.content || DEFAULT_API_BASE;
 
 const statusEl = document.getElementById('status');
@@ -759,7 +759,7 @@ async function initSpeechSDK() {
   
   try {
     // Get auth token from backend (secure - doesn't expose API key)
-    const tokenResponse = await fetchJSON('/api/speech-token', { method: 'GET' });
+    const tokenResponse = await fetchJSON('/speech-token', { method: 'GET' });
     if (!tokenResponse.token || !tokenResponse.region) {
       throw new Error('Failed to get speech token');
     }
