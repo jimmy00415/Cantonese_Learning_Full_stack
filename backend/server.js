@@ -251,12 +251,13 @@ app.post('/api/speech-to-text', async (req, res) => {
       
       console.log(`Received audio: format=${audioFormat}, size=${audioBuffer.length} bytes`);
 
-      // Azure ASR accepts WebM/Ogg/WAV - try direct submission first
+      // Azure ASR best supports OGG and WAV formats
       let contentType = 'audio/wav; codec=audio/pcm; samplerate=16000';
-      if (audioFormat === 'webm') {
-        contentType = 'audio/webm; codecs=opus';
-      } else if (audioFormat === 'ogg') {
+      if (audioFormat === 'ogg') {
         contentType = 'audio/ogg; codecs=opus';
+      } else if (audioFormat === 'webm') {
+        // WebM is less reliable, but try it
+        contentType = 'audio/webm; codecs=opus';
       }
 
       console.log(`Sending to Azure ASR with Content-Type: ${contentType}`);
@@ -282,10 +283,23 @@ app.post('/api/speech-to-text', async (req, res) => {
       const result = await response.json();
       console.log('Azure ASR result:', JSON.stringify(result));
       
+      // Check if recognition was successful
+      if (result.RecognitionStatus !== 'Success') {
+        console.error('Azure ASR recognition failed:', result.RecognitionStatus);
+        throw new Error(`Recognition failed: ${result.RecognitionStatus}`);
+      }
+      
+      const transcript = result.DisplayText || result.Text || '';
+      if (!transcript) {
+        console.error('Azure ASR returned no transcript');
+        throw new Error('No transcript in successful recognition');
+      }
+      
       return res.json({
-        transcript: result.DisplayText || '',
-        confidence: result.RecognitionStatus === 'Success' ? 0.9 : 0.5,
+        transcript,
+        confidence: 0.9,
         provider: 'azure',
+        recognitionStatus: result.RecognitionStatus
       });
     } catch (err) {
       console.error('Azure ASR error:', err.message);

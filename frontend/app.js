@@ -772,12 +772,12 @@ async function handleRecordStart() {
     });
     audioChunks = [];
     
-    // Try to use the best available format
+    // Try to use OGG format first (Azure ASR supports it better)
     let mimeType = 'audio/webm';
-    if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
-      mimeType = 'audio/webm;codecs=opus';
-    } else if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
+    if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
       mimeType = 'audio/ogg;codecs=opus';
+    } else if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+      mimeType = 'audio/webm;codecs=opus';
     } else if (MediaRecorder.isTypeSupported('audio/wav')) {
       mimeType = 'audio/wav';
     }
