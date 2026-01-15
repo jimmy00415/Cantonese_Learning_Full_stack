@@ -402,9 +402,12 @@ async function processAudioRecording(audioBlob) {
     setSystemState(STATES.PROCESSING);
     setStatus('轉換語音中...');
     
+    // Convert to WAV format required by Azure ASR
+    const wavBlob = await convertToWav(audioBlob);
+    
     // Convert blob to base64
     const reader = new FileReader();
-    reader.readAsDataURL(audioBlob);
+    reader.readAsDataURL(wavBlob);
     
     reader.onloadend = async () => {
       const audioData = reader.result;
@@ -446,6 +449,77 @@ async function processAudioRecording(audioBlob) {
     setSystemState(STATES.ERROR);
     setTimeout(() => setSystemState(STATES.IDLE), 2000);
   }
+}
+
+// Convert audio to WAV format for Azure ASR
+async function convertToWav(audioBlob) {
+  try {
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    const arrayBuffer = await audioBlob.arrayBuffer();
+    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+    
+    // Resample to 16kHz mono for Azure
+    const offlineContext = new OfflineAudioContext(1, audioBuffer.duration * 16000, 16000);
+    const source = offlineContext.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(offlineContext.destination);
+    source.start();
+    
+    const resampled = await offlineContext.startRendering();
+    
+    // Convert to WAV
+    const wavBuffer = audioBufferToWav(resampled);
+    return new Blob([wavBuffer], { type: 'audio/wav' });
+  } catch (err) {
+    console.error('Audio conversion error:', err);
+    // Fallback: return original blob
+    return audioBlob;
+  }
+}
+
+// Convert AudioBuffer to WAV format
+function audioBufferToWav(buffer) {
+  const length = buffer.length * buffer.numberOfChannels * 2 + 44;
+  const arrayBuffer = new ArrayBuffer(length);
+  const view = new DataView(arrayBuffer);
+  const channels = [];
+  let offset = 0;
+  let pos = 0;
+
+  // Write WAV header
+  const setUint16 = (data) => { view.setUint16(pos, data, true); pos += 2; };
+  const setUint32 = (data) => { view.setUint32(pos, data, true); pos += 4; };
+
+  setUint32(0x46464952); // "RIFF"
+  setUint32(length - 8); // file length - 8
+  setUint32(0x45564157); // "WAVE"
+  setUint32(0x20746d66); // "fmt " chunk
+  setUint32(16); // length = 16
+  setUint16(1); // PCM (uncompressed)
+  setUint16(buffer.numberOfChannels);
+  setUint32(buffer.sampleRate);
+  setUint32(buffer.sampleRate * 2 * buffer.numberOfChannels); // avg. bytes/sec
+  setUint16(buffer.numberOfChannels * 2); // block-align
+  setUint16(16); // 16-bit
+  setUint32(0x61746164); // "data" - chunk
+  setUint32(length - pos - 4); // chunk length
+
+  // Write interleaved data
+  for (let i = 0; i < buffer.numberOfChannels; i++) {
+    channels.push(buffer.getChannelData(i));
+  }
+
+  while (pos < length) {
+    for (let i = 0; i < buffer.numberOfChannels; i++) {
+      let sample = Math.max(-1, Math.min(1, channels[i][offset]));
+      sample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+      view.setInt16(pos, sample, true);
+      pos += 2;
+    }
+    offset++;
+  }
+
+  return arrayBuffer;
 }
 
 async function playAudioWithButton(ttsAudio, rate, btn) {
@@ -688,12 +762,18 @@ async function handleRecordStart() {
     });
     audioChunks = [];
     
-    // Use audio/webm or audio/wav based on browser support
-    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') 
-      ? 'audio/webm;codecs=opus' 
-      : 'audio/wav';
+    // Try to use the best available format
+    let mimeType = 'audio/webm';
+    if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+      mimeType = 'audio/webm;codecs=opus';
+    } else if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
+      mimeType = 'audio/ogg;codecs=opus';
+    } else if (MediaRecorder.isTypeSupported('audio/wav')) {
+      mimeType = 'audio/wav';
+    }
     
     mediaRecorder = new MediaRecorder(stream, { mimeType });
+    console.log('Recording with MIME type:', mimeType);
     
     mediaRecorder.ondataavailable = (event) => {
       if (event.data.size > 0) {
@@ -711,10 +791,12 @@ async function handleRecordStart() {
       }
       
       const audioBlob = new Blob(audioChunks, { type: mimeType });
+      console.log('Recording stopped, blob size:', audioBlob.size, 'type:', audioBlob.type);
       await processAudioRecording(audioBlob);
     };
     
     mediaRecorder.start();
+    console.log('Recording started');
   } catch (err) {
     console.error('Recording error:', err);
     setNotice('無法啟動錄音：' + err.message, 'error');
