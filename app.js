@@ -402,15 +402,15 @@ async function processAudioRecording(audioBlob) {
     setSystemState(STATES.PROCESSING);
     setStatus('轉換語音中...');
     
-    // Convert to WAV format required by Azure ASR
-    const wavBlob = await convertToWav(audioBlob);
+    console.log('Processing audio, blob size:', audioBlob.size, 'type:', audioBlob.type);
     
-    // Convert blob to base64
+    // Convert blob to base64 - send original format, let backend handle conversion
     const reader = new FileReader();
-    reader.readAsDataURL(wavBlob);
+    reader.readAsDataURL(audioBlob);
     
     reader.onloadend = async () => {
       const audioData = reader.result;
+      console.log('Base64 audio data length:', audioData.length);
       
       try {
         const res = await fetchJSON('/speech-to-text', {
@@ -418,8 +418,17 @@ async function processAudioRecording(audioBlob) {
           body: JSON.stringify({ audioData })
         });
         
+        console.log('ASR response:', res);
+        
         if (res.transcript) {
           const confidence = res.confidence || 0;
+          
+          // Filter out mock responses
+          if (res.transcript.includes('(模擬)')) {
+            setNotice('語音辨識服務未啟用，請使用打字模式', 'warning');
+            setSystemState(STATES.IDLE);
+            return;
+          }
           
           // Show low-confidence warning
           if (confidence < 0.7) {
@@ -432,20 +441,21 @@ async function processAudioRecording(audioBlob) {
         }
       } catch (err) {
         console.error('ASR error:', err);
-        setNotice('語音辨識失敗，請重試或使用打字', 'error');
+        setNotice('語音辨識失敗：' + (err.message || '請重試或使用打字'), 'error');
         setSystemState(STATES.ERROR);
         setTimeout(() => setSystemState(STATES.IDLE), 2000);
       }
     };
     
-    reader.onerror = () => {
+    reader.onerror = (err) => {
+      console.error('FileReader error:', err);
       setNotice('音訊處理失敗', 'error');
       setSystemState(STATES.ERROR);
       setTimeout(() => setSystemState(STATES.IDLE), 2000);
     };
   } catch (err) {
     console.error('Audio processing error:', err);
-    setNotice('處理錄音時出錯', 'error');
+    setNotice('處理錄音時出錯：' + err.message, 'error');
     setSystemState(STATES.ERROR);
     setTimeout(() => setSystemState(STATES.IDLE), 2000);
   }

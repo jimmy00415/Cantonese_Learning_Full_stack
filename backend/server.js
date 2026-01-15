@@ -244,7 +244,22 @@ app.post('/api/speech-to-text', async (req, res) => {
       }
 
       // Convert base64 to buffer
-      const audioBuffer = Buffer.from(audioData.replace(/^data:audio\/\w+;base64,/, ''), 'base64');
+      const match = audioData.match(/^data:audio\/(\w+);base64,(.+)$/);
+      const audioFormat = match ? match[1] : 'unknown';
+      const base64Data = match ? match[2] : audioData.replace(/^data:audio\/\w+;base64,/, '');
+      const audioBuffer = Buffer.from(base64Data, 'base64');
+      
+      console.log(`Received audio: format=${audioFormat}, size=${audioBuffer.length} bytes`);
+
+      // Azure ASR accepts WebM/Ogg/WAV - try direct submission first
+      let contentType = 'audio/wav; codec=audio/pcm; samplerate=16000';
+      if (audioFormat === 'webm') {
+        contentType = 'audio/webm; codecs=opus';
+      } else if (audioFormat === 'ogg') {
+        contentType = 'audio/ogg; codecs=opus';
+      }
+
+      console.log(`Sending to Azure ASR with Content-Type: ${contentType}`);
 
       const response = await fetch(
         `https://${speechRegion}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=zh-HK`,
@@ -252,7 +267,7 @@ app.post('/api/speech-to-text', async (req, res) => {
           method: 'POST',
           headers: {
             'Ocp-Apim-Subscription-Key': speechKey,
-            'Content-Type': 'audio/wav; codec=audio/pcm; samplerate=16000',
+            'Content-Type': contentType,
           },
           body: audioBuffer,
         }
@@ -260,11 +275,12 @@ app.post('/api/speech-to-text', async (req, res) => {
 
       if (!response.ok) {
         const errorBody = await response.text();
-        console.error('Azure ASR error response:', errorBody);
+        console.error('Azure ASR error response:', response.status, errorBody);
         throw new Error(`Azure ASR failed: ${response.status} ${response.statusText} - ${errorBody}`);
       }
 
       const result = await response.json();
+      console.log('Azure ASR result:', JSON.stringify(result));
       
       return res.json({
         transcript: result.DisplayText || '',
