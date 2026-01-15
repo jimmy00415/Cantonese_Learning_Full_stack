@@ -758,10 +758,25 @@ async function initSpeechSDK() {
   if (speechConfig) return; // Already initialized
   
   try {
+    // Wait for SDK to load if needed
+    let attempts = 0;
+    while (!window.SpeechSDK && !window.Microsoft && attempts < 10) {
+      console.log('Waiting for Speech SDK to load...');
+      await new Promise(resolve => setTimeout(resolve, 300));
+      attempts++;
+    }
+    
     // Check if Speech SDK is loaded
     if (!window.SpeechSDK && !window.Microsoft) {
-      throw new Error('Azure Speech SDK not loaded');
+      throw new Error('Azure Speech SDK not loaded after waiting. Please refresh the page.');
     }
+    
+    const SpeechSDK = window.SpeechSDK || window.Microsoft.CognitiveServices.Speech;
+    if (!SpeechSDK) {
+      throw new Error('Speech SDK namespace not found');
+    }
+    
+    console.log('Speech SDK loaded successfully');
     
     // Get auth token from backend (secure - doesn't expose API key)
     const tokenResponse = await fetchJSON('/speech-token', { method: 'GET' });
@@ -770,7 +785,6 @@ async function initSpeechSDK() {
     }
     
     const { token, region } = tokenResponse;
-    const SpeechSDK = window.SpeechSDK || window.Microsoft.CognitiveServices.Speech;
     
     // Create Speech Config (not Translation config - we're doing recognition with LID)
     speechConfig = SpeechSDK.SpeechConfig.fromAuthorizationToken(token, region);
