@@ -759,7 +759,7 @@ async function initSpeechSDK() {
   
   try {
     // Get auth token from backend (secure - doesn't expose API key)
-    const tokenResponse = await fetchJSON('/speech-token', { method: 'GET' });
+    const tokenResponse = await fetchJSON('/api/speech-token', { method: 'GET' });
     if (!tokenResponse.token || !tokenResponse.region) {
       throw new Error('Failed to get speech token');
     }
