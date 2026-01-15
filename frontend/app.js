@@ -828,10 +828,11 @@ async function handleRecordStart() {
     ]);
     
     // Create recognizer with Language Identification
-    speechRecognizer = SpeechSDK.SpeechRecognizer.FromConfig(
+    // Correct API: SpeechRecognizer.FromConfig(speechConfig, autoDetectConfig, audioConfig)
+    speechRecognizer = new SpeechSDK.SpeechRecognizer(
       speechConfig,
-      audioConfig,
-      autoDetectConfig
+      autoDetectConfig,
+      audioConfig
     );
     
     console.log('Speech recognizer created with LID for zh-CN and yue-CN');
