@@ -339,7 +339,18 @@ button:disabled, select:disabled, input:disabled { opacity: 0.6; cursor: not-all
 .info-card h3 { margin: 0 0 8px; font-size: 16px; color: var(--text); }
 .info-card ol, .info-card ul { margin: 0; padding-left: 18px; color: var(--text-muted); line-height: 1.5; }
 
-.mic { background: linear-gradient(135deg, var(--secondary), #e85e52); color: #fff; }
+.mic { background: linear-gradient(135deg, var(--secondary), #e85e52); color: #fff; min-width: 140px; }
+.mic:not(:disabled):active { background: linear-gradient(135deg, #e85e52, #d04a3e); }
+
+/* P0-3: Stop Speaking button */
+.stop-btn {
+  background: linear-gradient(135deg, var(--error), #c93c40);
+  color: #fff;
+  min-width: 100px;
+  animation: pulseStop 1.5s ease-in-out infinite;
+}
+.stop-btn:hover { background: linear-gradient(135deg, #c93c40, #b03236); }
+@keyframes pulseStop { 0%,100%{box-shadow: 0 8px 16px rgba(229, 72, 77, 0.3);} 50%{box-shadow: 0 12px 24px rgba(229, 72, 77, 0.5);} }
 
 .footer { margin-top: 8px; text-align: center; color: var(--text-muted); font-size: 13px; padding-bottom: 12px; }
 
