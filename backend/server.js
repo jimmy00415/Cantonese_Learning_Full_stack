@@ -16,12 +16,23 @@ dotenv.config({ path: join(__dirname, '.env') });
 const app = express();
 const port = process.env.PORT || 4000;
 const clientOrigin = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
-// Allow Azure frontend domain and GitHub Pages
+// Allow Azure frontend domain, GitHub Pages, and localhost for testing
 const allowedOrigins = [
   clientOrigin,
   'https://hongkongtutor-f4b5gzd3fbfdhxdw.eastasia-01.azurewebsites.net',
-  'https://jimmy00415.github.io'
+  'https://jimmy00415.github.io',
+  'http://localhost:5173',
+  'http://localhost:60480',
+  'http://localhost:3000'
 ];
+// Check if origin matches any allowed pattern (including localhost with any port)
+const isOriginAllowed = (origin) => {
+  if (!origin) return true;
+  if (allowedOrigins.includes(origin)) return true;
+  // Allow any localhost port for development
+  if (origin.match(/^http:\/\/localhost:\d+$/)) return true;
+  return false;
+};
 const appVersion = process.env.APP_VERSION || '0.1.0-prototype';
 const ttsProvider = (process.env.TTS_PROVIDER || 'mock').toLowerCase();
 const azureTtsKey = process.env.AZURE_SPEECH_KEY;
@@ -44,9 +55,10 @@ app.use(morgan(process.env.LOG_FORMAT || 'dev'));
 
 app.use(cors({ 
   origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (isOriginAllowed(origin)) {
       callback(null, true);
     } else {
+      console.log('CORS blocked origin:', origin);
       callback(new Error('Not allowed by CORS'));
     }
   },
