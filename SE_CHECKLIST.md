@@ -64,14 +64,48 @@
 
 ---
 
+## ✅ Phase 2 COMPLETED (February 2, 2026)
+
+### P2-1: Cultural Context Database ✅ DONE
+- [x] Created `backend/data/cantonese-culture.json`
+- [x] 30+ slang entries with pinyin, meaning, examples
+- [x] 10+ code-switch patterns (English-Cantonese)
+- [x] 7+ idioms with usage explanations
+- [x] 9+ cafe/restaurant slang terms
+- [x] Formal-to-colloquial mapping (30+ pairs)
+
+### P2-2: Cultural Context Service ✅ DONE
+- [x] Created `backend/services/culturalContext.js`
+- [x] `findSlang()` - detects slang in user text
+- [x] `explainTerm()` - explains specific slang terms
+- [x] `findCodeSwitch()` - detects English words
+- [x] `suggestColloquial()` - suggests casual alternatives
+- [x] `getCulturalContext()` - combined context for LLM
+
+### P2-3: "Correct Me" On-Demand Feedback ✅ DONE
+- [x] POST `/api/correct` endpoint with cultural context
+- [x] `generateCorrectionPrompt()` for detailed analysis
+- [x] "✏️ 糾正我" button in frontend
+- [x] Tracks `lastUserUtterance` for correction
+- [x] Cultural insight display styling
+- [x] Loading state for button
+
+### P2-4: LLM Integration with Cultural Context ✅ DONE
+- [x] Updated `getSystemPrompt()` to accept cultural context
+- [x] Cultural summary injected into teaching mode prompts
+- [x] Mode sent from frontend with each chat request
+- [x] Cultural context logged on detection
+
+---
+
 ## 📊 Phase Summary
 
 | Phase | Tasks | Est. Time | Status |
 |-------|-------|-----------|--------|
 | P0 | 4 critical fixes | 1 week | ✅ **COMPLETED** |
 | P1 | Mode system (5 tasks) | 2 weeks | ✅ **COMPLETED** |
-| P2 | Cultural engine + Feedback (3 tasks) | 2 weeks | 🟡 Ready to Start |
-| P3 | UI polish (4 tasks) | 1 week | ⚪ Blocked by P2 |
+| P2 | Cultural engine + Feedback (4 tasks) | 2 weeks | ✅ **COMPLETED** |
+| P3 | UI polish (4 tasks) | 1 week | 🟡 Ready to Start |
 
 ---
 

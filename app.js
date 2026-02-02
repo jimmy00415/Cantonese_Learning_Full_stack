@@ -1,3 +1,6 @@
+// P3-1: Import i18n module
+import { t, setLanguage, getLanguage, initI18n, getAvailableLanguages, locales } from './i18n/index.js';
+
 const META_API = document.querySelector('meta[name="api-base"]');
 
 // Speech SDK version tracking (P0-1)
@@ -23,7 +26,6 @@ const scenarioPill = document.getElementById('scenarioPill');
 const sessionPill = document.getElementById('sessionPill');
 const ttsPill = document.getElementById('ttsPill');
 const clearChatBtn = document.getElementById('clearChat');
-const speedSelect = document.getElementById('speed');
 const replayBtn = document.getElementById('replay');
 const starterChipsEl = document.getElementById('starterChips');
 const systemStateEl = document.getElementById('systemState');
@@ -41,6 +43,21 @@ const modeTeachingBtn = document.getElementById('modeTeaching');
 
 // P2: Correct Me button
 const correctMeBtn = document.getElementById('correctMeBtn');
+
+// P3-1: Language toggle
+const uiLangSelect = document.getElementById('uiLang');
+
+// P3-2: TTS Speed slider and presets
+const ttsSpeedSlider = document.getElementById('ttsSpeed');
+const ttsSpeedValue = document.getElementById('ttsSpeedValue');
+const presetBtns = document.querySelectorAll('.preset-btn');
+
+// P3-3: Recording countdown timer
+const recordingIndicator = document.getElementById('recordingIndicator');
+const ringProgress = document.getElementById('ringProgress');
+const timeRemainingEl = document.getElementById('timeRemaining');
+const MAX_RECORDING_TIME = 60; // seconds
+let recordingTimerInterval = null;
 
 let sessionId = null;
 let lastTtsAudio = null;
@@ -88,12 +105,23 @@ function scenarioKey(val) {
 function setSystemState(state) {
   if (!systemStateEl) return;
   systemStateEl.className = `system-state state-${state}`;
-  if (stateLabelEl) stateLabelEl.textContent = STATE_LABELS[state] || state;
-  systemStateEl.setAttribute('aria-label', `系統狀態: ${STATE_LABELS[state] || state}`);
+  // P3-1: Use i18n labels if available
+  const label = (typeof STATE_LABELS_I18N !== 'undefined' && STATE_LABELS_I18N[state]) 
+    ? STATE_LABELS_I18N[state] 
+    : (STATE_LABELS[state] || state);
+  if (stateLabelEl) stateLabelEl.textContent = label;
+  systemStateEl.setAttribute('aria-label', `系統狀態: ${label}`);
   
   // P0-3: Show/hide stop button based on state
   if (stopSpeakingBtn) {
     stopSpeakingBtn.hidden = state !== STATES.SPEAKING;
+  }
+  
+  // P3-3: Show/hide recording indicator based on state
+  if (state === STATES.LISTENING) {
+    startRecordingTimer();
+  } else {
+    stopRecordingTimer();
   }
 }
 
@@ -207,8 +235,8 @@ function setNotice(text, kind = 'info') {
 }
 
 function setControlsEnabled(enabled) {
-  [sendBtn, holdBtn, newSessionBtn, scenarioSelect, textInput, speedSelect, replayBtn].forEach((el) => {
-    el.disabled = !enabled;
+  [sendBtn, holdBtn, newSessionBtn, scenarioSelect, textInput, replayBtn].forEach((el) => {
+    if (el) el.disabled = !enabled;
   });
 }
 
@@ -1101,13 +1129,97 @@ clearChatBtn.addEventListener('click', () => {
 });
 
 scenarioSelect.addEventListener('change', () => {
-  scenarioPill.textContent = `情景：${scenarioSelect.value}`;
+  scenarioPill.textContent = `${t('transcript.scenarioPrefix')}${scenarioSelect.value}`;
   renderStarterChips(scenarioSelect.value);
 });
 
+// P3-2: Use slider value for playback rate
 function getPlaybackRate() {
-  const val = parseFloat(speedSelect?.value || '1');
+  const val = parseFloat(ttsSpeedSlider?.value || localStorage.getItem('ttsSpeed') || '1');
   return Number.isFinite(val) ? val : 1;
+}
+
+// P3-2: Speed slider event handlers
+if (ttsSpeedSlider) {
+  // Initialize from localStorage
+  const savedSpeed = localStorage.getItem('ttsSpeed') || '1.0';
+  ttsSpeedSlider.value = savedSpeed;
+  if (ttsSpeedValue) ttsSpeedValue.textContent = `${parseFloat(savedSpeed).toFixed(2)}×`;
+  updatePresetButtonsActive(parseFloat(savedSpeed));
+  
+  ttsSpeedSlider.addEventListener('input', (e) => {
+    const speed = parseFloat(e.target.value);
+    if (ttsSpeedValue) ttsSpeedValue.textContent = `${speed.toFixed(2)}×`;
+    localStorage.setItem('ttsSpeed', speed.toString());
+    updatePresetButtonsActive(speed);
+  });
+}
+
+// P3-2: Preset buttons
+presetBtns.forEach(btn => {
+  btn.addEventListener('click', () => {
+    const speed = parseFloat(btn.dataset.speed);
+    if (ttsSpeedSlider) ttsSpeedSlider.value = speed.toString();
+    if (ttsSpeedValue) ttsSpeedValue.textContent = `${speed.toFixed(2)}×`;
+    localStorage.setItem('ttsSpeed', speed.toString());
+    updatePresetButtonsActive(speed);
+  });
+});
+
+function updatePresetButtonsActive(currentSpeed) {
+  presetBtns.forEach(btn => {
+    const presetSpeed = parseFloat(btn.dataset.speed);
+    btn.classList.toggle('active', Math.abs(presetSpeed - currentSpeed) < 0.01);
+  });
+}
+
+// P3-3: Recording countdown timer
+function startRecordingTimer() {
+  if (!recordingIndicator || !ringProgress || !timeRemainingEl) return null;
+  
+  let remaining = MAX_RECORDING_TIME;
+  const circumference = 2 * Math.PI * 17; // r=17 from SVG
+  
+  recordingIndicator.hidden = false;
+  recordingIndicator.classList.add('active');
+  timeRemainingEl.textContent = `${remaining}s`;
+  ringProgress.style.strokeDashoffset = '0';
+  
+  recordingTimerInterval = setInterval(() => {
+    remaining--;
+    timeRemainingEl.textContent = `${remaining}s`;
+    
+    // Update ring progress (stroke-dashoffset increases as time decreases)
+    const offset = circumference - (remaining / MAX_RECORDING_TIME * circumference);
+    ringProgress.style.strokeDashoffset = offset.toString();
+    
+    // Warning color at last 10 seconds
+    if (remaining <= 10) {
+      timeRemainingEl.style.color = 'var(--error)';
+    }
+    
+    if (remaining <= 0) {
+      stopRecordingTimer();
+      // Auto-stop recording
+      handleRecordStop();
+    }
+  }, 1000);
+  
+  return recordingTimerInterval;
+}
+
+function stopRecordingTimer() {
+  if (recordingTimerInterval) {
+    clearInterval(recordingTimerInterval);
+    recordingTimerInterval = null;
+  }
+  if (recordingIndicator) {
+    recordingIndicator.hidden = true;
+    recordingIndicator.classList.remove('active');
+  }
+  if (timeRemainingEl) {
+    timeRemainingEl.style.color = '';
+  }
 }
 
 replayBtn.addEventListener('click', () => {
@@ -1298,19 +1410,129 @@ if (correctMeBtn) {
   correctMeBtn.disabled = true; // Disabled until user sends a message
   correctMeBtn.addEventListener('click', requestCorrection);
 }
+
+// P3-1: Language toggle handler
+if (uiLangSelect) {
+  // Initialize language from saved preference
+  initI18n();
+  uiLangSelect.value = getLanguage();
+  
+  uiLangSelect.addEventListener('change', (e) => {
+    const newLang = e.target.value;
+    setLanguage(newLang);
+    updateUILanguage();
+    setNotice(newLang === 'en' ? 'Language changed to English' : 
+              newLang === 'zh-CN' ? '界面语言已切换为简体中文' : 
+              '界面語言已切換為繁體中文', 'info');
+  });
+}
+
+// P3-1: Update all UI text when language changes
+function updateUILanguage() {
+  const lang = getLanguage();
+  const strings = locales[lang];
+  if (!strings) return;
+  
+  // Update elements with data-i18n attribute
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    const key = el.getAttribute('data-i18n');
+    const translation = t(key);
+    if (translation && translation !== key) {
+      el.textContent = translation;
+    }
+  });
+  
+  // Update placeholder attributes
+  document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+    const key = el.getAttribute('data-i18n-placeholder');
+    const translation = t(key);
+    if (translation && translation !== key) {
+      el.placeholder = translation;
+    }
+  });
+  
+  // Update dynamic state labels
+  STATE_LABELS_I18N = {
+    idle: t('states.idle'),
+    listening: t('states.listening'),
+    processing: t('states.processing'),
+    speaking: t('states.speaking'),
+    error: t('states.error')
+  };
+  
+  // Re-render current state
+  if (systemStateEl) {
+    const currentState = systemStateEl.className.match(/state-(\w+)/)?.[1] || 'idle';
+    if (stateLabelEl) stateLabelEl.textContent = STATE_LABELS_I18N[currentState] || currentState;
+  }
+  
+  // Update document title
+  document.title = t('appTitle');
+  
+  // Update header title if exists
+  const h1 = document.querySelector('h1');
+  if (h1) h1.textContent = t('appTitle');
+  
+  // Update subtitle
+  const subtitle = document.querySelector('.subtitle');
+  if (subtitle) subtitle.textContent = t('subtitle');
+  
+  // Update hero section
+  const heroKicker = document.querySelector('.hero-kicker');
+  const heroTitle = document.querySelector('.hero h2');
+  const heroBody = document.querySelector('.hero-body');
+  if (heroKicker) heroKicker.textContent = t('hero.kicker');
+  if (heroTitle) heroTitle.textContent = t('hero.title');
+  if (heroBody) heroBody.textContent = t('hero.body');
+  
+  // Update badges
+  const badges = document.querySelectorAll('.badges .pill');
+  const badgeKeys = ['badges.aiTutor', 'badges.voiceChat', 'badges.realFeedback'];
+  badges.forEach((badge, idx) => {
+    if (badgeKeys[idx]) badge.textContent = t(badgeKeys[idx]);
+  });
+  
+  // Update mode descriptions
+  if (modeFreeTalkBtn) {
+    const label = modeFreeTalkBtn.querySelector('.mode-label');
+    const desc = modeFreeTalkBtn.querySelector('.mode-desc');
+    if (label) label.textContent = t('modes.freeChat');
+    if (desc) desc.textContent = t('modes.freeChatDesc');
+  }
+  if (modeTeachingBtn) {
+    const label = modeTeachingBtn.querySelector('.mode-label');
+    const desc = modeTeachingBtn.querySelector('.mode-desc');
+    if (label) label.textContent = t('modes.teaching');
+    if (desc) desc.textContent = t('modes.teachingDesc');
+  }
+}
+
+// Dynamic state labels (will be updated by i18n)
+let STATE_LABELS_I18N = { ...STATE_LABELS };
+
+// Listen for language changes from i18n module
+window.addEventListener('languageChanged', () => {
+  updateUILanguage();
+});
+
 (async function init() {
+  // P3-1: Initialize i18n first
+  initI18n();
+  if (uiLangSelect) uiLangSelect.value = getLanguage();
+  updateUILanguage();
+  
   setSystemState(STATES.IDLE);
   setActiveMode(currentMode); // Initialize mode UI
   
   try {
     const health = await fetchJSON('/health');
-    setStatus('連線成功');
-    if (ttsPill) ttsPill.textContent = `語音：${health.ttsProvider === 'azure' ? 'Azure TTS' : '模擬'}`;
-    setNotice(`已連線 API：${API_BASE}`, 'info');
+    setStatus(t('status.connected') || '連線成功');
+    if (ttsPill) ttsPill.textContent = `${t('transcript.voiceDetecting').split('：')[0]}：${health.ttsProvider === 'azure' ? 'Azure TTS' : t('transcript.voiceDetecting').includes('模擬') ? '模擬' : 'Mock'}`;
+    setNotice(`${t('status.connected')} API：${API_BASE}`, 'info');
     setControlsEnabled(true);
   } catch {
-    setStatus('後端未連線');
-    setNotice('後端未連線，3 秒後重試...', 'error');
+    setStatus(t('status.disconnected') || '後端未連線');
+    setNotice(`${t('status.disconnected') || '後端未連線'}，3 秒後重試...`, 'error');
     setSystemState(STATES.ERROR);
     setControlsEnabled(false);
     setTimeout(init, 3000);
