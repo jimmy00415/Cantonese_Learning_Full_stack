@@ -1189,6 +1189,10 @@ async function switchMode(newMode) {
   const oldMode = currentMode;
   setActiveMode(newMode);
   
+  // Always show feedback when mode changes
+  const modeLabel = newMode === 'teaching' ? '教學模式' : '傾計模式';
+  setNotice(`已切換至${modeLabel}`, 'info');
+  
   // If we have an active session, notify the backend
   if (sessionId) {
     try {
@@ -1196,9 +1200,6 @@ async function switchMode(newMode) {
         method: 'POST',
         body: JSON.stringify({ sessionId, mode: newMode })
       });
-      
-      const modeLabel = newMode === 'teaching' ? '教學模式' : '傾計模式';
-      setNotice(`已切換至${modeLabel}`, 'info');
       
       // Add system message about mode change
       const modeChangeMsg = newMode === 'teaching'
