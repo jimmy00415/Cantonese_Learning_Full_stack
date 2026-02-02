@@ -4,8 +4,18 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Cantonese Conversation Tutor</title>
-  <!-- Azure Speech SDK for Language Identification -->
-  <script src="https://cdn.jsdelivr.net/npm/microsoft-cognitiveservices-speech-sdk@latest/distrib/browser/microsoft.cognitiveservices.speech.sdk.bundle.js" defer></script>
+  <!-- Azure Speech SDK - Self-hosted primary with CDN fallback -->
+  <!-- SDK Version: 1.38.0 - Update this comment when upgrading -->
+  <script src="lib/speech-sdk/microsoft.cognitiveservices.speech.sdk.bundle-min.js"></script>
+  <script>
+    // Fallback to CDN if local SDK fails to load
+    if (typeof SpeechSDK === 'undefined' && typeof Microsoft === 'undefined') {
+      console.warn('Local Speech SDK not found, loading from CDN fallback...');
+      document.write('<script src="https://aka.ms/csspeech/jsbrowserpackage"><\/script>');
+    } else {
+      console.log('Speech SDK loaded from: local (v1.38.0)');
+    }
+  </script>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -38,6 +48,22 @@
     </section>
 
     <div class="panel">
+      <!-- P1: Mode Toggle -->
+      <section class="mode-section">
+        <div class="mode-toggle" role="tablist" aria-label="對話模式">
+          <button role="tab" class="mode-btn active" data-mode="freeChat" aria-selected="true" id="modeFreeTalk">
+            <span class="mode-icon">💬</span>
+            <span class="mode-label">Free Talk</span>
+            <span class="mode-desc">輕鬆傾計</span>
+          </button>
+          <button role="tab" class="mode-btn" data-mode="teaching" aria-selected="false" id="modeTeaching">
+            <span class="mode-icon">📚</span>
+            <span class="mode-label">Teaching</span>
+            <span class="mode-desc">認真學習</span>
+          </button>
+        </div>
+      </section>
+
       <section class="controls">
         <label for="scenario">情景：</label>
         <select id="scenario"></select>
@@ -66,15 +92,19 @@
       </section>
 
       <section class="input-panel">
-        <button id="holdToSpeak" class="mic">按住說話（模擬）</button>
+        <button id="holdToSpeak" class="mic">按住說話</button>
+        <button id="stopSpeaking" class="stop-btn" hidden>停止播放</button>
         <input id="textInput" type="text" placeholder="或輸入一句廣東話..." />
         <div class="audio-controls">
           <label for="speed">速度</label>
           <select id="speed">
+            <option value="0.8">0.8x</option>
             <option value="0.9">0.9x</option>
             <option value="1" selected>1.0x</option>
             <option value="1.1">1.1x</option>
+            <option value="1.15">1.15x</option>
             <option value="1.2">1.2x</option>
+            <option value="1.3">1.3x</option>
           </select>
           <button id="replay">重播</button>
         </div>

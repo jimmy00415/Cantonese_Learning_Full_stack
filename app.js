@@ -1,4 +1,9 @@
 const META_API = document.querySelector('meta[name="api-base"]');
+
+// Speech SDK version tracking (P0-1)
+const SPEECH_SDK_VERSION = '1.38.0'; // Update when upgrading SDK
+
+// Auto-detect localhost for development, use Azure backend for production
 const DEFAULT_API_BASE = window.location.hostname === 'localhost' 
   ? `${window.location.protocol}//${window.location.hostname}:4000/api`
   : 'https://hongkongtutor-f4b5gzd3fbfdhxdw.eastasia-01.azurewebsites.net/api';
@@ -10,6 +15,7 @@ const scenarioSelect = document.getElementById('scenario');
 const textInput = document.getElementById('textInput');
 const sendBtn = document.getElementById('sendText');
 const holdBtn = document.getElementById('holdToSpeak');
+const stopSpeakingBtn = document.getElementById('stopSpeaking');
 const newSessionBtn = document.getElementById('newSession');
 const feedbackEl = document.getElementById('feedback');
 const noticeEl = document.getElementById('notice');
@@ -29,6 +35,10 @@ const feedbackDetailsEl = document.getElementById('feedbackDetails');
 const micPermissionDialog = document.getElementById('micPermissionDialog');
 const micBlockedDialog = document.getElementById('micBlockedDialog');
 
+// P1: Mode toggle elements
+const modeFreeTalkBtn = document.getElementById('modeFreeTalk');
+const modeTeachingBtn = document.getElementById('modeTeaching');
+
 let sessionId = null;
 let lastTtsAudio = null;
 let isPlaying = false;
@@ -37,6 +47,9 @@ let micPermissionGranted = false;
 let processingStartTime = null;
 let mediaRecorder = null;
 let audioChunks = [];
+
+// P1: Current mode state
+let currentMode = 'freeChat'; // 'freeChat' or 'teaching'
 
 // System states: idle, listening, processing, speaking, error
 const STATES = {
@@ -73,6 +86,11 @@ function setSystemState(state) {
   systemStateEl.className = `system-state state-${state}`;
   if (stateLabelEl) stateLabelEl.textContent = STATE_LABELS[state] || state;
   systemStateEl.setAttribute('aria-label', `系統狀態: ${STATE_LABELS[state] || state}`);
+  
+  // P0-3: Show/hide stop button based on state
+  if (stopSpeakingBtn) {
+    stopSpeakingBtn.hidden = state !== STATES.SPEAKING;
+  }
 }
 
 function renderStarterChips(val) {
@@ -637,14 +655,27 @@ async function loadScenarios() {
 }
 
 async function startSession() {
-  const { sessionId: sid } = await fetchJSON('/session', { method: 'POST' });
+  // P1: Include mode in session creation
+  const { sessionId: sid, mode } = await fetchJSON('/session', { 
+    method: 'POST',
+    body: JSON.stringify({ mode: currentMode })
+  });
   sessionId = sid;
+  if (mode) currentMode = mode;
+  
   transcriptEl.innerHTML = '';
-  feedbackEl.textContent = '';
+  if (feedbackEl) feedbackEl.textContent = '';
   renderEmptyState();
-  renderMessage({ role: 'ai', text: '你好！我係你嘅廣東話導師，講句嘢嚟聽下？', timestamp: Date.now() });
+  
+  // P1: Mode-specific greeting
+  const greeting = currentMode === 'teaching' 
+    ? '你好！我係你嘅廣東話老師。今日我會幫你糾正發音同文法，有咩想練習？'
+    : '你好！我係你嘅廣東話導師，講句嘢嚟聽下？';
+  renderMessage({ role: 'ai', text: greeting, timestamp: Date.now() });
+  
   setStatus(`已建立對話：${sessionId.slice(0, 8)}`);
   sessionPill.textContent = `會話 ${sessionId.slice(0, 8)}`;
+  updateModePill();
 }
 
 async function sendUtterance(text) {
@@ -742,6 +773,14 @@ textInput.addEventListener('keyup', (e) => {
   if (e.key === 'Enter') sendBtn.click();
 });
 
+// P0-3: Stop Speaking button handler
+if (stopSpeakingBtn) {
+  stopSpeakingBtn.addEventListener('click', () => {
+    stopAudio();
+    setNotice('已停止播放', 'info');
+  });
+}
+
 holdBtn.addEventListener('mousedown', handleRecordStart);
 holdBtn.addEventListener('touchstart', (e) => {
   e.preventDefault();
@@ -752,6 +791,9 @@ holdBtn.addEventListener('touchstart', (e) => {
 let speechRecognizer = null;
 let speechConfig = null;
 let audioConfig = null;
+let recordingTimerInterval = null;
+let recordingStartTime = null;
+const MAX_RECORDING_TIME = 60; // seconds
 
 // Initialize Azure Speech SDK with Language Identification
 async function initSpeechSDK() {
@@ -797,10 +839,21 @@ async function initSpeechSDK() {
       throw new Error('Failed to create speech config');
     }
     
-    // Set initial recognition language (required by SDK even though LID will detect)
-    speechConfig.speechRecognitionLanguage = 'zh-CN';
+    // P0-4: Extend pause threshold to 3 seconds for users who pause to think
+    speechConfig.setProperty(
+      SpeechSDK.PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs,
+      "3000"
+    );
+    speechConfig.setProperty(
+      SpeechSDK.PropertyId.SpeechServiceConnection_InitialSilenceTimeoutMs,
+      "10000"
+    );
     
-    console.log('Speech config created successfully');
+    // Set primary recognition language to Cantonese (Hong Kong)
+    // Using zh-HK which is better supported than yue-CN for most cases
+    speechConfig.speechRecognitionLanguage = 'zh-HK';
+    
+    console.log('Speech config created with 3s pause threshold');
     
     // Configure audio from microphone
     audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
@@ -829,9 +882,18 @@ async function handleRecordStart() {
     return;
   }
   
+  // P0-3: Interrupt any playing audio when user wants to speak
+  if (currentAudio && !currentAudio.paused) {
+    stopAudio();
+    setNotice('已停止播放，開始錄音', 'info');
+  }
+  
   try {
     setSystemState(STATES.LISTENING);
     holdBtn.textContent = '錄音中... 放開即發送';
+    
+    // Start recording timer for visual feedback
+    startRecordingTimer();
     
     // Initialize Speech SDK if needed
     await initSpeechSDK();
@@ -852,38 +914,63 @@ async function handleRecordStart() {
       hasSpeechSDK: !!SpeechSDK
     });
     
-    // Create auto-detect config with Mandarin and Cantonese as candidates
-    const autoDetectConfig = SpeechSDK.AutoDetectSourceLanguageConfig.fromLanguages([
-      'zh-CN',  // Mandarin (Simplified Chinese)
-      'yue-CN'  // Cantonese (Cantonese, China)
-    ]);
-    
-    console.log('Auto-detect config created:', autoDetectConfig);
-    
-    // Create recognizer with Language Identification
-    // Use FromConfig static method with correct parameter order
-    speechRecognizer = SpeechSDK.SpeechRecognizer.FromConfig(
-      speechConfig,
-      autoDetectConfig,
-      audioConfig
-    );
-    
-    if (!speechRecognizer) {
-      throw new Error('Failed to create speech recognizer');
+    // P0-2 FIX: Use simple SpeechRecognizer constructor instead of FromConfig with AutoDetect
+    // The AutoDetectSourceLanguageConfig.fromLanguages() causes "mergeTo" undefined error
+    // Instead, we create a simple recognizer with zh-HK (Cantonese) as the primary language
+    try {
+      speechRecognizer = new SpeechSDK.SpeechRecognizer(speechConfig, audioConfig);
+      
+      if (!speechRecognizer) {
+        throw new Error('Failed to create speech recognizer');
+      }
+      
+      console.log('Speech recognizer created for zh-HK (Cantonese)');
+    } catch (recognizerError) {
+      console.warn('Azure Speech SDK recognizer failed, falling back to typing mode:', recognizerError);
+      setNotice('語音識別暫時無法使用，請使用打字模式', 'error');
+      holdBtn.textContent = '按住說話';
+      stopRecordingTimer();
+      setSystemState(STATES.IDLE);
+      // Suggest user to type instead
+      textInput?.focus();
+      return; // Exit early, don't proceed with broken recognizer
     }
     
-    console.log('Speech recognizer created with LID for zh-CN and yue-CN');
+    // Track pause duration for encouragement message
+    let pauseTimer = null;
+    
+    // Handle partial recognition (user is speaking)
+    speechRecognizer.recognizing = (s, e) => {
+      // Clear pause timer when user speaks
+      if (pauseTimer) {
+        clearTimeout(pauseTimer);
+        pauseTimer = null;
+      }
+      
+      // Show partial result
+      if (e.result.text) {
+        holdBtn.textContent = `識別中: ${e.result.text.substring(0, 20)}...`;
+      }
+      
+      // P0-4: Set pause timer for encouragement after 2s of silence
+      pauseTimer = setTimeout(() => {
+        setNotice('唔緊要，慢慢講...', 'info');
+      }, 2000);
+    };
     
     // Handle recognition results
     speechRecognizer.recognized = (s, e) => {
+      // Clear pause timer
+      if (pauseTimer) {
+        clearTimeout(pauseTimer);
+        pauseTimer = null;
+      }
+      
       if (e.result.reason === SpeechSDK.ResultReason.RecognizedSpeech) {
-        const detectedLanguage = e.result.language || 'unknown';
         const transcript = e.result.text;
-        console.log(`Detected language: ${detectedLanguage}, Transcript: ${transcript}`);
+        console.log(`Recognized: ${transcript}`);
         
-        // Show detected language to user
-        const langName = detectedLanguage === 'zh-CN' ? '普通話' : (detectedLanguage === 'yue-CN' ? '廣東話' : detectedLanguage);
-        setNotice(`已識別：${langName}`, 'success');
+        setNotice('已識別：廣東話', 'success');
         
         // Send transcript to AI
         if (transcript) {
@@ -899,9 +986,14 @@ async function handleRecordStart() {
     // Handle errors
     speechRecognizer.canceled = (s, e) => {
       console.error('Recognition canceled:', e.errorDetails);
-      setNotice('語音識別失敗：' + e.errorDetails, 'error');
-      setSystemState(STATES.ERROR);
-      setTimeout(() => setSystemState(STATES.IDLE), 2000);
+      
+      // Don't show error for normal cancellation (user stopped)
+      if (e.errorCode !== SpeechSDK.CancellationErrorCode.NoError) {
+        setNotice('語音識別失敗：' + e.errorDetails, 'error');
+        setSystemState(STATES.ERROR);
+        setTimeout(() => setSystemState(STATES.IDLE), 2000);
+      }
+      
       if (speechRecognizer) {
         speechRecognizer.close();
         speechRecognizer = null;
@@ -925,10 +1017,48 @@ async function handleRecordStart() {
     setSystemState(STATES.ERROR);
     setTimeout(() => setSystemState(STATES.IDLE), 2000);
     holdBtn.textContent = '按住說話';
+    stopRecordingTimer();
   }
 }
 
+// Recording timer functions
+function startRecordingTimer() {
+  recordingStartTime = Date.now();
+  updateRecordingTimerDisplay();
+  
+  recordingTimerInterval = setInterval(() => {
+    const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
+    const remaining = MAX_RECORDING_TIME - elapsed;
+    
+    if (remaining <= 0) {
+      // Auto-stop after max time
+      handleRecordStop();
+      setNotice('已達最長錄音時間', 'info');
+    } else {
+      updateRecordingTimerDisplay();
+    }
+  }, 1000);
+}
+
+function updateRecordingTimerDisplay() {
+  if (!recordingStartTime) return;
+  const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
+  const remaining = MAX_RECORDING_TIME - elapsed;
+  holdBtn.textContent = `錄音中... ${remaining}s`;
+}
+
+function stopRecordingTimer() {
+  if (recordingTimerInterval) {
+    clearInterval(recordingTimerInterval);
+    recordingTimerInterval = null;
+  }
+  recordingStartTime = null;
+}
+
 function handleRecordStop() {
+  // Stop recording timer
+  stopRecordingTimer();
+  
   if (speechRecognizer) {
     speechRecognizer.stopContinuousRecognitionAsync(
       () => {
@@ -1021,8 +1151,80 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// P1: Mode toggle handlers
+function updateModePill() {
+  const modePill = document.querySelector('.pill.mode-teaching, .pill.mode-freeChat');
+  if (!modePill) {
+    // Create mode pill if it doesn't exist
+    const newPill = document.createElement('div');
+    newPill.className = `pill mode-${currentMode}`;
+    newPill.id = 'modePill';
+    newPill.textContent = currentMode === 'teaching' ? '📚 教學模式' : '💬 傾計模式';
+    sessionPill?.parentNode?.insertBefore(newPill, sessionPill.nextSibling);
+  } else {
+    modePill.className = `pill mode-${currentMode}`;
+    modePill.textContent = currentMode === 'teaching' ? '📚 教學模式' : '💬 傾計模式';
+  }
+}
+
+function setActiveMode(mode) {
+  currentMode = mode;
+  
+  // Update button states
+  if (modeFreeTalkBtn) {
+    modeFreeTalkBtn.classList.toggle('active', mode === 'freeChat');
+    modeFreeTalkBtn.setAttribute('aria-selected', mode === 'freeChat');
+  }
+  if (modeTeachingBtn) {
+    modeTeachingBtn.classList.toggle('active', mode === 'teaching');
+    modeTeachingBtn.setAttribute('aria-selected', mode === 'teaching');
+  }
+  
+  updateModePill();
+}
+
+async function switchMode(newMode) {
+  if (newMode === currentMode) return;
+  
+  const oldMode = currentMode;
+  setActiveMode(newMode);
+  
+  // If we have an active session, notify the backend
+  if (sessionId) {
+    try {
+      await fetchJSON('/mode', {
+        method: 'POST',
+        body: JSON.stringify({ sessionId, mode: newMode })
+      });
+      
+      const modeLabel = newMode === 'teaching' ? '教學模式' : '傾計模式';
+      setNotice(`已切換至${modeLabel}`, 'info');
+      
+      // Add system message about mode change
+      const modeChangeMsg = newMode === 'teaching'
+        ? '【模式切換】現在進入教學模式，我會認真幫你糾正發音同文法。'
+        : '【模式切換】現在進入傾計模式，我哋輕鬆傾下計！';
+      renderMessage({ role: 'ai', text: modeChangeMsg, timestamp: Date.now() });
+    } catch (err) {
+      console.error('Failed to switch mode:', err);
+      setActiveMode(oldMode); // Revert on error
+      setNotice('切換模式失敗', 'error');
+    }
+  }
+}
+
+// Mode button click handlers
+if (modeFreeTalkBtn) {
+  modeFreeTalkBtn.addEventListener('click', () => switchMode('freeChat'));
+}
+if (modeTeachingBtn) {
+  modeTeachingBtn.addEventListener('click', () => switchMode('teaching'));
+}
+
 (async function init() {
   setSystemState(STATES.IDLE);
+  setActiveMode(currentMode); // Initialize mode UI
+  
   try {
     const health = await fetchJSON('/health');
     setStatus('連線成功');
