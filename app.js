@@ -39,6 +39,9 @@ const micBlockedDialog = document.getElementById('micBlockedDialog');
 const modeFreeTalkBtn = document.getElementById('modeFreeTalk');
 const modeTeachingBtn = document.getElementById('modeTeaching');
 
+// P2: Correct Me button
+const correctMeBtn = document.getElementById('correctMeBtn');
+
 let sessionId = null;
 let lastTtsAudio = null;
 let isPlaying = false;
@@ -47,6 +50,7 @@ let micPermissionGranted = false;
 let processingStartTime = null;
 let mediaRecorder = null;
 let audioChunks = [];
+let lastUserUtterance = null; // P2: Track last user message for correction
 
 // P1: Current mode state
 let currentMode = 'freeChat'; // 'freeChat' or 'teaching'
@@ -681,6 +685,10 @@ async function startSession() {
 async function sendUtterance(text) {
   if (!text || !sessionId) return;
   
+  // P2: Track last user utterance for "Correct Me" feature
+  lastUserUtterance = text;
+  if (correctMeBtn) correctMeBtn.disabled = false;
+  
   setSystemState(STATES.PROCESSING);
   processingStartTime = Date.now();
   
@@ -1202,6 +1210,81 @@ async function switchMode(newMode) {
   }
 }
 
+// P2: "Correct Me" button handler
+async function requestCorrection() {
+  if (!lastUserUtterance) {
+    setNotice('請先講或輸入一句廣東話', 'info');
+    return;
+  }
+  
+  if (!correctMeBtn) return;
+  
+  correctMeBtn.disabled = true;
+  correctMeBtn.classList.add('loading');
+  correctMeBtn.textContent = '分析中';
+  setNotice('正在分析你嘅句子...', 'info');
+  
+  try {
+    const res = await fetchJSON('/correct', {
+      method: 'POST',
+      body: JSON.stringify({ 
+        sessionId, 
+        utterance: lastUserUtterance 
+      })
+    });
+    
+    if (res.correction) {
+      // Display correction as AI message
+      renderMessage({ 
+        role: 'ai', 
+        text: `✏️ 糾正分析：\n\n${res.correction}`, 
+        timestamp: Date.now() 
+      });
+      
+      // Show cultural insights if available
+      if (res.culturalInsights) {
+        renderCulturalInsight(res.culturalInsights);
+      }
+      
+      setNotice('分析完成！', 'info');
+    } else {
+      throw new Error('No correction returned');
+    }
+  } catch (err) {
+    console.error('Correction request failed:', err);
+    setNotice('糾正請求失敗，請重試', 'error');
+  } finally {
+    correctMeBtn.disabled = false;
+    correctMeBtn.classList.remove('loading');
+    correctMeBtn.textContent = '✏️ 糾正我';
+  }
+}
+
+// P2: Render cultural insight box
+function renderCulturalInsight(insights) {
+  if (!insights || !insights.summary) return;
+  
+  const insightDiv = document.createElement('div');
+  insightDiv.className = 'cultural-insight';
+  
+  const header = document.createElement('div');
+  header.className = 'cultural-insight-header';
+  header.textContent = '🎭 文化背景';
+  
+  const body = document.createElement('div');
+  body.className = 'cultural-insight-body';
+  body.textContent = insights.summary;
+  
+  insightDiv.appendChild(header);
+  insightDiv.appendChild(body);
+  
+  // Add to the feedback panel
+  if (feedbackDetailsEl) {
+    feedbackDetailsEl.innerHTML = '';
+    feedbackDetailsEl.appendChild(insightDiv);
+  }
+}
+
 // Mode button click handlers
 if (modeFreeTalkBtn) {
   modeFreeTalkBtn.addEventListener('click', () => switchMode('freeChat'));
@@ -1210,6 +1293,11 @@ if (modeTeachingBtn) {
   modeTeachingBtn.addEventListener('click', () => switchMode('teaching'));
 }
 
+// P2: Correct Me button handler
+if (correctMeBtn) {
+  correctMeBtn.disabled = true; // Disabled until user sends a message
+  correctMeBtn.addEventListener('click', requestCorrection);
+}
 (async function init() {
   setSystemState(STATES.IDLE);
   setActiveMode(currentMode); // Initialize mode UI
