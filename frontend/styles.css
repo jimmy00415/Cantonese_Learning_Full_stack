@@ -367,6 +367,63 @@ button:disabled, select:disabled, input:disabled { opacity: 0.6; cursor: not-all
 .corrections-list { display: flex; flex-direction: column; gap: 10px; }
 .correction-item { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px; background: var(--surface-muted); }
 
+/* P2: Correct Me button */
+.correct-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  font-size: 13px;
+  border-radius: var(--radius-sm);
+  transition: all 0.2s ease;
+}
+
+.correct-btn:hover {
+  background: #fff3cd;
+  border-color: #ffc107;
+  color: #856404;
+}
+
+.correct-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.correct-btn.loading {
+  pointer-events: none;
+}
+
+.correct-btn.loading::after {
+  content: '...';
+  animation: dots 1s steps(3, end) infinite;
+}
+
+@keyframes dots {
+  0%, 20% { content: '.'; }
+  40% { content: '..'; }
+  60%, 100% { content: '...'; }
+}
+
+/* P2: Cultural insight styling */
+.cultural-insight {
+  background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+  border: 1px solid #fbbf24;
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.cultural-insight-header {
+  font-weight: 600;
+  color: #92400e;
+  margin-bottom: 4px;
+}
+
+.cultural-insight-body {
+  color: #78350f;
+}
+
 .notice {
   min-height: 18px;
   font-size: 14px;

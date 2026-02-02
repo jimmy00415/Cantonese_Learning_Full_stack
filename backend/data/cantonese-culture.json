@@ -1,0 +1,418 @@
+{
+  "version": "1.0",
+  "lastUpdated": "2026-02-02",
+  "slang": [
+    {
+      "term": "痴线",
+      "pinyin": "ci1 sin3",
+      "meaning": "瘋狂/離譜/有問題",
+      "context": "朋友間非正式用語，對長輩不禮貌",
+      "examples": ["你痴线㗎！", "呢個價錢痴线嘅！"],
+      "politeAlternative": "太誇張了/好離譜",
+      "tags": ["informal", "exclamation"]
+    },
+    {
+      "term": "靚仔",
+      "pinyin": "leng3 zai2",
+      "meaning": "1) 帥哥 2) 茶餐廳暗語：白飯",
+      "context": "茶餐廳點餐：「要一碗靚仔」= 要一碗白飯",
+      "examples": ["靚仔，埋單！", "一碗靚仔一杯凍檸茶"],
+      "tags": ["cafe-slang", "dual-meaning"]
+    },
+    {
+      "term": "靚女",
+      "pinyin": "leng3 neoi5",
+      "meaning": "1) 美女 2) 茶餐廳暗語：白粥",
+      "context": "茶餐廳點餐時可以用",
+      "examples": ["靚女，落單！", "要碗靚女同多士"],
+      "tags": ["cafe-slang", "dual-meaning"]
+    },
+    {
+      "term": "埋單",
+      "pinyin": "maai4 daan1",
+      "meaning": "結帳/買單",
+      "context": "飲食場合常用，等於普通話「結帳」",
+      "examples": ["唔該埋單！", "埋單幾多錢？"],
+      "politeAlternative": null,
+      "tags": ["restaurant", "common"]
+    },
+    {
+      "term": "唔該",
+      "pinyin": "m4 goi1",
+      "meaning": "1) 請/麻煩 2) 謝謝（回應服務）",
+      "context": "最常用嘅禮貌用語，用於請求或感謝服務",
+      "examples": ["唔該借過！", "唔該你幫我攞杯水"],
+      "tags": ["polite", "essential"]
+    },
+    {
+      "term": "多謝",
+      "pinyin": "do1 ze6",
+      "meaning": "謝謝（回應禮物/幫助）",
+      "context": "收到禮物或別人幫忙時使用",
+      "examples": ["多謝你嘅禮物！", "多謝晒！"],
+      "tags": ["polite", "essential"]
+    },
+    {
+      "term": "咩事",
+      "pinyin": "me1 si6",
+      "meaning": "什麼事？/怎麼了？",
+      "context": "詢問發生什麼事情",
+      "examples": ["咩事呀？", "有咩事？"],
+      "tags": ["common", "question"]
+    },
+    {
+      "term": "冇問題",
+      "pinyin": "mou5 man6 tai4",
+      "meaning": "沒問題/OK",
+      "context": "表示同意或確認",
+      "examples": ["冇問題！", "包喺我身上，冇問題"],
+      "tags": ["common", "affirmative"]
+    },
+    {
+      "term": "搞掂",
+      "pinyin": "gaau2 dim6",
+      "meaning": "搞定/完成了/OK",
+      "context": "表示事情已經處理好",
+      "examples": ["搞掂未？", "搞掂晒啦！"],
+      "tags": ["common", "affirmative"]
+    },
+    {
+      "term": "得閒",
+      "pinyin": "dak1 haan4",
+      "meaning": "有空/空閒",
+      "context": "詢問或表示有沒有時間",
+      "examples": ["你得唔得閒？", "我呢排好得閒"],
+      "tags": ["common", "time"]
+    },
+    {
+      "term": "趕時間",
+      "pinyin": "gon2 si4 gaan3",
+      "meaning": "趕時間/很忙",
+      "context": "表示時間緊迫",
+      "examples": ["我趕時間，快啲啦", "唔好意思，趕時間"],
+      "tags": ["common", "time"]
+    },
+    {
+      "term": "好味",
+      "pinyin": "hou2 mei6",
+      "meaning": "好吃/美味",
+      "context": "形容食物美味",
+      "examples": ["呢度嘅嘢好好味", "好味道呀！"],
+      "tags": ["food", "adjective"]
+    },
+    {
+      "term": "正",
+      "pinyin": "zeng3",
+      "meaning": "很好/很棒/正點",
+      "context": "表示讚賞，年輕人常用",
+      "examples": ["呢部戲好正！", "正呀！"],
+      "tags": ["informal", "positive"]
+    },
+    {
+      "term": "勁",
+      "pinyin": "ging6",
+      "meaning": "很厲害/很強",
+      "context": "表示印象深刻",
+      "examples": ["佢好勁！", "勁呀你！"],
+      "tags": ["informal", "positive"]
+    },
+    {
+      "term": "鳩",
+      "pinyin": "gau1",
+      "meaning": "胡亂/隨便（粗俗）",
+      "context": "粗俗用語，正式場合不宜使用",
+      "examples": ["你鳩講！", "唔好鳩做"],
+      "politeAlternative": "亂咁/隨便",
+      "tags": ["vulgar", "informal"]
+    },
+    {
+      "term": "收皮",
+      "pinyin": "sau1 pei4",
+      "meaning": "閉嘴/走開/算了（粗俗）",
+      "context": "不禮貌用語，表達不滿",
+      "examples": ["收皮啦你！"],
+      "politeAlternative": "唔好再講/算數啦",
+      "tags": ["vulgar", "informal"]
+    },
+    {
+      "term": "飲茶",
+      "pinyin": "jam2 caa4",
+      "meaning": "喝早茶/吃點心",
+      "context": "香港傳統活動，通常指去茶樓吃點心",
+      "examples": ["星期日去飲茶", "我哋一齊飲茶啦"],
+      "tags": ["culture", "food"]
+    },
+    {
+      "term": "飲嘢",
+      "pinyin": "jam2 je5",
+      "meaning": "喝東西/喝飲料",
+      "context": "一般指喝飲料",
+      "examples": ["飲嘢先啦", "你想飲咩嘢？"],
+      "tags": ["common", "food"]
+    },
+    {
+      "term": "食飯",
+      "pinyin": "sik6 faan6",
+      "meaning": "吃飯/吃東西",
+      "context": "日常用語，可以指任何一餐",
+      "examples": ["食咗飯未？", "一齊食飯啦"],
+      "tags": ["common", "food"]
+    },
+    {
+      "term": "行街",
+      "pinyin": "haang4 gaai1",
+      "meaning": "逛街/購物",
+      "context": "出去購物或閒逛",
+      "examples": ["去邊度行街？", "今日去行街"],
+      "tags": ["common", "activity"]
+    },
+    {
+      "term": "傾計",
+      "pinyin": "king1 gai2",
+      "meaning": "聊天/談話",
+      "context": "朋友間閒聊",
+      "examples": ["我哋傾下計先", "同佢傾計好開心"],
+      "tags": ["common", "social"]
+    },
+    {
+      "term": "嘥時間",
+      "pinyin": "saai1 si4 gaan3",
+      "meaning": "浪費時間",
+      "context": "表示不值得花時間",
+      "examples": ["唔好嘥時間啦", "嘥晒時間"],
+      "tags": ["common", "negative"]
+    },
+    {
+      "term": "攰",
+      "pinyin": "gui6",
+      "meaning": "累/疲倦",
+      "context": "表示身體疲勞",
+      "examples": ["好攰呀", "做到好攰"],
+      "tags": ["common", "feeling"]
+    },
+    {
+      "term": "悶",
+      "pinyin": "mun6",
+      "meaning": "無聊/沉悶",
+      "context": "表示無事可做或不有趣",
+      "examples": ["好悶呀", "呢套戲好悶"],
+      "tags": ["common", "feeling"]
+    },
+    {
+      "term": "開心",
+      "pinyin": "hoi1 sam1",
+      "meaning": "高興/開心",
+      "context": "表達正面情緒",
+      "examples": ["好開心呀！", "你開唔開心？"],
+      "tags": ["common", "feeling"]
+    },
+    {
+      "term": "嬲",
+      "pinyin": "nau1",
+      "meaning": "生氣/憤怒",
+      "context": "表達負面情緒",
+      "examples": ["我好嬲！", "你嬲咩？"],
+      "tags": ["common", "feeling"]
+    },
+    {
+      "term": "驚",
+      "pinyin": "geng1",
+      "meaning": "害怕/擔心",
+      "context": "表達恐懼或擔憂",
+      "examples": ["我驚黑", "唔驚唔驚"],
+      "tags": ["common", "feeling"]
+    }
+  ],
+  "codeSwitch": [
+    {
+      "pattern": "library",
+      "cantonese": "圖書館",
+      "context": "學生常用中英混合",
+      "example": "我今晚要去library温書"
+    },
+    {
+      "pattern": "deadline",
+      "cantonese": "死線/限期",
+      "context": "工作常用英文詞",
+      "example": "呢個project deadline係幾時？"
+    },
+    {
+      "pattern": "meeting",
+      "cantonese": "開會",
+      "context": "辦公室常用",
+      "example": "聽日有冇meeting？"
+    },
+    {
+      "pattern": "email",
+      "cantonese": "電郵/電子郵件",
+      "context": "日常工作用語",
+      "example": "我send咗email俾你"
+    },
+    {
+      "pattern": "report",
+      "cantonese": "報告",
+      "context": "學校或工作用語",
+      "example": "份report做好未？"
+    },
+    {
+      "pattern": "lunch",
+      "cantonese": "午餐/晏晝",
+      "context": "日常用語",
+      "example": "食lunch未？"
+    },
+    {
+      "pattern": "dinner",
+      "cantonese": "晚餐/晚飯",
+      "context": "日常用語",
+      "example": "今晚食咩dinner？"
+    },
+    {
+      "pattern": "sorry",
+      "cantonese": "對唔住/唔好意思",
+      "context": "道歉用語",
+      "example": "Sorry呀，我遲到"
+    },
+    {
+      "pattern": "thank you",
+      "cantonese": "唔該/多謝",
+      "context": "感謝用語",
+      "example": "Thank you呀"
+    },
+    {
+      "pattern": "bye",
+      "cantonese": "拜拜/再見",
+      "context": "告別用語",
+      "example": "Bye bye先"
+    }
+  ],
+  "idioms": [
+    {
+      "idiom": "識少少扮代表",
+      "meaning": "略知皮毛卻裝作專家",
+      "usage": "批評別人不懂裝懂",
+      "example": "佢咁都講得出，真係識少少扮代表"
+    },
+    {
+      "idiom": "食鬼你",
+      "meaning": "騙你的/才怪",
+      "usage": "表示不相信對方說的話",
+      "example": "你話你冇錢？食鬼你！"
+    },
+    {
+      "idiom": "講多無謂",
+      "meaning": "多說無益/不用多說了",
+      "usage": "結束爭論或表示無話可說",
+      "example": "算啦，講多無謂"
+    },
+    {
+      "idiom": "好心做壞事",
+      "meaning": "好心辦壞事",
+      "usage": "形容好意卻造成不好的結果",
+      "example": "我本來想幫佢，點知好心做壞事"
+    },
+    {
+      "idiom": "死蠢",
+      "meaning": "非常笨/愚蠢",
+      "usage": "批評別人（不禮貌）",
+      "example": "你咁都唔識，死蠢㗎！"
+    },
+    {
+      "idiom": "冇眼睇",
+      "meaning": "不忍心看/沒法看下去",
+      "usage": "形容情況太差或太尷尬",
+      "example": "佢唱歌唱到冇眼睇"
+    },
+    {
+      "idiom": "打蛇隨棍上",
+      "meaning": "順勢而為/趁機佔便宜",
+      "usage": "形容見機行事或趁機要求更多",
+      "example": "你咁就打蛇隨棍上喎"
+    }
+  ],
+  "cafeSlang": [
+    {
+      "term": "凍檸茶",
+      "pronunciation": "dung3 ning4 caa4",
+      "alias": ["凍檸", "0T"],
+      "meaning": "冰凍檸檬茶"
+    },
+    {
+      "term": "熱奶茶",
+      "pronunciation": "jit6 naai5 caa4",
+      "alias": ["熱奶", "HOT"],
+      "meaning": "熱的奶茶"
+    },
+    {
+      "term": "鴛鴦",
+      "pronunciation": "jin1 joeng1",
+      "meaning": "咖啡混合奶茶"
+    },
+    {
+      "term": "少甜",
+      "pronunciation": "siu2 tim4",
+      "meaning": "少糖"
+    },
+    {
+      "term": "走甜",
+      "pronunciation": "zau2 tim4",
+      "meaning": "不加糖"
+    },
+    {
+      "term": "少冰",
+      "pronunciation": "siu2 bing1",
+      "meaning": "少放冰塊"
+    },
+    {
+      "term": "走冰",
+      "pronunciation": "zau2 bing1",
+      "meaning": "不加冰塊"
+    },
+    {
+      "term": "加底",
+      "pronunciation": "gaa1 dai2",
+      "meaning": "飲品加多一倍（收費）"
+    },
+    {
+      "term": "飛沙走奶",
+      "pronunciation": "fei1 saa1 zau2 naai5",
+      "meaning": "咖啡不加糖不加奶"
+    }
+  ],
+  "formalToColloquial": {
+    "非常": "好/超級/勁",
+    "因為": "因為/因住",
+    "如果": "如果/假如/若果",
+    "請問": "唔該問下",
+    "可以嗎": "得唔得/可唔可以",
+    "謝謝": "唔該/多謝",
+    "再見": "拜拜/再見啦",
+    "你好": "你好/喂",
+    "沒有": "冇",
+    "什麼": "咩/乜嘢",
+    "為什麼": "點解",
+    "怎麼": "點/點樣",
+    "這個": "呢個",
+    "那個": "嗰個",
+    "在哪裡": "喺邊度",
+    "知道": "知/知道",
+    "不知道": "唔知",
+    "喜歡": "鍾意",
+    "不喜歡": "唔鍾意",
+    "吃": "食",
+    "喝": "飲",
+    "看": "睇",
+    "說": "講",
+    "走": "行",
+    "跑": "跑/走",
+    "東西": "嘢",
+    "時候": "時候/陣時",
+    "現在": "而家/依家",
+    "以前": "之前/以前",
+    "以後": "之後/以後",
+    "還是": "定係/定",
+    "或者": "或者/定",
+    "但是": "但係/不過",
+    "所以": "所以/咁",
+    "這樣": "咁/咁樣"
+  }
+}

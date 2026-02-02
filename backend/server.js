@@ -7,6 +7,9 @@ import { v4 as uuidv4 } from 'uuid';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
+// P2: Cultural Context Service
+import { getCulturalContext, generateCorrectionPrompt } from './services/culturalContext.js';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
@@ -105,8 +108,13 @@ const politeOpeners = [
 const ttsCache = new Map();
 const MAX_TTS_CACHE = 50;
 
-// P1: Mode-specific system prompts
-function getSystemPrompt(mode, scenario) {
+// P1: Mode-specific system prompts with P2 cultural context enhancement
+function getSystemPrompt(mode, scenario, culturalContext = null) {
+  let culturalNote = '';
+  if (culturalContext && culturalContext.hasContent) {
+    culturalNote = `\n\n## 文化背景（學生用咗以下元素）\n${culturalContext.summary}`;
+  }
+  
   if (mode === 'teaching') {
     return `你係一個嚴謹但友善嘅廣東話老師。你嘅工作係幫學生改善廣東話。
 
@@ -116,13 +124,14 @@ function getSystemPrompt(mode, scenario) {
 3. **語氣專業但鼓勵**：像老師咁教導，但要有耐心
 4. **使用繁體中文**書寫
 5. **保持簡潔**：糾正後繼續對話，回應1-3句
+6. **認識文化背景**：如果學生用咗俚語或潮語，解釋佢哋嘅適當用法
 
 ## 糾正格式：
 「[學生講嘅話]」→ 應該講「[正確講法]」
 [簡短解釋原因]
 [繼續對話]
 
-## 場景：${scenario || '日常對話'}`;
+## 場景：${scenario || '日常對話'}${culturalNote}`;
   } else {
     // Free Talk mode (default)
     return `你係一個好傾得嘅香港朋友，鍾意同人聊天。
@@ -135,12 +144,12 @@ function getSystemPrompt(mode, scenario) {
 5. **用繁體中文**書寫
 6. **回應長度保持 1-3 句**
 
-## 場景：${scenario || '自由傾計'}`;
+## 場景：${scenario || '自由傾計'}${culturalNote}`;
   }
 }
 
-async function generateAIResponse(userText, scenario, history, mode = 'freeChat') {
-  console.log('🤖 generateAIResponse called with:', { userText: userText.substring(0, 20), scenario, mode, provider: llmProvider });
+async function generateAIResponse(userText, scenario, history, mode = 'freeChat', culturalContext = null) {
+  console.log('🤖 generateAIResponse called with:', { userText: userText.substring(0, 20), scenario, mode, provider: llmProvider, hasCulturalContext: !!culturalContext });
   
   // Check if any LLM provider is configured
   const hasAzureOpenAI = azureOpenAIKey && azureOpenAIEndpoint;
@@ -152,8 +161,8 @@ async function generateAIResponse(userText, scenario, history, mode = 'freeChat'
   }
   
   try {
-    // P1: Use mode-specific system prompt
-    const systemMessage = getSystemPrompt(mode, scenario);
+    // P1: Use mode-specific system prompt with P2 cultural context
+    const systemMessage = getSystemPrompt(mode, scenario, culturalContext);
 
     const messages = [
       { role: 'system', content: systemMessage },
@@ -293,6 +302,55 @@ app.post('/api/mode', (req, res) => {
   res.json({ success: true, mode, previousMode: oldMode });
 });
 
+// P2: "Correct Me" on-demand feedback endpoint
+app.post('/api/correct', async (req, res) => {
+  const { sessionId, utterance } = req.body;
+  
+  if (!utterance) {
+    return res.status(400).json({ error: 'utterance is required' });
+  }
+  
+  const trimmedUtterance = typeof utterance === 'string' ? utterance.slice(0, 500).trim() : '';
+  
+  if (!trimmedUtterance) {
+    return res.status(400).json({ error: 'utterance cannot be empty' });
+  }
+  
+  console.log(`✏️ Correction requested for: "${trimmedUtterance.substring(0, 30)}..."`);
+  
+  try {
+    // Get cultural context for enhanced correction
+    const culturalContext = getCulturalContext(trimmedUtterance);
+    
+    // Generate the correction prompt
+    const correctionPrompt = generateCorrectionPrompt(trimmedUtterance);
+    
+    // Call LLM for detailed correction
+    const correction = await generateAIResponse(correctionPrompt, '糾正模式', [], 'teaching', culturalContext);
+    
+    // Extract any cultural insights
+    const culturalInsights = culturalContext.hasContent ? {
+      summary: culturalContext.summary,
+      slangUsed: culturalContext.slang.map(s => ({ term: s.term, meaning: s.meaning })),
+      suggestions: culturalContext.colloquialSuggestions
+    } : null;
+    
+    res.json({
+      success: true,
+      originalUtterance: trimmedUtterance,
+      correction,
+      culturalInsights,
+      timestamp: Date.now()
+    });
+  } catch (err) {
+    console.error('Correction error:', err.message);
+    res.status(500).json({ 
+      error: 'Failed to generate correction',
+      fallbackCorrection: `你講：「${trimmedUtterance}」\n\n繼續練習，你做得好好！有問題可以再問我。`
+    });
+  }
+});
+
 // Token endpoint for Azure Speech SDK (secure - doesn't expose API key)
 app.get('/api/speech-token', async (_req, res) => {
   const speechKey = process.env.AZURE_SPEECH_KEY;
@@ -425,7 +483,7 @@ app.post('/api/speech-to-text', async (req, res) => {
 });
 
 app.post('/api/recognize-and-respond', async (req, res) => {
-  const { sessionId, userText = '', scenario = '' } = req.body || {};
+  const { sessionId, userText = '', scenario = '', mode: requestMode } = req.body || {};
   if (!sessionId) {
     return res.status(400).json({ error: 'sessionId is required' });
   }
@@ -448,17 +506,30 @@ app.post('/api/recognize-and-respond', async (req, res) => {
     conversations.set(sessionId, session);
   }
 
-  const { history, mode = 'freeChat' } = session;
+  // P1: Use mode from request body if provided (frontend sends it with each message)
+  const mode = requestMode || session.mode || 'freeChat';
+  if (requestMode && requestMode !== session.mode) {
+    session.mode = requestMode;
+    console.log(`🔄 Mode updated from request: ${session.mode} → ${requestMode}`);
+  }
   
-  // Generate AI response using real LLM with mode
-  const aiText = await generateAIResponse(trimmedUserText, scenarioText, history, mode);
+  const { history } = session;
+  
+  // P2: Get cultural context for the user's text
+  const culturalContext = getCulturalContext(trimmedUserText);
+  if (culturalContext.hasContent) {
+    console.log('🎭 Cultural context detected:', culturalContext.summary);
+  }
+  
+  // Generate AI response using real LLM with mode and cultural context
+  const aiText = await generateAIResponse(trimmedUserText, scenarioText, history, mode, culturalContext);
   
   // Generate intelligent feedback using LLM (only in teaching mode)
   let feedback = '';
   if (mode === 'teaching' && trimmedUserText) {
     try {
       const feedbackPrompt = `分析以下廣東話句子嘅發音同文法，提供簡短建議（1句話）：「${trimmedUserText}」`;
-      feedback = await generateAIResponse(feedbackPrompt, '發音分析', [], 'teaching');
+      feedback = await generateAIResponse(feedbackPrompt, '發音分析', [], 'teaching', culturalContext);
       feedback = `（分析）${feedback}`;
     } catch (err) {
       feedback = '（分析）繼續練習，你做得好好！';
