@@ -2,15 +2,23 @@
 
 ## ✅ Phase 0 COMPLETED (February 1, 2026)
 
+### P0-0: Fix Frontend-Backend Connectivity ✅ HOTFIX
+- [x] Fixed wrong Azure URL (`hongkongtutor.azurewebsites.net` → `hongkongtutor-f4b5gzd3fbfdhxdw.eastasia-01.azurewebsites.net`)
+- [x] Updated CORS to allow `localhost:*` for local development
+- [x] Pushed to GitHub, verified GitHub Pages has correct URL
+- [x] Verified Azure backend CORS allows `https://jimmy00415.github.io`
+
 ### P0-1: Self-Host Speech SDK ⏱️ 4h ✅ DONE
 - [x] Downloaded `microsoft.cognitiveservices.speech.sdk.bundle-min.js` (441KB)
 - [x] Created `frontend/lib/speech-sdk/` directory
 - [x] Updated `frontend/index.html` with local SDK + CDN fallback
+- [x] Added SDK version tracking (v1.38.0) in index.html + app.js
 
 ### P0-2: Fix SpeechRecognizer Error ⏱️ 4h ✅ DONE
 - [x] Replaced `SpeechRecognizer.FromConfig()` with simple constructor
 - [x] Set `speechConfig.speechRecognitionLanguage = 'zh-HK'`
 - [x] Removed problematic `AutoDetectSourceLanguageConfig` usage
+- [x] Added graceful fallback to typing mode if recognizer creation fails
 
 ### P0-3: Add Interrupt Mechanism ⏱️ 3h ✅ DONE
 - [x] Added `stopAudio()` call in `handleRecordStart()` when audio is playing

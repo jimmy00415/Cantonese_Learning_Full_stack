@@ -1,6 +1,9 @@
 const META_API = document.querySelector('meta[name="api-base"]');
 // Force Azure backend for testing - change back to conditional for production
 const DEFAULT_API_BASE = 'https://hongkongtutor-f4b5gzd3fbfdhxdw.eastasia-01.azurewebsites.net/api';
+
+// Speech SDK version tracking (P0-1)
+const SPEECH_SDK_VERSION = '1.38.0'; // Update when upgrading SDK
 // const DEFAULT_API_BASE = window.location.hostname === 'localhost' 
 //   ? `${window.location.protocol}//${window.location.hostname}:4000/api`
 //   : 'https://hongkongtutor-f4b5gzd3fbfdhxdw.eastasia-01.azurewebsites.net/api';
@@ -894,13 +897,24 @@ async function handleRecordStart() {
     // P0-2 FIX: Use simple SpeechRecognizer constructor instead of FromConfig with AutoDetect
     // The AutoDetectSourceLanguageConfig.fromLanguages() causes "mergeTo" undefined error
     // Instead, we create a simple recognizer with zh-HK (Cantonese) as the primary language
-    speechRecognizer = new SpeechSDK.SpeechRecognizer(speechConfig, audioConfig);
-    
-    if (!speechRecognizer) {
-      throw new Error('Failed to create speech recognizer');
+    try {
+      speechRecognizer = new SpeechSDK.SpeechRecognizer(speechConfig, audioConfig);
+      
+      if (!speechRecognizer) {
+        throw new Error('Failed to create speech recognizer');
+      }
+      
+      console.log('Speech recognizer created for zh-HK (Cantonese)');
+    } catch (recognizerError) {
+      console.warn('Azure Speech SDK recognizer failed, falling back to typing mode:', recognizerError);
+      setNotice('語音識別暫時無法使用，請使用打字模式', 'error');
+      holdBtn.textContent = '按住說話';
+      stopRecordingTimer();
+      setSystemState(STATES.IDLE);
+      // Suggest user to type instead
+      textInput?.focus();
+      return; // Exit early, don't proceed with broken recognizer
     }
-    
-    console.log('Speech recognizer created for zh-HK (Cantonese)');
     
     // Track pause duration for encouragement message
     let pauseTimer = null;
