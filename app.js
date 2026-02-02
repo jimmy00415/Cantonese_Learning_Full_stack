@@ -1,12 +1,12 @@
 const META_API = document.querySelector('meta[name="api-base"]');
-// Force Azure backend for testing - change back to conditional for production
-const DEFAULT_API_BASE = 'https://hongkongtutor-f4b5gzd3fbfdhxdw.eastasia-01.azurewebsites.net/api';
 
 // Speech SDK version tracking (P0-1)
 const SPEECH_SDK_VERSION = '1.38.0'; // Update when upgrading SDK
-// const DEFAULT_API_BASE = window.location.hostname === 'localhost' 
-//   ? `${window.location.protocol}//${window.location.hostname}:4000/api`
-//   : 'https://hongkongtutor-f4b5gzd3fbfdhxdw.eastasia-01.azurewebsites.net/api';
+
+// Auto-detect localhost for development, use Azure backend for production
+const DEFAULT_API_BASE = window.location.hostname === 'localhost' 
+  ? `${window.location.protocol}//${window.location.hostname}:4000/api`
+  : 'https://hongkongtutor-f4b5gzd3fbfdhxdw.eastasia-01.azurewebsites.net/api';
 const API_BASE = window.__API_BASE__ || META_API?.content || DEFAULT_API_BASE;
 
 const statusEl = document.getElementById('status');
@@ -35,6 +35,10 @@ const feedbackDetailsEl = document.getElementById('feedbackDetails');
 const micPermissionDialog = document.getElementById('micPermissionDialog');
 const micBlockedDialog = document.getElementById('micBlockedDialog');
 
+// P1: Mode toggle elements
+const modeFreeTalkBtn = document.getElementById('modeFreeTalk');
+const modeTeachingBtn = document.getElementById('modeTeaching');
+
 let sessionId = null;
 let lastTtsAudio = null;
 let isPlaying = false;
@@ -43,6 +47,9 @@ let micPermissionGranted = false;
 let processingStartTime = null;
 let mediaRecorder = null;
 let audioChunks = [];
+
+// P1: Current mode state
+let currentMode = 'freeChat'; // 'freeChat' or 'teaching'
 
 // System states: idle, listening, processing, speaking, error
 const STATES = {
@@ -648,14 +655,27 @@ async function loadScenarios() {
 }
 
 async function startSession() {
-  const { sessionId: sid } = await fetchJSON('/session', { method: 'POST' });
+  // P1: Include mode in session creation
+  const { sessionId: sid, mode } = await fetchJSON('/session', { 
+    method: 'POST',
+    body: JSON.stringify({ mode: currentMode })
+  });
   sessionId = sid;
+  if (mode) currentMode = mode;
+  
   transcriptEl.innerHTML = '';
-  feedbackEl.textContent = '';
+  if (feedbackEl) feedbackEl.textContent = '';
   renderEmptyState();
-  renderMessage({ role: 'ai', text: '你好！我係你嘅廣東話導師，講句嘢嚟聽下？', timestamp: Date.now() });
+  
+  // P1: Mode-specific greeting
+  const greeting = currentMode === 'teaching' 
+    ? '你好！我係你嘅廣東話老師。今日我會幫你糾正發音同文法，有咩想練習？'
+    : '你好！我係你嘅廣東話導師，講句嘢嚟聽下？';
+  renderMessage({ role: 'ai', text: greeting, timestamp: Date.now() });
+  
   setStatus(`已建立對話：${sessionId.slice(0, 8)}`);
   sessionPill.textContent = `會話 ${sessionId.slice(0, 8)}`;
+  updateModePill();
 }
 
 async function sendUtterance(text) {
@@ -1131,8 +1151,80 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// P1: Mode toggle handlers
+function updateModePill() {
+  const modePill = document.querySelector('.pill.mode-teaching, .pill.mode-freeChat');
+  if (!modePill) {
+    // Create mode pill if it doesn't exist
+    const newPill = document.createElement('div');
+    newPill.className = `pill mode-${currentMode}`;
+    newPill.id = 'modePill';
+    newPill.textContent = currentMode === 'teaching' ? '📚 教學模式' : '💬 傾計模式';
+    sessionPill?.parentNode?.insertBefore(newPill, sessionPill.nextSibling);
+  } else {
+    modePill.className = `pill mode-${currentMode}`;
+    modePill.textContent = currentMode === 'teaching' ? '📚 教學模式' : '💬 傾計模式';
+  }
+}
+
+function setActiveMode(mode) {
+  currentMode = mode;
+  
+  // Update button states
+  if (modeFreeTalkBtn) {
+    modeFreeTalkBtn.classList.toggle('active', mode === 'freeChat');
+    modeFreeTalkBtn.setAttribute('aria-selected', mode === 'freeChat');
+  }
+  if (modeTeachingBtn) {
+    modeTeachingBtn.classList.toggle('active', mode === 'teaching');
+    modeTeachingBtn.setAttribute('aria-selected', mode === 'teaching');
+  }
+  
+  updateModePill();
+}
+
+async function switchMode(newMode) {
+  if (newMode === currentMode) return;
+  
+  const oldMode = currentMode;
+  setActiveMode(newMode);
+  
+  // If we have an active session, notify the backend
+  if (sessionId) {
+    try {
+      await fetchJSON('/mode', {
+        method: 'POST',
+        body: JSON.stringify({ sessionId, mode: newMode })
+      });
+      
+      const modeLabel = newMode === 'teaching' ? '教學模式' : '傾計模式';
+      setNotice(`已切換至${modeLabel}`, 'info');
+      
+      // Add system message about mode change
+      const modeChangeMsg = newMode === 'teaching'
+        ? '【模式切換】現在進入教學模式，我會認真幫你糾正發音同文法。'
+        : '【模式切換】現在進入傾計模式，我哋輕鬆傾下計！';
+      renderMessage({ role: 'ai', text: modeChangeMsg, timestamp: Date.now() });
+    } catch (err) {
+      console.error('Failed to switch mode:', err);
+      setActiveMode(oldMode); // Revert on error
+      setNotice('切換模式失敗', 'error');
+    }
+  }
+}
+
+// Mode button click handlers
+if (modeFreeTalkBtn) {
+  modeFreeTalkBtn.addEventListener('click', () => switchMode('freeChat'));
+}
+if (modeTeachingBtn) {
+  modeTeachingBtn.addEventListener('click', () => switchMode('teaching'));
+}
+
 (async function init() {
   setSystemState(STATES.IDLE);
+  setActiveMode(currentMode); // Initialize mode UI
+  
   try {
     const health = await fetchJSON('/health');
     setStatus('連線成功');

@@ -48,6 +48,22 @@
     </section>
 
     <div class="panel">
+      <!-- P1: Mode Toggle -->
+      <section class="mode-section">
+        <div class="mode-toggle" role="tablist" aria-label="對話模式">
+          <button role="tab" class="mode-btn active" data-mode="freeChat" aria-selected="true" id="modeFreeTalk">
+            <span class="mode-icon">💬</span>
+            <span class="mode-label">Free Talk</span>
+            <span class="mode-desc">輕鬆傾計</span>
+          </button>
+          <button role="tab" class="mode-btn" data-mode="teaching" aria-selected="false" id="modeTeaching">
+            <span class="mode-icon">📚</span>
+            <span class="mode-label">Teaching</span>
+            <span class="mode-desc">認真學習</span>
+          </button>
+        </div>
+      </section>
+
       <section class="controls">
         <label for="scenario">情景：</label>
         <select id="scenario"></select>
