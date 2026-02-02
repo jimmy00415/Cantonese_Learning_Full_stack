@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Cantonese Conversation Tutor</title>
   <!-- Azure Speech SDK - Self-hosted primary with CDN fallback -->
+  <!-- SDK Version: 1.38.0 - Update this comment when upgrading -->
   <script src="lib/speech-sdk/microsoft.cognitiveservices.speech.sdk.bundle-min.js"></script>
   <script>
     // Fallback to CDN if local SDK fails to load
@@ -12,7 +13,7 @@
       console.warn('Local Speech SDK not found, loading from CDN fallback...');
       document.write('<script src="https://aka.ms/csspeech/jsbrowserpackage"><\/script>');
     } else {
-      console.log('Speech SDK loaded from: local');
+      console.log('Speech SDK loaded from: local (v1.38.0)');
     }
   </script>
   <link rel="stylesheet" href="styles.css" />
