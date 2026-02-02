@@ -89,6 +89,9 @@ const STATE_LABELS = {
   error: '出錯了'
 };
 
+// P3-1: Dynamic i18n state labels (will be updated by updateUILanguage())
+let STATE_LABELS_I18N = { ...STATE_LABELS };
+
 const starterPhrases = {
   default: ['你好，我想練習日常對話', '可唔可以幫我糾正發音？', '講個笑話俾我聽吓？'],
   '餐廳點餐 (At the Restaurant)': ['我想點一碗雲吞麵', '呢度有冇素食選擇？', '可唔可以少冰少甜？'],
@@ -828,9 +831,8 @@ holdBtn.addEventListener('touchstart', (e) => {
 let speechRecognizer = null;
 let speechConfig = null;
 let audioConfig = null;
-let recordingTimerInterval = null;
-let recordingStartTime = null;
-const MAX_RECORDING_TIME = 60; // seconds
+// Note: recordingTimerInterval is defined at top of file (P3-3)
+// Note: MAX_RECORDING_TIME is defined at top of file (P3-3)
 
 // Initialize Azure Speech SDK with Language Identification
 async function initSpeechSDK() {
@@ -1058,39 +1060,7 @@ async function handleRecordStart() {
   }
 }
 
-// Recording timer functions
-function startRecordingTimer() {
-  recordingStartTime = Date.now();
-  updateRecordingTimerDisplay();
-  
-  recordingTimerInterval = setInterval(() => {
-    const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
-    const remaining = MAX_RECORDING_TIME - elapsed;
-    
-    if (remaining <= 0) {
-      // Auto-stop after max time
-      handleRecordStop();
-      setNotice('已達最長錄音時間', 'info');
-    } else {
-      updateRecordingTimerDisplay();
-    }
-  }, 1000);
-}
-
-function updateRecordingTimerDisplay() {
-  if (!recordingStartTime) return;
-  const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
-  const remaining = MAX_RECORDING_TIME - elapsed;
-  holdBtn.textContent = `錄音中... ${remaining}s`;
-}
-
-function stopRecordingTimer() {
-  if (recordingTimerInterval) {
-    clearInterval(recordingTimerInterval);
-    recordingTimerInterval = null;
-  }
-  recordingStartTime = null;
-}
+// Note: Recording timer functions moved to P3-3 section below (SVG ring indicator)
 
 function handleRecordStop() {
   // Stop recording timer
@@ -1364,7 +1334,12 @@ async function requestCorrection() {
     }
   } catch (err) {
     console.error('Correction request failed:', err);
-    setNotice('糾正請求失敗，請重試', 'error');
+    // Better error handling for 404 (endpoint not available on Azure)
+    if (err.message && err.message.includes('404')) {
+      setNotice('糾正功能暫時未能使用（後端更新中）', 'error');
+    } else {
+      setNotice('糾正請求失敗，請重試', 'error');
+    }
   } finally {
     correctMeBtn.disabled = false;
     correctMeBtn.classList.remove('loading');
@@ -1507,8 +1482,7 @@ function updateUILanguage() {
   }
 }
 
-// Dynamic state labels (will be updated by i18n)
-let STATE_LABELS_I18N = { ...STATE_LABELS };
+// Note: STATE_LABELS_I18N is defined at top of file (line ~93)
 
 // Listen for language changes from i18n module
 window.addEventListener('languageChanged', () => {
