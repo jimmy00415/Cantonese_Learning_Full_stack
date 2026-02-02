@@ -712,7 +712,8 @@ async function sendUtterance(text) {
     const payload = {
       sessionId,
       userText: text,
-      scenario: scenarioSelect.value
+      scenario: scenarioSelect.value,
+      mode: currentMode
     };
     const res = await fetchJSON('/recognize-and-respond', {
       method: 'POST',
@@ -1186,31 +1187,18 @@ function setActiveMode(mode) {
 async function switchMode(newMode) {
   if (newMode === currentMode) return;
   
-  const oldMode = currentMode;
   setActiveMode(newMode);
   
-  // Always show feedback when mode changes
+  // Show feedback when mode changes
   const modeLabel = newMode === 'teaching' ? '教學模式' : '傾計模式';
   setNotice(`已切換至${modeLabel}`, 'info');
   
-  // If we have an active session, notify the backend
+  // Add system message about mode change if session exists
   if (sessionId) {
-    try {
-      await fetchJSON('/mode', {
-        method: 'POST',
-        body: JSON.stringify({ sessionId, mode: newMode })
-      });
-      
-      // Add system message about mode change
-      const modeChangeMsg = newMode === 'teaching'
-        ? '【模式切換】現在進入教學模式，我會認真幫你糾正發音同文法。'
-        : '【模式切換】現在進入傾計模式，我哋輕鬆傾下計！';
-      renderMessage({ role: 'ai', text: modeChangeMsg, timestamp: Date.now() });
-    } catch (err) {
-      console.error('Failed to switch mode:', err);
-      setActiveMode(oldMode); // Revert on error
-      setNotice('切換模式失敗', 'error');
-    }
+    const modeChangeMsg = newMode === 'teaching'
+      ? '【模式切換】現在進入教學模式，我會認真幫你糾正發音同文法。'
+      : '【模式切換】現在進入傾計模式，我哋輕鬆傾下計！';
+    renderMessage({ role: 'ai', text: modeChangeMsg, timestamp: Date.now() });
   }
 }
 
