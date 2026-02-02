@@ -105,8 +105,42 @@ const politeOpeners = [
 const ttsCache = new Map();
 const MAX_TTS_CACHE = 50;
 
-async function generateAIResponse(userText, scenario, history) {
-  console.log('🤖 generateAIResponse called with:', { userText: userText.substring(0, 20), scenario, provider: llmProvider });
+// P1: Mode-specific system prompts
+function getSystemPrompt(mode, scenario) {
+  if (mode === 'teaching') {
+    return `你係一個嚴謹但友善嘅廣東話老師。你嘅工作係幫學生改善廣東話。
+
+## 指引：
+1. **必須糾正錯誤**：每當學生有發音、文法、用詞錯誤，一定要指出並解釋
+2. **提供正確示範**：講出正確嘅講法
+3. **語氣專業但鼓勵**：像老師咁教導，但要有耐心
+4. **使用繁體中文**書寫
+5. **保持簡潔**：糾正後繼續對話，回應1-3句
+
+## 糾正格式：
+「[學生講嘅話]」→ 應該講「[正確講法]」
+[簡短解釋原因]
+[繼續對話]
+
+## 場景：${scenario || '日常對話'}`;
+  } else {
+    // Free Talk mode (default)
+    return `你係一個好傾得嘅香港朋友，鍾意同人聊天。
+
+## 指引：
+1. **唔好過份糾正**：除非聽唔明，否則唔使指出小錯誤
+2. **講地道廣東話**：用俗語、潮語，講嘢自然啲
+3. **保持輕鬆**：像朋友咁傾計，可以講笑
+4. **推動對話**：問問題，分享睇法
+5. **用繁體中文**書寫
+6. **回應長度保持 1-3 句**
+
+## 場景：${scenario || '自由傾計'}`;
+  }
+}
+
+async function generateAIResponse(userText, scenario, history, mode = 'freeChat') {
+  console.log('🤖 generateAIResponse called with:', { userText: userText.substring(0, 20), scenario, mode, provider: llmProvider });
   
   // Check if any LLM provider is configured
   const hasAzureOpenAI = azureOpenAIKey && azureOpenAIEndpoint;
@@ -118,16 +152,8 @@ async function generateAIResponse(userText, scenario, history) {
   }
   
   try {
-    const systemMessage = `你係一個友善嘅廣東話老師。你嘅工作係幫學生練習廣東話對話。
-場景：${scenario || '日常對話'}
-
-指引：
-1. 用地道廣東話回應
-2. 語氣自然親切
-3. 如果學生有文法或用詞錯誤，溫柔地糾正
-4. 鼓勵學生繼續練習
-5. 回應長度保持 1-3 句，唔好太長
-6. 用繁體中文書寫`;
+    // P1: Use mode-specific system prompt
+    const systemMessage = getSystemPrompt(mode, scenario);
 
     const messages = [
       { role: 'system', content: systemMessage },
@@ -230,10 +256,41 @@ app.get('/api/scenarios', (_req, res) => {
   res.json({ scenarios });
 });
 
-app.post('/api/session', (_req, res) => {
+// P1: Session now includes mode
+app.post('/api/session', (req, res) => {
+  const { mode = 'freeChat' } = req.body || {};
   const sessionId = uuidv4();
-  conversations.set(sessionId, []);
-  res.json({ sessionId });
+  conversations.set(sessionId, {
+    history: [],
+    mode,
+    settings: { language: 'zh-TW', ttsSpeed: 1.0 },
+    createdAt: Date.now()
+  });
+  console.log(`📝 New session created: ${sessionId}, mode: ${mode}`);
+  res.json({ sessionId, mode });
+});
+
+// P1: Switch mode mid-session
+app.post('/api/mode', (req, res) => {
+  const { sessionId, mode } = req.body;
+  
+  if (!sessionId || !mode) {
+    return res.status(400).json({ error: 'sessionId and mode are required' });
+  }
+  
+  if (!['teaching', 'freeChat'].includes(mode)) {
+    return res.status(400).json({ error: 'mode must be "teaching" or "freeChat"' });
+  }
+  
+  const session = conversations.get(sessionId);
+  if (!session) {
+    return res.status(404).json({ error: 'Session not found' });
+  }
+  
+  const oldMode = session.mode;
+  session.mode = mode;
+  console.log(`🔄 Mode switched for session ${sessionId}: ${oldMode} → ${mode}`);
+  res.json({ success: true, mode, previousMode: oldMode });
 });
 
 // Token endpoint for Azure Speech SDK (secure - doesn't expose API key)
@@ -377,33 +434,45 @@ app.post('/api/recognize-and-respond', async (req, res) => {
   const trimmedUserText = typeof userText === 'string' ? userText.slice(0, 400).trim() : '';
   const scenarioText = typeof scenario === 'string' ? scenario.slice(0, 120) : '';
 
-  if (!conversations.has(sessionId)) {
-    conversations.set(sessionId, []);
+  // P1: Get session with mode (support both old array format and new object format)
+  let session = conversations.get(sessionId);
+  if (!session) {
+    // Create new session if not exists
+    session = { history: [], mode: 'freeChat', settings: {} };
+    conversations.set(sessionId, session);
+  }
+  
+  // Handle legacy sessions (array format)
+  if (Array.isArray(session)) {
+    session = { history: session, mode: 'freeChat', settings: {} };
+    conversations.set(sessionId, session);
   }
 
-  let history = conversations.get(sessionId);
+  const { history, mode = 'freeChat' } = session;
   
-  // Generate AI response using real LLM
-  const aiText = await generateAIResponse(trimmedUserText, scenarioText, history);
+  // Generate AI response using real LLM with mode
+  const aiText = await generateAIResponse(trimmedUserText, scenarioText, history, mode);
   
-  // Generate intelligent feedback using LLM
+  // Generate intelligent feedback using LLM (only in teaching mode)
   let feedback = '';
-  if (trimmedUserText && hkbuApiKey) {
+  if (mode === 'teaching' && trimmedUserText) {
     try {
       const feedbackPrompt = `分析以下廣東話句子嘅發音同文法，提供簡短建議（1句話）：「${trimmedUserText}」`;
-      feedback = await generateAIResponse(feedbackPrompt, '發音分析', []);
+      feedback = await generateAIResponse(feedbackPrompt, '發音分析', [], 'teaching');
       feedback = `（分析）${feedback}`;
     } catch (err) {
       feedback = '（分析）繼續練習，你做得好好！';
     }
+  } else if (mode === 'freeChat') {
+    feedback = ''; // No feedback in free chat mode
   } else {
     feedback = trimmedUserText ? '（分析）繼續練習，你做得好好！' : '請試下講一句你想練習嘅句子。';
   }
 
-  history.push({ role: 'user', text: trimmedUserText, timestamp: Date.now() });
-  history.push({ role: 'ai', text: aiText, timestamp: Date.now() });
-  if (history.length > 20) history = history.slice(-20);
-  conversations.set(sessionId, history);
+  session.history.push({ role: 'user', text: trimmedUserText, timestamp: Date.now() });
+  session.history.push({ role: 'ai', text: aiText, timestamp: Date.now() });
+  if (session.history.length > 20) session.history = session.history.slice(-20);
+  conversations.set(sessionId, session);
 
   // TTS Synthesis
   let ttsAudio = null;
