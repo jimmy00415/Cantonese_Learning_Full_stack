@@ -33,13 +33,44 @@
 
 ---
 
+## ✅ Phase 1 COMPLETED (February 2, 2026)
+
+### P1-1: Mode System Architecture ✅ DONE
+- [x] Session stores mode, history, settings, createdAt
+- [x] POST /api/session accepts mode parameter
+- [x] POST /api/mode endpoint for mid-session switching
+- [x] generateAIResponse accepts mode parameter
+
+### P1-2: Teaching Mode Prompt ✅ DONE
+- [x] Strict corrections for all errors
+- [x] Professional but encouraging tone
+- [x] Correction format: 「原句」→「正確講法」+ 解釋
+
+### P1-3: Free Talk Mode Prompt ✅ DONE
+- [x] Minimal corrections (only if incomprehensible)
+- [x] Relaxed, friendly tone
+- [x] Uses slang and casual language
+
+### P1-4: Frontend Mode Toggle UI ✅ DONE
+- [x] Two-button toggle (Free Talk 💬 / Teaching 📚)
+- [x] Active state styling with color coding
+- [x] Mode-specific greetings on session start
+
+### P1-5: Mode State Logic ✅ DONE
+- [x] currentMode state variable
+- [x] switchMode() syncs with backend
+- [x] Mode change messages in transcript
+- [x] Mode pill indicator in header
+
+---
+
 ## 📊 Phase Summary
 
 | Phase | Tasks | Est. Time | Status |
 |-------|-------|-----------|--------|
 | P0 | 4 critical fixes | 1 week | ✅ **COMPLETED** |
-| P1 | Mode system (5 tasks) | 2 weeks | 🟡 Ready to Start |
-| P2 | Cultural engine + Feedback (3 tasks) | 2 weeks | ⚪ Blocked by P1 |
+| P1 | Mode system (5 tasks) | 2 weeks | ✅ **COMPLETED** |
+| P2 | Cultural engine + Feedback (3 tasks) | 2 weeks | 🟡 Ready to Start |
 | P3 | UI polish (4 tasks) | 1 week | ⚪ Blocked by P2 |
 
 ---
