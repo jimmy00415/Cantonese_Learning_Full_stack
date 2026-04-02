@@ -6,10 +6,10 @@ const META_API = document.querySelector('meta[name="api-base"]');
 // Speech SDK version tracking (P0-1)
 const SPEECH_SDK_VERSION = '1.38.0'; // Update when upgrading SDK
 
-// Auto-detect localhost for development, use Azure backend for production
+// Auto-detect localhost for development, use same-origin backend in production
 const DEFAULT_API_BASE = window.location.hostname === 'localhost' 
   ? `${window.location.protocol}//${window.location.hostname}:4000/api`
-  : 'https://hongkongtutor-f4b5gzd3fbfdhxdw.eastasia-01.azurewebsites.net/api';
+  : `${window.location.origin}/api`;
 const API_BASE = window.__API_BASE__ || META_API?.content || DEFAULT_API_BASE;
 
 const statusEl = document.getElementById('status');
@@ -68,6 +68,7 @@ let processingStartTime = null;
 let mediaRecorder = null;
 let audioChunks = [];
 let lastUserUtterance = null; // P2: Track last user message for correction
+let isRecording = false; // Guard flag for async recording lifecycle
 
 // P1: Current mode state
 let currentMode = 'freeChat'; // 'freeChat' or 'teaching'
@@ -836,9 +837,13 @@ let audioConfig = null;
 
 // Initialize Azure Speech SDK with Language Identification
 async function initSpeechSDK() {
+  // Always create fresh audioConfig since closing a recognizer disposes the mic stream.
+  // Only reuse speechConfig (token-based, valid for ~10 min).
   if (speechConfig && audioConfig) {
-    console.log('Speech SDK already initialized');
-    return; // Already initialized
+    console.log('Speech SDK config exists, creating fresh audioConfig');
+    const SpeechSDK = window.SpeechSDK || window.Microsoft.CognitiveServices.Speech;
+    audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
+    return;
   }
   
   try {
@@ -928,14 +933,21 @@ async function handleRecordStart() {
   }
   
   try {
+    isRecording = true;
     setSystemState(STATES.LISTENING);
     holdBtn.textContent = '錄音中... 放開即發送';
     
-    // Start recording timer for visual feedback
-    startRecordingTimer();
+    // Note: startRecordingTimer() is already called by setSystemState(LISTENING)
     
     // Initialize Speech SDK if needed
     await initSpeechSDK();
+    
+    // Check if user released button during async init
+    if (!isRecording) {
+      console.log('Recording was stopped during SDK init, aborting');
+      holdBtn.textContent = '按住說話';
+      return;
+    }
     
     const SpeechSDK = window.SpeechSDK || window.Microsoft.CognitiveServices.Speech;
     
@@ -969,10 +981,11 @@ async function handleRecordStart() {
       setNotice('語音識別暫時無法使用，請使用打字模式', 'error');
       holdBtn.textContent = '按住說話';
       stopRecordingTimer();
+      isRecording = false;
+      audioConfig = null;
       setSystemState(STATES.IDLE);
-      // Suggest user to type instead
       textInput?.focus();
-      return; // Exit early, don't proceed with broken recognizer
+      return;
     }
     
     // Track pause duration for encouragement message
@@ -1022,20 +1035,23 @@ async function handleRecordStart() {
       }
     };
     
-    // Handle errors
+    // Handle errors — only handle actual errors here.
+    // Normal stop flow is handled by handleRecordStop callbacks.
     speechRecognizer.canceled = (s, e) => {
-      console.error('Recognition canceled:', e.errorDetails);
+      console.log('Recognition canceled:', e.errorDetails, 'errorCode:', e.errorCode);
       
-      // Don't show error for normal cancellation (user stopped)
+      // Only handle actual errors, not normal user-initiated stops
       if (e.errorCode !== SpeechSDK.CancellationErrorCode.NoError) {
         setNotice('語音識別失敗：' + e.errorDetails, 'error');
         setSystemState(STATES.ERROR);
         setTimeout(() => setSystemState(STATES.IDLE), 2000);
-      }
-      
-      if (speechRecognizer) {
-        speechRecognizer.close();
-        speechRecognizer = null;
+        // Clean up on error
+        if (speechRecognizer) {
+          speechRecognizer.close();
+          speechRecognizer = null;
+        }
+        audioConfig = null;
+        isRecording = false;
       }
     };
     
@@ -1045,6 +1061,12 @@ async function handleRecordStart() {
       (err) => {
         console.error('Failed to start recognition:', err);
         setNotice('無法啟動錄音', 'error');
+        isRecording = false;
+        audioConfig = null;
+        if (speechRecognizer) {
+          speechRecognizer.close();
+          speechRecognizer = null;
+        }
         setSystemState(STATES.ERROR);
         setTimeout(() => setSystemState(STATES.IDLE), 2000);
       }
@@ -1057,36 +1079,42 @@ async function handleRecordStart() {
     setTimeout(() => setSystemState(STATES.IDLE), 2000);
     holdBtn.textContent = '按住說話';
     stopRecordingTimer();
+    isRecording = false;
+    audioConfig = null;
   }
 }
 
 // Note: Recording timer functions moved to P3-3 section below (SVG ring indicator)
 
 function handleRecordStop() {
+  if (!isRecording && !speechRecognizer) return;
+  
+  isRecording = false;
   // Stop recording timer
   stopRecordingTimer();
   
   if (speechRecognizer) {
-    speechRecognizer.stopContinuousRecognitionAsync(
+    const recognizerRef = speechRecognizer;
+    speechRecognizer = null; // Prevent double-stop
+    recognizerRef.stopContinuousRecognitionAsync(
       () => {
         console.log('Recognition stopped');
-        if (speechRecognizer) {
-          speechRecognizer.close();
-          speechRecognizer = null;
-        }
+        recognizerRef.close();
+        audioConfig = null; // Force fresh audioConfig on next recording
         holdBtn.textContent = '按住說話';
         setSystemState(STATES.IDLE);
       },
       (err) => {
         console.error('Error stopping recognition:', err);
-        if (speechRecognizer) {
-          speechRecognizer.close();
-          speechRecognizer = null;
-        }
+        try { recognizerRef.close(); } catch(e) { /* ignore */ }
+        audioConfig = null;
         holdBtn.textContent = '按住說話';
         setSystemState(STATES.IDLE);
       }
     );
+  } else {
+    holdBtn.textContent = '按住說話';
+    setSystemState(STATES.IDLE);
   }
 }
 
@@ -1146,6 +1174,12 @@ function updatePresetButtonsActive(currentSpeed) {
 // P3-3: Recording countdown timer
 function startRecordingTimer() {
   if (!recordingIndicator || !ringProgress || !timeRemainingEl) return null;
+  
+  // Clear any existing timer to prevent leaks from double-calls
+  if (recordingTimerInterval) {
+    clearInterval(recordingTimerInterval);
+    recordingTimerInterval = null;
+  }
   
   let remaining = MAX_RECORDING_TIME;
   const circumference = 2 * Math.PI * 17; // r=17 from SVG
