@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
 // P2: Cultural Context Service
-import { getCulturalContext, generateCorrectionPrompt } from './services/culturalContext.js';
+import { getCulturalContext } from './services/culturalContext.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -22,6 +22,7 @@ const clientOrigin = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
 // Allow Azure frontend domain, GitHub Pages, and localhost for testing
 const allowedOrigins = [
   clientOrigin,
+  'https://hongkongtutor.azurewebsites.net',
   'https://hongkongtutor-f4b5gzd3fbfdhxdw.eastasia-01.azurewebsites.net',
   'https://jimmy00415.github.io',
   'http://localhost:5173',
@@ -40,6 +41,7 @@ const appVersion = process.env.APP_VERSION || '0.1.0-prototype';
 const ttsProvider = (process.env.TTS_PROVIDER || 'mock').toLowerCase();
 const azureTtsKey = process.env.AZURE_SPEECH_KEY;
 const azureTtsRegion = process.env.AZURE_SPEECH_REGION;
+const azureAsrLanguage = process.env.AZURE_ASR_LANGUAGE || 'zh-HK';
 const azureVoice = process.env.AZURE_TTS_VOICE || 'zh-HK-HiuMaanNeural';
 const azureRate = process.env.AZURE_TTS_RATE || '0%';
 const azurePitch = process.env.AZURE_TTS_PITCH || '0%';
@@ -52,11 +54,47 @@ const azureOpenAIEndpoint = process.env.AZURE_OPENAI_ENDPOINT;
 const azureOpenAIDeployment = process.env.AZURE_OPENAI_DEPLOYMENT || 'gpt-4o';
 const azureOpenAIApiVersion = process.env.AZURE_OPENAI_API_VERSION || '2024-08-01-preview';
 const llmProvider = (process.env.LLM_PROVIDER || 'hkbu').toLowerCase();
+const asrProvider = (process.env.ASR_PROVIDER || process.env.SPEECH_PROVIDER || ttsProvider).toLowerCase();
+const asrFallbackProvider = (process.env.ASR_FALLBACK_PROVIDER || '').toLowerCase();
+function normalizeMiniMaxApiKey(apiKey) {
+  return apiKey ? apiKey.trim().replace(/^Minimax-/, '') : '';
+}
+
+const minimaxApiKey = normalizeMiniMaxApiKey(process.env.MINIMAX_API_KEY || process.env.ANTHROPIC_API_KEY);
+const minimaxBaseUrl = (process.env.MINIMAX_BASE_URL || 'https://api.minimax.io').replace(/\/+$/, '');
+const minimaxAnthropicBaseUrl = (process.env.MINIMAX_ANTHROPIC_BASE_URL || process.env.ANTHROPIC_BASE_URL || `${minimaxBaseUrl}/anthropic`).replace(/\/+$/, '');
+const minimaxLlmModel = process.env.MINIMAX_LLM_MODEL || 'MiniMax-M2.7';
+const minimaxMaxTokens = Number(process.env.MINIMAX_MAX_TOKENS || 300);
+const minimaxTemperature = Number(process.env.MINIMAX_TEMPERATURE || 0.8);
+const minimaxTtsModel = process.env.MINIMAX_TTS_MODEL || 'speech-2.8-hd';
+const minimaxTtsVoice = process.env.MINIMAX_TTS_VOICE || 'Cantonese_GentleLady';
+const minimaxTtsLanguageBoost = process.env.MINIMAX_TTS_LANGUAGE_BOOST || 'Chinese,Yue';
+const minimaxTtsSpeed = Number(process.env.MINIMAX_TTS_SPEED || 1);
+const minimaxTtsVolume = Number(process.env.MINIMAX_TTS_VOLUME || 1);
+const minimaxTtsPitch = Number(process.env.MINIMAX_TTS_PITCH || 0);
+const minimaxAsrModel = process.env.MINIMAX_ASR_MODEL || 'speech-01';
+const minimaxAsrLanguage = process.env.MINIMAX_ASR_LANGUAGE || 'zh-HK';
+const minimaxAsrEndpoint = process.env.MINIMAX_ASR_ENDPOINT || `${minimaxBaseUrl}/v1/audio/transcriptions`;
+
+const defaultMiniMaxCantoneseVoices = [
+  {
+    voiceId: 'Cantonese_GentleLady',
+    label: '溫柔女聲',
+    description: 'Gentle Cantonese female voice'
+  },
+  {
+    voiceId: 'Cantonese_podacast_host_1',
+    label: 'Podcast 主持',
+    description: 'Cantonese podcast host voice'
+  }
+];
+
+let minimaxVoiceCache = { expiresAt: 0, voices: defaultMiniMaxCantoneseVoices };
 
 app.disable('x-powered-by');
 app.use(morgan(process.env.LOG_FORMAT || 'dev'));
 
-app.use(cors({ 
+app.use(cors({
   origin: (origin, callback) => {
     if (isOriginAllowed(origin)) {
       callback(null, true);
@@ -65,9 +103,9 @@ app.use(cors({
       callback(new Error('Not allowed by CORS'));
     }
   },
-  credentials: true 
+  credentials: true
 }));
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: process.env.JSON_LIMIT || '10mb' }));
 app.use((req, res, next) => {
   req.startTime = Date.now();
   next();
@@ -108,13 +146,144 @@ const politeOpeners = [
 const ttsCache = new Map();
 const MAX_TTS_CACHE = 50;
 
+function normalizeMiniMaxVoiceId(voiceId) {
+  const normalized = typeof voiceId === 'string' ? voiceId.trim() : '';
+  if (!normalized || normalized.length > 120) return '';
+  return /^[\w\s().,-]+$/.test(normalized) ? normalized : '';
+}
+
+function labelMiniMaxVoice(voiceId, fallbackLabel = '') {
+  if (fallbackLabel) return fallbackLabel;
+  const labels = {
+    Cantonese_GentleLady: '溫柔女聲',
+    Cantonese_podacast_host_1: 'Podcast 主持'
+  };
+  return labels[voiceId] || voiceId.replace(/^Cantonese_/, '').replace(/_/g, ' ');
+}
+
+function mergeVoices(primary, fallback) {
+  const byId = new Map();
+  [...fallback, ...primary].forEach((voice) => {
+    const voiceId = normalizeMiniMaxVoiceId(voice.voiceId || voice.voice_id);
+    if (!voiceId) return;
+    byId.set(voiceId, {
+      voiceId,
+      label: voice.label || voice.voice_name || labelMiniMaxVoice(voiceId),
+      description: Array.isArray(voice.description) ? voice.description.join(' ') : voice.description || ''
+    });
+  });
+  return [...byId.values()];
+}
+
+function buildEnglishCoachCorrection(utterance, culturalContext = null) {
+  const trimmedUtterance = String(utterance || '').trim();
+  const colloquialSwaps = culturalContext?.colloquialSuggestions?.length
+    ? culturalContext.colloquialSuggestions
+        .slice(0, 3)
+        .map(({ formal, colloquial }) => `"${formal}" -> "${colloquial}"`)
+        .join(', ')
+    : '';
+  const coachNote = colloquialSwaps
+    ? `Your meaning is clear, but some words sound formal or Mandarin-style. For spoken Cantonese, try these local swaps: ${colloquialSwaps}.`
+    : 'Your meaning is understandable. Make it more useful by naming the situation first, then asking for one specific thing.';
+  const nextTry = colloquialSwaps
+    ? 'Rewrite the line with one spoken Cantonese swap, then say it slowly once.'
+    : 'Try one short campus sentence, such as asking how to order, where to go, or what to say next.';
+
+  return `Your line: ${trimmedUtterance}
+
+Coach note: ${coachNote}
+
+Why it helps: International students sound more natural in Hong Kong when the sentence is short, specific, and closer to everyday spoken Cantonese.
+
+Next try: ${nextTry}`;
+}
+
+async function getMiniMaxCantoneseVoices({ refresh = false } = {}) {
+  if (!refresh && minimaxVoiceCache.voices && Date.now() < minimaxVoiceCache.expiresAt) {
+    return minimaxVoiceCache.voices;
+  }
+
+  if (!minimaxApiKey) return defaultMiniMaxCantoneseVoices;
+
+  try {
+    const response = await fetch(`${minimaxBaseUrl}/v1/get_voice`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${minimaxApiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ voice_type: 'system' })
+    });
+
+    if (!response.ok) throw new Error(`MiniMax voice list failed: ${response.status}`);
+
+    const data = await response.json();
+    const statusCode = data.base_resp?.status_code;
+    if (statusCode !== undefined && statusCode !== 0) {
+      throw new Error(`MiniMax voice list failed ${statusCode}: ${data.base_resp?.status_msg || 'unknown error'}`);
+    }
+
+    const cantoneseVoices = (data.system_voice || [])
+      .filter((voice) => {
+        const description = Array.isArray(voice.description) ? voice.description.join(' ') : voice.description || '';
+        return /cantonese/i.test(`${voice.voice_id || ''} ${voice.voice_name || ''} ${description}`)
+          || defaultMiniMaxCantoneseVoices.some(defaultVoice => defaultVoice.voiceId === voice.voice_id);
+      })
+      .map((voice) => ({
+        voiceId: voice.voice_id,
+        label: labelMiniMaxVoice(voice.voice_id, voice.voice_name),
+        description: Array.isArray(voice.description) ? voice.description.join(' ') : voice.description || ''
+      }));
+
+    minimaxVoiceCache = {
+      expiresAt: Date.now() + 10 * 60 * 1000,
+      voices: mergeVoices(cantoneseVoices, defaultMiniMaxCantoneseVoices)
+    };
+  } catch (err) {
+    console.warn('MiniMax voice list unavailable, using built-in Cantonese voices:', err.message);
+    minimaxVoiceCache = {
+      expiresAt: Date.now() + 60 * 1000,
+      voices: defaultMiniMaxCantoneseVoices
+    };
+  }
+
+  return minimaxVoiceCache.voices;
+}
+
+async function resolveMiniMaxVoice(voiceId) {
+  const requestedVoiceId = normalizeMiniMaxVoiceId(voiceId);
+  const voices = await getMiniMaxCantoneseVoices();
+  const defaultVoiceId = normalizeMiniMaxVoiceId(minimaxTtsVoice) || defaultMiniMaxCantoneseVoices[0].voiceId;
+  return voices.some(voice => voice.voiceId === requestedVoiceId) ? requestedVoiceId : defaultVoiceId;
+}
+
 // P1: Mode-specific system prompts with P2 cultural context enhancement
 function getSystemPrompt(mode, scenario, culturalContext = null) {
   let culturalNote = '';
   if (culturalContext && culturalContext.hasContent) {
     culturalNote = `\n\n## 文化背景（學生用咗以下元素）\n${culturalContext.summary}`;
   }
-  
+
+  if (mode === 'coachNotes') {
+    return `You are a friendly Cantonese learning coach for international students living or studying in Hong Kong.
+
+## Instructions:
+1. Reply only in clear, natural English.
+2. Keep Cantonese examples short and useful; Cantonese words may stay in Traditional Chinese or Jyutping when needed.
+3. Explain what the learner did well, what to improve, and how to try again in real student-life situations.
+4. Be encouraging, practical, and easy to understand for non-local students.
+5. Avoid long grammar lectures. Use concise coaching notes.
+
+## Format:
+Your line: [brief reference]
+Coach note: [one practical English note]
+Why it helps: [short reason]
+Next try: [one short action]
+
+## Scenario: ${scenario || 'Hong Kong student life'}${culturalNote}`;
+  }
+
   if (mode === 'teaching') {
     return `你係一個嚴謹但友善嘅廣東話老師。你嘅工作係幫學生改善廣東話。
 
@@ -148,95 +317,163 @@ function getSystemPrompt(mode, scenario, culturalContext = null) {
   }
 }
 
+async function callLLMProvider(provider, messages) {
+  const hasAzureOpenAI = azureOpenAIKey && azureOpenAIEndpoint;
+  const hasHKBU = hkbuApiKey;
+  const hasMiniMax = !!minimaxApiKey;
+
+  let url, headers, body;
+
+  if (provider === 'minimax' && hasMiniMax) {
+    url = `${minimaxAnthropicBaseUrl}/v1/messages`;
+    const systemMessage = messages
+      .filter(message => message.role === 'system')
+      .map(message => message.content)
+      .join('\n\n');
+    const chatMessages = messages
+      .filter(message => message.role !== 'system')
+      .map(message => ({
+        role: message.role === 'assistant' ? 'assistant' : 'user',
+        content: String(message.content || '')
+      }))
+      .filter(message => message.content.trim());
+    headers = {
+      'X-Api-Key': minimaxApiKey,
+      'Content-Type': 'application/json'
+    };
+    body = {
+      model: minimaxLlmModel,
+      system: systemMessage || undefined,
+      messages: chatMessages,
+      max_tokens: minimaxMaxTokens,
+      temperature: minimaxTemperature,
+      stream: false
+    };
+    console.log('📡 Calling MiniMax Anthropic API:', url);
+  } else if (provider === 'azure-openai' && hasAzureOpenAI) {
+    const baseEndpoint = azureOpenAIEndpoint.replace(/\/+$/, '');
+    url = `${baseEndpoint}/openai/deployments/${azureOpenAIDeployment}/chat/completions?api-version=${azureOpenAIApiVersion}`;
+    headers = {
+      'api-key': azureOpenAIKey,
+      'Content-Type': 'application/json'
+    };
+    body = {
+      messages: messages,
+      temperature: 0.7,
+      max_completion_tokens: 150
+    };
+    console.log('📡 Calling Azure OpenAI:', url);
+  } else if (provider === 'hkbu' && hasHKBU) {
+    url = `${hkbuBaseUrl}/deployments/${hkbuModel}/chat/completions?api-version=${hkbuApiVersion}`;
+    headers = {
+      'accept': 'application/json',
+      'Content-Type': 'application/json',
+      'api-key': hkbuApiKey,
+    };
+    body = {
+      messages: messages,
+      temperature: 1.0,
+      max_tokens: 150,
+      stream: false
+    };
+    console.log('📡 Calling HKBU API:', url);
+  } else {
+    throw new Error(`Provider ${provider} not configured`);
+  }
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: headers,
+    body: JSON.stringify(body)
+  });
+
+  console.log(`📥 ${provider} API response status:`, response.status, response.statusText);
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error(`❌ ${provider} API error response:`, errorText);
+    throw new Error(`${provider} API failed: ${response.status} ${response.statusText} - ${errorText}`);
+  }
+
+  const data = await response.json();
+  console.log(`📦 ${provider} API response received`);
+
+  const aiResponse = provider === 'minimax'
+    ? (data.content || [])
+      .filter(part => part.type === 'text' && part.text)
+      .map(part => part.text)
+      .join('')
+    : data.choices?.[0]?.message?.content || '';
+  if (!aiResponse) {
+    throw new Error(`No content in ${provider} response`);
+  }
+
+  console.log(`✅ ${provider} Response generated:`, aiResponse.substring(0, 50));
+  return aiResponse.trim();
+}
+
 async function generateAIResponse(userText, scenario, history, mode = 'freeChat', culturalContext = null) {
   console.log('🤖 generateAIResponse called with:', { userText: userText.substring(0, 20), scenario, mode, provider: llmProvider, hasCulturalContext: !!culturalContext });
-  
+
   // Check if any LLM provider is configured
   const hasAzureOpenAI = azureOpenAIKey && azureOpenAIEndpoint;
   const hasHKBU = hkbuApiKey;
-  
-  if (!hasAzureOpenAI && !hasHKBU) {
+  const hasMiniMax = !!minimaxApiKey;
+
+  if (!hasAzureOpenAI && !hasHKBU && !hasMiniMax) {
     console.warn('⚠️ No LLM API key configured, using mock');
     return mockAiReply(userText, scenario);
   }
-  
-  try {
-    // P1: Use mode-specific system prompt with P2 cultural context
-    const systemMessage = getSystemPrompt(mode, scenario, culturalContext);
 
-    const messages = [
-      { role: 'system', content: systemMessage },
-      ...history.slice(-6).map(h => ({ 
-        role: h.role === 'user' ? 'user' : 'assistant', 
-        content: h.text 
-      })),
-      { role: 'user', content: userText }
-    ];
+  // P1: Use mode-specific system prompt with P2 cultural context
+  const systemMessage = getSystemPrompt(mode, scenario, culturalContext);
 
-    let url, headers, body;
-    
-    // Use Azure OpenAI if configured and selected
-    if (llmProvider === 'azure-openai' && hasAzureOpenAI) {
-      url = `${azureOpenAIEndpoint}/openai/deployments/${azureOpenAIDeployment}/chat/completions?api-version=${azureOpenAIApiVersion}`;
-      headers = {
-        'api-key': azureOpenAIKey,
-        'Content-Type': 'application/json'
-      };
-      body = {
-        messages: messages,
-        temperature: 0.7,
-        max_tokens: 150
-      };
-      console.log('📡 Calling Azure OpenAI:', url);
-    } else if (hasHKBU) {
-      // Fallback to HKBU if Azure OpenAI not available
-      url = `${hkbuBaseUrl}/deployments/${hkbuModel}/chat/completions?api-version=${hkbuApiVersion}`;
-      headers = {
-        'accept': 'application/json',
-        'Content-Type': 'application/json',
-        'api-key': hkbuApiKey,
-      };
-      body = {
-        messages: messages,
-        temperature: 1.0,
-        max_tokens: 150,
-        stream: false
-      };
-      console.log('📡 Calling HKBU API:', url);
-    } else {
-      throw new Error('No valid LLM provider configured');
-    }
-    
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: headers,
-      body: JSON.stringify(body)
-    });
+  const messages = [
+    { role: 'system', content: systemMessage },
+    ...history.slice(-6).map(h => ({
+      role: h.role === 'user' ? 'user' : 'assistant',
+      content: h.text
+    })),
+    { role: 'user', content: userText }
+  ];
 
-    console.log('📥 LLM API response status:', response.status, response.statusText);
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('❌ LLM API error response:', errorText);
-      throw new Error(`LLM API failed: ${response.status} ${response.statusText} - ${errorText}`);
-    }
-
-    const data = await response.json();
-    console.log('📦 LLM API response data:', JSON.stringify(data).substring(0, 200));
-    
-    const aiResponse = data.choices?.[0]?.message?.content || '';
-    
-    if (aiResponse) {
-      console.log('✅ LLM Response generated:', aiResponse.substring(0, 50));
-      return aiResponse.trim();
-    }
-    
-    throw new Error('No content in LLM response');
-  } catch (err) {
-    console.error('❌ LLM API error:', err.message);
-    console.log('⚠️ Falling back to mock response');
-    return mockAiReply(userText, scenario);
+  // Build provider ordering: primary first, then fallback
+  const providers = [];
+  if (llmProvider === 'minimax' && hasMiniMax) {
+    providers.push('minimax');
+    if (hasAzureOpenAI) providers.push('azure-openai');
+    if (hasHKBU) providers.push('hkbu');
+  } else if (llmProvider === 'azure-openai' && hasAzureOpenAI) {
+    providers.push('azure-openai');
+    if (hasMiniMax) providers.push('minimax');
+    if (hasHKBU) providers.push('hkbu');
+  } else if (llmProvider === 'hkbu' && hasHKBU) {
+    providers.push('hkbu');
+    if (hasMiniMax) providers.push('minimax');
+    if (hasAzureOpenAI) providers.push('azure-openai');
+  } else if (hasMiniMax) {
+    providers.push('minimax');
+  } else if (hasAzureOpenAI) {
+    providers.push('azure-openai');
+  } else if (hasHKBU) {
+    providers.push('hkbu');
   }
+
+  // Try each provider in order, fall back on failure
+  for (const provider of providers) {
+    try {
+      return await callLLMProvider(provider, messages);
+    } catch (err) {
+      console.error(`❌ ${provider} error:`, err.message);
+      if (provider !== providers[providers.length - 1]) {
+        console.log(`🔄 Falling back to next provider...`);
+      }
+    }
+  }
+
+  console.log('⚠️ All LLM providers failed, falling back to mock response');
+  if (mode === 'coachNotes') return buildEnglishCoachCorrection(userText, culturalContext);
+  return mockAiReply(userText, scenario);
 }
 
 function mockAiReply(userText, scenario) {
@@ -253,11 +490,21 @@ function generateMockTtsDataUri() {
 }
 
 app.get('/api/health', (_req, res) => {
+  const activeAsrProvider = asrProvider === 'azure' && azureTtsKey
+    ? 'azure'
+    : asrProvider === 'minimax' && minimaxApiKey
+      ? 'minimax'
+      : 'mock';
+
   res.json({
     status: 'ok',
     timestamp: Date.now(),
     version: appVersion,
-    ttsProvider: ttsProvider === 'azure' ? 'azure' : 'mock'
+    llmProvider: minimaxApiKey && llmProvider === 'minimax' ? 'minimax' : llmProvider,
+    asrProvider: activeAsrProvider,
+    asrLanguage: activeAsrProvider === 'azure' ? azureAsrLanguage : minimaxAsrLanguage,
+    ttsProvider: ttsProvider === 'minimax' && minimaxApiKey ? 'minimax' : ttsProvider === 'azure' && azureTtsKey ? 'azure' : 'mock',
+    ttsVoice: ttsProvider === 'minimax' ? minimaxTtsVoice : azureVoice
   });
 });
 
@@ -265,37 +512,55 @@ app.get('/api/scenarios', (_req, res) => {
   res.json({ scenarios });
 });
 
+app.get('/api/tts-voices', async (_req, res) => {
+  if (ttsProvider !== 'minimax') {
+    return res.json({
+      provider: ttsProvider,
+      currentVoice: azureVoice,
+      voices: [{ voiceId: azureVoice, label: 'Azure Cantonese Voice', description: 'Configured Azure voice' }]
+    });
+  }
+
+  const voices = await getMiniMaxCantoneseVoices();
+  res.json({
+    provider: 'minimax',
+    currentVoice: await resolveMiniMaxVoice(minimaxTtsVoice),
+    voices
+  });
+});
+
 // P1: Session now includes mode
 app.post('/api/session', (req, res) => {
-  const { mode = 'freeChat' } = req.body || {};
+  const { mode = 'freeChat', userMode = 'international_student', ttsVoice } = req.body || {};
   const sessionId = uuidv4();
   conversations.set(sessionId, {
     history: [],
     mode,
-    settings: { language: 'zh-TW', ttsSpeed: 1.0 },
+    userMode,
+    settings: { language: 'zh-TW', ttsSpeed: 1.0, ttsVoice: normalizeMiniMaxVoiceId(ttsVoice) || minimaxTtsVoice },
     createdAt: Date.now()
   });
-  console.log(`📝 New session created: ${sessionId}, mode: ${mode}`);
-  res.json({ sessionId, mode });
+  console.log(`📝 New session created: ${sessionId}, mode: ${mode}, userMode: ${userMode}`);
+  res.json({ sessionId, mode, userMode, ttsVoice: normalizeMiniMaxVoiceId(ttsVoice) || minimaxTtsVoice });
 });
 
 // P1: Switch mode mid-session
 app.post('/api/mode', (req, res) => {
   const { sessionId, mode } = req.body;
-  
+
   if (!sessionId || !mode) {
     return res.status(400).json({ error: 'sessionId and mode are required' });
   }
-  
+
   if (!['teaching', 'freeChat'].includes(mode)) {
     return res.status(400).json({ error: 'mode must be "teaching" or "freeChat"' });
   }
-  
+
   const session = conversations.get(sessionId);
   if (!session) {
     return res.status(404).json({ error: 'Session not found' });
   }
-  
+
   const oldMode = session.mode;
   session.mode = mode;
   console.log(`🔄 Mode switched for session ${sessionId}: ${oldMode} → ${mode}`);
@@ -305,36 +570,32 @@ app.post('/api/mode', (req, res) => {
 // P2: "Correct Me" on-demand feedback endpoint
 app.post('/api/correct', async (req, res) => {
   const { sessionId, utterance } = req.body;
-  
+
   if (!utterance) {
     return res.status(400).json({ error: 'utterance is required' });
   }
-  
+
   const trimmedUtterance = typeof utterance === 'string' ? utterance.slice(0, 500).trim() : '';
-  
+
   if (!trimmedUtterance) {
     return res.status(400).json({ error: 'utterance cannot be empty' });
   }
-  
+
   console.log(`✏️ Correction requested for: "${trimmedUtterance.substring(0, 30)}..."`);
-  
+
   try {
     // Get cultural context for enhanced correction
     const culturalContext = getCulturalContext(trimmedUtterance);
-    
-    // Generate the correction prompt
-    const correctionPrompt = generateCorrectionPrompt(trimmedUtterance);
-    
-    // Call LLM for detailed correction
-    const correction = await generateAIResponse(correctionPrompt, '糾正模式', [], 'teaching', culturalContext);
-    
+
+    const correction = buildEnglishCoachCorrection(trimmedUtterance, culturalContext);
+
     // Extract any cultural insights
     const culturalInsights = culturalContext.hasContent ? {
       summary: culturalContext.summary,
       slangUsed: culturalContext.slang.map(s => ({ term: s.term, meaning: s.meaning })),
       suggestions: culturalContext.colloquialSuggestions
     } : null;
-    
+
     res.json({
       success: true,
       originalUtterance: trimmedUtterance,
@@ -344,9 +605,9 @@ app.post('/api/correct', async (req, res) => {
     });
   } catch (err) {
     console.error('Correction error:', err.message);
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Failed to generate correction',
-      fallbackCorrection: `你講：「${trimmedUtterance}」\n\n繼續練習，你做得好好！有問題可以再問我。`
+      fallbackCorrection: `Your line: ${trimmedUtterance}\n\nCoach note: Keep going. Use one short sentence, name the situation, and ask for one clear thing you need.`
     });
   }
 });
@@ -355,11 +616,11 @@ app.post('/api/correct', async (req, res) => {
 app.get('/api/speech-token', async (_req, res) => {
   const speechKey = process.env.AZURE_SPEECH_KEY;
   const speechRegion = process.env.AZURE_SPEECH_REGION || 'eastasia';
-  
+
   if (!speechKey) {
     return res.status(500).json({ error: 'AZURE_SPEECH_KEY not configured' });
   }
-  
+
   try {
     const response = await fetch(
       `https://${speechRegion}.api.cognitive.microsoft.com/sts/v1.0/issueToken`,
@@ -371,13 +632,13 @@ app.get('/api/speech-token', async (_req, res) => {
         }
       }
     );
-    
+
     if (!response.ok) {
       throw new Error(`Token request failed: ${response.status}`);
     }
-    
+
     const token = await response.text();
-    res.json({ token, region: speechRegion });
+    res.json({ token, region: speechRegion, language: azureAsrLanguage, expiresIn: 540 });
   } catch (err) {
     console.error('Speech token error:', err.message);
     res.status(500).json({ error: 'Failed to get speech token' });
@@ -385,96 +646,182 @@ app.get('/api/speech-token', async (_req, res) => {
 });
 
 
-// Speech-to-Text endpoint (Azure ASR for Cantonese)
+function parseAudioData(audioData) {
+  const dataUriMatch = String(audioData).match(/^data:(audio\/[^;,]+)(?:;[^,]*)?;base64,(.+)$/);
+  const mimeType = dataUriMatch?.[1] || 'audio/wav';
+  const base64Data = dataUriMatch?.[2] || String(audioData).replace(/^data:audio\/[^,]+,/, '');
+  const audioBuffer = Buffer.from(base64Data, 'base64');
+  const audioFormat = mimeType.split('/')[1]?.replace('mpeg', 'mp3') || 'wav';
+
+  return { audioBuffer, audioFormat, mimeType };
+}
+
+function azureAudioContentType(audioFormat) {
+  if (audioFormat === 'ogg' || audioFormat === 'opus') return 'audio/ogg; codecs=opus';
+  if (audioFormat === 'webm') return 'audio/webm; codecs=opus';
+  if (audioFormat === 'mp3') return 'audio/mpeg';
+  return 'audio/wav; codec=audio/pcm; samplerate=16000';
+}
+
+async function transcribeMiniMax(audioBuffer, audioFormat, mimeType) {
+  if (!minimaxApiKey) throw new Error('MINIMAX_API_KEY not configured');
+
+  const fileExtension = audioFormat === 'mp3' ? 'mp3' : audioFormat || 'wav';
+  const formData = new FormData();
+  formData.append('file', new Blob([audioBuffer], { type: mimeType }), `speech.${fileExtension}`);
+  formData.append('model', minimaxAsrModel);
+  formData.append('language', minimaxAsrLanguage);
+
+  const response = await fetch(minimaxAsrEndpoint, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${minimaxApiKey}`
+    },
+    body: formData
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(`MiniMax ASR failed: ${response.status} ${response.statusText} - ${errorBody}`);
+  }
+
+  const result = await response.json();
+  const transcript = result.text || result.transcript || result.data?.text || result.data?.transcript || result.result?.text || '';
+  if (!transcript) {
+    throw new Error(`No transcript in MiniMax ASR response: ${JSON.stringify(result).substring(0, 300)}`);
+  }
+
+  return { transcript, result };
+}
+
+async function transcribeAzure(audioBuffer, audioFormat) {
+  const speechKey = process.env.AZURE_SPEECH_KEY;
+  const speechRegion = process.env.AZURE_SPEECH_REGION || 'eastasia';
+
+  if (!speechKey) {
+    throw new Error('AZURE_SPEECH_KEY not configured');
+  }
+
+  const contentType = azureAudioContentType(audioFormat);
+  console.log(`Sending to Azure ASR with Content-Type: ${contentType}`);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+
+  let response;
+  try {
+    response = await fetch(
+      `https://${speechRegion}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=${encodeURIComponent(azureAsrLanguage)}`,
+      {
+        method: 'POST',
+        headers: {
+          'Ocp-Apim-Subscription-Key': speechKey,
+          'Content-Type': contentType,
+        },
+        body: audioBuffer,
+        signal: controller.signal,
+      }
+    );
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(`Azure ASR failed: ${response.status} ${response.statusText} - ${errorBody}`);
+  }
+
+  const result = await response.json();
+  if (result.RecognitionStatus !== 'Success') {
+    throw new Error(`Recognition failed: ${result.RecognitionStatus}`);
+  }
+
+  const transcript = result.DisplayText || result.Text || '';
+  if (!transcript) {
+    throw new Error('No transcript in successful recognition');
+  }
+
+  return { transcript, result };
+}
+
+// Speech-to-Text endpoint for browser-recorded audio.
 app.post('/api/speech-to-text', async (req, res) => {
   const { audioData } = req.body;
-  
+
   if (!audioData) {
     return res.status(400).json({ error: 'Missing audioData' });
   }
 
-  const ttsProvider = process.env.TTS_PROVIDER || 'mock';
-  
-  if (ttsProvider === 'azure') {
-    try {
-      const speechKey = process.env.AZURE_SPEECH_KEY;
-      const speechRegion = process.env.AZURE_SPEECH_REGION || 'eastasia';
-      
-      if (!speechKey) {
-        throw new Error('AZURE_SPEECH_KEY not configured');
-      }
+  try {
+    const { audioBuffer, audioFormat, mimeType } = parseAudioData(audioData);
+    console.log(`Received audio: format=${audioFormat}, mime=${mimeType}, size=${audioBuffer.length} bytes`);
 
-      // Convert base64 to buffer
-      const match = audioData.match(/^data:audio\/(\w+);base64,(.+)$/);
-      const audioFormat = match ? match[1] : 'unknown';
-      const base64Data = match ? match[2] : audioData.replace(/^data:audio\/\w+;base64,/, '');
-      const audioBuffer = Buffer.from(base64Data, 'base64');
-      
-      console.log(`Received audio: format=${audioFormat}, size=${audioBuffer.length} bytes`);
+    const providerOrder = asrProvider === 'azure'
+      ? ['azure']
+      : asrProvider === 'minimax'
+        ? ['minimax']
+        : ['azure', 'minimax'];
+    if (asrFallbackProvider && asrFallbackProvider !== asrProvider) {
+      providerOrder.push(asrFallbackProvider);
+    }
+    const providers = providerOrder.filter((provider) => {
+      if (provider === 'azure') return Boolean(azureTtsKey);
+      if (provider === 'minimax') return Boolean(minimaxApiKey);
+      return false;
+    });
 
-      // Azure ASR best supports OGG and WAV formats
-      let contentType = 'audio/wav; codec=audio/pcm; samplerate=16000';
-      if (audioFormat === 'ogg') {
-        contentType = 'audio/ogg; codecs=opus';
-      } else if (audioFormat === 'webm') {
-        // WebM is less reliable, but try it
-        contentType = 'audio/webm; codecs=opus';
-      }
+    if (!providers.length) {
+      throw new Error(`${asrProvider.toUpperCase()} ASR is not configured`);
+    }
 
-      console.log(`Sending to Azure ASR with Content-Type: ${contentType}`);
-
-      const response = await fetch(
-        `https://${speechRegion}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=zh-HK`,
-        {
-          method: 'POST',
-          headers: {
-            'Ocp-Apim-Subscription-Key': speechKey,
-            'Content-Type': contentType,
-          },
-          body: audioBuffer,
+    let lastError = null;
+    for (const provider of [...new Set(providers)]) {
+      try {
+        if (provider === 'minimax') {
+          const { transcript } = await transcribeMiniMax(audioBuffer, audioFormat, mimeType);
+          return res.json({
+            transcript,
+            confidence: 0.9,
+            provider: 'minimax',
+            language: minimaxAsrLanguage
+          });
         }
-      );
 
-      if (!response.ok) {
-        const errorBody = await response.text();
-        console.error('Azure ASR error response:', response.status, errorBody);
-        throw new Error(`Azure ASR failed: ${response.status} ${response.statusText} - ${errorBody}`);
+        if (provider === 'azure') {
+          const { transcript, result } = await transcribeAzure(audioBuffer, audioFormat);
+          return res.json({
+            transcript,
+            confidence: 0.9,
+            provider: 'azure',
+            language: azureAsrLanguage,
+            recognitionStatus: result.RecognitionStatus
+          });
+        }
+      } catch (err) {
+        lastError = err;
+        console.error(`${provider} ASR error:`, err.message);
       }
+    }
 
-      const result = await response.json();
-      console.log('Azure ASR result:', JSON.stringify(result));
-      
-      // Check if recognition was successful
-      if (result.RecognitionStatus !== 'Success') {
-        console.error('Azure ASR recognition failed:', result.RecognitionStatus);
-        throw new Error(`Recognition failed: ${result.RecognitionStatus}`);
-      }
-      
-      const transcript = result.DisplayText || result.Text || '';
-      if (!transcript) {
-        console.error('Azure ASR returned no transcript');
-        throw new Error('No transcript in successful recognition');
-      }
-      
-      return res.json({
-        transcript,
-        confidence: 0.9,
-        provider: 'azure',
-        recognitionStatus: result.RecognitionStatus
-      });
-    } catch (err) {
-      console.error('Azure ASR error:', err.message);
-      // Fallback to mock
-      return res.json({
-        transcript: '(模擬) 你好，我想練習廣東話',
-        confidence: 0.8,
-        provider: 'mock',
-        error: err.message,
+    if (lastError) throw lastError;
+  } catch (err) {
+    console.error(`${asrProvider} ASR error:`, err.message);
+    if (asrProvider !== 'mock') {
+      return res.status(502).json({
+        error: 'Speech recognition failed',
+        provider: asrProvider,
+        details: err.message
       });
     }
+
+    return res.json({
+      transcript: '(模擬) 你好，我想練習廣東話',
+      confidence: 0.8,
+      provider: 'mock',
+      error: err.message,
+    });
   }
 
-  // Mock ASR fallback
   res.json({
     transcript: '(模擬) 你好，我想練習廣東話',
     confidence: 0.8,
@@ -483,7 +830,7 @@ app.post('/api/speech-to-text', async (req, res) => {
 });
 
 app.post('/api/recognize-and-respond', async (req, res) => {
-  const { sessionId, userText = '', scenario = '', mode: requestMode } = req.body || {};
+  const { sessionId, userText = '', scenario = '', mode: requestMode, userMode: requestUserMode, ttsVoice: requestTtsVoice } = req.body || {};
   if (!sessionId) {
     return res.status(400).json({ error: 'sessionId is required' });
   }
@@ -496,13 +843,13 @@ app.post('/api/recognize-and-respond', async (req, res) => {
   let session = conversations.get(sessionId);
   if (!session) {
     // Create new session if not exists
-    session = { history: [], mode: 'freeChat', settings: {} };
+    session = { history: [], mode: 'freeChat', userMode: requestUserMode || 'international_student', settings: {} };
     conversations.set(sessionId, session);
   }
-  
+
   // Handle legacy sessions (array format)
   if (Array.isArray(session)) {
-    session = { history: session, mode: 'freeChat', settings: {} };
+    session = { history: session, mode: 'freeChat', userMode: requestUserMode || 'international_student', settings: {} };
     conversations.set(sessionId, session);
   }
 
@@ -512,32 +859,41 @@ app.post('/api/recognize-and-respond', async (req, res) => {
     session.mode = requestMode;
     console.log(`🔄 Mode updated from request: ${session.mode} → ${requestMode}`);
   }
-  
+  if (requestUserMode && requestUserMode !== session.userMode) {
+    session.userMode = requestUserMode;
+  }
+
+  if (!session.settings) session.settings = {};
+  const selectedTtsVoice = ttsProvider === 'minimax'
+    ? await resolveMiniMaxVoice(requestTtsVoice || session.settings.ttsVoice || minimaxTtsVoice)
+    : azureVoice;
+  session.settings.ttsVoice = selectedTtsVoice;
+
   const { history } = session;
-  
+
   // P2: Get cultural context for the user's text
   const culturalContext = getCulturalContext(trimmedUserText);
   if (culturalContext.hasContent) {
     console.log('🎭 Cultural context detected:', culturalContext.summary);
   }
-  
+
   // Generate AI response using real LLM with mode and cultural context
   const aiText = await generateAIResponse(trimmedUserText, scenarioText, history, mode, culturalContext);
-  
+
   // Generate intelligent feedback using LLM (only in teaching mode)
   let feedback = '';
   if (mode === 'teaching' && trimmedUserText) {
     try {
-      const feedbackPrompt = `分析以下廣東話句子嘅發音同文法，提供簡短建議（1句話）：「${trimmedUserText}」`;
-      feedback = await generateAIResponse(feedbackPrompt, '發音分析', [], 'teaching', culturalContext);
-      feedback = `（分析）${feedback}`;
+      feedback = buildEnglishCoachCorrection(trimmedUserText, culturalContext);
     } catch (err) {
-      feedback = '（分析）繼續練習，你做得好好！';
+      feedback = 'Coach note: Keep going. Make the sentence short, clear, and connected to one real Hong Kong student-life situation.';
     }
   } else if (mode === 'freeChat') {
     feedback = ''; // No feedback in free chat mode
   } else {
-    feedback = trimmedUserText ? '（分析）繼續練習，你做得好好！' : '請試下講一句你想練習嘅句子。';
+    feedback = trimmedUserText
+      ? 'Coach note: Keep going. Make the sentence short, clear, and connected to one real Hong Kong student-life situation.'
+      : 'Try one Cantonese sentence you might actually use on campus.';
   }
 
   session.history.push({ role: 'user', text: trimmedUserText, timestamp: Date.now() });
@@ -550,20 +906,22 @@ app.post('/api/recognize-and-respond', async (req, res) => {
   let ttsError = null;
   let ttsFallback = false;
   const ttsStartTime = Date.now();
-  
-  if (ttsProvider === 'azure' && azureTtsKey) {
+
+  if ((ttsProvider === 'azure' && azureTtsKey) || (ttsProvider === 'minimax' && minimaxApiKey)) {
     try {
-      const cacheKey = aiText.trim().toLowerCase();
+      const cacheKey = `${ttsProvider}:${ttsProvider === 'minimax' ? selectedTtsVoice : azureVoice}:${aiText.trim().toLowerCase()}`;
       if (ttsCache.has(cacheKey)) {
         ttsAudio = ttsCache.get(cacheKey);
         console.log('✓ TTS cache hit');
       } else {
-        console.log('Synthesizing Azure TTS for:', aiText.substring(0, 30) + '...');
-        ttsAudio = await synthesizeAzure(aiText);
+        console.log(`Synthesizing ${ttsProvider} TTS with ${selectedTtsVoice} for:`, aiText.substring(0, 30) + '...');
+        ttsAudio = ttsProvider === 'minimax'
+          ? await synthesizeMiniMax(aiText, selectedTtsVoice)
+          : await synthesizeAzure(aiText);
         if (ttsAudio) {
           console.log('✓ TTS synthesized, length:', ttsAudio.length);
           ttsCache.set(cacheKey, ttsAudio);
-          if (ttsCache.size > 50) {
+          if (ttsCache.size > MAX_TTS_CACHE) {
             const firstKey = ttsCache.keys().next().value;
             ttsCache.delete(firstKey);
           }
@@ -572,37 +930,38 @@ app.post('/api/recognize-and-respond', async (req, res) => {
         }
       }
     } catch (err) {
-      console.error('✗ Azure TTS failed:', err.message);
+      console.error(`✗ ${ttsProvider} TTS failed:`, err.message);
       ttsError = err.message;
       ttsFallback = true;
     }
   } else {
     console.log('TTS provider not configured, using mock');
   }
-  
+
   if (!ttsAudio) {
     console.log('Generating mock TTS audio');
     ttsAudio = generateMockTtsDataUri();
     if (!ttsFallback) ttsFallback = true;
   }
-  
+
   const ttsLatency = Date.now() - ttsStartTime;
   const totalLatency = Date.now() - (req.startTime || Date.now());
 
   console.log('Sending response:', {
     aiTextLength: aiText.length,
     ttsAudioLength: ttsAudio ? ttsAudio.length : 0,
-    ttsProvider: ttsAudio && !ttsFallback ? 'azure' : 'mock',
+    ttsProvider: ttsAudio && !ttsFallback ? ttsProvider : 'mock',
     latencyMs: totalLatency
   });
 
-  res.json({ 
-    aiText, 
-    feedback, 
-    ttsAudio, 
+  res.json({
+    aiText,
+    feedback,
+    ttsAudio,
     history,
     latencyMs: totalLatency,
-    ttsProvider: ttsAudio && !ttsFallback ? 'azure' : 'mock',
+    ttsProvider: ttsAudio && !ttsFallback ? ttsProvider : 'mock',
+    ttsVoice: ttsAudio && !ttsFallback ? selectedTtsVoice : null,
     ttsLatency,
     ttsError,
     ttsFallback
@@ -618,7 +977,7 @@ app.use((err, _req, res, _next) => {
 
 async function synthesizeAzure(text) {
   if (!azureTtsKey || !azureTtsRegion) throw new Error('Azure TTS key/region missing');
-  
+
   // Escape XML special characters
   const escapedText = text
     .replace(/&/g, '&amp;')
@@ -626,7 +985,7 @@ async function synthesizeAzure(text) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
-  
+
   const ssml = `<?xml version="1.0" encoding="utf-8"?>
 <speak version="1.0" xml:lang="zh-HK">
   <voice name="${azureVoice}">
@@ -650,19 +1009,67 @@ async function synthesizeAzure(text) {
       signal: controller.signal
     });
     clearTimeout(timeout);
-    
+
     if (!ttsRes.ok) {
       const errorBody = await ttsRes.text();
       console.error('Azure TTS error response:', errorBody);
       throw new Error(`Azure TTS error ${ttsRes.status}: ${errorBody}`);
     }
-    
+
     const buffer = Buffer.from(await ttsRes.arrayBuffer());
     return `data:audio/mpeg;base64,${buffer.toString('base64')}`;
   } catch (err) {
     clearTimeout(timeout);
     throw err;
   }
+}
+
+async function synthesizeMiniMax(text, voiceId = minimaxTtsVoice) {
+  if (!minimaxApiKey) throw new Error('MiniMax API key missing');
+
+  const response = await fetch(`${minimaxBaseUrl}/v1/t2a_v2`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${minimaxApiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: minimaxTtsModel,
+      text: text.slice(0, 10000),
+      stream: false,
+      language_boost: minimaxTtsLanguageBoost,
+      output_format: 'hex',
+      voice_setting: {
+        voice_id: voiceId,
+        speed: minimaxTtsSpeed,
+        vol: minimaxTtsVolume,
+        pitch: minimaxTtsPitch
+      },
+      audio_setting: {
+        sample_rate: 32000,
+        bitrate: 128000,
+        format: 'mp3',
+        channel: 1
+      }
+    })
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(`MiniMax TTS error ${response.status}: ${errorBody}`);
+  }
+
+  const data = await response.json();
+  const statusCode = data.base_resp?.status_code;
+  if (statusCode !== undefined && statusCode !== 0) {
+    throw new Error(`MiniMax TTS failed ${statusCode}: ${data.base_resp?.status_msg || 'unknown error'}`);
+  }
+
+  const audioHex = data.data?.audio;
+  if (!audioHex) throw new Error('MiniMax TTS returned no audio');
+
+  const buffer = Buffer.from(audioHex, 'hex');
+  return `data:audio/mpeg;base64,${buffer.toString('base64')}`;
 }
 
 export async function handler(req, res) {
@@ -672,8 +1079,14 @@ export async function handler(req, res) {
 app.listen(port, () => {
   console.log(`Backend listening on port ${port}`);
   console.log(`Allowing origin: ${clientOrigin}`);
+  console.log(`ASR Provider: ${asrProvider}`);
   console.log(`TTS Provider: ${ttsProvider}`);
   console.log(`LLM Provider: ${llmProvider}`);
+  console.log(`MiniMax configured: ${minimaxApiKey ? 'YES ✓' : 'NO ✗'}`);
+  if (minimaxApiKey) {
+    console.log(`MiniMax LLM Model: ${minimaxLlmModel}`);
+    console.log(`MiniMax TTS Voice: ${minimaxTtsVoice}`);
+  }
   console.log(`Azure OpenAI configured: ${azureOpenAIKey && azureOpenAIEndpoint ? 'YES ✓' : 'NO ✗'}`);
   if (azureOpenAIKey && azureOpenAIEndpoint) {
     console.log(`Azure OpenAI Deployment: ${azureOpenAIDeployment}`);

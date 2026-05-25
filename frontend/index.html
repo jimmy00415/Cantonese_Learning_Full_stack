@@ -3,17 +3,15 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Cantonese Conversation Tutor</title>
-  <!-- Google Fonts -->
+  <title>Hong Kong Buddy</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+HK:wght@400;500;700&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
-  
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+HK:wght@400;500;700;900&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+
   <!-- Azure Speech SDK - Self-hosted primary with CDN fallback -->
   <!-- SDK Version: 1.38.0 - Update this comment when upgrading -->
   <script src="lib/speech-sdk/microsoft.cognitiveservices.speech.sdk.bundle-min.js"></script>
   <script>
-    // Fallback to CDN if local SDK fails to load
     if (typeof SpeechSDK === 'undefined' && typeof Microsoft === 'undefined') {
       console.warn('Local Speech SDK not found, loading from CDN fallback...');
       document.write('<script src="https://aka.ms/csspeech/jsbrowserpackage"><\/script>');
@@ -21,25 +19,24 @@
       console.log('Speech SDK loaded from: local (v1.38.0)');
     }
   </script>
-  <link rel="stylesheet" href="styles.css?v=20260202p4" />
+  <link rel="stylesheet" href="styles.css?v=20260514cool5" />
 </head>
 <body>
-  <div class="app">
-    <header>
-      <div>
-        <h1>廣東話對話導師</h1>
-        <p class="subtitle">桌面網頁體驗 · 模擬語音對話 · 立即練習</p>
-        <div class="badges">
-          <span class="pill">AI 導師</span>
-          <span class="pill">語音對話</span>
-          <span class="pill">實時反饋</span>
+  <main class="app">
+    <header class="topbar">
+      <div class="brand-lockup">
+        <div class="brand-mark" aria-hidden="true">HK</div>
+        <div>
+          <h1>Hong Kong Buddy</h1>
+          <p class="subtitle">Campus Cantonese practice for international students</p>
         </div>
       </div>
-      <div class="header-status">
-        <!-- P3-1: Language Toggle -->
-        <div class="language-toggle">
-          <label for="uiLang" class="sr-only">界面語言</label>
-          <select id="uiLang" class="lang-select">
+
+        <div class="header-status">
+        <button id="changeModeBtn" class="ghost change-mode-btn" type="button" data-i18n="onboarding.changeMode" hidden>Change mode</button>
+          <div class="language-toggle">
+            <label for="uiLang" class="sr-only" data-i18n="settings.uiLanguage">界面語言</label>
+            <select id="uiLang" class="lang-select">
             <option value="zh-TW">繁體中文</option>
             <option value="zh-CN">简体中文</option>
             <option value="en">English</option>
@@ -53,119 +50,233 @@
       </div>
     </header>
 
-    <section class="hero">
-      <div>
-        <p class="hero-kicker">練口語 · 聽語感 · 改發音</p>
-        <h2>和 AI 對話，像真人陪練</h2>
-        <p class="hero-body">按住說話或輸入文字，獲取即時廣東話回應與語音播報，適合桌面麥克風場景。</p>
+    <section class="hero" aria-labelledby="heroTitle">
+      <div class="hero-copy">
+        <p class="hero-kicker">Campus Cantonese Sprint</p>
+        <h2 id="heroTitle">Speak Cantonese for real Hong Kong student life</h2>
+        <p class="hero-body">Practice restaurant orders, MTR moments, group-project small talk, and culture cues with an AI coach that answers in Cantonese voice.</p>
+
+        <div class="badges" aria-label="Product highlights">
+          <span class="pill">Campus-ready</span>
+          <span class="pill">Voice coach</span>
+          <span class="pill">Culture signals</span>
+        </div>
+      </div>
+
+      <div class="hero-visual">
+        <img src="https://images.unsplash.com/photo-1536599018102-9f803c140fc1?auto=format&fit=crop&w=1200&q=82" alt="Hong Kong street scene with trams, signs, and dense city life" />
+        <div class="hero-sticker hero-sticker-main">
+          <span class="sticker-label">Today</span>
+          <strong>3 real-life missions</strong>
+        </div>
+        <div class="hero-sticker hero-sticker-secondary">
+          <span class="sticker-label">Tone Lab</span>
+          <strong>Slow it down</strong>
+        </div>
       </div>
     </section>
 
-    <div class="panel">
-      <!-- P1: Mode Toggle -->
-      <section class="mode-section">
-        <div class="mode-toggle" role="tablist" aria-label="對話模式">
-          <button role="tab" class="mode-btn active" data-mode="freeChat" aria-selected="true" id="modeFreeTalk">
-            <span class="mode-icon">💬</span>
-            <span class="mode-label">Free Talk</span>
-            <span class="mode-desc">輕鬆傾計</span>
-          </button>
-          <button role="tab" class="mode-btn" data-mode="teaching" aria-selected="false" id="modeTeaching">
-            <span class="mode-icon">📚</span>
-            <span class="mode-label">Teaching</span>
-            <span class="mode-desc">認真學習</span>
-          </button>
-        </div>
-      </section>
+    <section class="role-onboarding" id="roleOnboarding" aria-labelledby="roleOnboardingTitle">
+      <div class="role-onboarding-copy">
+        <p class="section-eyebrow" data-i18n="onboarding.eyebrow">Start here</p>
+        <h2 id="roleOnboardingTitle" data-i18n="onboarding.title">What do you need today?</h2>
+        <p data-i18n="onboarding.body">Choose one path so Hong Kong Buddy shows the right language, guidance, and tools first.</p>
+      </div>
 
-      <section class="controls">
-        <label for="scenario">情景：</label>
-        <select id="scenario"></select>
-        <button id="newSession">開始新對話</button>
-      </section>
+      <div class="role-card-grid" role="list">
+        <button class="role-card" type="button" data-user-mode="mainland_learner" role="listitem">
+          <span class="role-card-code" aria-hidden="true">CN</span>
+          <span class="role-card-body">
+            <strong data-i18n="onboarding.cards.mainland.title">I want to practise Cantonese</strong>
+            <span data-i18n="onboarding.cards.mainland.body">Best for Mainland students who read Chinese and want pronunciation, particles, and natural phrasing.</span>
+          </span>
+        </button>
 
-      <section class="starter" aria-label="建議開場白">
-        <div class="starter-header">
-          <span>開場建議</span>
-          <small>點擊一句即填入</small>
-        </div>
-        <div id="starterChips" class="chips"></div>
-      </section>
+        <button class="role-card role-card-primary" type="button" data-user-mode="international_student" role="listitem">
+          <span class="role-card-code" aria-hidden="true">EN</span>
+          <span class="role-card-body">
+            <strong data-i18n="onboarding.cards.international.title">I am an international student</strong>
+            <span data-i18n="onboarding.cards.international.body">English-first help with Cantonese audio, meaning, and practice steps.</span>
+          </span>
+        </button>
 
-      <div id="notice" class="notice" role="status" aria-live="polite"></div>
+        <button class="role-card" type="button" data-user-mode="visit_translation" role="listitem">
+          <span class="role-card-code" aria-hidden="true">VISIT</span>
+          <span class="role-card-body">
+            <strong data-i18n="onboarding.cards.visit.title">I need translation during a visit</strong>
+            <span data-i18n="onboarding.cards.visit.body">A simple path for HKBU activity visits with large text, quick phrases, and audio.</span>
+          </span>
+        </button>
+      </div>
+    </section>
+
+    <section class="role-context-panel" id="roleContextPanel" aria-live="polite" hidden>
+      <div>
+        <p class="section-eyebrow" id="roleContextEyebrow">Selected mode</p>
+        <h2 id="roleContextTitle">International Student Mode</h2>
+        <p id="roleContextBody">English-first guidance is ready.</p>
+      </div>
+      <div class="role-context-actions" id="roleContextActions"></div>
+    </section>
+
+    <section class="mission-strip" aria-label="Learning missions">
+      <article class="mission-card mission-card-hot">
+        <span class="mission-code">01</span>
+        <h3>Campus Survival</h3>
+        <p>Cafeteria, hall life, classmate intros, and polite saves.</p>
+      </article>
+      <article class="mission-card">
+        <span class="mission-code">02</span>
+        <h3>Street Smart HK</h3>
+        <p>MTR, cha chaan teng, shopping, directions, and quick replies.</p>
+      </article>
+      <article class="mission-card mission-card-blue">
+        <span class="mission-code">03</span>
+        <h3>Pronunciation Lab</h3>
+        <p>Replay voices, adjust speed, and turn corrections into drills.</p>
+      </article>
+    </section>
+
+    <section class="practice-stage" id="practice" aria-label="Cantonese practice workspace">
+      <aside class="control-rail" aria-label="Practice setup">
+        <section class="mode-section">
+          <div class="section-eyebrow">Mode</div>
+          <div class="mode-toggle" role="tablist" aria-label="對話模式">
+            <button role="tab" class="mode-btn active" data-mode="freeChat" aria-selected="true" id="modeFreeTalk">
+              <span class="mode-icon" aria-hidden="true">CHAT</span>
+              <span class="mode-text">
+                <span class="mode-label">Free Talk</span>
+                <span class="mode-desc">輕鬆傾計</span>
+              </span>
+            </button>
+            <button role="tab" class="mode-btn" data-mode="teaching" aria-selected="false" id="modeTeaching">
+              <span class="mode-icon" aria-hidden="true">LAB</span>
+              <span class="mode-text">
+                <span class="mode-label">Teaching</span>
+                <span class="mode-desc">認真學習</span>
+              </span>
+            </button>
+          </div>
+        </section>
+
+        <section class="controls">
+          <label for="scenario" data-i18n="controls.scenario">情景：</label>
+          <select id="scenario"></select>
+          <button id="newSession" data-i18n="controls.newSession">開始任務</button>
+        </section>
+
+        <section class="starter" aria-label="建議開場白">
+          <div class="starter-header">
+            <span data-i18n="starter.header">開場建議</span>
+            <small data-i18n="starter.hint">智能句子卡</small>
+          </div>
+          <div id="starterChips" class="chips"></div>
+        </section>
+
+        <div id="notice" class="notice" role="status" aria-live="polite"></div>
+      </aside>
+
       <section class="transcript" aria-label="對話內容">
         <div class="transcript-header">
-          <div>
+          <div class="transcript-titleblock">
+            <span class="section-eyebrow">Live Practice</span>
+            <h3>Conversation Deck</h3>
+          </div>
+          <div class="transcript-meta">
             <div class="pill" id="scenarioPill">情景：自由對話</div>
             <div class="pill pill-secondary" id="sessionPill">未開始</div>
             <div class="pill pill-secondary" id="ttsPill">語音：偵測中</div>
+            <button id="clearChat" class="ghost" data-i18n="controls.clearChat">清除記錄</button>
           </div>
-          <button id="clearChat" class="ghost">清除記錄</button>
         </div>
         <div id="transcript" class="transcript-body"></div>
       </section>
 
-      <section class="input-panel">
-        <button id="holdToSpeak" class="mic" data-i18n="input.holdToSpeak">按住說話</button>
-        <button id="stopSpeaking" class="stop-btn" data-i18n="input.stopSpeaking" hidden>停止播放</button>
-        <!-- P3-3: Recording Countdown Timer -->
-        <div class="recording-indicator" id="recordingIndicator" hidden>
-          <svg class="countdown-ring" viewBox="0 0 40 40">
-            <circle class="ring-bg" cx="20" cy="20" r="17" />
-            <circle class="ring-progress" id="ringProgress" cx="20" cy="20" r="17" 
-                    stroke-dasharray="106.8, 106.8" stroke-dashoffset="0" />
-          </svg>
-          <span class="time-remaining" id="timeRemaining">60s</span>
-        </div>
-        <input id="textInput" type="text" placeholder="或輸入一句廣東話..." data-i18n-placeholder="input.textPlaceholder" />
-        <div class="audio-controls">
-          <!-- P3-2: Fine-Grained TTS Speed Slider with Presets -->
-          <div class="speed-control">
-            <label for="ttsSpeed" data-i18n="input.speed">速度</label>
-            <input type="range" id="ttsSpeed" min="0.5" max="1.5" step="0.05" value="1.0" />
-            <span id="ttsSpeedValue" class="speed-value">1.00×</span>
-            <div class="speed-presets">
-              <button type="button" class="preset-btn" data-speed="0.8" data-i18n="settings.speedPresets.slow">慢</button>
-              <button type="button" class="preset-btn active" data-speed="1.0" data-i18n="settings.speedPresets.normal">正常</button>
-              <button type="button" class="preset-btn" data-speed="1.2" data-i18n="settings.speedPresets.fast">快</button>
-            </div>
-          </div>
-          <button id="replay" data-i18n="input.replay">重播</button>
-          <!-- P2: Correct Me button -->
-          <button id="correctMeBtn" class="correct-btn ghost" title="分析上一句並提供糾正" data-i18n="input.correctMe">✏️ 糾正我</button>
-        </div>
-        <button id="sendText" data-i18n="input.send">發送</button>
-      </section>
-
-      <section class="feedback-panel">
+      <aside class="feedback-panel" aria-label="Learning feedback">
         <div class="feedback-immediate" id="feedbackImmediate">
-          <h3>即時反饋</h3>
+          <div class="section-eyebrow">Coach Notes</div>
+          <h3 data-i18n="feedback.immediate">Coach Notes</h3>
           <div id="topCorrections" class="corrections-list"></div>
         </div>
         <details class="feedback-deep" id="feedbackDeep">
-          <summary>詳細分析</summary>
+          <summary data-i18n="feedback.details">Deep Dive</summary>
           <div id="feedbackDetails" class="feedback-details"></div>
         </details>
-      </section>
-    </div>
+      </aside>
+    </section>
 
-    <!-- Mic Permission Dialog -->
+    <section class="input-panel" aria-label="Practice input">
+      <button id="holdToSpeak" class="mic" data-i18n="input.holdToSpeak">按住說話</button>
+      <button id="stopSpeaking" class="stop-btn" data-i18n="input.stopSpeaking" hidden>停止播放</button>
+      <div class="recording-indicator" id="recordingIndicator" hidden>
+        <svg class="countdown-ring" viewBox="0 0 40 40" aria-hidden="true">
+          <circle class="ring-bg" cx="20" cy="20" r="17" />
+          <circle class="ring-progress" id="ringProgress" cx="20" cy="20" r="17" stroke-dasharray="106.8, 106.8" stroke-dashoffset="0" />
+        </svg>
+        <span class="time-remaining" id="timeRemaining">60s</span>
+      </div>
+
+      <div class="text-entry">
+        <label for="textInput" class="sr-only">Cantonese message</label>
+        <input id="textInput" type="text" placeholder="Try: m4 goi1, ngo5 soeng2 lin6 zaap6 gwong2 dung1 waa2" data-i18n-placeholder="input.textPlaceholder" />
+      </div>
+
+      <div class="audio-controls">
+        <div class="voice-control">
+          <label for="ttsVoice" data-i18n="input.voice">聲線</label>
+          <select id="ttsVoice" class="voice-select" aria-label="導師聲線">
+            <option value="Cantonese_GentleLady">溫柔女聲</option>
+          </select>
+        </div>
+        <div class="speed-control">
+          <label for="ttsSpeed" data-i18n="input.speed">速度</label>
+          <input type="range" id="ttsSpeed" min="0.5" max="1.5" step="0.05" value="1.0" />
+          <span id="ttsSpeedValue" class="speed-value">1.00×</span>
+          <div class="speed-presets">
+            <button type="button" class="preset-btn" data-speed="0.8" data-i18n="settings.speedPresets.slow">慢</button>
+            <button type="button" class="preset-btn active" data-speed="1.0" data-i18n="settings.speedPresets.normal">正常</button>
+            <button type="button" class="preset-btn" data-speed="1.2" data-i18n="settings.speedPresets.fast">快</button>
+          </div>
+        </div>
+        <button id="replay" data-i18n="input.replay">重播</button>
+        <button id="correctMeBtn" class="correct-btn ghost" title="分析上一句並提供糾正" data-i18n="input.correctMe">糾正我</button>
+      </div>
+      <button id="sendText" class="send-btn" data-i18n="input.send">發送</button>
+    </section>
+
+    <section class="info-grid" aria-label="Learning focus areas">
+      <article class="info-card">
+        <span class="info-tag">Culture</span>
+        <h3>Not textbook Cantonese</h3>
+        <p>Practice the phrasing, rhythm, and small social moves that make Hong Kong conversations feel natural.</p>
+      </article>
+      <article class="info-card">
+        <span class="info-tag">Confidence</span>
+        <h3>From silent to speaking</h3>
+        <p>Short loops, replayable voice, and correction cards keep practice moving even when you hesitate.</p>
+      </article>
+      <article class="info-card">
+        <span class="info-tag">Campus</span>
+        <h3>Built around student life</h3>
+        <p>Dining halls, new friends, group work, weekend travel, and daily micro-conversations.</p>
+      </article>
+    </section>
+
     <dialog id="micPermissionDialog" class="modal" aria-labelledby="micDialogTitle">
       <div class="modal-content">
-        <h2 id="micDialogTitle">麥克風權限</h2>
-        <p>我哋需要您嘅麥克風權限，先可以聽到您嘅廣東話發音並提供反饋。</p>
+        <h2 id="micDialogTitle" data-i18n="dialogs.micPermission.title">麥克風權限</h2>
+        <p data-i18n="dialogs.micPermission.body">我哋需要您嘅麥克風權限，先可以聽到您嘅廣東話發音並提供反饋。</p>
         <div class="modal-actions">
-          <button id="micDenyBtn" class="ghost">使用打字代替</button>
-          <button id="micAllowBtn">允許麥克風</button>
+          <button id="micDenyBtn" class="ghost" data-i18n="dialogs.micPermission.deny">使用打字代替</button>
+          <button id="micAllowBtn" data-i18n="dialogs.micPermission.allow">允許麥克風</button>
         </div>
       </div>
     </dialog>
 
-    <!-- Mic Blocked Help Dialog -->
     <dialog id="micBlockedDialog" class="modal" aria-labelledby="micBlockedTitle">
       <div class="modal-content">
-        <h2 id="micBlockedTitle">麥克風被阻擋</h2>
-        <p>請喺瀏覽器設置中允許呢個網站使用麥克風：</p>
+        <h2 id="micBlockedTitle" data-i18n="dialogs.micBlocked.title">麥克風被阻擋</h2>
+        <p data-i18n="dialogs.micBlocked.body">請喺瀏覽器設置中允許呢個網站使用麥克風：</p>
         <ol>
           <li>點擊地址欄左側嘅鎖形圖標</li>
           <li>揀「網站設置」或「權限」</li>
@@ -178,28 +289,9 @@
       </div>
     </dialog>
 
-    <section class="info-grid">
-      <div class="info-card">
-        <h3>如何開始</h3>
-        <ol>
-          <li>選擇情景後按「開始新對話」。</li>
-          <li>按住麥克風按鈕說話，或直接輸入文字。</li>
-          <li>點「播放」或「重播」聽導師語音，可調整速度。</li>
-        </ol>
-      </div>
-      <div class="info-card">
-        <h3>小貼士</h3>
-        <ul>
-          <li>放慢語速，讓導師更準確給出反饋。</li>
-          <li>用「餐廳點餐」等情景，練習實用對話。</li>
-          <li>重播時可調速度，聽清楚聲調與語氣。</li>
-        </ul>
-      </div>
-    </section>
+    <footer class="footer">Hong Kong Buddy · Cantonese practice for international student life</footer>
+  </main>
 
-    <footer class="footer">© 2025 Cantonese Tutor · 桌面版體驗 · 支持實時語音與文字輸入</footer>
-  </div>
-
-  <script type="module" src="app.js?v=20260202p4"></script>
+  <script type="module" src="app.js?v=20260514asr1"></script>
 </body>
 </html>

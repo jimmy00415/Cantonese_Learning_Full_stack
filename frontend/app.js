@@ -1,5 +1,5 @@
 // P3-1: Import i18n module
-import { t, setLanguage, getLanguage, initI18n, getAvailableLanguages, locales } from './i18n/index.js';
+import { t, setLanguage, getLanguage, initI18n, getAvailableLanguages, locales } from './i18n/index.js?v=20260514coach1';
 
 const META_API = document.querySelector('meta[name="api-base"]');
 
@@ -7,10 +7,10 @@ const META_API = document.querySelector('meta[name="api-base"]');
 const SPEECH_SDK_VERSION = '1.38.0'; // Update when upgrading SDK
 
 // Auto-detect localhost for development, use same-origin backend in production
-const DEFAULT_API_BASE = window.location.hostname === 'localhost' 
+const DEFAULT_API_BASE = window.location.hostname === 'localhost'
   ? `${window.location.protocol}//${window.location.hostname}:4000/api`
   : `${window.location.origin}/api`;
-const API_BASE = window.__API_BASE__ || META_API?.content || DEFAULT_API_BASE;
+const API_BASE = window.__API_BASE__ || (window.location.hostname === 'localhost' ? DEFAULT_API_BASE : META_API?.content || DEFAULT_API_BASE);
 
 const statusEl = document.getElementById('status');
 const transcriptEl = document.getElementById('transcript');
@@ -25,6 +25,7 @@ const noticeEl = document.getElementById('notice');
 const scenarioPill = document.getElementById('scenarioPill');
 const sessionPill = document.getElementById('sessionPill');
 const ttsPill = document.getElementById('ttsPill');
+const voiceSelect = document.getElementById('ttsVoice');
 const clearChatBtn = document.getElementById('clearChat');
 const replayBtn = document.getElementById('replay');
 const starterChipsEl = document.getElementById('starterChips');
@@ -36,6 +37,14 @@ const topCorrectionsEl = document.getElementById('topCorrections');
 const feedbackDetailsEl = document.getElementById('feedbackDetails');
 const micPermissionDialog = document.getElementById('micPermissionDialog');
 const micBlockedDialog = document.getElementById('micBlockedDialog');
+const roleOnboardingEl = document.getElementById('roleOnboarding');
+const roleContextPanel = document.getElementById('roleContextPanel');
+const roleContextEyebrow = document.getElementById('roleContextEyebrow');
+const roleContextTitle = document.getElementById('roleContextTitle');
+const roleContextBody = document.getElementById('roleContextBody');
+const roleContextActions = document.getElementById('roleContextActions');
+const changeModeBtn = document.getElementById('changeModeBtn');
+const roleCards = document.querySelectorAll('.role-card[data-user-mode]');
 
 // P1: Mode toggle elements
 const modeFreeTalkBtn = document.getElementById('modeFreeTalk');
@@ -66,12 +75,23 @@ let currentAudio = null;
 let micPermissionGranted = false;
 let processingStartTime = null;
 let mediaRecorder = null;
+let recordingStream = null;
 let audioChunks = [];
 let lastUserUtterance = null; // P2: Track last user message for correction
 let isRecording = false; // Guard flag for async recording lifecycle
 
 // P1: Current mode state
 let currentMode = 'freeChat'; // 'freeChat' or 'teaching'
+const USER_MODE_STORAGE_KEY = 'hkbuddy.userMode';
+const initialUiLanguagePreference = localStorage.getItem('uiLang');
+let userChangedLanguage = false;
+let currentUserMode = localStorage.getItem(USER_MODE_STORAGE_KEY) || '';
+let currentAsrProvider = 'mock';
+let currentAsrLanguage = 'zh-HK';
+let currentTtsProvider = 'mock';
+let currentTtsVoice = localStorage.getItem('ttsVoice') || 'Cantonese_GentleLady';
+let availableTtsVoices = [];
+let voiceSelectionEnabled = false;
 
 // System states: idle, listening, processing, speaking, error
 const STATES = {
@@ -102,6 +122,42 @@ const starterPhrases = {
   '工作寒暄 (Workplace Small Talk)': ['今日開會會講啲乜？', '你哋通常點分工？', '可唔可以幫我review一下文件？']
 };
 
+const userModeConfig = {
+  mainland_learner: {
+    chatMode: 'teaching',
+    defaultLanguage: 'zh-CN',
+    titleKey: 'onboarding.selected.mainland.title',
+    bodyKey: 'onboarding.selected.mainland.body',
+    actionKeys: [
+      { labelKey: 'onboarding.actions.pronunciation', action: 'startPractice' },
+      { labelKey: 'onboarding.actions.particles', action: 'focusParticles' },
+      { labelKey: 'onboarding.actions.changeMode', action: 'changeMode', secondary: true }
+    ]
+  },
+  international_student: {
+    chatMode: 'teaching',
+    defaultLanguage: 'en',
+    titleKey: 'onboarding.selected.international.title',
+    bodyKey: 'onboarding.selected.international.body',
+    actionKeys: [
+      { labelKey: 'onboarding.actions.prepareVisit', action: 'prepareVisit' },
+      { labelKey: 'onboarding.actions.survivalCantonese', action: 'startPractice' },
+      { labelKey: 'onboarding.actions.changeMode', action: 'changeMode', secondary: true }
+    ]
+  },
+  visit_translation: {
+    chatMode: 'freeChat',
+    defaultLanguage: 'en',
+    titleKey: 'onboarding.selected.visit.title',
+    bodyKey: 'onboarding.selected.visit.body',
+    actionKeys: [
+      { labelKey: 'onboarding.actions.startVisitTranslation', action: 'startVisitTranslation' },
+      { labelKey: 'onboarding.actions.readVisitGuide', action: 'prepareVisit', secondary: true },
+      { labelKey: 'onboarding.actions.changeMode', action: 'changeMode', secondary: true }
+    ]
+  }
+};
+
 function scenarioKey(val) {
   return starterPhrases[val] ? val : 'default';
 }
@@ -110,22 +166,127 @@ function setSystemState(state) {
   if (!systemStateEl) return;
   systemStateEl.className = `system-state state-${state}`;
   // P3-1: Use i18n labels if available
-  const label = (typeof STATE_LABELS_I18N !== 'undefined' && STATE_LABELS_I18N[state]) 
-    ? STATE_LABELS_I18N[state] 
+  const label = (typeof STATE_LABELS_I18N !== 'undefined' && STATE_LABELS_I18N[state])
+    ? STATE_LABELS_I18N[state]
     : (STATE_LABELS[state] || state);
   if (stateLabelEl) stateLabelEl.textContent = label;
   systemStateEl.setAttribute('aria-label', `系統狀態: ${label}`);
-  
+
   // P0-3: Show/hide stop button based on state
   if (stopSpeakingBtn) {
     stopSpeakingBtn.hidden = state !== STATES.SPEAKING;
   }
-  
+
   // P3-3: Show/hide recording indicator based on state
   if (state === STATES.LISTENING) {
     startRecordingTimer();
   } else {
     stopRecordingTimer();
+  }
+}
+
+function getUserModeConfig(mode = currentUserMode) {
+  return userModeConfig[mode] || null;
+}
+
+function applyUserModeDefaults(mode, { preserveLanguage = false } = {}) {
+  const config = getUserModeConfig(mode);
+  if (!config) return;
+
+  setActiveMode(config.chatMode);
+  if (!preserveLanguage && config.defaultLanguage && getLanguage() !== config.defaultLanguage) {
+    setLanguage(config.defaultLanguage);
+    if (uiLangSelect) uiLangSelect.value = config.defaultLanguage;
+  }
+}
+
+function handleRoleAction(action) {
+  if (action === 'changeMode') {
+    showRoleSelection();
+    return;
+  }
+
+  if (action === 'startVisitTranslation') {
+    document.body.dataset.userMode = 'visit_translation';
+    document.getElementById('practice')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    setNotice(t('onboarding.notices.visitTranslationComingSoon'), 'info');
+    return;
+  }
+
+  if (action === 'prepareVisit') {
+    setNotice(t('onboarding.notices.visitGuideComingSoon'), 'info');
+    roleContextPanel?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    return;
+  }
+
+  document.getElementById('practice')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (!sessionId) startSession();
+}
+
+function renderRoleContext() {
+  const config = getUserModeConfig();
+  if (!config || !roleContextPanel) return;
+
+  if (roleContextEyebrow) roleContextEyebrow.textContent = t('onboarding.selected.eyebrow');
+  if (roleContextTitle) roleContextTitle.textContent = t(config.titleKey);
+  if (roleContextBody) roleContextBody.textContent = t(config.bodyKey);
+
+  if (roleContextActions) {
+    roleContextActions.innerHTML = '';
+    config.actionKeys.forEach(({ labelKey, action, secondary }) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = t(labelKey);
+      if (secondary) button.className = 'ghost';
+      button.addEventListener('click', () => handleRoleAction(action));
+      roleContextActions.appendChild(button);
+    });
+  }
+
+  roleContextPanel.hidden = false;
+}
+
+function showRoleSelection() {
+  if (roleOnboardingEl) roleOnboardingEl.hidden = false;
+  if (roleContextPanel) roleContextPanel.hidden = true;
+  if (changeModeBtn) changeModeBtn.hidden = true;
+  document.body.dataset.userMode = '';
+}
+
+function selectUserMode(mode, { fromStorage = false } = {}) {
+  const config = getUserModeConfig(mode);
+  if (!config) return;
+
+  currentUserMode = mode;
+  localStorage.setItem(USER_MODE_STORAGE_KEY, mode);
+  document.body.dataset.userMode = mode;
+
+  const preserveLanguage = Boolean(initialUiLanguagePreference) || userChangedLanguage || fromStorage;
+  applyUserModeDefaults(mode, { preserveLanguage });
+
+  roleCards.forEach((card) => {
+    const active = card.dataset.userMode === mode;
+    card.classList.toggle('active', active);
+    card.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+
+  if (roleOnboardingEl) roleOnboardingEl.hidden = true;
+  if (changeModeBtn) changeModeBtn.hidden = false;
+  renderRoleContext();
+}
+
+function initUserMode() {
+  roleCards.forEach((card) => {
+    card.setAttribute('aria-pressed', 'false');
+    card.addEventListener('click', () => selectUserMode(card.dataset.userMode));
+  });
+
+  changeModeBtn?.addEventListener('click', showRoleSelection);
+
+  if (currentUserMode && getUserModeConfig(currentUserMode)) {
+    selectUserMode(currentUserMode, { fromStorage: true });
+  } else {
+    showRoleSelection();
   }
 }
 
@@ -151,7 +312,7 @@ function renderEmptyState() {
   transcriptEl.innerHTML = '';
   const box = document.createElement('div');
   box.className = 'empty-state';
-  box.innerHTML = '<strong>開始你的第一句</strong><p>選一個情景或點擊上方建議句子，然後按住麥克風或直接輸入。</p>';
+  box.innerHTML = '<strong>Ready for your first line</strong><p>Pick a mission, freestyle a Cantonese sentence, or warm up with a starter card.</p>';
   transcriptEl.appendChild(box);
 }
 
@@ -163,7 +324,7 @@ function clearEmptyState() {
 
 async function requestMicPermission() {
   if (micPermissionGranted) return true;
-  
+
   return new Promise((resolve) => {
     if (!micPermissionDialog) {
       resolve(false);
@@ -171,10 +332,10 @@ async function requestMicPermission() {
     }
 
     micPermissionDialog.showModal();
-    
+
     const allowBtn = document.getElementById('micAllowBtn');
     const denyBtn = document.getElementById('micDenyBtn');
-    
+
     const handleAllow = async () => {
       cleanup();
       try {
@@ -190,19 +351,19 @@ async function requestMicPermission() {
         resolve(false);
       }
     };
-    
+
     const handleDeny = () => {
       cleanup();
       micPermissionDialog.close();
       setNotice('已切換至打字模式', 'info');
       resolve(false);
     };
-    
+
     const cleanup = () => {
       allowBtn?.removeEventListener('click', handleAllow);
       denyBtn?.removeEventListener('click', handleDeny);
     };
-    
+
     allowBtn?.addEventListener('click', handleAllow);
     denyBtn?.addEventListener('click', handleDeny);
   });
@@ -210,31 +371,31 @@ async function requestMicPermission() {
 
 function showMicBlockedDialog() {
   if (!micBlockedDialog) return;
-  
+
   micBlockedDialog.showModal();
-  
+
   const retryBtn = document.getElementById('micBlockedRetry');
   const closeBtn = document.getElementById('micBlockedClose');
-  
+
   const handleRetry = async () => {
     micBlockedDialog.close();
     const granted = await requestMicPermission();
     if (!granted) setSystemState(STATES.IDLE);
   };
-  
+
   const handleClose = () => {
     micBlockedDialog.close();
     setNotice('已切換至打字模式', 'info');
     setSystemState(STATES.IDLE);
   };
-  
+
   retryBtn?.addEventListener('click', handleRetry, { once: true });
   closeBtn?.addEventListener('click', handleClose, { once: true });
 }
 
 function setNotice(text, kind = 'info') {
   noticeEl.textContent = text || '';
-  noticeEl.classList.remove('error', 'info');
+  noticeEl.classList.remove('error', 'info', 'success', 'warning');
   noticeEl.classList.add(kind);
 }
 
@@ -242,6 +403,7 @@ function setControlsEnabled(enabled) {
   [sendBtn, holdBtn, newSessionBtn, scenarioSelect, textInput, replayBtn].forEach((el) => {
     if (el) el.disabled = !enabled;
   });
+  if (voiceSelect) voiceSelect.disabled = !enabled || !voiceSelectionEnabled;
 }
 
 function setStatus(text) {
@@ -262,12 +424,12 @@ function renderMessage({ role, text, ttsAudio, timestamp, corrections }) {
   div.className = `message ${role}`;
   div.dataset.timestamp = timestamp;
   div.dataset.text = text;
-  
+
   // Store audio data on the element
   if (ttsAudio) {
     div.dataset.ttsAudio = ttsAudio;
   }
-  
+
   const meta = document.createElement('div');
   meta.className = 'meta';
   const badge = document.createElement('span');
@@ -316,7 +478,7 @@ function renderMessage({ role, text, ttsAudio, timestamp, corrections }) {
     controls.appendChild(replay);
     meta.appendChild(controls);
   }
-  
+
   if (role === 'user') {
     const editBtn = document.createElement('button');
     editBtn.className = 'edit-btn';
@@ -332,11 +494,11 @@ function renderMessage({ role, text, ttsAudio, timestamp, corrections }) {
 
   div.appendChild(meta);
   div.appendChild(body);
-  
+
   if (corrections && role === 'user') {
     renderImmediateFeedback(corrections);
   }
-  
+
   transcriptEl.appendChild(div);
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
 }
@@ -356,11 +518,11 @@ async function playAudio(ttsAudio, rate = 1) {
     audio.playbackRate = rate || 1;
     currentAudio = audio;
     setSystemState(STATES.SPEAKING);
-    
+
     console.log('Starting audio playback...');
     await audio.play();
     console.log('Audio playback started successfully');
-    
+
     lastTtsAudio = ttsAudio;
     audio.addEventListener('ended', () => {
       console.log('Audio playback ended');
@@ -386,35 +548,35 @@ function stopAudio() {
 function editTranscript(messageDiv, originalText) {
   const body = messageDiv.querySelector('div:last-child');
   if (!body) return;
-  
+
   const input = document.createElement('input');
   input.type = 'text';
   input.value = originalText;
   input.className = 'edit-input';
-  
+
   const saveBtn = document.createElement('button');
   saveBtn.textContent = '保存';
   saveBtn.className = 'save-edit-btn';
-  
+
   const cancelBtn = document.createElement('button');
   cancelBtn.textContent = '取消';
   cancelBtn.className = 'cancel-edit-btn ghost';
-  
+
   const actions = document.createElement('div');
   actions.className = 'edit-actions';
   actions.appendChild(input);
   actions.appendChild(saveBtn);
   actions.appendChild(cancelBtn);
-  
+
   body.replaceWith(actions);
   input.focus();
-  
+
   const restore = () => {
     const newBody = document.createElement('div');
     newBody.innerText = originalText;
     actions.replaceWith(newBody);
   };
-  
+
   saveBtn.addEventListener('click', async () => {
     const newText = input.value.trim();
     if (!newText || newText === originalText) {
@@ -429,9 +591,9 @@ function editTranscript(messageDiv, originalText) {
     // Re-analyze edited text
     await reanalyzeUtterance(newText);
   });
-  
+
   cancelBtn.addEventListener('click', restore);
-  
+
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') saveBtn.click();
     if (e.key === 'Escape') cancelBtn.click();
@@ -440,76 +602,73 @@ function editTranscript(messageDiv, originalText) {
 
 async function reanalyzeUtterance(text) {
   if (!sessionId) return;
-  setNotice('重新分析中…', 'info');
+  setNotice('Rechecking your line...', 'info');
   // Placeholder: would call backend to re-analyze
   setTimeout(() => {
     const mockCorrections = [
-      { original: text, suggested: text, reason: '編輯後的文本已重新分析' }
+      {
+        original: text,
+        suggested: 'Nice edit. Keep the sentence short, direct, and tied to one real Hong Kong student-life situation.',
+        reason: 'International learners improve faster when each practice line has one clear goal.',
+        retryText: text
+      }
     ];
     renderImmediateFeedback(mockCorrections);
-    setNotice('分析完成', 'info');
+    setNotice('Coach notes updated.', 'info');
   }, 500);
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
 }
 
 async function processAudioRecording(audioBlob) {
   try {
     setSystemState(STATES.PROCESSING);
-    setStatus('轉換語音中...');
-    
-    console.log('Processing audio, blob size:', audioBlob.size, 'type:', audioBlob.type);
-    
-    // Convert blob to base64 - send original format, let backend handle conversion
-    const reader = new FileReader();
-    reader.readAsDataURL(audioBlob);
-    
-    reader.onloadend = async () => {
-      const audioData = reader.result;
-      console.log('Base64 audio data length:', audioData.length);
-      
-      try {
-        const res = await fetchJSON('/speech-to-text', {
-          method: 'POST',
-          body: JSON.stringify({ audioData })
-        });
-        
-        console.log('ASR response:', res);
-        
-        if (res.transcript) {
-          const confidence = res.confidence || 0;
-          
-          // Filter out mock responses
-          if (res.transcript.includes('(模擬)')) {
-            setNotice('語音辨識服務未啟用，請使用打字模式', 'warning');
-            setSystemState(STATES.IDLE);
-            return;
-          }
-          
-          // Show low-confidence warning
-          if (confidence < 0.7) {
-            setNotice(`辨識信心度較低 (${Math.round(confidence * 100)}%)，請確認`, 'warning');
-          }
-          
-          await sendUtterance(res.transcript);
-        } else {
-          throw new Error('No transcript returned');
-        }
-      } catch (err) {
-        console.error('ASR error:', err);
-        setNotice('語音辨識失敗：' + (err.message || '請重試或使用打字'), 'error');
-        setSystemState(STATES.ERROR);
-        setTimeout(() => setSystemState(STATES.IDLE), 2000);
-      }
-    };
-    
-    reader.onerror = (err) => {
-      console.error('FileReader error:', err);
-      setNotice('音訊處理失敗', 'error');
-      setSystemState(STATES.ERROR);
-      setTimeout(() => setSystemState(STATES.IDLE), 2000);
-    };
+    setStatus(currentAsrProvider === 'azure' ? 'Azure Speech 轉換中...' : '轉換語音中...');
+
+    console.log('Processing audio, blob size:', audioBlob.size, 'type:', audioBlob.type, 'provider:', currentAsrProvider);
+
+    const uploadBlob = currentAsrProvider === 'azure'
+      ? await convertToWav(audioBlob)
+      : audioBlob;
+    const audioData = await blobToDataUrl(uploadBlob);
+    console.log('Base64 audio data length:', audioData.length, 'upload type:', uploadBlob.type);
+
+    const res = await fetchJSON('/speech-to-text', {
+      method: 'POST',
+      body: JSON.stringify({ audioData })
+    });
+
+    console.log('ASR response:', res);
+
+    if (!res.transcript) {
+      throw new Error('No transcript returned');
+    }
+
+    const confidence = res.confidence || 0;
+
+    if (res.transcript.includes('(模擬)')) {
+      setNotice('語音辨識服務未啟用，請使用打字模式', 'warning');
+      setSystemState(STATES.IDLE);
+      return;
+    }
+
+    if (confidence < 0.7) {
+      setNotice(`辨識信心度較低 (${Math.round(confidence * 100)}%)，請確認`, 'warning');
+    } else if (res.provider === 'azure') {
+      setNotice(`Azure Speech 已識別：${res.language || currentAsrLanguage}`, 'success');
+    }
+
+    await sendUtterance(res.transcript);
   } catch (err) {
-    console.error('Audio processing error:', err);
-    setNotice('處理錄音時出錯：' + err.message, 'error');
+    console.error('ASR error:', err);
+    setNotice('語音辨識失敗：' + (err.message || '請重試或使用打字'), 'error');
     setSystemState(STATES.ERROR);
     setTimeout(() => setSystemState(STATES.IDLE), 2000);
   }
@@ -521,16 +680,16 @@ async function convertToWav(audioBlob) {
     const audioContext = new (window.AudioContext || window.webkitAudioContext)();
     const arrayBuffer = await audioBlob.arrayBuffer();
     const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-    
+
     // Resample to 16kHz mono for Azure
-    const offlineContext = new OfflineAudioContext(1, audioBuffer.duration * 16000, 16000);
+    const offlineContext = new OfflineAudioContext(1, Math.ceil(audioBuffer.duration * 16000), 16000);
     const source = offlineContext.createBufferSource();
     source.buffer = audioBuffer;
     source.connect(offlineContext.destination);
     source.start();
-    
+
     const resampled = await offlineContext.startRendering();
-    
+
     // Convert to WAV
     const wavBuffer = audioBufferToWav(resampled);
     return new Blob([wavBuffer], { type: 'audio/wav' });
@@ -603,67 +762,88 @@ async function playAudioWithButton(ttsAudio, rate, btn) {
   }
 }
 
+function buildEnglishCoachNotes(userText, aiText, mode) {
+  const trimmedText = userText.trim();
+  const isQuestion = /[?？嗎吗]$/.test(trimmedText);
+  const campusFrame = scenarioSelect?.value?.includes('餐廳')
+    ? 'ordering food on campus or at a local cha chaan teng'
+    : scenarioSelect?.value?.includes('認識')
+      ? 'meeting classmates and making first conversations feel natural'
+      : 'daily Hong Kong campus life';
+
+  return [{
+    original: trimmedText,
+    suggested: mode === 'teaching'
+      ? `Good practice line. For ${campusFrame}, focus on one intention first, then add details after the other person responds.`
+      : `This works as a friendly opener. For ${campusFrame}, keep it casual and give one small detail so your buddy knows how to help.`,
+    reason: isQuestion
+      ? 'Your question is understandable. Make it even easier to answer by naming the place, task, or help you need.'
+      : 'The meaning is understandable. Add a simple context cue so the reply can sound more local and useful.',
+    retryText: trimmedText
+  }];
+}
+
 function renderImmediateFeedback(corrections) {
   if (!topCorrectionsEl) return;
-  
+
   topCorrectionsEl.innerHTML = '';
   const topThree = corrections.slice(0, 3);
-  
+
   if (topThree.length === 0) {
-    topCorrectionsEl.innerHTML = '<p style="color: #86efac;">發音不錯！</p>';
+    topCorrectionsEl.innerHTML = '<p class="feedback-empty">Nice start. Keep going with one short, real-life sentence.</p>';
     return;
   }
-  
+
   topThree.forEach((corr, idx) => {
     const item = document.createElement('div');
     item.className = 'correction-item';
-    
+
     const original = document.createElement('div');
     original.className = 'original';
-    original.textContent = `你講：${corr.original}`;
-    
+    original.textContent = `Your line: ${corr.original}`;
+
     const suggested = document.createElement('div');
     suggested.className = 'suggested';
-    suggested.textContent = `建議：${corr.suggested}`;
-    
+    suggested.textContent = `Coach note: ${corr.suggested}`;
+
     const reason = document.createElement('div');
     reason.className = 'reason';
     reason.textContent = corr.reason;
-    
+
     const actions = document.createElement('div');
     actions.className = 'correction-actions';
-    
+
     const hearBtn = document.createElement('button');
-    hearBtn.textContent = '聽正確音頻';
+    hearBtn.textContent = 'Hear Model Audio';
     hearBtn.className = 'ghost';
     hearBtn.addEventListener('click', () => {
       // Placeholder: would synthesize correct audio
-      setNotice('正確音頻播放（模擬）', 'info');
+      setNotice('Model audio preview is coming soon.', 'info');
     });
-    
+
     const tryBtn = document.createElement('button');
-    tryBtn.textContent = '再試一次';
+    tryBtn.textContent = 'Try Again';
     tryBtn.addEventListener('click', () => {
-      textInput.value = corr.suggested;
+      textInput.value = corr.retryText || corr.original || '';
       textInput.focus();
     });
-    
+
     const saveBtn = document.createElement('button');
-    saveBtn.textContent = '保存為卡片';
+    saveBtn.textContent = 'Save Card';
     saveBtn.className = 'ghost';
     saveBtn.addEventListener('click', () => {
-      setNotice('已保存至復習卡片', 'info');
+      setNotice('Saved to review cards.', 'info');
     });
-    
+
     actions.appendChild(hearBtn);
     actions.appendChild(tryBtn);
     actions.appendChild(saveBtn);
-    
+
     item.appendChild(original);
     item.appendChild(suggested);
     item.appendChild(reason);
     item.appendChild(actions);
-    
+
     topCorrectionsEl.appendChild(item);
   });
 }
@@ -673,7 +853,16 @@ async function fetchJSON(path, options) {
     headers: { 'Content-Type': 'application/json' },
     ...options
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const payload = await res.json();
+      detail = payload.details || payload.message || payload.error || detail;
+    } catch {
+      // Keep the status fallback when the response body is not JSON.
+    }
+    throw new Error(detail);
+  }
   return res.json();
 }
 
@@ -690,25 +879,84 @@ async function loadScenarios() {
   renderStarterChips(scenarioSelect.value);
 }
 
+function voicePrefixLabel() {
+  return (t('transcript.voiceDetecting') || '語音').split(/[：:]/)[0];
+}
+
+function getVoiceLabel(voiceId = currentTtsVoice) {
+  return availableTtsVoices.find(voice => voice.voiceId === voiceId)?.label || voiceId;
+}
+
+function updateTtsPill(provider = currentTtsProvider) {
+  if (!ttsPill) return;
+  if (provider === 'minimax') {
+    ttsPill.textContent = `${voicePrefixLabel()}：MiniMax · ${getVoiceLabel()}`;
+  } else if (provider === 'azure') {
+    ttsPill.textContent = `${voicePrefixLabel()}：Azure TTS`;
+  } else {
+    ttsPill.textContent = `${voicePrefixLabel()}：Mock`;
+  }
+}
+
+function renderVoiceOptions() {
+  if (!voiceSelect) return;
+  voiceSelect.innerHTML = '';
+  availableTtsVoices.forEach((voice) => {
+    const option = document.createElement('option');
+    option.value = voice.voiceId;
+    option.textContent = voice.label || voice.voiceId;
+    option.title = voice.description || voice.voiceId;
+    voiceSelect.appendChild(option);
+  });
+  voiceSelect.value = availableTtsVoices.some(voice => voice.voiceId === currentTtsVoice)
+    ? currentTtsVoice
+    : availableTtsVoices[0]?.voiceId || currentTtsVoice;
+  currentTtsVoice = voiceSelect.value;
+  localStorage.setItem('ttsVoice', currentTtsVoice);
+}
+
+async function loadTtsVoices() {
+  try {
+    const result = await fetchJSON('/tts-voices');
+    currentTtsProvider = result.provider || currentTtsProvider;
+    voiceSelectionEnabled = currentTtsProvider === 'minimax';
+    availableTtsVoices = Array.isArray(result.voices) && result.voices.length
+      ? result.voices
+      : [{ voiceId: result.currentVoice || currentTtsVoice, label: result.currentVoice || currentTtsVoice }];
+    const savedVoice = localStorage.getItem('ttsVoice');
+    currentTtsVoice = availableTtsVoices.some(voice => voice.voiceId === savedVoice)
+      ? savedVoice
+      : result.currentVoice || availableTtsVoices[0]?.voiceId || currentTtsVoice;
+  } catch (err) {
+    console.warn('Unable to load TTS voices:', err);
+    currentTtsProvider = currentTtsProvider || 'mock';
+    voiceSelectionEnabled = false;
+    availableTtsVoices = [{ voiceId: currentTtsVoice, label: currentTtsVoice }];
+  }
+  renderVoiceOptions();
+  updateTtsPill(currentTtsProvider);
+  setControlsEnabled(true);
+}
+
 async function startSession() {
   // P1: Include mode in session creation
-  const { sessionId: sid, mode } = await fetchJSON('/session', { 
+  const { sessionId: sid, mode } = await fetchJSON('/session', {
     method: 'POST',
-    body: JSON.stringify({ mode: currentMode })
+    body: JSON.stringify({ mode: currentMode, userMode: currentUserMode || 'international_student', ttsVoice: currentTtsVoice })
   });
   sessionId = sid;
   if (mode) currentMode = mode;
-  
+
   transcriptEl.innerHTML = '';
   if (feedbackEl) feedbackEl.textContent = '';
   renderEmptyState();
-  
+
   // P1: Mode-specific greeting
-  const greeting = currentMode === 'teaching' 
+  const greeting = currentMode === 'teaching'
     ? '你好！我係你嘅廣東話老師。今日我會幫你糾正發音同文法，有咩想練習？'
     : '你好！我係你嘅廣東話導師，講句嘢嚟聽下？';
   renderMessage({ role: 'ai', text: greeting, timestamp: Date.now() });
-  
+
   setStatus(`已建立對話：${sessionId.slice(0, 8)}`);
   sessionPill.textContent = `會話 ${sessionId.slice(0, 8)}`;
   updateModePill();
@@ -716,20 +964,20 @@ async function startSession() {
 
 async function sendUtterance(text) {
   if (!text || !sessionId) return;
-  
+
   // P2: Track last user utterance for "Correct Me" feature
   lastUserUtterance = text;
   if (correctMeBtn) correctMeBtn.disabled = false;
-  
+
   setSystemState(STATES.PROCESSING);
   processingStartTime = Date.now();
-  
+
   renderMessage({ role: 'user', text, timestamp: Date.now() });
   textInput.value = '';
   sendBtn.disabled = true;
   holdBtn.disabled = true;
   setStatus('處理中...');
-  
+
   // Show "Still working..." if processing takes >2s
   const longProcessTimeout = setTimeout(() => {
     if (processingStartTime) {
@@ -747,43 +995,44 @@ async function sendUtterance(text) {
       };
     }
   }, 2000);
-  
+
   try {
     const payload = {
       sessionId,
       userText: text,
       scenario: scenarioSelect.value,
-      mode: currentMode
+      mode: currentMode,
+      userMode: currentUserMode || 'international_student',
+      ttsVoice: currentTtsVoice
     };
     const res = await fetchJSON('/recognize-and-respond', {
       method: 'POST',
       body: JSON.stringify(payload)
     });
-    
+
     clearTimeout(longProcessTimeout);
     processingStartTime = null;
     statusEl.onclick = null;
     statusEl.style.cursor = 'default';
-    
+
     console.log('Response received:', {
       hasAiText: !!res.aiText,
       hasTtsAudio: !!res.ttsAudio,
       ttsProvider: res.ttsProvider,
+      ttsVoice: res.ttsVoice,
       ttsAudioLength: res.ttsAudio ? res.ttsAudio.length : 0
     });
-    
-    // Mock corrections for demo
-    const mockCorrections = [
-      { original: text, suggested: res.aiText, reason: '語氣更自然' }
-    ];
-    
+    if (res.ttsProvider) currentTtsProvider = res.ttsProvider;
+    if (res.ttsVoice) currentTtsVoice = res.ttsVoice;
+    updateTtsPill(currentTtsProvider);
+
     renderMessage({ role: 'ai', text: res.aiText, ttsAudio: res.ttsAudio, timestamp: Date.now() });
-    renderImmediateFeedback(mockCorrections);
-    
+    renderImmediateFeedback(buildEnglishCoachNotes(text, res.aiText, currentMode));
+
     if (res.latencyMs) {
       console.log(`Response latency: ${res.latencyMs}ms`);
     }
-    
+
     if (res.ttsAudio) {
       console.log('Auto-playing TTS audio...');
       await playAudio(res.ttsAudio, getPlaybackRate());
@@ -832,6 +1081,8 @@ holdBtn.addEventListener('touchstart', (e) => {
 let speechRecognizer = null;
 let speechConfig = null;
 let audioConfig = null;
+let azureSdkTranscript = '';
+let azureSdkError = null;
 // Note: recordingTimerInterval is defined at top of file (P3-3)
 // Note: MAX_RECORDING_TIME is defined at top of file (P3-3)
 
@@ -845,7 +1096,7 @@ async function initSpeechSDK() {
     audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
     return;
   }
-  
+
   try {
     // Wait for SDK to load if needed
     let attempts = 0;
@@ -854,35 +1105,35 @@ async function initSpeechSDK() {
       await new Promise(resolve => setTimeout(resolve, 300));
       attempts++;
     }
-    
+
     // Check if Speech SDK is loaded
     if (!window.SpeechSDK && !window.Microsoft) {
       throw new Error('Azure Speech SDK not loaded after waiting. Please refresh the page.');
     }
-    
+
     const SpeechSDK = window.SpeechSDK || window.Microsoft.CognitiveServices.Speech;
     if (!SpeechSDK) {
       throw new Error('Speech SDK namespace not found');
     }
-    
+
     console.log('Speech SDK loaded successfully, namespace:', Object.keys(SpeechSDK).slice(0, 10));
-    
+
     // Get auth token from backend (secure - doesn't expose API key)
     const tokenResponse = await fetchJSON('/speech-token', { method: 'GET' });
     if (!tokenResponse.token || !tokenResponse.region) {
       throw new Error('Failed to get speech token from backend');
     }
-    
-    const { token, region } = tokenResponse;
+
+    const { token, region, language } = tokenResponse;
     console.log('Got speech token for region:', region);
-    
+
     // Create Speech Config (not Translation config - we're doing recognition with LID)
     speechConfig = SpeechSDK.SpeechConfig.fromAuthorizationToken(token, region);
-    
+
     if (!speechConfig) {
       throw new Error('Failed to create speech config');
     }
-    
+
     // P0-4: Extend pause threshold to 3 seconds for users who pause to think
     speechConfig.setProperty(
       SpeechSDK.PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs,
@@ -892,20 +1143,20 @@ async function initSpeechSDK() {
       SpeechSDK.PropertyId.SpeechServiceConnection_InitialSilenceTimeoutMs,
       "10000"
     );
-    
+
     // Set primary recognition language to Cantonese (Hong Kong)
     // Using zh-HK which is better supported than yue-CN for most cases
-    speechConfig.speechRecognitionLanguage = 'zh-HK';
-    
+    speechConfig.speechRecognitionLanguage = language || currentAsrLanguage || 'zh-HK';
+
     console.log('Speech config created with 3s pause threshold');
-    
+
     // Configure audio from microphone
     audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
-    
+
     if (!audioConfig) {
       throw new Error('Failed to create audio config');
     }
-    
+
     console.log('Audio config created successfully');
     console.log('Azure Speech SDK fully initialized');
   } catch (err) {
@@ -919,159 +1170,176 @@ async function initSpeechSDK() {
 document.addEventListener('mouseup', handleRecordStop);
 document.addEventListener('touchend', handleRecordStop);
 
+function getSupportedAudioMimeType() {
+  const candidates = [
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/ogg;codecs=opus',
+    'audio/ogg',
+    'audio/mp4'
+  ];
+  return candidates.find(type => window.MediaRecorder?.isTypeSupported?.(type)) || '';
+}
+
+async function startBackendSpeechRecording() {
+  if (!window.MediaRecorder) {
+    throw new Error('MediaRecorder is not supported in this browser');
+  }
+
+  audioChunks = [];
+  const mimeType = getSupportedAudioMimeType();
+  recordingStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  mediaRecorder = new MediaRecorder(recordingStream, mimeType ? { mimeType } : undefined);
+
+  mediaRecorder.addEventListener('dataavailable', (event) => {
+    if (event.data && event.data.size > 0) audioChunks.push(event.data);
+  });
+
+  mediaRecorder.addEventListener('stop', async () => {
+    const recordedMimeType = mediaRecorder?.mimeType || mimeType || 'audio/webm';
+    const audioBlob = new Blob(audioChunks, { type: recordedMimeType });
+    recordingStream?.getTracks().forEach(track => track.stop());
+    recordingStream = null;
+    mediaRecorder = null;
+    holdBtn.textContent = '按住說話';
+
+    if (audioBlob.size === 0) {
+      setNotice('未錄到聲音，請再試一次', 'error');
+      setSystemState(STATES.IDLE);
+      return;
+    }
+
+    await processAudioRecording(audioBlob);
+  });
+
+  mediaRecorder.start();
+  console.log('Backend ASR recording started:', mediaRecorder.mimeType || mimeType || 'default');
+}
+
+function cleanupRecordingResources() {
+  recordingStream?.getTracks().forEach(track => track.stop());
+  recordingStream = null;
+  mediaRecorder = null;
+  if (speechRecognizer) {
+    try {
+      speechRecognizer.close();
+    } catch (closeError) {
+      console.warn('Recognizer cleanup warning:', closeError);
+    }
+    speechRecognizer = null;
+  }
+  audioConfig = null;
+}
+
+async function startAzureSpeechSdkRecording() {
+  await initSpeechSDK();
+
+  if (!isRecording) {
+    console.log('Recording was stopped during SDK init, aborting');
+    holdBtn.textContent = '按住說話';
+    return;
+  }
+
+  const SpeechSDK = window.SpeechSDK || window.Microsoft?.CognitiveServices?.Speech;
+  if (!SpeechSDK) throw new Error('Speech SDK namespace not found');
+  if (!speechConfig) throw new Error('Speech config not initialized');
+  if (!audioConfig) throw new Error('Audio config not initialized');
+
+  azureSdkTranscript = '';
+  azureSdkError = null;
+
+  console.log('Creating Azure Speech SDK recognizer with configs:', {
+    hasSpeechConfig: !!speechConfig,
+    hasAudioConfig: !!audioConfig,
+    hasSpeechSDK: !!SpeechSDK
+  });
+
+  speechRecognizer = new SpeechSDK.SpeechRecognizer(speechConfig, audioConfig);
+  if (!speechRecognizer) throw new Error('Failed to create speech recognizer');
+
+  let pauseTimer = null;
+  const clearPauseTimer = () => {
+    if (pauseTimer) {
+      clearTimeout(pauseTimer);
+      pauseTimer = null;
+    }
+  };
+
+  speechRecognizer.recognizing = (_sender, event) => {
+    clearPauseTimer();
+    const partialText = event.result?.text || '';
+    if (partialText) holdBtn.textContent = `識別中: ${partialText.substring(0, 20)}...`;
+    pauseTimer = setTimeout(() => setNotice('唔緊要，慢慢講...', 'info'), 2000);
+  };
+
+  speechRecognizer.recognized = (_sender, event) => {
+    clearPauseTimer();
+    if (event.result.reason === SpeechSDK.ResultReason.RecognizedSpeech) {
+      const transcript = (event.result.text || '').trim();
+      if (transcript) {
+        azureSdkTranscript = [azureSdkTranscript, transcript].filter(Boolean).join(' ');
+        holdBtn.textContent = `已識別: ${transcript.substring(0, 20)}...`;
+        console.log(`Azure SDK recognized: ${transcript}`);
+      }
+    } else if (event.result.reason === SpeechSDK.ResultReason.NoMatch) {
+      console.warn('Azure SDK no speech match');
+    }
+  };
+
+  speechRecognizer.canceled = (_sender, event) => {
+    clearPauseTimer();
+    console.log('Azure SDK recognition canceled:', event.errorDetails, 'errorCode:', event.errorCode);
+    if (event.errorCode !== SpeechSDK.CancellationErrorCode.NoError) {
+      azureSdkError = new Error(event.errorDetails || 'Azure Speech recognition canceled');
+    }
+  };
+
+  await new Promise((resolve, reject) => {
+    speechRecognizer.startContinuousRecognitionAsync(resolve, reject);
+  });
+
+  setStatus('Azure Speech 正在聽...');
+  console.log('Azure Speech SDK recognition started');
+}
+
 async function handleRecordStart() {
   const hasPermission = await requestMicPermission();
   if (!hasPermission) {
     setNotice('需要麥克風權限，已切換至打字模式', 'info');
     return;
   }
-  
+
   // P0-3: Interrupt any playing audio when user wants to speak
   if (currentAudio && !currentAudio.paused) {
     stopAudio();
     setNotice('已停止播放，開始錄音', 'info');
   }
-  
+
   try {
     isRecording = true;
     setSystemState(STATES.LISTENING);
     holdBtn.textContent = '錄音中... 放開即發送';
-    
-    // Note: startRecordingTimer() is already called by setSystemState(LISTENING)
-    
-    // Initialize Speech SDK if needed
-    await initSpeechSDK();
-    
-    // Check if user released button during async init
-    if (!isRecording) {
-      console.log('Recording was stopped during SDK init, aborting');
-      holdBtn.textContent = '按住說話';
-      return;
+    if (currentAsrProvider === 'azure') {
+      await startAzureSpeechSdkRecording();
+    } else {
+      await startBackendSpeechRecording();
     }
-    
-    const SpeechSDK = window.SpeechSDK || window.Microsoft.CognitiveServices.Speech;
-    
-    if (!speechConfig) {
-      throw new Error('Speech config not initialized');
+    return;
+  } catch (err) {
+    console.warn(`${currentAsrProvider === 'azure' ? 'Azure Speech SDK' : 'Backend ASR'} recording failed, trying fallback:`, err);
+    cleanupRecordingResources();
+  }
+
+  try {
+    isRecording = true;
+    setSystemState(STATES.LISTENING);
+    holdBtn.textContent = '錄音中... 放開即發送';
+    if (currentAsrProvider === 'azure') {
+      await startBackendSpeechRecording();
+    } else {
+      await startAzureSpeechSdkRecording();
     }
-    
-    if (!audioConfig) {
-      throw new Error('Audio config not initialized');
-    }
-    
-    console.log('Creating recognizer with configs:', {
-      hasSpeechConfig: !!speechConfig,
-      hasAudioConfig: !!audioConfig,
-      hasSpeechSDK: !!SpeechSDK
-    });
-    
-    // P0-2 FIX: Use simple SpeechRecognizer constructor instead of FromConfig with AutoDetect
-    // The AutoDetectSourceLanguageConfig.fromLanguages() causes "mergeTo" undefined error
-    // Instead, we create a simple recognizer with zh-HK (Cantonese) as the primary language
-    try {
-      speechRecognizer = new SpeechSDK.SpeechRecognizer(speechConfig, audioConfig);
-      
-      if (!speechRecognizer) {
-        throw new Error('Failed to create speech recognizer');
-      }
-      
-      console.log('Speech recognizer created for zh-HK (Cantonese)');
-    } catch (recognizerError) {
-      console.warn('Azure Speech SDK recognizer failed, falling back to typing mode:', recognizerError);
-      setNotice('語音識別暫時無法使用，請使用打字模式', 'error');
-      holdBtn.textContent = '按住說話';
-      stopRecordingTimer();
-      isRecording = false;
-      audioConfig = null;
-      setSystemState(STATES.IDLE);
-      textInput?.focus();
-      return;
-    }
-    
-    // Track pause duration for encouragement message
-    let pauseTimer = null;
-    
-    // Handle partial recognition (user is speaking)
-    speechRecognizer.recognizing = (s, e) => {
-      // Clear pause timer when user speaks
-      if (pauseTimer) {
-        clearTimeout(pauseTimer);
-        pauseTimer = null;
-      }
-      
-      // Show partial result
-      if (e.result.text) {
-        holdBtn.textContent = `識別中: ${e.result.text.substring(0, 20)}...`;
-      }
-      
-      // P0-4: Set pause timer for encouragement after 2s of silence
-      pauseTimer = setTimeout(() => {
-        setNotice('唔緊要，慢慢講...', 'info');
-      }, 2000);
-    };
-    
-    // Handle recognition results
-    speechRecognizer.recognized = (s, e) => {
-      // Clear pause timer
-      if (pauseTimer) {
-        clearTimeout(pauseTimer);
-        pauseTimer = null;
-      }
-      
-      if (e.result.reason === SpeechSDK.ResultReason.RecognizedSpeech) {
-        const transcript = e.result.text;
-        console.log(`Recognized: ${transcript}`);
-        
-        setNotice('已識別：廣東話', 'success');
-        
-        // Send transcript to AI
-        if (transcript) {
-          sendUtterance(transcript);
-        }
-      } else if (e.result.reason === SpeechSDK.ResultReason.NoMatch) {
-        console.error('No speech recognized');
-        setNotice('未能識別語音，請重試', 'error');
-        setSystemState(STATES.IDLE);
-      }
-    };
-    
-    // Handle errors — only handle actual errors here.
-    // Normal stop flow is handled by handleRecordStop callbacks.
-    speechRecognizer.canceled = (s, e) => {
-      console.log('Recognition canceled:', e.errorDetails, 'errorCode:', e.errorCode);
-      
-      // Only handle actual errors, not normal user-initiated stops
-      if (e.errorCode !== SpeechSDK.CancellationErrorCode.NoError) {
-        setNotice('語音識別失敗：' + e.errorDetails, 'error');
-        setSystemState(STATES.ERROR);
-        setTimeout(() => setSystemState(STATES.IDLE), 2000);
-        // Clean up on error
-        if (speechRecognizer) {
-          speechRecognizer.close();
-          speechRecognizer = null;
-        }
-        audioConfig = null;
-        isRecording = false;
-      }
-    };
-    
-    // Start continuous recognition
-    speechRecognizer.startContinuousRecognitionAsync(
-      () => console.log('Recognition started'),
-      (err) => {
-        console.error('Failed to start recognition:', err);
-        setNotice('無法啟動錄音', 'error');
-        isRecording = false;
-        audioConfig = null;
-        if (speechRecognizer) {
-          speechRecognizer.close();
-          speechRecognizer = null;
-        }
-        setSystemState(STATES.ERROR);
-        setTimeout(() => setSystemState(STATES.IDLE), 2000);
-      }
-    );
-    
+    return;
   } catch (err) {
     console.error('Recording error:', err);
     setNotice('無法啟動錄音：' + err.message, 'error');
@@ -1080,36 +1348,78 @@ async function handleRecordStart() {
     holdBtn.textContent = '按住說話';
     stopRecordingTimer();
     isRecording = false;
-    audioConfig = null;
+    cleanupRecordingResources();
   }
 }
 
 // Note: Recording timer functions moved to P3-3 section below (SVG ring indicator)
 
 function handleRecordStop() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    isRecording = false;
+    stopRecordingTimer();
+    holdBtn.textContent = '處理錄音中...';
+    mediaRecorder.stop();
+    return;
+  }
+
   if (!isRecording && !speechRecognizer) return;
-  
+
   isRecording = false;
   // Stop recording timer
   stopRecordingTimer();
-  
+
   if (speechRecognizer) {
     const recognizerRef = speechRecognizer;
     speechRecognizer = null; // Prevent double-stop
+    holdBtn.textContent = '處理錄音中...';
+    setSystemState(STATES.PROCESSING);
+    setStatus('Azure Speech 轉換中...');
     recognizerRef.stopContinuousRecognitionAsync(
       () => {
-        console.log('Recognition stopped');
-        recognizerRef.close();
-        audioConfig = null; // Force fresh audioConfig on next recording
-        holdBtn.textContent = '按住說話';
-        setSystemState(STATES.IDLE);
+        (async () => {
+          console.log('Azure SDK recognition stopped');
+          await new Promise(resolve => setTimeout(resolve, 250));
+          recognizerRef.close();
+          audioConfig = null; // Force fresh audioConfig on next recording
+          holdBtn.textContent = '按住說話';
+
+          const transcript = azureSdkTranscript.trim().replace(/\s+/g, ' ');
+          const recognitionError = azureSdkError;
+          azureSdkTranscript = '';
+          azureSdkError = null;
+
+          if (recognitionError && !transcript) throw recognitionError;
+          if (!transcript) {
+            setNotice('未能識別語音，請重試或使用打字', 'error');
+            setSystemState(STATES.IDLE);
+            setStatus(sessionId ? `對話進行中：${sessionId.slice(0, 8)}` : '就緒');
+            return;
+          }
+
+          setNotice(`Azure Speech 已識別：${currentAsrLanguage}`, 'success');
+          await sendUtterance(transcript);
+        })().catch((err) => {
+          console.error('Azure Speech finalize error:', err);
+          holdBtn.textContent = '按住說話';
+          audioConfig = null;
+          azureSdkTranscript = '';
+          azureSdkError = null;
+          setNotice('語音辨識失敗：' + (err.message || '請重試或使用打字'), 'error');
+          setSystemState(STATES.ERROR);
+          setTimeout(() => setSystemState(STATES.IDLE), 2000);
+        });
       },
       (err) => {
         console.error('Error stopping recognition:', err);
-        try { recognizerRef.close(); } catch(e) { /* ignore */ }
+        try { recognizerRef.close(); } catch (closeError) { console.warn('Recognizer close warning:', closeError); }
         audioConfig = null;
+        azureSdkTranscript = '';
+        azureSdkError = null;
         holdBtn.textContent = '按住說話';
-        setSystemState(STATES.IDLE);
+        setNotice('語音識別停止失敗：' + (err?.message || err), 'error');
+        setSystemState(STATES.ERROR);
+        setTimeout(() => setSystemState(STATES.IDLE), 2000);
       }
     );
   } else {
@@ -1121,7 +1431,7 @@ function handleRecordStop() {
 newSessionBtn.addEventListener('click', startSession);
 clearChatBtn.addEventListener('click', () => {
   transcriptEl.innerHTML = '';
-  feedbackEl.textContent = '';
+  if (feedbackEl) feedbackEl.textContent = '';
   setNotice('已清除對話記錄', 'info');
   renderEmptyState();
 });
@@ -1144,7 +1454,7 @@ if (ttsSpeedSlider) {
   ttsSpeedSlider.value = savedSpeed;
   if (ttsSpeedValue) ttsSpeedValue.textContent = `${parseFloat(savedSpeed).toFixed(2)}×`;
   updatePresetButtonsActive(parseFloat(savedSpeed));
-  
+
   ttsSpeedSlider.addEventListener('input', (e) => {
     const speed = parseFloat(e.target.value);
     if (ttsSpeedValue) ttsSpeedValue.textContent = `${speed.toFixed(2)}×`;
@@ -1164,6 +1474,15 @@ presetBtns.forEach(btn => {
   });
 });
 
+if (voiceSelect) {
+  voiceSelect.addEventListener('change', () => {
+    currentTtsVoice = voiceSelect.value;
+    localStorage.setItem('ttsVoice', currentTtsVoice);
+    updateTtsPill(currentTtsProvider);
+    setNotice(`${voicePrefixLabel()}：${getVoiceLabel()}`, 'info');
+  });
+}
+
 function updatePresetButtonsActive(currentSpeed) {
   presetBtns.forEach(btn => {
     const presetSpeed = parseFloat(btn.dataset.speed);
@@ -1174,41 +1493,41 @@ function updatePresetButtonsActive(currentSpeed) {
 // P3-3: Recording countdown timer
 function startRecordingTimer() {
   if (!recordingIndicator || !ringProgress || !timeRemainingEl) return null;
-  
+
   // Clear any existing timer to prevent leaks from double-calls
   if (recordingTimerInterval) {
     clearInterval(recordingTimerInterval);
     recordingTimerInterval = null;
   }
-  
+
   let remaining = MAX_RECORDING_TIME;
   const circumference = 2 * Math.PI * 17; // r=17 from SVG
-  
+
   recordingIndicator.hidden = false;
   recordingIndicator.classList.add('active');
   timeRemainingEl.textContent = `${remaining}s`;
   ringProgress.style.strokeDashoffset = '0';
-  
+
   recordingTimerInterval = setInterval(() => {
     remaining--;
     timeRemainingEl.textContent = `${remaining}s`;
-    
+
     // Update ring progress (stroke-dashoffset increases as time decreases)
     const offset = circumference - (remaining / MAX_RECORDING_TIME * circumference);
     ringProgress.style.strokeDashoffset = offset.toString();
-    
+
     // Warning color at last 10 seconds
     if (remaining <= 10) {
       timeRemainingEl.style.color = 'var(--error)';
     }
-    
+
     if (remaining <= 0) {
       stopRecordingTimer();
       // Auto-stop recording
       handleRecordStop();
     }
   }, 1000);
-  
+
   return recordingTimerInterval;
 }
 
@@ -1242,25 +1561,31 @@ document.addEventListener('keydown', (e) => {
     if (text) sendUtterance(text);
     return;
   }
-  
+
   // Ctrl+Shift+R to replay
   if (e.ctrlKey && e.shiftKey && (e.key === 'r' || e.key === 'R')) {
     e.preventDefault();
     replayBtn.click();
     return;
   }
-  
+
   // Ctrl+Arrow to change speed
   if (e.ctrlKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
     e.preventDefault();
-    const options = Array.from(speedSelect.options);
-    const idx = speedSelect.selectedIndex;
-    const next = e.key === 'ArrowUp' ? Math.max(0, idx - 1) : Math.min(options.length - 1, idx + 1);
-    speedSelect.selectedIndex = next;
-    setNotice(`播放速度：${speedSelect.value}x`, 'info');
+    if (!ttsSpeedSlider) return;
+    const step = parseFloat(ttsSpeedSlider.step || '0.05');
+    const currentSpeed = getPlaybackRate();
+    const nextSpeed = e.key === 'ArrowUp'
+      ? Math.min(parseFloat(ttsSpeedSlider.max), currentSpeed + step)
+      : Math.max(parseFloat(ttsSpeedSlider.min), currentSpeed - step);
+    ttsSpeedSlider.value = nextSpeed.toFixed(2);
+    if (ttsSpeedValue) ttsSpeedValue.textContent = `${nextSpeed.toFixed(2)}×`;
+    localStorage.setItem('ttsSpeed', nextSpeed.toString());
+    updatePresetButtonsActive(nextSpeed);
+    setNotice(`播放速度：${nextSpeed.toFixed(2)}x`, 'info');
     return;
   }
-  
+
   // Space to interrupt TTS (when not typing)
   if (e.key === ' ' && document.activeElement !== textInput && currentAudio) {
     e.preventDefault();
@@ -1268,7 +1593,7 @@ document.addEventListener('keydown', (e) => {
     setNotice('已停止播放', 'info');
     return;
   }
-  
+
   // Escape to close dialogs
   if (e.key === 'Escape') {
     if (micPermissionDialog?.open) micPermissionDialog.close();
@@ -1284,17 +1609,17 @@ function updateModePill() {
     const newPill = document.createElement('div');
     newPill.className = `pill mode-${currentMode}`;
     newPill.id = 'modePill';
-    newPill.textContent = currentMode === 'teaching' ? '📚 教學模式' : '💬 傾計模式';
+    newPill.textContent = currentMode === 'teaching' ? 'Teaching Lab' : 'Free Talk';
     sessionPill?.parentNode?.insertBefore(newPill, sessionPill.nextSibling);
   } else {
     modePill.className = `pill mode-${currentMode}`;
-    modePill.textContent = currentMode === 'teaching' ? '📚 教學模式' : '💬 傾計模式';
+    modePill.textContent = currentMode === 'teaching' ? 'Teaching Lab' : 'Free Talk';
   }
 }
 
 function setActiveMode(mode) {
   currentMode = mode;
-  
+
   // Update button states
   if (modeFreeTalkBtn) {
     modeFreeTalkBtn.classList.toggle('active', mode === 'freeChat');
@@ -1304,19 +1629,19 @@ function setActiveMode(mode) {
     modeTeachingBtn.classList.toggle('active', mode === 'teaching');
     modeTeachingBtn.setAttribute('aria-selected', mode === 'teaching');
   }
-  
+
   updateModePill();
 }
 
 async function switchMode(newMode) {
   if (newMode === currentMode) return;
-  
+
   setActiveMode(newMode);
-  
+
   // Show feedback when mode changes
   const modeLabel = newMode === 'teaching' ? '教學模式' : '傾計模式';
   setNotice(`已切換至${modeLabel}`, 'info');
-  
+
   // Add system message about mode change if session exists
   if (sessionId) {
     const modeChangeMsg = newMode === 'teaching'
@@ -1329,40 +1654,40 @@ async function switchMode(newMode) {
 // P2: "Correct Me" button handler
 async function requestCorrection() {
   if (!lastUserUtterance) {
-    setNotice('請先講或輸入一句廣東話', 'info');
+    setNotice('Speak or type one Cantonese line first.', 'info');
     return;
   }
-  
+
   if (!correctMeBtn) return;
-  
+
   correctMeBtn.disabled = true;
   correctMeBtn.classList.add('loading');
-  correctMeBtn.textContent = '分析中';
-  setNotice('正在分析你嘅句子...', 'info');
-  
+  correctMeBtn.textContent = 'Analyzing';
+  setNotice('Analyzing your Cantonese line...', 'info');
+
   try {
     const res = await fetchJSON('/correct', {
       method: 'POST',
-      body: JSON.stringify({ 
-        sessionId, 
-        utterance: lastUserUtterance 
+      body: JSON.stringify({
+        sessionId,
+        utterance: lastUserUtterance
       })
     });
-    
+
     if (res.correction) {
       // Display correction as AI message
-      renderMessage({ 
-        role: 'ai', 
-        text: `✏️ 糾正分析：\n\n${res.correction}`, 
-        timestamp: Date.now() 
+      renderMessage({
+        role: 'ai',
+        text: `Correction analysis:\n\n${res.correction}`,
+        timestamp: Date.now()
       });
-      
+
       // Show cultural insights if available
       if (res.culturalInsights) {
         renderCulturalInsight(res.culturalInsights);
       }
-      
-      setNotice('分析完成！', 'info');
+
+      setNotice('Coach notes ready.', 'info');
     } else {
       throw new Error('No correction returned');
     }
@@ -1370,35 +1695,35 @@ async function requestCorrection() {
     console.error('Correction request failed:', err);
     // Better error handling for 404 (endpoint not available on Azure)
     if (err.message && err.message.includes('404')) {
-      setNotice('糾正功能暫時未能使用（後端更新中）', 'error');
+      setNotice('Correction coaching is temporarily unavailable while the backend updates.', 'error');
     } else {
-      setNotice('糾正請求失敗，請重試', 'error');
+      setNotice('Correction request failed. Please try again.', 'error');
     }
   } finally {
     correctMeBtn.disabled = false;
     correctMeBtn.classList.remove('loading');
-    correctMeBtn.textContent = '✏️ 糾正我';
+    correctMeBtn.textContent = t('input.correctMe') || 'Correct Me';
   }
 }
 
 // P2: Render cultural insight box
 function renderCulturalInsight(insights) {
   if (!insights || !insights.summary) return;
-  
+
   const insightDiv = document.createElement('div');
   insightDiv.className = 'cultural-insight';
-  
+
   const header = document.createElement('div');
   header.className = 'cultural-insight-header';
-  header.textContent = '🎭 文化背景';
-  
+  header.textContent = 'Culture context';
+
   const body = document.createElement('div');
   body.className = 'cultural-insight-body';
   body.textContent = insights.summary;
-  
+
   insightDiv.appendChild(header);
   insightDiv.appendChild(body);
-  
+
   // Add to the feedback panel
   if (feedbackDetailsEl) {
     feedbackDetailsEl.innerHTML = '';
@@ -1425,13 +1750,14 @@ if (uiLangSelect) {
   // Initialize language from saved preference
   initI18n();
   uiLangSelect.value = getLanguage();
-  
+
   uiLangSelect.addEventListener('change', (e) => {
     const newLang = e.target.value;
+    userChangedLanguage = true;
     setLanguage(newLang);
     updateUILanguage();
-    setNotice(newLang === 'en' ? 'Language changed to English' : 
-              newLang === 'zh-CN' ? '界面语言已切换为简体中文' : 
+    setNotice(newLang === 'en' ? 'Language changed to English' :
+              newLang === 'zh-CN' ? '界面语言已切换为简体中文' :
               '界面語言已切換為繁體中文', 'info');
   });
 }
@@ -1441,7 +1767,7 @@ function updateUILanguage() {
   const lang = getLanguage();
   const strings = locales[lang];
   if (!strings) return;
-  
+
   // Update elements with data-i18n attribute
   document.querySelectorAll('[data-i18n]').forEach(el => {
     const key = el.getAttribute('data-i18n');
@@ -1450,7 +1776,7 @@ function updateUILanguage() {
       el.textContent = translation;
     }
   });
-  
+
   // Update placeholder attributes
   document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
     const key = el.getAttribute('data-i18n-placeholder');
@@ -1459,7 +1785,7 @@ function updateUILanguage() {
       el.placeholder = translation;
     }
   });
-  
+
   // Update dynamic state labels
   STATE_LABELS_I18N = {
     idle: t('states.idle'),
@@ -1468,24 +1794,24 @@ function updateUILanguage() {
     speaking: t('states.speaking'),
     error: t('states.error')
   };
-  
+
   // Re-render current state
   if (systemStateEl) {
     const currentState = systemStateEl.className.match(/state-(\w+)/)?.[1] || 'idle';
     if (stateLabelEl) stateLabelEl.textContent = STATE_LABELS_I18N[currentState] || currentState;
   }
-  
+
   // Update document title
   document.title = t('appTitle');
-  
+
   // Update header title if exists
   const h1 = document.querySelector('h1');
   if (h1) h1.textContent = t('appTitle');
-  
+
   // Update subtitle
   const subtitle = document.querySelector('.subtitle');
   if (subtitle) subtitle.textContent = t('subtitle');
-  
+
   // Update hero section
   const heroKicker = document.querySelector('.hero-kicker');
   const heroTitle = document.querySelector('.hero h2');
@@ -1493,14 +1819,15 @@ function updateUILanguage() {
   if (heroKicker) heroKicker.textContent = t('hero.kicker');
   if (heroTitle) heroTitle.textContent = t('hero.title');
   if (heroBody) heroBody.textContent = t('hero.body');
-  
+  renderRoleContext();
+
   // Update badges
   const badges = document.querySelectorAll('.badges .pill');
   const badgeKeys = ['badges.aiTutor', 'badges.voiceChat', 'badges.realFeedback'];
   badges.forEach((badge, idx) => {
     if (badgeKeys[idx]) badge.textContent = t(badgeKeys[idx]);
   });
-  
+
   // Update mode descriptions
   if (modeFreeTalkBtn) {
     const label = modeFreeTalkBtn.querySelector('.mode-label');
@@ -1514,6 +1841,8 @@ function updateUILanguage() {
     if (label) label.textContent = t('modes.teaching');
     if (desc) desc.textContent = t('modes.teachingDesc');
   }
+
+  updateTtsPill(currentTtsProvider);
 }
 
 // Note: STATE_LABELS_I18N is defined at top of file (line ~93)
@@ -1528,14 +1857,19 @@ window.addEventListener('languageChanged', () => {
   initI18n();
   if (uiLangSelect) uiLangSelect.value = getLanguage();
   updateUILanguage();
-  
+  initUserMode();
+
   setSystemState(STATES.IDLE);
   setActiveMode(currentMode); // Initialize mode UI
-  
+
   try {
     const health = await fetchJSON('/health');
     setStatus(t('status.connected') || '連線成功');
-    if (ttsPill) ttsPill.textContent = `${t('transcript.voiceDetecting').split('：')[0]}：${health.ttsProvider === 'azure' ? 'Azure TTS' : t('transcript.voiceDetecting').includes('模擬') ? '模擬' : 'Mock'}`;
+    currentAsrProvider = health.asrProvider || currentAsrProvider;
+    currentAsrLanguage = health.asrLanguage || currentAsrLanguage;
+    currentTtsProvider = health.ttsProvider || currentTtsProvider;
+    currentTtsVoice = health.ttsVoice || currentTtsVoice;
+    updateTtsPill(currentTtsProvider);
     setNotice(`${t('status.connected')} API：${API_BASE}`, 'info');
     setControlsEnabled(true);
   } catch {
@@ -1546,6 +1880,7 @@ window.addEventListener('languageChanged', () => {
     setTimeout(init, 3000);
     return;
   }
+  await loadTtsVoices();
   await loadScenarios();
   await startSession();
   textInput?.focus();

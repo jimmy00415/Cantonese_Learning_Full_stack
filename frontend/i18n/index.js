@@ -7,12 +7,12 @@
 export const locales = {
   'zh-TW': {
     // App Title & Header
-    appTitle: '廣東話對話導師',
-    subtitle: '桌面網頁體驗 · 模擬語音對話 · 立即練習',
+    appTitle: 'Hong Kong Buddy',
+    subtitle: '國際學生廣東話實戰練習',
     badges: {
-      aiTutor: 'AI 導師',
-      voiceChat: '語音對話',
-      realFeedback: '實時反饋'
+      aiTutor: '校園廣東話',
+      voiceChat: '語音教練',
+      realFeedback: '文化提示'
     },
     
     // System States
@@ -34,9 +34,58 @@ export const locales = {
     
     // Hero Section
     hero: {
-      kicker: '練口語 · 聽語感 · 改發音',
-      title: '和 AI 對話，像真人陪練',
-      body: '按住說話或輸入文字，獲取即時廣東話回應與語音播報，適合桌面麥克風場景。'
+      kicker: 'Campus Cantonese Sprint',
+      title: '學會真正用得到嘅香港生活廣東話',
+      body: '練習飯堂、港鐵、小組功課、識新朋友同本地文化語感，由 AI 教練用廣東話即時回應。'
+    },
+
+    onboarding: {
+      changeMode: '轉換模式',
+      eyebrow: '由呢度開始',
+      title: '你今日想做咩？',
+      body: '先揀一條路，Hong Kong Buddy 會優先顯示合適語言、指引同工具。',
+      cards: {
+        mainland: {
+          title: '我想練習廣東話',
+          body: '適合識中文、想改善廣東話發音、語氣助詞同自然講法嘅內地學生。'
+        },
+        international: {
+          title: '我係國際學生',
+          body: '英文優先指引，配廣東話音頻、意思同逐步練習。'
+        },
+        visit: {
+          title: '我探訪期間需要翻譯',
+          body: '為 HKBU 探訪活動而設嘅簡化路徑，支援大字、常用短句同音頻。'
+        }
+      },
+      selected: {
+        eyebrow: '已選模式',
+        mainland: {
+          title: '廣東話練習模式',
+          body: '會優先顯示發音、語氣助詞、探訪短句同老師式糾正。'
+        },
+        international: {
+          title: '國際學生模式',
+          body: '會用英文解釋先，再配廣東話例句、音頻同練習步驟。'
+        },
+        visit: {
+          title: '探訪翻譯模式',
+          body: '先保留一個主要行動：開始探訪翻譯。完整翻譯介面會喺下一個任務補上。'
+        }
+      },
+      actions: {
+        pronunciation: '開始發音練習',
+        particles: '練習語氣助詞',
+        prepareVisit: '睇探訪前指引',
+        survivalCantonese: '學基本廣東話',
+        startVisitTranslation: '開始探訪翻譯',
+        readVisitGuide: '睇探訪指引',
+        changeMode: '重新選擇模式'
+      },
+      notices: {
+        visitTranslationComingSoon: '探訪翻譯入口已準備好；完整翻譯功能會喺下一步加入。',
+        visitGuideComingSoon: '探訪前指引會喺下一步加入。'
+      }
     },
     
     // Mode Toggle
@@ -51,14 +100,14 @@ export const locales = {
     // Controls
     controls: {
       scenario: '情景：',
-      newSession: '開始新對話',
+      newSession: '開始任務',
       clearChat: '清除記錄'
     },
     
     // Starter Section
     starter: {
       header: '開場建議',
-      hint: '點擊一句即填入'
+      hint: '智能句子卡'
     },
     
     // Transcript
@@ -73,17 +122,18 @@ export const locales = {
     input: {
       holdToSpeak: '按住說話',
       stopSpeaking: '停止播放',
-      textPlaceholder: '或輸入一句廣東話...',
+      textPlaceholder: '試下：唔該，我想練習廣東話...',
+      voice: '聲線',
       speed: '速度',
       replay: '重播',
-      correctMe: '糾正我',
+      correctMe: 'Correct Me',
       send: '發送'
     },
     
     // Feedback
     feedback: {
-      immediate: '即時反饋',
-      details: '詳細分析'
+      immediate: 'Coach Notes',
+      details: 'Deep Dive'
     },
     
     // Dialogs
@@ -145,12 +195,12 @@ export const locales = {
   
   'zh-CN': {
     // App Title & Header
-    appTitle: '粤语对话导师',
-    subtitle: '桌面网页体验 · 模拟语音对话 · 立即练习',
+    appTitle: 'Hong Kong Buddy',
+    subtitle: '国际学生粤语实战练习',
     badges: {
-      aiTutor: 'AI 导师',
-      voiceChat: '语音对话',
-      realFeedback: '实时反馈'
+      aiTutor: '校园粤语',
+      voiceChat: '语音教练',
+      realFeedback: '文化提示'
     },
     
     // System States
@@ -172,9 +222,58 @@ export const locales = {
     
     // Hero Section
     hero: {
-      kicker: '练口语 · 听语感 · 改发音',
-      title: '和 AI 对话，像真人陪练',
-      body: '按住说话或输入文字，获取即时粤语回应与语音播报，适合桌面麦克风场景。'
+      kicker: 'Campus Cantonese Sprint',
+      title: '学会真正用得到的香港生活粤语',
+      body: '练习饭堂、港铁、小组作业、认识新朋友和本地文化语感，由 AI 教练用粤语即时回应。'
+    },
+
+    onboarding: {
+      changeMode: '切换模式',
+      eyebrow: '从这里开始',
+      title: '你今天想做什么？',
+      body: '先选择一条路径，Hong Kong Buddy 会优先显示合适语言、指引和工具。',
+      cards: {
+        mainland: {
+          title: '我想练习粤语',
+          body: '适合会读中文、想改善粤语发音、语气助词和自然表达的内地学生。'
+        },
+        international: {
+          title: '我是国际学生',
+          body: '英文优先指引，配粤语音频、意思和逐步练习。'
+        },
+        visit: {
+          title: '我探访期间需要翻译',
+          body: '为 HKBU 探访活动而设的简化路径，支持大字、常用短句和音频。'
+        }
+      },
+      selected: {
+        eyebrow: '已选模式',
+        mainland: {
+          title: '粤语练习模式',
+          body: '会优先显示发音、语气助词、探访短句和老师式纠正。'
+        },
+        international: {
+          title: '国际学生模式',
+          body: '会先用英文解释，再配粤语例句、音频和练习步骤。'
+        },
+        visit: {
+          title: '探访翻译模式',
+          body: '先保留一个主要行动：开始探访翻译。完整翻译界面会在下一项任务补上。'
+        }
+      },
+      actions: {
+        pronunciation: '开始发音练习',
+        particles: '练习语气助词',
+        prepareVisit: '查看探访前指引',
+        survivalCantonese: '学习基本粤语',
+        startVisitTranslation: '开始探访翻译',
+        readVisitGuide: '查看探访指引',
+        changeMode: '重新选择模式'
+      },
+      notices: {
+        visitTranslationComingSoon: '探访翻译入口已准备好；完整翻译功能会在下一步加入。',
+        visitGuideComingSoon: '探访前指引会在下一步加入。'
+      }
     },
     
     // Mode Toggle
@@ -189,14 +288,14 @@ export const locales = {
     // Controls
     controls: {
       scenario: '情景：',
-      newSession: '开始新对话',
+      newSession: '开始任务',
       clearChat: '清除记录'
     },
     
     // Starter Section
     starter: {
       header: '开场建议',
-      hint: '点击一句即填入'
+      hint: '智能句子卡'
     },
     
     // Transcript
@@ -211,17 +310,18 @@ export const locales = {
     input: {
       holdToSpeak: '按住说话',
       stopSpeaking: '停止播放',
-      textPlaceholder: '或输入一句粤语...',
+      textPlaceholder: '试试：唔该，我想练习粤语...',
+      voice: '声线',
       speed: '速度',
       replay: '重播',
-      correctMe: '纠正我',
+      correctMe: 'Correct Me',
       send: '发送'
     },
     
     // Feedback
     feedback: {
-      immediate: '即时反馈',
-      details: '详细分析'
+      immediate: 'Coach Notes',
+      details: 'Deep Dive'
     },
     
     // Dialogs
@@ -283,12 +383,12 @@ export const locales = {
   
   'en': {
     // App Title & Header
-    appTitle: 'Cantonese Conversation Tutor',
-    subtitle: 'Desktop Experience · Voice Practice · Learn Now',
+    appTitle: 'Hong Kong Buddy',
+    subtitle: 'Campus Cantonese practice for international students',
     badges: {
-      aiTutor: 'AI Tutor',
-      voiceChat: 'Voice Chat',
-      realFeedback: 'Real-time Feedback'
+      aiTutor: 'Campus-ready',
+      voiceChat: 'Voice coach',
+      realFeedback: 'Culture signals'
     },
     
     // System States
@@ -310,9 +410,58 @@ export const locales = {
     
     // Hero Section
     hero: {
-      kicker: 'Speak · Listen · Improve',
-      title: 'Chat with AI, like a real tutor',
-      body: 'Press and hold to speak or type, get instant Cantonese responses with voice playback, ideal for desktop microphone scenarios.'
+      kicker: 'Campus Cantonese Sprint',
+      title: 'Speak Cantonese for real Hong Kong student life',
+      body: 'Practice restaurant orders, MTR moments, group-project small talk, and culture cues with an AI coach that answers in Cantonese voice.'
+    },
+
+    onboarding: {
+      changeMode: 'Change mode',
+      eyebrow: 'Start here',
+      title: 'What do you need today?',
+      body: 'Choose one path so Hong Kong Buddy shows the right language, guidance, and tools first.',
+      cards: {
+        mainland: {
+          title: 'I want to practise Cantonese',
+          body: 'Best for Mainland students who read Chinese and want pronunciation, particles, and natural phrasing.'
+        },
+        international: {
+          title: 'I am an international student',
+          body: 'English-first help with Cantonese audio, meaning, and practice steps.'
+        },
+        visit: {
+          title: 'I need translation during a visit',
+          body: 'A simple path for HKBU activity visits with large text, quick phrases, and audio.'
+        }
+      },
+      selected: {
+        eyebrow: 'Selected mode',
+        mainland: {
+          title: 'Cantonese Practice Mode',
+          body: 'Pronunciation, particles, visit phrases, and teacher-style correction are prioritised.'
+        },
+        international: {
+          title: 'International Student Mode',
+          body: 'Guidance appears in English first, with Cantonese examples, audio, and practice steps.'
+        },
+        visit: {
+          title: 'Visit Translation Mode',
+          body: 'One primary action is ready: Start Visit Translation. The full translation interface is the next implementation task.'
+        }
+      },
+      actions: {
+        pronunciation: 'Start pronunciation practice',
+        particles: 'Practise Cantonese particles',
+        prepareVisit: 'Read before-visit guide',
+        survivalCantonese: 'Learn survival Cantonese',
+        startVisitTranslation: 'Start Visit Translation',
+        readVisitGuide: 'Read visit guide',
+        changeMode: 'Choose another mode'
+      },
+      notices: {
+        visitTranslationComingSoon: 'Visit Translation entry is ready; the full translation workflow will be added next.',
+        visitGuideComingSoon: 'The before-visit guide will be added next.'
+      }
     },
     
     // Mode Toggle
@@ -327,14 +476,14 @@ export const locales = {
     // Controls
     controls: {
       scenario: 'Scenario:',
-      newSession: 'New Conversation',
+      newSession: 'Start Mission',
       clearChat: 'Clear History'
     },
     
     // Starter Section
     starter: {
       header: 'Conversation Starters',
-      hint: 'Click to fill in'
+      hint: 'Smart phrase cards'
     },
     
     // Transcript
@@ -349,7 +498,8 @@ export const locales = {
     input: {
       holdToSpeak: 'Hold to Speak',
       stopSpeaking: 'Stop Playing',
-      textPlaceholder: 'Or type in Cantonese...',
+      textPlaceholder: 'Try: m4 goi1, ngo5 soeng2 lin6 zaap6 gwong2 dung1 waa2',
+      voice: 'Voice',
       speed: 'Speed',
       replay: 'Replay',
       correctMe: 'Correct Me',
@@ -358,8 +508,8 @@ export const locales = {
     
     // Feedback
     feedback: {
-      immediate: 'Immediate Feedback',
-      details: 'Detailed Analysis'
+      immediate: 'Coach Notes',
+      details: 'Deep Dive'
     },
     
     // Dialogs
