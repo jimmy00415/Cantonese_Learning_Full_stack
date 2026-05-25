@@ -1,5 +1,6 @@
 // P3-1: Import i18n module
 import { t, setLanguage, getLanguage, initI18n, getAvailableLanguages, locales } from './i18n/index.js?v=20260514coach1';
+import { elderlyVisitPlaybook } from './content/playbooks.js?v=20260522visit1';
 
 const META_API = document.querySelector('meta[name="api-base"]');
 
@@ -51,6 +52,10 @@ const scenarioGuideHint = document.getElementById('scenarioGuideHint');
 const scenarioGuideBody = document.getElementById('scenarioGuideBody');
 const scenarioGuidePhrase = document.getElementById('scenarioGuidePhrase');
 const scenarioGuideSteps = document.getElementById('scenarioGuideSteps');
+const visitPhraseList = document.getElementById('visitPhraseList');
+const visitLargeText = document.getElementById('visitLargeText');
+const startVisitTranslationFromPlaybook = document.getElementById('startVisitTranslationFromPlaybook');
+const clearVisitPhrase = document.getElementById('clearVisitPhrase');
 
 // P1: Mode toggle elements
 const modeFreeTalkBtn = document.getElementById('modeFreeTalk');
@@ -412,6 +417,52 @@ function handleScenarioStep(index, phrase) {
     return;
   }
   setNotice(getLanguage() === 'en' ? 'Saved for this practice session.' : '已記錄喺今次練習。', 'success');
+}
+
+function renderElderlyVisitPlaybook() {
+  if (!visitPhraseList) return;
+  visitPhraseList.innerHTML = '';
+
+  elderlyVisitPlaybook.phrases.forEach((phrase) => {
+    const card = document.createElement('article');
+    card.className = 'visit-phrase-card';
+    card.innerHTML = `
+      <div>
+        <span class="visit-phrase-tag">${t(`playbook.categories.${phrase.category}`)} · ${t(`playbook.phases.${phrase.phase}`)}</span>
+        <h4>${phrase.cantonese}</h4>
+        <p>${phrase.jyutping}</p>
+        <p>${phrase.english}</p>
+      </div>
+      <button type="button" class="ghost visit-phrase-use">${t('playbook.actions.usePhrase')}</button>
+    `;
+    card.querySelector('button')?.addEventListener('click', () => selectVisitPhrase(phrase));
+    visitPhraseList.appendChild(card);
+  });
+}
+
+function selectVisitPhrase(phrase) {
+  textInput.value = phrase.cantonese;
+  textInput.focus();
+  if (visitLargeText) {
+    visitLargeText.innerHTML = `
+      <strong>${phrase.cantonese}</strong>
+      <span>${phrase.jyutping}</span>
+      <small>${phrase.english}</small>
+    `;
+  }
+  setNotice(t('playbook.notices.phraseLoaded'), 'info');
+}
+
+function resetVisitPhrase() {
+  if (visitLargeText) {
+    visitLargeText.innerHTML = `
+      <strong>${t('playbook.largeText.title')}</strong>
+      <span>${t('playbook.largeText.empty')}</span>
+    `;
+  }
+  if (textInput.value && elderlyVisitPlaybook.phrases.some((phrase) => phrase.cantonese === textInput.value)) {
+    textInput.value = '';
+  }
 }
 
 function renderEmptyState() {
@@ -1886,6 +1937,14 @@ document.querySelectorAll('.modal a[href^="#"]').forEach((link) => {
   });
 });
 
+startVisitTranslationFromPlaybook?.addEventListener('click', () => {
+  selectUserMode('visit_translation');
+  document.getElementById('practice')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  setNotice(t('onboarding.notices.visitTranslationComingSoon'), 'info');
+});
+
+clearVisitPhrase?.addEventListener('click', resetVisitPhrase);
+
 // P3-1: Update all UI text when language changes
 function updateUILanguage() {
   const lang = getLanguage();
@@ -1945,6 +2004,7 @@ function updateUILanguage() {
   if (heroBody) heroBody.textContent = t('hero.body');
   renderRoleContext();
   renderScenarioGuide(scenarioSelect.value);
+  renderElderlyVisitPlaybook();
 
   // Update badges
   const badges = document.querySelectorAll('.badges .pill');
@@ -1968,6 +2028,7 @@ function updateUILanguage() {
   }
 
   updateTtsPill(currentTtsProvider);
+  resetVisitPhrase();
 }
 
 // Note: STATE_LABELS_I18N is defined at top of file (line ~93)
@@ -1983,6 +2044,7 @@ window.addEventListener('languageChanged', () => {
   if (uiLangSelect) uiLangSelect.value = getLanguage();
   updateUILanguage();
   initUserMode();
+  renderElderlyVisitPlaybook();
 
   setSystemState(STATES.IDLE);
   setActiveMode(currentMode); // Initialize mode UI

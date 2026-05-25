@@ -8,6 +8,7 @@ const files = [
   'index.html',
   'app.js',
   'styles.css',
+  'content/playbooks.js',
   'i18n/index.js'
 ];
 

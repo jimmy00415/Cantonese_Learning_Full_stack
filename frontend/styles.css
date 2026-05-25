@@ -660,6 +660,125 @@ h1 {
   background: #fef2f2;
 }
 
+.visit-playbook {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  border: 2px solid var(--ink);
+  border-radius: var(--radius-xl);
+  background: #eef2ff;
+}
+
+.visit-playbook-copy {
+  display: grid;
+  gap: 8px;
+}
+
+.visit-playbook-copy h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(26px, 3vw, 38px);
+  line-height: 1;
+}
+
+.visit-playbook-copy p:last-child {
+  margin: 0;
+  color: var(--ink-soft);
+  font-weight: 750;
+}
+
+.playbook-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.visit-large-text {
+  display: grid;
+  gap: 8px;
+  min-height: 112px;
+  padding: 16px;
+  border: 2px solid var(--ink);
+  border-radius: var(--radius-lg);
+  background: #fff;
+  color: var(--ink);
+}
+
+.visit-large-text strong {
+  font-size: clamp(22px, 4vw, 34px);
+  line-height: 1.1;
+}
+
+.visit-large-text span {
+  color: var(--ink-soft);
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.visit-large-text small {
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.playbook-warning {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 12px;
+  border: 2px solid #f97316;
+  border-radius: var(--radius);
+  background: #fff7ed;
+  color: var(--ink-soft);
+  font-weight: 750;
+}
+
+.playbook-warning strong {
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.visit-phrase-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.visit-phrase-card {
+  display: grid;
+  gap: 12px;
+  align-content: space-between;
+  padding: 14px;
+  border: 2px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: #fff;
+}
+
+.visit-phrase-tag {
+  display: inline-flex;
+  margin-bottom: 8px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #dbeafe;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.visit-phrase-card h4 {
+  margin: 0 0 6px;
+  font-size: 18px;
+  line-height: 1.25;
+}
+
+.visit-phrase-card p {
+  margin: 4px 0 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 750;
+  line-height: 1.4;
+}
+
 .change-mode-btn {
   min-height: 36px;
   padding: 0 13px;
@@ -1520,6 +1639,7 @@ h1 {
   .role-onboarding,
   .guide-card-grid,
   .guide-info-grid,
+  .visit-phrase-list,
   .practice-stage,
   .info-grid,
   .feedback-panel {

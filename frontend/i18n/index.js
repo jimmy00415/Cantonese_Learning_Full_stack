@@ -79,6 +79,38 @@ export const locales = {
       }
     },
 
+    playbook: {
+      eyebrow: '長者探訪 Playbook',
+      title: '探訪長者前、中、後點做',
+      body: '英文優先短句配廣東話、粵拼、意思，並可快速進入探訪翻譯。',
+      phases: {
+        before: '探訪前',
+        during: '探訪期間',
+        after: '探訪後'
+      },
+      categories: {
+        greeting: '問候',
+        comfort: '關心',
+        closing: '告別'
+      },
+      actions: {
+        startTranslation: '開始探訪翻譯',
+        clearPhrase: '清除已選短句',
+        usePhrase: '使用呢句'
+      },
+      largeText: {
+        title: '大字顯示',
+        empty: '選擇一句常用短句，會顯示喺呢度。'
+      },
+      safety: {
+        title: '安全提醒',
+        body: '唔好將 AI 當成醫療、法律或社工權威；唔肯定時要問職員。'
+      },
+      notices: {
+        phraseLoaded: '已載入探訪短句，可送出練習或俾對方睇。'
+      }
+    },
+
     onboarding: {
       changeMode: '轉換模式',
       eyebrow: '由呢度開始',
@@ -309,6 +341,38 @@ export const locales = {
       }
     },
 
+    playbook: {
+      eyebrow: '长者探访 Playbook',
+      title: '探访长者前、中、后怎么做',
+      body: '英文优先短句配粤语、粤拼、意思，并可快速进入探访翻译。',
+      phases: {
+        before: '探访前',
+        during: '探访期间',
+        after: '探访后'
+      },
+      categories: {
+        greeting: '问候',
+        comfort: '关心',
+        closing: '告别'
+      },
+      actions: {
+        startTranslation: '开始探访翻译',
+        clearPhrase: '清除已选短句',
+        usePhrase: '使用这句'
+      },
+      largeText: {
+        title: '大字显示',
+        empty: '选择一句常用短句，会显示在这里。'
+      },
+      safety: {
+        title: '安全提醒',
+        body: '不要把 AI 当成医疗、法律或社工权威；不确定时要询问工作人员。'
+      },
+      notices: {
+        phraseLoaded: '已载入探访短句，可发送练习或给对方看。'
+      }
+    },
+
     onboarding: {
       changeMode: '切换模式',
       eyebrow: '从这里开始',
@@ -536,6 +600,38 @@ export const locales = {
       privacy: {
         title: 'Privacy and AI limits',
         body: 'Microphone access is optional. Typed and spoken practice may be sent to configured AI providers to generate responses. Avoid names, addresses, medical details, student IDs, and other sensitive information.'
+      }
+    },
+
+    playbook: {
+      eyebrow: 'Elderly visit playbook',
+      title: 'Before, during, and after an elderly home visit',
+      body: 'English-first phrases with Cantonese, Jyutping, meaning, and a quick path into visit translation.',
+      phases: {
+        before: 'Before',
+        during: 'During',
+        after: 'After'
+      },
+      categories: {
+        greeting: 'Greeting',
+        comfort: 'Comfort check',
+        closing: 'Closing'
+      },
+      actions: {
+        startTranslation: 'Start Visit Translation',
+        clearPhrase: 'Clear selected phrase',
+        usePhrase: 'Use this phrase'
+      },
+      largeText: {
+        title: 'Large-text display',
+        empty: 'Choose a quick phrase to show it here.'
+      },
+      safety: {
+        title: 'Safety note',
+        body: 'Do not use AI as medical, legal, or social-work authority. Ask staff when unsure.'
+      },
+      notices: {
+        phraseLoaded: 'Visit phrase loaded. You can send it for practice or show it to the resident.'
       }
     },
 
