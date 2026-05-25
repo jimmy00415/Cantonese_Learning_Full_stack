@@ -2,6 +2,9 @@
   "name": "cantonese-tutor-root",
   "private": true,
   "scripts": {
+    "sync:frontend": "node scripts/sync-frontend-to-public.js",
+    "sync:frontend:check": "node scripts/sync-frontend-to-public.js --check",
+    "predeploy": "npm run sync:frontend",
     "dev:backend": "npm --prefix backend run dev",
     "dev:frontend": "npm --prefix frontend run dev",
     "start:backend": "npm --prefix backend start",
