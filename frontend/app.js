@@ -45,6 +45,12 @@ const roleContextBody = document.getElementById('roleContextBody');
 const roleContextActions = document.getElementById('roleContextActions');
 const changeModeBtn = document.getElementById('changeModeBtn');
 const roleCards = document.querySelectorAll('.role-card[data-user-mode]');
+const scenarioGuideEl = document.getElementById('scenarioGuide');
+const scenarioGuideTitle = document.getElementById('scenarioGuideTitle');
+const scenarioGuideHint = document.getElementById('scenarioGuideHint');
+const scenarioGuideBody = document.getElementById('scenarioGuideBody');
+const scenarioGuidePhrase = document.getElementById('scenarioGuidePhrase');
+const scenarioGuideSteps = document.getElementById('scenarioGuideSteps');
 
 // P1: Mode toggle elements
 const modeFreeTalkBtn = document.getElementById('modeFreeTalk');
@@ -120,6 +126,48 @@ const starterPhrases = {
   '去香港旅行 (Traveling in Hong Kong)': ['點樣去太平山頂最方便？', '附近有咩地道小食推介？', '可唔可以講下八達通點用？'],
   '購物閒聊 (Shopping Small Talk)': ['有冇其他顏色同尺碼？', '可唔可以平啲呀？', '呢件衫可唔可以試下？'],
   '工作寒暄 (Workplace Small Talk)': ['今日開會會講啲乜？', '你哋通常點分工？', '可唔可以幫我review一下文件？']
+};
+
+const scenarioGuideCopy = {
+  en: {
+    nextStep: 'Next step',
+    guidedScenario: 'Guided scenario',
+    fallbackTitle: 'Try one useful line',
+    fallbackBody: 'Use a starter card, say or type one short Cantonese line, then ask for correction.',
+    meetingTitle: 'Meeting New Friends',
+    meetingBody: 'Use this when you want to introduce yourself, ask someone to slow down, or start a friendly campus conversation.',
+    phraseLabel: 'Try this first',
+    phrase: '你好，我叫 Alex。可唔可以講慢少少？',
+    jyutping: 'nei5 hou2, ngo5 giu3 Alex. ho2 m4 ho2 ji5 gong2 maan6 siu2 siu2?',
+    meaning: 'Hi, I am Alex. Could you speak a little slower?',
+    steps: ['Load the phrase', 'Try the phrase', 'Get feedback', 'Save or report']
+  },
+  'zh-TW': {
+    nextStep: '下一步',
+    guidedScenario: '情景指引',
+    fallbackTitle: '試一句有用短句',
+    fallbackBody: '先用開場句子卡，講或打一句短廣東話，再請 AI 糾正。',
+    meetingTitle: '認識新朋友',
+    meetingBody: '適合自我介紹、請對方講慢啲，或者開始校園友善對話。',
+    phraseLabel: '先試呢句',
+    phrase: '你好，我叫 Alex。可唔可以講慢少少？',
+    jyutping: 'nei5 hou2, ngo5 giu3 Alex. ho2 m4 ho2 ji5 gong2 maan6 siu2 siu2?',
+    meaning: '你好，我叫 Alex。可以講慢一點嗎？',
+    steps: ['載入短句', '試講呢句', '取得回饋', '儲存或回報']
+  },
+  'zh-CN': {
+    nextStep: '下一步',
+    guidedScenario: '情景指引',
+    fallbackTitle: '试一句有用短句',
+    fallbackBody: '先用开场句子卡，说或打一短句粤语，再请 AI 纠正。',
+    meetingTitle: '认识新朋友',
+    meetingBody: '适合自我介绍、请对方说慢一点，或者开始校园友善对话。',
+    phraseLabel: '先试这句',
+    phrase: '你好，我叫 Alex。可唔可以講慢少少？',
+    jyutping: 'nei5 hou2, ngo5 giu3 Alex. ho2 m4 ho2 ji5 gong2 maan6 siu2 siu2?',
+    meaning: '你好，我叫 Alex。可以说慢一点吗？',
+    steps: ['载入短句', '试说这句', '取得反馈', '保存或回报']
+  }
 };
 
 const userModeConfig = {
@@ -305,6 +353,65 @@ function renderStarterChips(val) {
     });
     starterChipsEl.appendChild(chip);
   });
+}
+
+function getScenarioGuideCopy() {
+  return scenarioGuideCopy[getLanguage()] || scenarioGuideCopy.en;
+}
+
+function isMeetingScenario(val) {
+  return String(val || '').includes('Meeting New People') || String(val || '').includes('認識新朋友');
+}
+
+function renderScenarioGuide(val) {
+  if (!scenarioGuideEl || !scenarioGuideSteps) return;
+  const copy = getScenarioGuideCopy();
+  const hasMeetingGuide = isMeetingScenario(val);
+  const title = hasMeetingGuide ? copy.meetingTitle : copy.fallbackTitle;
+  const body = hasMeetingGuide ? copy.meetingBody : copy.fallbackBody;
+  const phrase = hasMeetingGuide
+    ? copy.phrase
+    : (starterPhrases[scenarioKey(val)] || starterPhrases.default)[0];
+
+  scenarioGuideTitle.textContent = `${copy.nextStep}: ${title}`;
+  scenarioGuideHint.textContent = copy.guidedScenario;
+  scenarioGuideBody.textContent = body;
+  scenarioGuidePhrase.innerHTML = `
+    <strong>${copy.phraseLabel}</strong>
+    <span>${phrase}</span>
+    ${hasMeetingGuide ? `<small>${copy.jyutping}<br>${copy.meaning}</small>` : ''}
+  `;
+  scenarioGuideSteps.innerHTML = '';
+
+  copy.steps.forEach((label, index) => {
+    const step = document.createElement('button');
+    step.type = 'button';
+    step.className = index === 1 ? 'scenario-step primary' : 'scenario-step';
+    step.textContent = `${index + 1}. ${label}`;
+    step.addEventListener('click', () => handleScenarioStep(index, phrase));
+    scenarioGuideSteps.appendChild(step);
+  });
+}
+
+function handleScenarioStep(index, phrase) {
+  if (index === 0) {
+    textInput.value = phrase;
+    textInput.focus();
+    setNotice(getLanguage() === 'en' ? 'Phrase loaded. Press Send to hear the tutor response.' : '已載入短句，按送出聽導師回應。', 'info');
+    return;
+  }
+  if (index === 1) {
+    textInput.value = phrase;
+    textInput.focus();
+    return;
+  }
+  if (index === 2) {
+    textInput.value = phrase;
+    textInput.focus();
+    setNotice(getLanguage() === 'en' ? 'Send the phrase, then use Correct Me for feedback.' : '先送出短句，再按「糾正我」取得回饋。', 'info');
+    return;
+  }
+  setNotice(getLanguage() === 'en' ? 'Saved for this practice session.' : '已記錄喺今次練習。', 'success');
 }
 
 function renderEmptyState() {
@@ -877,6 +984,7 @@ async function loadScenarios() {
   });
   scenarioPill.textContent = `情景：${scenarioSelect.value || '自由對話'}`;
   renderStarterChips(scenarioSelect.value);
+  renderScenarioGuide(scenarioSelect.value);
 }
 
 function voicePrefixLabel() {
@@ -1447,6 +1555,7 @@ clearChatBtn.addEventListener('click', () => {
 scenarioSelect.addEventListener('change', () => {
   scenarioPill.textContent = `${t('transcript.scenarioPrefix')}${scenarioSelect.value}`;
   renderStarterChips(scenarioSelect.value);
+  renderScenarioGuide(scenarioSelect.value);
 });
 
 // P3-2: Use slider value for playback rate
@@ -1828,6 +1937,7 @@ function updateUILanguage() {
   if (heroTitle) heroTitle.textContent = t('hero.title');
   if (heroBody) heroBody.textContent = t('hero.body');
   renderRoleContext();
+  renderScenarioGuide(scenarioSelect.value);
 
   // Update badges
   const badges = document.querySelectorAll('.badges .pill');
