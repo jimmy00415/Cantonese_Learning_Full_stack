@@ -1076,15 +1076,18 @@ function showDialog(dialog) {
   }
 }
 
-async function translateTutorFeedback(aiText) {
+async function translateTutorFeedback(aiText, options = {}) {
   const sourceText = String(aiText || '').trim();
   if (!sourceText) {
     resetCoachTranslation();
     return;
   }
 
+  const retryCount = Number(options.retryCount || 0);
   const requestId = ++coachTranslationRequestId;
-  setCoachTranslationState({ status: 'loading', originalText: sourceText });
+  if (!options.quiet) {
+    setCoachTranslationState({ status: 'loading', originalText: sourceText });
+  }
 
   try {
     const result = await fetchJSON('/tutor-feedback-translation', {
@@ -1104,9 +1107,16 @@ async function translateTutorFeedback(aiText) {
       provider: result.provider,
       needsConfirmation: result.needsConfirmation
     });
+    if (result.provider === 'local-fallback' && retryCount < 2) {
+      window.setTimeout(() => {
+        if (requestId === coachTranslationRequestId) {
+          translateTutorFeedback(sourceText, { retryCount: retryCount + 1, quiet: true });
+        }
+      }, 2500 + retryCount * 2000);
+    }
   } catch (err) {
     console.error(err);
-    if (requestId === coachTranslationRequestId) {
+    if (requestId === coachTranslationRequestId && !options.quiet) {
       setCoachTranslationState({ status: 'error', originalText: sourceText });
     }
   }

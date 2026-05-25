@@ -342,7 +342,7 @@ Next try: [one short action]
   }
 }
 
-async function callLLMProvider(provider, messages) {
+async function callLLMProvider(provider, messages, options = {}) {
   const hasAzureOpenAI = azureOpenAIKey && azureOpenAIEndpoint;
   const hasHKBU = hkbuApiKey;
   const hasMiniMax = !!minimaxApiKey;
@@ -370,8 +370,8 @@ async function callLLMProvider(provider, messages) {
       model: minimaxLlmModel,
       system: systemMessage || undefined,
       messages: chatMessages,
-      max_tokens: minimaxMaxTokens,
-      temperature: minimaxTemperature,
+      max_tokens: options.maxTokens || minimaxMaxTokens,
+      temperature: options.temperature ?? minimaxTemperature,
       stream: false
     };
     console.log('📡 Calling MiniMax Anthropic API:', url);
@@ -384,8 +384,8 @@ async function callLLMProvider(provider, messages) {
     };
     body = {
       messages: messages,
-      temperature: 0.7,
-      max_completion_tokens: 150
+      temperature: options.temperature ?? 0.7,
+      max_completion_tokens: options.maxTokens || 150
     };
     console.log('📡 Calling Azure OpenAI:', url);
   } else if (provider === 'hkbu' && hasHKBU) {
@@ -397,8 +397,8 @@ async function callLLMProvider(provider, messages) {
     };
     body = {
       messages: messages,
-      temperature: 1.0,
-      max_tokens: 150,
+      temperature: options.temperature ?? 1.0,
+      max_tokens: options.maxTokens || 150,
       stream: false
     };
     console.log('📡 Calling HKBU API:', url);
@@ -773,30 +773,60 @@ function isUnavailableTranslationText(text) {
   return String(text || '').trim().toLowerCase() === UNAVAILABLE_TRANSLATION_TEXT.toLowerCase();
 }
 
+function translateKnownCantoneseFeedbackLine(line) {
+  const raw = String(line || '').trim();
+  if (!raw) return '';
+
+  const prefix = raw.match(/^([-*•]|\d+[.)])\s*/)?.[0] || '';
+  const text = raw
+    .replace(/^([-*•]|\d+[.)])\s*/, '')
+    .replace(/\*\*/g, '')
+    .replace(/[「」]/g, '"')
+    .trim();
+  const bullet = prefix ? (/\d/.test(prefix) ? `${prefix.trim()} ` : '- ') : '';
+
+  const mappings = [
+    [/^好問題.*幫長者按摩.*要點/, 'Good question! Here are the key points for massaging elderly people:'],
+    [/力度要輕柔.*皮膚薄.*骨.*唔好用太大力度/, 'Use gentle pressure: older adults may have thin skin and fragile bones, so do not press too hard.'],
+    [/^力度要輕柔/, 'Use gentle pressure.'],
+    [/^避開位置/, 'Areas to avoid:'],
+    [/唔好按摩頸側.*血管/, 'Do not massage the sides of the neck where major blood vessels are.'],
+    [/避開背部脊椎位置/, 'Avoid the spine area on the back.'],
+    [/靜脈曲張.*唔好按/, 'Do not press areas with varicose veins.'],
+    [/^注意反應.*表情.*痛.*停/, 'Watch their reaction: pay attention to their facial expression, and stop immediately if they say it hurts.'],
+    [/^注意反應/, 'Watch their reaction.'],
+    [/^可以按摩位置/, 'Safer areas you may massage:'],
+    [/^肩膀$/, 'Shoulders.'],
+    [/^手臂$/, 'Arms.'],
+    [/^手掌[、,，]?\s*腳掌$/, 'Palms and soles.'],
+    [/^小腿.*避開靜脈曲張/, 'Calves, but avoid any areas with varicose veins.'],
+    [/^你可以試下講呢句/, 'You can try saying this sentence:'],
+    [/我幫你輕輕咁摸下手.*有邊度覺得唔舒服就話我知/, '"I will gently rub your hand. It should feel comfortable. If anything feels uncomfortable, please tell me."'],
+    [/^溫馨提示.*問.*同意/, 'Warm reminder: ask for permission before touching or massaging.'],
+    [/^溫馨提示/, 'Warm reminder:'],
+    [/^好問題/, 'Good question!'],
+    [/長者|婆婆|公公|老人/, 'This is about communicating carefully with an elderly person.'],
+    [/按摩|按/, 'The tutor is giving massage safety advice: use gentle pressure, avoid sensitive areas, and stop if the elder feels pain.'],
+    [/數|一|二|三|十|卡片|手指/, 'For counting practice, count slowly together and use cards, fingers, or simple objects to help.'],
+    [/你好|早晨|打招呼/, 'Start with a warm greeting.'],
+    [/慢|慢慢|講慢/, 'Speak slowly and give them time to follow.'],
+    [/好唔好|可以|想/, 'Ask gently whether they would like to try together.'],
+    [/練習|試|跟住|重複/, 'Practice by repeating the phrase step by step.']
+  ];
+
+  const mapped = mappings.find(([pattern]) => pattern.test(text))?.[1];
+  if (mapped) return `${bullet}${mapped}`;
+  return '';
+}
+
 function buildBasicTutorFeedbackTranslation(sourceText) {
   const text = String(sourceText || '');
-  const hints = [];
+  const translatedLines = text
+    .split(/\r?\n/)
+    .map(translateKnownCantoneseFeedbackLine)
+    .filter(Boolean);
 
-  if (/長者|婆婆|公公|老人|探訪/.test(text)) {
-    hints.push('The tutor is guiding you on how to speak politely with an elderly person during the visit.');
-  }
-  if (/數|一|二|三|十|卡片|手指/.test(text)) {
-    hints.push('They suggest doing the counting activity slowly, using cards, fingers, or simple objects to count together.');
-  }
-  if (/你好|早晨|笑|打招呼/.test(text)) {
-    hints.push('Start with a warm greeting and smile before asking the elder to join.');
-  }
-  if (/慢|慢慢|講慢/.test(text)) {
-    hints.push('Speak slowly and give the elder time to follow.');
-  }
-  if (/好唔好|可以|想/.test(text)) {
-    hints.push('Use a gentle question such as asking whether they would like to try together.');
-  }
-  if (/練習|試|跟住|重複/.test(text)) {
-    hints.push('Practice by repeating the Cantonese phrase step by step.');
-  }
-
-  if (hints.length) return hints.join(' ');
+  if (translatedLines.length) return translatedLines.join('\n');
   return 'The tutor is giving practical Cantonese feedback. Read it as the next suggested phrase or action, try repeating it slowly, and confirm any important meaning with a local speaker.';
 }
 
@@ -847,7 +877,10 @@ async function translateTutorFeedbackToEnglish(tutorText) {
     let lastError = null;
     for (const provider of providers) {
       try {
-        const raw = await callLLMProvider(provider, messages);
+        const raw = await callLLMProvider(provider, messages, {
+          maxTokens: Math.min(900, Math.max(360, Math.ceil(sourceText.length * 1.4))),
+          temperature: 0.15
+        });
         const englishText = unwrapEnglishTranslation(raw).trim();
         if (englishText) {
           if (isUnavailableTranslationText(englishText)) continue;
@@ -887,7 +920,6 @@ async function translateTutorFeedbackToEnglish(tutorText) {
       needsConfirmation: true,
       cached: false
     };
-    cacheTutorFeedbackTranslation(cacheKey, fallback);
     if (lastError) console.warn('Using local tutor feedback fallback:', lastError.message);
     return fallback;
   })().finally(() => {
