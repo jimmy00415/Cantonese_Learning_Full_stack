@@ -789,8 +789,7 @@ h1 {
 .info-card,
 .control-rail,
 .transcript,
-.feedback-immediate,
-.feedback-deep {
+.feedback-immediate {
   border: 2px solid var(--line);
   border-radius: var(--radius);
   background: #fff;
@@ -1277,36 +1276,12 @@ h1 {
   gap: 16px;
 }
 
-.feedback-immediate,
-.feedback-deep {
+.feedback-immediate {
   padding: 16px;
 }
 
 .feedback-immediate {
   background: #f7fee7;
-}
-
-.feedback-deep {
-  background: #fff;
-}
-
-.feedback-deep h3 {
-  margin: 0 0 8px;
-  font-family: var(--font-display);
-  font-size: 21px;
-}
-
-.feedback-deep p {
-  margin: 0 0 12px;
-  color: var(--ink-soft);
-  font-size: 13px;
-  font-weight: 750;
-  line-height: 1.45;
-}
-
-.feedback-deep button {
-  min-height: 44px;
-  width: 100%;
 }
 
 .corrections-list {
@@ -1349,6 +1324,23 @@ h1 {
   font-size: 14px;
   font-weight: 750;
   line-height: 1.45;
+}
+
+.coach-translation-panel {
+  background: #fff;
+}
+
+.coach-translation-card {
+  min-height: 132px;
+  align-content: start;
+}
+
+.inline-coach-loading {
+  min-height: auto;
+}
+
+.inline-coach-loading p {
+  margin: 0;
 }
 
 .coach-actions {
@@ -2133,7 +2125,6 @@ button:hover:not(:disabled),
 .control-rail,
 .transcript,
 .feedback-immediate,
-.feedback-deep,
 .input-panel {
   border: 1px solid var(--line);
   border-radius: 28px;

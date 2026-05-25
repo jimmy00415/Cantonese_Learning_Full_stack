@@ -256,28 +256,13 @@ export const locales = {
     // Feedback
     feedback: {
       immediate: 'Coach Notes',
-      details: 'Deep Dive',
-      deepPrompt: '保持頁面簡潔，需要時再打開詳細說明。',
-      openDetails: '查看練習細節',
-      viewTranslation: '查看英文反饋',
-      latestLine: '最新一句',
-      empty: '好開始。先用一句短而真實嘅生活句子繼續練習。',
-      translationEyebrow: '英文支援',
-      translationTitle: '英文反饋',
-      translationLoading: '正在整理英文反饋…',
-      translationSummaryFallback: '以下係目前對話嘅英文意思同學習提示。',
+      currentTutorReply: '最新導師回覆',
+      realtimeEnglish: '即時英文翻譯',
+      empty: '導師回覆嘅英文翻譯會即時顯示喺呢度。',
+      translationLoading: '正在翻譯最新導師回覆…',
+      translationSummaryFallback: '暫時未有英文翻譯。',
       translationWarning: '翻譯由 AI 產生；重要意思請同真人確認。',
-      translationFailed: '暫時未能取得英文翻譯，請稍後再試。',
-      noConversation: '請先開始一段對話。',
-      tutorRole: '導師',
-      learnerRole: '學生',
-      detailsEyebrow: '練習細節',
-      detailsTitle: 'Coach note 詳細說明',
-      yourLine: '你講嘅句子',
-      coachNote: 'Coach note',
-      why: '原因',
-      tryAgain: '再試一次',
-      close: '關閉'
+      translationFailed: '暫時未能取得英文翻譯，請稍後再試。'
     },
     
     // Dialogs
@@ -589,28 +574,13 @@ export const locales = {
     // Feedback
     feedback: {
       immediate: 'Coach Notes',
-      details: 'Deep Dive',
-      deepPrompt: '保持页面简洁，需要时再打开详细说明。',
-      openDetails: '查看练习细节',
-      viewTranslation: '查看英文反馈',
-      latestLine: '最新一句',
-      empty: '很好的开始。先用一句短而真实的生活句子继续练习。',
-      translationEyebrow: '英文支援',
-      translationTitle: '英文反馈',
-      translationLoading: '正在整理英文反馈…',
-      translationSummaryFallback: '以下是目前对话的英文意思和学习提示。',
+      currentTutorReply: '最新导师回复',
+      realtimeEnglish: '即时英文翻译',
+      empty: '导师回复的英文翻译会即时显示在这里。',
+      translationLoading: '正在翻译最新导师回复…',
+      translationSummaryFallback: '暂时没有英文翻译。',
       translationWarning: '翻译由 AI 生成；重要意思请和真人确认。',
-      translationFailed: '暂时未能取得英文翻译，请稍后再试。',
-      noConversation: '请先开始一段对话。',
-      tutorRole: '导师',
-      learnerRole: '学生',
-      detailsEyebrow: '练习细节',
-      detailsTitle: 'Coach note 详细说明',
-      yourLine: '你说的句子',
-      coachNote: 'Coach note',
-      why: '原因',
-      tryAgain: '再试一次',
-      close: '关闭'
+      translationFailed: '暂时未能取得英文翻译，请稍后再试。'
     },
     
     // Dialogs
@@ -922,28 +892,13 @@ export const locales = {
     // Feedback
     feedback: {
       immediate: 'Coach Notes',
-      details: 'Deep Dive',
-      deepPrompt: 'Keep the page focused. Open details only when you need them.',
-      openDetails: 'Open practice details',
-      viewTranslation: 'View English feedback',
-      latestLine: 'Latest line',
-      empty: 'Nice start. Keep going with one short, real-life sentence.',
-      translationEyebrow: 'English support',
-      translationTitle: 'English feedback',
-      translationLoading: 'Preparing English feedback…',
-      translationSummaryFallback: 'Here is the English meaning of the current conversation with study notes.',
+      currentTutorReply: 'Latest tutor reply',
+      realtimeEnglish: 'Real-time English translation',
+      empty: 'The English translation of the tutor reply will appear here in real time.',
+      translationLoading: 'Translating the latest tutor reply…',
+      translationSummaryFallback: 'No English translation yet.',
       translationWarning: 'Translation is AI-generated. Confirm important meaning with a person.',
-      translationFailed: 'English translation is unavailable right now. Please try again.',
-      noConversation: 'Start a conversation first.',
-      tutorRole: 'Tutor',
-      learnerRole: 'Learner',
-      detailsEyebrow: 'Practice details',
-      detailsTitle: 'Coach note details',
-      yourLine: 'Your line',
-      coachNote: 'Coach note',
-      why: 'Why',
-      tryAgain: 'Try again',
-      close: 'Close'
+      translationFailed: 'English translation is unavailable right now. Please try again.'
     },
     
     // Dialogs

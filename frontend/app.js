@@ -1,5 +1,5 @@
 // P3-1: Import i18n module
-import { t, setLanguage, getLanguage, initI18n, getAvailableLanguages, locales } from './i18n/index.js?v=20260514coach1';
+import { t, setLanguage, getLanguage, initI18n, getAvailableLanguages, locales } from './i18n/index.js?v=20260525coachtranslation1';
 import { elderlyVisitPlaybook } from './content/playbooks.js?v=20260522visit1';
 
 const META_API = document.querySelector('meta[name="api-base"]');
@@ -33,14 +33,8 @@ const starterChipsEl = document.getElementById('starterChips');
 const systemStateEl = document.getElementById('systemState');
 const stateIconEl = document.getElementById('stateIcon');
 const stateLabelEl = document.getElementById('stateLabel');
-const feedbackImmediateEl = document.getElementById('feedbackImmediate');
 const topCorrectionsEl = document.getElementById('topCorrections');
 const feedbackDetailsEl = document.getElementById('feedbackDetails');
-const openCoachDetailBtn = document.getElementById('openCoachDetailBtn');
-const coachTranslationDialog = document.getElementById('coachTranslationDialog');
-const coachTranslationBody = document.getElementById('coachTranslationBody');
-const coachDetailDialog = document.getElementById('coachDetailDialog');
-const coachDetailBody = document.getElementById('coachDetailBody');
 const micPermissionDialog = document.getElementById('micPermissionDialog');
 const micBlockedDialog = document.getElementById('micBlockedDialog');
 const roleOnboardingEl = document.getElementById('roleOnboarding');
@@ -112,7 +106,8 @@ let currentTtsProvider = 'mock';
 let currentTtsVoice = localStorage.getItem('ttsVoice') || 'Cantonese_GentleLady';
 let availableTtsVoices = [];
 let voiceSelectionEnabled = false;
-let latestCoachNotes = [];
+let coachTranslationState = { status: 'empty' };
+let coachTranslationRequestId = 0;
 
 // System states: idle, listening, processing, speaking, error
 const STATES = {
@@ -670,7 +665,7 @@ function fmtTime(ts) {
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-function renderMessage({ role, text, ttsAudio, timestamp, corrections }) {
+function renderMessage({ role, text, ttsAudio, timestamp }) {
   clearEmptyState();
   const div = document.createElement('div');
   div.className = `message ${role}`;
@@ -747,10 +742,6 @@ function renderMessage({ role, text, ttsAudio, timestamp, corrections }) {
 
   div.appendChild(meta);
   div.appendChild(body);
-
-  if (corrections && role === 'user') {
-    renderImmediateFeedback(corrections);
-  }
 
   transcriptEl.appendChild(div);
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
@@ -858,15 +849,7 @@ async function reanalyzeUtterance(text) {
   setNotice('Rechecking your line...', 'info');
   // Placeholder: would call backend to re-analyze
   setTimeout(() => {
-    const mockCorrections = [
-      {
-        original: text,
-        suggested: 'Nice edit. Keep the sentence short, direct, and tied to one real Hong Kong student-life situation.',
-        reason: 'International learners improve faster when each practice line has one clear goal.',
-        retryText: text
-      }
-    ];
-    renderImmediateFeedback(mockCorrections);
+    resetCoachTranslation();
     setNotice('Coach notes updated.', 'info');
   }, 500);
 }
@@ -1019,70 +1002,65 @@ async function playAudioWithButton(ttsAudio, rate, btn) {
   }
 }
 
-function buildEnglishCoachNotes(userText, aiText, mode) {
-  const trimmedText = userText.trim();
-  const isQuestion = /[?？嗎吗]$/.test(trimmedText);
-  const campusFrame = scenarioSelect?.value?.includes('餐廳')
-    ? 'ordering food on campus or at a local cha chaan teng'
-    : scenarioSelect?.value?.includes('認識')
-      ? 'meeting classmates and making first conversations feel natural'
-      : 'daily Hong Kong campus life';
-
-  return [{
-    original: trimmedText,
-    suggested: mode === 'teaching'
-      ? `Good practice line. For ${campusFrame}, focus on one intention first, then add details after the other person responds.`
-      : `This works as a friendly opener. For ${campusFrame}, keep it casual and give one small detail so your buddy knows how to help.`,
-    reason: isQuestion
-      ? 'Your question is understandable. Make it even easier to answer by naming the place, task, or help you need.'
-      : 'The meaning is understandable. Add a simple context cue so the reply can sound more local and useful.',
-    retryText: trimmedText
-  }];
+function setCoachTranslationState(nextState) {
+  coachTranslationState = nextState || { status: 'empty' };
+  renderImmediateFeedback();
 }
 
-function renderImmediateFeedback(corrections) {
+function resetCoachTranslation() {
+  coachTranslationRequestId += 1;
+  setCoachTranslationState({ status: 'empty' });
+}
+
+function renderImmediateFeedback() {
   if (!topCorrectionsEl) return;
 
-  latestCoachNotes = corrections || [];
   topCorrectionsEl.innerHTML = '';
-  const topThree = corrections.slice(0, 3);
+  const state = coachTranslationState || { status: 'empty' };
+  const card = document.createElement('div');
+  card.className = 'coach-summary-card coach-translation-card';
 
-  if (topThree.length === 0) {
-    topCorrectionsEl.innerHTML = `
-      <div class="coach-summary-card">
-        <p class="feedback-empty">${t('feedback.empty')}</p>
-        <button type="button" id="openTranslationEmpty" class="coach-action-primary">${t('feedback.viewTranslation')}</button>
-      </div>
+  if (state.status === 'empty') {
+    card.innerHTML = `
+      <p class="coach-summary-kicker">${t('feedback.realtimeEnglish')}</p>
+      <p class="feedback-empty">${t('feedback.empty')}</p>
     `;
-    topCorrectionsEl.querySelector('#openTranslationEmpty')?.addEventListener('click', openConversationTranslation);
+    topCorrectionsEl.appendChild(card);
     return;
   }
 
-  const firstNote = topThree[0];
-  const item = document.createElement('div');
-  item.className = 'coach-summary-card';
-  item.innerHTML = `
-    <p class="coach-summary-kicker">${t('feedback.latestLine')}</p>
-    <p class="coach-summary-text">${firstNote.suggested}</p>
-    <div class="coach-actions">
-      <button type="button" class="coach-action-primary" data-action="translation">${t('feedback.viewTranslation')}</button>
-      <button type="button" class="ghost" data-action="details">${t('feedback.openDetails')}</button>
-    </div>
+  if (state.status === 'loading') {
+    card.innerHTML = `
+      <p class="coach-summary-kicker">${t('feedback.currentTutorReply')}</p>
+      <div class="coach-loading inline-coach-loading">
+        <span class="coach-loading-dot" aria-hidden="true"></span>
+        <p>${t('feedback.translationLoading')}</p>
+      </div>
+    `;
+    topCorrectionsEl.appendChild(card);
+    return;
+  }
+
+  if (state.status === 'error') {
+    card.innerHTML = `
+      <p class="coach-summary-kicker">${t('feedback.currentTutorReply')}</p>
+      <p class="coach-modal-warning">${t('feedback.translationFailed')}</p>
+    `;
+    topCorrectionsEl.appendChild(card);
+    return;
+  }
+
+  card.innerHTML = `
+    <p class="coach-summary-kicker">${t('feedback.currentTutorReply')}</p>
+    <p class="coach-summary-text">${state.englishText || t('feedback.translationSummaryFallback')}</p>
   `;
-
-  item.querySelector('[data-action="translation"]')?.addEventListener('click', openConversationTranslation);
-  item.querySelector('[data-action="details"]')?.addEventListener('click', openCoachDetails);
-  topCorrectionsEl.appendChild(item);
-}
-
-function getVisibleConversationTurns() {
-  return Array.from(transcriptEl?.querySelectorAll('.message') || [])
-    .map((message) => {
-      const role = message.classList.contains('user') ? 'learner' : 'tutor';
-      const text = message.dataset.text || message.querySelector('.message-body')?.textContent || '';
-      return { role, text: text.trim() };
-    })
-    .filter((turn) => turn.text);
+  if (state.provider === 'mock' || state.needsConfirmation) {
+    const warning = document.createElement('p');
+    warning.className = 'coach-modal-warning';
+    warning.textContent = t('feedback.translationWarning');
+    card.appendChild(warning);
+  }
+  topCorrectionsEl.appendChild(card);
 }
 
 function showDialog(dialog) {
@@ -1098,134 +1076,41 @@ function showDialog(dialog) {
   }
 }
 
-function renderTranslationLoading() {
-  if (!coachTranslationBody) return;
-  coachTranslationBody.innerHTML = `
-    <div class="coach-loading">
-      <span class="coach-loading-dot" aria-hidden="true"></span>
-      <p>${t('feedback.translationLoading')}</p>
-    </div>
-  `;
-}
-
-function renderConversationTranslation(result) {
-  if (!coachTranslationBody) return;
-  coachTranslationBody.innerHTML = '';
-
-  const summary = document.createElement('p');
-  summary.className = 'coach-translation-summary';
-  summary.textContent = result.summary || t('feedback.translationSummaryFallback');
-  coachTranslationBody.appendChild(summary);
-
-  const list = document.createElement('div');
-  list.className = 'coach-translation-list';
-  (result.turns || []).forEach((turn) => {
-    const card = document.createElement('article');
-    card.className = 'coach-translation-turn';
-
-    const role = document.createElement('span');
-    role.className = 'coach-turn-role';
-    role.textContent = turn.role === 'learner' ? t('feedback.learnerRole') : t('feedback.tutorRole');
-
-    const english = document.createElement('p');
-    english.className = 'coach-turn-english';
-    english.textContent = turn.englishText || turn.text || '';
-
-    const original = document.createElement('p');
-    original.className = 'coach-turn-original';
-    original.textContent = turn.originalText || turn.text || '';
-
-    card.appendChild(role);
-    card.appendChild(english);
-    card.appendChild(original);
-    list.appendChild(card);
-  });
-  coachTranslationBody.appendChild(list);
-
-  if (result.provider === 'mock' || result.needsConfirmation) {
-    const warning = document.createElement('p');
-    warning.className = 'coach-modal-warning';
-    warning.textContent = t('feedback.translationWarning');
-    coachTranslationBody.appendChild(warning);
-  }
-}
-
-async function openConversationTranslation() {
-  const turns = getVisibleConversationTurns();
-  if (!turns.length) {
-    setNotice(t('feedback.noConversation'), 'info');
+async function translateTutorFeedback(aiText) {
+  const sourceText = String(aiText || '').trim();
+  if (!sourceText) {
+    resetCoachTranslation();
     return;
   }
 
-  renderTranslationLoading();
-  showDialog(coachTranslationDialog);
+  const requestId = ++coachTranslationRequestId;
+  setCoachTranslationState({ status: 'loading', originalText: sourceText });
 
   try {
     const result = await fetchJSON('/conversation-translation', {
       method: 'POST',
       body: JSON.stringify({
         sessionId,
-        turns,
+        turns: [{ role: 'tutor', text: sourceText }],
         userMode: currentUserMode || 'international_student',
         uiLanguage: getLanguage()
       })
     });
-    renderConversationTranslation(result);
+    if (requestId !== coachTranslationRequestId) return;
+    const tutorTurn = (result.turns || []).find(turn => turn.role === 'tutor') || result.turns?.[0];
+    setCoachTranslationState({
+      status: 'ready',
+      originalText: sourceText,
+      englishText: tutorTurn?.englishText || result.summary || '',
+      provider: result.provider,
+      needsConfirmation: result.needsConfirmation
+    });
   } catch (err) {
     console.error(err);
-    if (coachTranslationBody) {
-      coachTranslationBody.innerHTML = `<p class="coach-modal-warning">${t('feedback.translationFailed')}</p>`;
+    if (requestId === coachTranslationRequestId) {
+      setCoachTranslationState({ status: 'error', originalText: sourceText });
     }
   }
-}
-
-function openCoachDetails() {
-  if (!coachDetailBody) return;
-  coachDetailBody.innerHTML = '';
-
-  if (!latestCoachNotes.length) {
-    const empty = document.createElement('p');
-    empty.className = 'feedback-empty';
-    empty.textContent = t('feedback.empty');
-    coachDetailBody.appendChild(empty);
-    showDialog(coachDetailDialog);
-    return;
-  }
-
-  latestCoachNotes.forEach((note) => {
-    const card = document.createElement('article');
-    card.className = 'coach-detail-card';
-
-    const original = labelledCoachLine(t('feedback.yourLine'), note.original);
-    const suggested = labelledCoachLine(t('feedback.coachNote'), note.suggested);
-    const reason = labelledCoachLine(t('feedback.why'), note.reason);
-
-    const tryBtn = document.createElement('button');
-    tryBtn.type = 'button';
-    tryBtn.textContent = t('feedback.tryAgain');
-    tryBtn.addEventListener('click', () => {
-      textInput.value = note.retryText || note.original || '';
-      coachDetailDialog?.close();
-      textInput.focus();
-    });
-
-    card.appendChild(original);
-    card.appendChild(suggested);
-    card.appendChild(reason);
-    card.appendChild(tryBtn);
-    coachDetailBody.appendChild(card);
-  });
-
-  showDialog(coachDetailDialog);
-}
-
-function labelledCoachLine(label, text) {
-  const line = document.createElement('p');
-  const strong = document.createElement('strong');
-  strong.textContent = `${label}: `;
-  line.appendChild(strong);
-  line.append(document.createTextNode(text || ''));
-  return line;
 }
 
 async function fetchJSON(path, options) {
@@ -1336,8 +1221,7 @@ async function startSession() {
 
   transcriptEl.innerHTML = '';
   if (feedbackEl) feedbackEl.textContent = '';
-  latestCoachNotes = [];
-  if (topCorrectionsEl) topCorrectionsEl.innerHTML = '';
+  resetCoachTranslation();
   renderEmptyState();
 
   // P1: Mode-specific greeting
@@ -1429,7 +1313,7 @@ async function sendUtterance(text) {
     }
 
     renderMessage({ role: 'ai', text: res.aiText, ttsAudio: res.ttsAudio, timestamp: Date.now() });
-    renderImmediateFeedback(buildEnglishCoachNotes(text, res.aiText, currentMode));
+    translateTutorFeedback(res.aiText);
 
     if (res.latencyMs) {
       console.log(`Response latency: ${res.latencyMs}ms`);
@@ -1838,8 +1722,7 @@ newSessionBtn.addEventListener('click', startSession);
 clearChatBtn.addEventListener('click', () => {
   transcriptEl.innerHTML = '';
   if (feedbackEl) feedbackEl.textContent = '';
-  latestCoachNotes = [];
-  if (topCorrectionsEl) topCorrectionsEl.innerHTML = '';
+  resetCoachTranslation();
   setNotice('已清除對話記錄', 'info');
   renderEmptyState();
 });
@@ -2192,7 +2075,6 @@ document.querySelectorAll('[data-dialog-open]').forEach((button) => {
   });
 });
 
-openCoachDetailBtn?.addEventListener('click', openCoachDetails);
 startVisitTranslationFromPlaybook?.addEventListener('click', () => {
   selectUserMode('visit_translation');
   document.getElementById('playbookDialog')?.close();
@@ -2264,7 +2146,7 @@ function updateUILanguage() {
   renderScenarioGuide(scenarioSelect.value);
   renderElderlyVisitPlaybook();
   resetVisitTranslationOutput();
-  if (latestCoachNotes.length) renderImmediateFeedback(latestCoachNotes);
+  renderImmediateFeedback();
 
   // Update badges
   const badges = document.querySelectorAll('.badges .pill');
@@ -2303,7 +2185,7 @@ window.addEventListener('languageChanged', () => {
   initI18n();
   if (uiLangSelect) uiLangSelect.value = getLanguage();
   updateUILanguage();
-  renderImmediateFeedback([]);
+  renderImmediateFeedback();
   initUserMode();
   renderElderlyVisitPlaybook();
 
