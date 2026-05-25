@@ -1292,6 +1292,9 @@ async function sendUtterance(text) {
     if (res.ttsProvider) currentTtsProvider = res.ttsProvider;
     if (res.ttsVoice) currentTtsVoice = res.ttsVoice;
     updateTtsPill(currentTtsProvider);
+    if (res.needsConfirmation || res.aiProvider === 'mock' || Number(res.confidence || 1) < 0.7) {
+      setNotice(t('reliability.confirmTutorOutput'), 'warning');
+    }
 
     renderMessage({ role: 'ai', text: res.aiText, ttsAudio: res.ttsAudio, timestamp: Date.now() });
     renderImmediateFeedback(buildEnglishCoachNotes(text, res.aiText, currentMode));

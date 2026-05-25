@@ -486,7 +486,13 @@ async function generateAIResponse(userText, scenario, history, mode = 'freeChat'
 
   if (!hasAzureOpenAI && !hasHKBU && !hasMiniMax) {
     console.warn('⚠️ No LLM API key configured, using mock');
-    return mockAiReply(userText, scenario, languagePolicy);
+    return {
+      text: mockAiReply(userText, scenario, languagePolicy),
+      aiProvider: 'mock',
+      aiFallback: true,
+      confidence: 0.55,
+      uncertaintyReason: 'mock_provider_unconfigured'
+    };
   }
 
   // P1: Use mode-specific system prompt with P2 cultural context
@@ -526,7 +532,13 @@ async function generateAIResponse(userText, scenario, history, mode = 'freeChat'
   // Try each provider in order, fall back on failure
   for (const provider of providers) {
     try {
-      return await callLLMProvider(provider, messages);
+      return {
+        text: await callLLMProvider(provider, messages),
+        aiProvider: provider,
+        aiFallback: provider !== providers[0],
+        confidence: provider === providers[0] ? 0.84 : 0.74,
+        uncertaintyReason: provider === providers[0] ? null : 'fallback_provider_used'
+      };
     } catch (err) {
       console.error(`❌ ${provider} error:`, err.message);
       if (provider !== providers[providers.length - 1]) {
@@ -536,8 +548,15 @@ async function generateAIResponse(userText, scenario, history, mode = 'freeChat'
   }
 
   console.log('⚠️ All LLM providers failed, falling back to mock response');
-  if (mode === 'coachNotes') return buildEnglishCoachCorrection(userText, culturalContext);
-  return mockAiReply(userText, scenario, languagePolicy);
+  return {
+    text: mode === 'coachNotes'
+      ? buildEnglishCoachCorrection(userText, culturalContext)
+      : mockAiReply(userText, scenario, languagePolicy),
+    aiProvider: 'mock',
+    aiFallback: true,
+    confidence: 0.5,
+    uncertaintyReason: 'all_providers_failed'
+  };
 }
 
 function mockAiReply(userText, scenario, languagePolicy = resolveLanguagePolicy()) {
@@ -1087,7 +1106,8 @@ app.post('/api/recognize-and-respond', async (req, res) => {
   }
 
   // Generate AI response using real LLM with mode and cultural context
-  const aiText = await generateAIResponse(trimmedUserText, scenarioText, history, mode, culturalContext, languagePolicy);
+  const aiResult = await generateAIResponse(trimmedUserText, scenarioText, history, mode, culturalContext, languagePolicy);
+  const aiText = aiResult.text;
 
   // Generate intelligent feedback using LLM (only in teaching mode)
   let feedback = '';
@@ -1174,9 +1194,13 @@ app.post('/api/recognize-and-respond', async (req, res) => {
     ttsLatency,
     ttsError,
     ttsFallback,
+    aiProvider: aiResult.aiProvider,
+    aiFallback: aiResult.aiFallback,
+    confidence: aiResult.confidence,
+    uncertaintyReason: aiResult.uncertaintyReason,
     responseLanguage: languagePolicy.responseLanguage,
     languagePolicyApplied: languagePolicy.languagePolicyApplied,
-    needsConfirmation: languagePolicy.needsConfirmation
+    needsConfirmation: languagePolicy.needsConfirmation || aiResult.aiFallback || Number(aiResult.confidence || 0) < 0.7
   });
 });
 

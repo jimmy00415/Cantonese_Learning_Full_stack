@@ -136,6 +136,10 @@ export const locales = {
       }
     },
 
+    reliability: {
+      confirmTutorOutput: 'AI 正使用模擬或低信心回應；重要內容請同真人確認。'
+    },
+
     onboarding: {
       changeMode: '轉換模式',
       eyebrow: '由呢度開始',
@@ -423,6 +427,10 @@ export const locales = {
       }
     },
 
+    reliability: {
+      confirmTutorOutput: 'AI 正在使用模拟或低信心回应；重要内容请和真人确认。'
+    },
+
     onboarding: {
       changeMode: '切换模式',
       eyebrow: '从这里开始',
@@ -708,6 +716,10 @@ export const locales = {
         failed: 'Translation failed. Try again with a shorter sentence.',
         confirmWithStaff: 'Translation ready; confirm important meaning with staff.'
       }
+    },
+
+    reliability: {
+      confirmTutorOutput: 'AI is using mock or lower-confidence output. Confirm important meaning with a person.'
     },
 
     onboarding: {
