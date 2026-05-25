@@ -1087,21 +1087,20 @@ async function translateTutorFeedback(aiText) {
   setCoachTranslationState({ status: 'loading', originalText: sourceText });
 
   try {
-    const result = await fetchJSON('/conversation-translation', {
+    const result = await fetchJSON('/tutor-feedback-translation', {
       method: 'POST',
       body: JSON.stringify({
         sessionId,
-        turns: [{ role: 'tutor', text: sourceText }],
+        tutorText: sourceText,
         userMode: currentUserMode || 'international_student',
         uiLanguage: getLanguage()
       })
     });
     if (requestId !== coachTranslationRequestId) return;
-    const tutorTurn = (result.turns || []).find(turn => turn.role === 'tutor') || result.turns?.[0];
     setCoachTranslationState({
       status: 'ready',
       originalText: sourceText,
-      englishText: tutorTurn?.englishText || result.summary || '',
+      englishText: result.englishText || '',
       provider: result.provider,
       needsConfirmation: result.needsConfirmation
     });

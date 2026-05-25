@@ -145,6 +145,9 @@ const politeOpeners = [
 // Cache synthesized TTS by text to avoid repeat calls; keep it small.
 const ttsCache = new Map();
 const MAX_TTS_CACHE = 50;
+const tutorFeedbackTranslationCache = new Map();
+const tutorFeedbackTranslationInflight = new Map();
+const MAX_TUTOR_FEEDBACK_TRANSLATION_CACHE = 80;
 
 function normalizeMiniMaxVoiceId(voiceId) {
   const normalized = typeof voiceId === 'string' ? voiceId.trim() : '';
@@ -762,6 +765,94 @@ function mockConversationTranslation(turns) {
     confidence: 0.55,
     needsConfirmation: true
   };
+}
+
+function normalizeTutorFeedbackTranslationKey(text) {
+  return String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+    .slice(0, 1800);
+}
+
+function cacheTutorFeedbackTranslation(key, value) {
+  tutorFeedbackTranslationCache.set(key, value);
+  if (tutorFeedbackTranslationCache.size > MAX_TUTOR_FEEDBACK_TRANSLATION_CACHE) {
+    const firstKey = tutorFeedbackTranslationCache.keys().next().value;
+    tutorFeedbackTranslationCache.delete(firstKey);
+  }
+}
+
+async function translateTutorFeedbackToEnglish(tutorText) {
+  const sourceText = String(tutorText || '').trim();
+  const cacheKey = normalizeTutorFeedbackTranslationKey(sourceText);
+  if (!cacheKey) return null;
+  if (tutorFeedbackTranslationCache.has(cacheKey)) {
+    return { ...tutorFeedbackTranslationCache.get(cacheKey), cached: true };
+  }
+  if (tutorFeedbackTranslationInflight.has(cacheKey)) {
+    return tutorFeedbackTranslationInflight.get(cacheKey);
+  }
+
+  const translatePromise = (async () => {
+    const providers = getConfiguredLlmProviders();
+    const messages = [
+      {
+        role: 'system',
+        content: [
+          'You translate Cantonese tutor feedback for international students.',
+          'Return the English translation only. Do not return JSON, Markdown, commentary, Cantonese, Chinese, or extra labels.',
+          'Keep practical steps and numbered advice, but make it concise enough for a coach note.'
+        ].join('\n')
+      },
+      {
+        role: 'user',
+        content: `Cantonese tutor feedback:\n${sourceText.slice(0, 2200)}`
+      }
+    ];
+
+    let lastError = null;
+    for (const provider of providers) {
+      try {
+        const raw = await callLLMProvider(provider, messages);
+        const englishText = unwrapEnglishTranslation(raw).trim();
+        if (englishText) {
+          const result = {
+            englishText,
+            provider,
+            confidence: 0.92,
+            needsConfirmation: false,
+            cached: false
+          };
+          cacheTutorFeedbackTranslation(cacheKey, result);
+          return result;
+        }
+      } catch (err) {
+        lastError = err;
+        console.warn(`Tutor feedback translation failed with ${provider}:`, err.message);
+      }
+    }
+
+    const mockTurn = mockConversationTranslation([{ role: 'tutor', text: sourceText }]).turns[0];
+    if (mockTurn?.englishText) {
+      const result = {
+        englishText: mockTurn.englishText,
+        provider: 'mock',
+        confidence: 0.55,
+        needsConfirmation: true,
+        cached: false
+      };
+      cacheTutorFeedbackTranslation(cacheKey, result);
+      return result;
+    }
+
+    throw lastError || new Error('No LLM provider configured for tutor feedback translation');
+  })().finally(() => {
+    tutorFeedbackTranslationInflight.delete(cacheKey);
+  });
+
+  tutorFeedbackTranslationInflight.set(cacheKey, translatePromise);
+  return translatePromise;
 }
 
 function cleanJsonText(rawText) {
@@ -1490,6 +1581,31 @@ app.post('/api/conversation-translation', async (req, res) => {
   res.json({
     ...translation,
     needsConfirmation: translation.needsConfirmation || translation.provider === 'mock' || Number(translation.confidence || 0) < 0.7,
+    latencyMs: Date.now() - startedAt
+  });
+});
+
+app.post('/api/tutor-feedback-translation', async (req, res) => {
+  const { tutorText = '' } = req.body || {};
+  const sourceText = String(tutorText || '').trim();
+
+  if (!sourceText) {
+    return res.status(400).json({ error: 'tutorText is required' });
+  }
+
+  const startedAt = Date.now();
+  const translation = await translateTutorFeedbackToEnglish(sourceText);
+  res.json({
+    originalText: sourceText,
+    englishText: translation?.englishText || '',
+    provider: translation?.provider || 'unknown',
+    confidence: translation?.confidence || 0,
+    cached: Boolean(translation?.cached),
+    needsConfirmation: Boolean(
+      translation?.needsConfirmation ||
+      translation?.provider === 'mock' ||
+      Number(translation?.confidence || 0) < 0.7
+    ),
     latencyMs: Date.now() - startedAt
   });
 });
