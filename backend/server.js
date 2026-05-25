@@ -672,13 +672,14 @@ function mockConversationTranslation(turns) {
     ['可唔可以講慢少少？', 'Could you speak a little slower?'],
     ['你好， 好高興見到你。', 'Hello, nice to meet you.']
   ]);
+  const unavailable = 'English translation is temporarily unavailable. Please try again.';
 
   return {
-    summary: 'English translation preview is using mock mode. Confirm important meaning with a person.',
+    summary: unavailable,
     turns: turns.map((turn) => ({
       role: turn.role,
       originalText: turn.text,
-      englishText: dictionary.get(turn.text) || turn.text
+      englishText: dictionary.get(turn.text) || unavailable
     })),
     provider: 'mock',
     confidence: 0.55,
