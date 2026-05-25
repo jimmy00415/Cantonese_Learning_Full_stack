@@ -942,7 +942,13 @@ async function startSession() {
   // P1: Include mode in session creation
   const { sessionId: sid, mode } = await fetchJSON('/session', {
     method: 'POST',
-    body: JSON.stringify({ mode: currentMode, userMode: currentUserMode || 'international_student', ttsVoice: currentTtsVoice })
+    body: JSON.stringify({
+      mode: currentMode,
+      userMode: currentUserMode || 'international_student',
+      uiLanguage: getLanguage(),
+      responseLanguage: 'auto',
+      ttsVoice: currentTtsVoice
+    })
   });
   sessionId = sid;
   if (mode) currentMode = mode;
@@ -1003,6 +1009,8 @@ async function sendUtterance(text) {
       scenario: scenarioSelect.value,
       mode: currentMode,
       userMode: currentUserMode || 'international_student',
+      uiLanguage: getLanguage(),
+      responseLanguage: 'auto',
       ttsVoice: currentTtsVoice
     };
     const res = await fetchJSON('/recognize-and-respond', {

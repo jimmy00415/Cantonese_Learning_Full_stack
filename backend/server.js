@@ -258,12 +258,55 @@ async function resolveMiniMaxVoice(voiceId) {
   return voices.some(voice => voice.voiceId === requestedVoiceId) ? requestedVoiceId : defaultVoiceId;
 }
 
+function normalizeUiLanguage(language) {
+  return ['en', 'zh-TW', 'zh-CN'].includes(language) ? language : 'zh-TW';
+}
+
+function resolveLanguagePolicy({ userMode = 'international_student', uiLanguage = 'zh-TW', responseLanguage = 'auto' } = {}) {
+  const normalizedUiLanguage = normalizeUiLanguage(uiLanguage);
+  const requestedLanguage = normalizeUiLanguage(responseLanguage);
+  const explicitLanguage = responseLanguage && responseLanguage !== 'auto';
+
+  if (explicitLanguage) {
+    return {
+      responseLanguage: requestedLanguage,
+      languagePolicyApplied: `explicit_${requestedLanguage}`,
+      needsConfirmation: false
+    };
+  }
+
+  if (userMode === 'international_student' || normalizedUiLanguage === 'en') {
+    return {
+      responseLanguage: 'en',
+      languagePolicyApplied: 'international_english_first',
+      needsConfirmation: false
+    };
+  }
+
+  if (userMode === 'mainland_learner') {
+    return {
+      responseLanguage: normalizedUiLanguage === 'zh-TW' ? 'zh-TW' : 'zh-CN',
+      languagePolicyApplied: 'mainland_chinese_explanation',
+      needsConfirmation: false
+    };
+  }
+
+  return {
+    responseLanguage: normalizedUiLanguage,
+    languagePolicyApplied: 'ui_language_default',
+    needsConfirmation: false
+  };
+}
+
 // P1: Mode-specific system prompts with P2 cultural context enhancement
-function getSystemPrompt(mode, scenario, culturalContext = null) {
+function getSystemPrompt(mode, scenario, culturalContext = null, languagePolicy = resolveLanguagePolicy()) {
   let culturalNote = '';
   if (culturalContext && culturalContext.hasContent) {
     culturalNote = `\n\n## 文化背景（學生用咗以下元素）\n${culturalContext.summary}`;
   }
+  const englishCulturalNote = culturalContext && culturalContext.hasContent
+    ? `\n\n## Cultural context detected\n${culturalContext.summary}`
+    : '';
 
   if (mode === 'coachNotes') {
     return `You are a friendly Cantonese learning coach for international students living or studying in Hong Kong.
@@ -282,6 +325,27 @@ Why it helps: [short reason]
 Next try: [one short action]
 
 ## Scenario: ${scenario || 'Hong Kong student life'}${culturalNote}`;
+  }
+
+  if (languagePolicy.responseLanguage === 'en') {
+    return `You are Hong Kong Buddy, an English-first Cantonese helper for international students in HKBU activities.
+
+## Language contract:
+1. Reply in clear English first.
+2. Do not answer with Chinese-only text.
+3. Cantonese may appear only as useful examples, Traditional Chinese phrase targets, Jyutping, or short labels.
+4. If the learner asks what to do next, give step-by-step guidance.
+5. Keep the response practical for Hong Kong student life or community visits.
+6. If the input is unclear, ask one simple English clarification question.
+
+## Response shape:
+Start with one direct English answer.
+Then, if useful, add:
+- Cantonese: [short phrase]
+- Jyutping: [romanisation if known]
+- When to use it: [one short note]
+
+## Scenario: ${scenario || 'Hong Kong student life'}${englishCulturalNote}`;
   }
 
   if (mode === 'teaching') {
@@ -412,8 +476,8 @@ async function callLLMProvider(provider, messages) {
   return aiResponse.trim();
 }
 
-async function generateAIResponse(userText, scenario, history, mode = 'freeChat', culturalContext = null) {
-  console.log('🤖 generateAIResponse called with:', { userText: userText.substring(0, 20), scenario, mode, provider: llmProvider, hasCulturalContext: !!culturalContext });
+async function generateAIResponse(userText, scenario, history, mode = 'freeChat', culturalContext = null, languagePolicy = resolveLanguagePolicy()) {
+  console.log('🤖 generateAIResponse called with:', { userText: userText.substring(0, 20), scenario, mode, provider: llmProvider, responseLanguage: languagePolicy.responseLanguage, hasCulturalContext: !!culturalContext });
 
   // Check if any LLM provider is configured
   const hasAzureOpenAI = azureOpenAIKey && azureOpenAIEndpoint;
@@ -422,11 +486,11 @@ async function generateAIResponse(userText, scenario, history, mode = 'freeChat'
 
   if (!hasAzureOpenAI && !hasHKBU && !hasMiniMax) {
     console.warn('⚠️ No LLM API key configured, using mock');
-    return mockAiReply(userText, scenario);
+    return mockAiReply(userText, scenario, languagePolicy);
   }
 
   // P1: Use mode-specific system prompt with P2 cultural context
-  const systemMessage = getSystemPrompt(mode, scenario, culturalContext);
+  const systemMessage = getSystemPrompt(mode, scenario, culturalContext, languagePolicy);
 
   const messages = [
     { role: 'system', content: systemMessage },
@@ -473,10 +537,16 @@ async function generateAIResponse(userText, scenario, history, mode = 'freeChat'
 
   console.log('⚠️ All LLM providers failed, falling back to mock response');
   if (mode === 'coachNotes') return buildEnglishCoachCorrection(userText, culturalContext);
-  return mockAiReply(userText, scenario);
+  return mockAiReply(userText, scenario, languagePolicy);
 }
 
-function mockAiReply(userText, scenario) {
+function mockAiReply(userText, scenario, languagePolicy = resolveLanguagePolicy()) {
+  if (languagePolicy.responseLanguage === 'en') {
+    const scenarioHint = scenario ? `Scenario: ${scenario}.` : 'Scenario: Hong Kong student life.';
+    const echo = userText ? `You asked: "${userText}"` : 'Tell me what you want to practise first.';
+    return `${echo}\n\n${scenarioHint}\n\nStart with one simple phrase and I will help you improve it. For an elderly visit, try: Cantonese: 「你好，好高興見到你。」 Jyutping: nei5 hou2, hou2 gou1 hing3 gin3 dou3 nei5. When to use it: a polite first greeting.`;
+  }
+
   const opener = politeOpeners[Math.floor(Math.random() * politeOpeners.length)];
   const seed = promptSeeds[Math.floor(Math.random() * promptSeeds.length)];
   const scenarioHint = scenario ? `（情景：${scenario}）` : '';
@@ -531,17 +601,18 @@ app.get('/api/tts-voices', async (_req, res) => {
 
 // P1: Session now includes mode
 app.post('/api/session', (req, res) => {
-  const { mode = 'freeChat', userMode = 'international_student', ttsVoice } = req.body || {};
+  const { mode = 'freeChat', userMode = 'international_student', uiLanguage = 'zh-TW', responseLanguage = 'auto', ttsVoice } = req.body || {};
+  const languagePolicy = resolveLanguagePolicy({ userMode, uiLanguage, responseLanguage });
   const sessionId = uuidv4();
   conversations.set(sessionId, {
     history: [],
     mode,
     userMode,
-    settings: { language: 'zh-TW', ttsSpeed: 1.0, ttsVoice: normalizeMiniMaxVoiceId(ttsVoice) || minimaxTtsVoice },
+    settings: { language: normalizeUiLanguage(uiLanguage), responseLanguage: languagePolicy.responseLanguage, ttsSpeed: 1.0, ttsVoice: normalizeMiniMaxVoiceId(ttsVoice) || minimaxTtsVoice },
     createdAt: Date.now()
   });
   console.log(`📝 New session created: ${sessionId}, mode: ${mode}, userMode: ${userMode}`);
-  res.json({ sessionId, mode, userMode, ttsVoice: normalizeMiniMaxVoiceId(ttsVoice) || minimaxTtsVoice });
+  res.json({ sessionId, mode, userMode, responseLanguage: languagePolicy.responseLanguage, languagePolicyApplied: languagePolicy.languagePolicyApplied, ttsVoice: normalizeMiniMaxVoiceId(ttsVoice) || minimaxTtsVoice });
 });
 
 // P1: Switch mode mid-session
@@ -830,7 +901,7 @@ app.post('/api/speech-to-text', async (req, res) => {
 });
 
 app.post('/api/recognize-and-respond', async (req, res) => {
-  const { sessionId, userText = '', scenario = '', mode: requestMode, userMode: requestUserMode, ttsVoice: requestTtsVoice } = req.body || {};
+  const { sessionId, userText = '', scenario = '', mode: requestMode, userMode: requestUserMode, uiLanguage: requestUiLanguage, responseLanguage: requestResponseLanguage = 'auto', ttsVoice: requestTtsVoice } = req.body || {};
   if (!sessionId) {
     return res.status(400).json({ error: 'sessionId is required' });
   }
@@ -864,6 +935,14 @@ app.post('/api/recognize-and-respond', async (req, res) => {
   }
 
   if (!session.settings) session.settings = {};
+  const uiLanguage = normalizeUiLanguage(requestUiLanguage || session.settings.language || 'zh-TW');
+  const languagePolicy = resolveLanguagePolicy({
+    userMode: session.userMode || requestUserMode || 'international_student',
+    uiLanguage,
+    responseLanguage: requestResponseLanguage
+  });
+  session.settings.language = uiLanguage;
+  session.settings.responseLanguage = languagePolicy.responseLanguage;
   const selectedTtsVoice = ttsProvider === 'minimax'
     ? await resolveMiniMaxVoice(requestTtsVoice || session.settings.ttsVoice || minimaxTtsVoice)
     : azureVoice;
@@ -878,7 +957,7 @@ app.post('/api/recognize-and-respond', async (req, res) => {
   }
 
   // Generate AI response using real LLM with mode and cultural context
-  const aiText = await generateAIResponse(trimmedUserText, scenarioText, history, mode, culturalContext);
+  const aiText = await generateAIResponse(trimmedUserText, scenarioText, history, mode, culturalContext, languagePolicy);
 
   // Generate intelligent feedback using LLM (only in teaching mode)
   let feedback = '';
@@ -964,7 +1043,10 @@ app.post('/api/recognize-and-respond', async (req, res) => {
     ttsVoice: ttsAudio && !ttsFallback ? selectedTtsVoice : null,
     ttsLatency,
     ttsError,
-    ttsFallback
+    ttsFallback,
+    responseLanguage: languagePolicy.responseLanguage,
+    languagePolicyApplied: languagePolicy.languagePolicyApplied,
+    needsConfirmation: languagePolicy.needsConfirmation
   });
 });
 
