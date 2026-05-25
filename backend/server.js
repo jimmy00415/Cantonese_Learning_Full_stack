@@ -767,6 +767,39 @@ function mockConversationTranslation(turns) {
   };
 }
 
+const UNAVAILABLE_TRANSLATION_TEXT = 'English translation is temporarily unavailable. Please try again.';
+
+function isUnavailableTranslationText(text) {
+  return String(text || '').trim().toLowerCase() === UNAVAILABLE_TRANSLATION_TEXT.toLowerCase();
+}
+
+function buildBasicTutorFeedbackTranslation(sourceText) {
+  const text = String(sourceText || '');
+  const hints = [];
+
+  if (/長者|婆婆|公公|老人|探訪/.test(text)) {
+    hints.push('The tutor is guiding you on how to speak politely with an elderly person during the visit.');
+  }
+  if (/數|一|二|三|十|卡片|手指/.test(text)) {
+    hints.push('They suggest doing the counting activity slowly, using cards, fingers, or simple objects to count together.');
+  }
+  if (/你好|早晨|笑|打招呼/.test(text)) {
+    hints.push('Start with a warm greeting and smile before asking the elder to join.');
+  }
+  if (/慢|慢慢|講慢/.test(text)) {
+    hints.push('Speak slowly and give the elder time to follow.');
+  }
+  if (/好唔好|可以|想/.test(text)) {
+    hints.push('Use a gentle question such as asking whether they would like to try together.');
+  }
+  if (/練習|試|跟住|重複/.test(text)) {
+    hints.push('Practice by repeating the Cantonese phrase step by step.');
+  }
+
+  if (hints.length) return hints.join(' ');
+  return 'The tutor is giving practical Cantonese feedback. Read it as the next suggested phrase or action, try repeating it slowly, and confirm any important meaning with a local speaker.';
+}
+
 function normalizeTutorFeedbackTranslationKey(text) {
   return String(text || '')
     .replace(/\s+/g, ' ')
@@ -817,6 +850,7 @@ async function translateTutorFeedbackToEnglish(tutorText) {
         const raw = await callLLMProvider(provider, messages);
         const englishText = unwrapEnglishTranslation(raw).trim();
         if (englishText) {
+          if (isUnavailableTranslationText(englishText)) continue;
           const result = {
             englishText,
             provider,
@@ -834,7 +868,7 @@ async function translateTutorFeedbackToEnglish(tutorText) {
     }
 
     const mockTurn = mockConversationTranslation([{ role: 'tutor', text: sourceText }]).turns[0];
-    if (mockTurn?.englishText) {
+    if (mockTurn?.englishText && !isUnavailableTranslationText(mockTurn.englishText)) {
       const result = {
         englishText: mockTurn.englishText,
         provider: 'mock',
@@ -846,7 +880,16 @@ async function translateTutorFeedbackToEnglish(tutorText) {
       return result;
     }
 
-    throw lastError || new Error('No LLM provider configured for tutor feedback translation');
+    const fallback = {
+      englishText: buildBasicTutorFeedbackTranslation(sourceText),
+      provider: 'local-fallback',
+      confidence: 0.45,
+      needsConfirmation: true,
+      cached: false
+    };
+    cacheTutorFeedbackTranslation(cacheKey, fallback);
+    if (lastError) console.warn('Using local tutor feedback fallback:', lastError.message);
+    return fallback;
   })().finally(() => {
     tutorFeedbackTranslationInflight.delete(cacheKey);
   });

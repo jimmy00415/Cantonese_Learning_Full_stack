@@ -1769,11 +1769,13 @@ h1 {
 
 .coach-modal-warning {
   margin: 0;
-  padding: 12px 14px;
-  border-radius: 16px;
+  padding: 8px 10px;
+  border-radius: 14px;
   background: rgba(255, 149, 0, 0.12);
   color: #7a3f00;
-  font-weight: 760;
+  font-size: 12px;
+  font-weight: 720;
+  line-height: 1.35;
 }
 
 .sr-only {
