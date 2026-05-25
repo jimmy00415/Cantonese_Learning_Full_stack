@@ -26,6 +26,10 @@ jobs:
       - name: npm install, build, and test
         run: |
           npm install
+          npm --prefix backend install
+          npm --prefix frontend install
+          npm run sync:frontend
+          npm run sync:frontend:check
           npm run build --if-present
           npm run test --if-present
       
