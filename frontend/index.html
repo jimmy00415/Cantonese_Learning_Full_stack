@@ -33,6 +33,9 @@
       </div>
 
         <div class="header-status">
+        <a class="ghost header-link" href="#guidePanel" data-i18n="guide.nav.guide">Guide</a>
+        <a class="ghost header-link" href="#aboutCard" data-i18n="guide.nav.about">About</a>
+        <a class="ghost header-link" href="#privacyCard" data-i18n="guide.nav.privacy">Privacy</a>
         <button id="changeModeBtn" class="ghost change-mode-btn" type="button" data-i18n="onboarding.changeMode" hidden>Change mode</button>
           <div class="language-toggle">
             <label for="uiLang" class="sr-only" data-i18n="settings.uiLanguage">界面語言</label>
@@ -117,6 +120,60 @@
         <p id="roleContextBody">English-first guidance is ready.</p>
       </div>
       <div class="role-context-actions" id="roleContextActions"></div>
+    </section>
+
+    <section class="guide-panel" id="guidePanel" aria-labelledby="guideTitle">
+      <div class="guide-copy">
+        <p class="section-eyebrow" data-i18n="guide.eyebrow">User guide</p>
+        <h2 id="guideTitle" data-i18n="guide.title">How to use Hong Kong Buddy in an activity</h2>
+        <p data-i18n="guide.body">Use this guide before, during, and after a Cantonese practice or HKBU visit activity.</p>
+      </div>
+
+      <div class="guide-card-grid">
+        <article class="guide-card">
+          <span class="guide-step-code">01</span>
+          <h3 data-i18n="guide.before.title">Before the visit</h3>
+          <p data-i18n="guide.before.body">Choose your role, learn polite greetings, practise pronunciation, and check the privacy reminder.</p>
+          <ol>
+            <li data-i18n="guide.before.step1">Pick International Student or Visit Translation mode.</li>
+            <li data-i18n="guide.before.step2">Practise short greetings with Jyutping and meaning.</li>
+            <li data-i18n="guide.before.step3">Do not record private or sensitive information.</li>
+          </ol>
+        </article>
+
+        <article class="guide-card">
+          <span class="guide-step-code">02</span>
+          <h3 data-i18n="guide.during.title">During the visit</h3>
+          <p data-i18n="guide.during.body">Use short sentences, confirm meaning, show large text when helpful, and ask the AI to simplify.</p>
+          <ol>
+            <li data-i18n="guide.during.step1">Start with one greeting or comfort-check phrase.</li>
+            <li data-i18n="guide.during.step2">Type if the room is noisy or microphone use is not appropriate.</li>
+            <li data-i18n="guide.during.step3">Confirm important meanings with a human volunteer.</li>
+          </ol>
+        </article>
+
+        <article class="guide-card">
+          <span class="guide-step-code">03</span>
+          <h3 data-i18n="guide.after.title">After the visit</h3>
+          <p data-i18n="guide.after.body">Review useful phrases, report confusing AI output, and clear local practice notes when needed.</p>
+          <ol>
+            <li data-i18n="guide.after.step1">Save only non-sensitive phrases you want to practise again.</li>
+            <li data-i18n="guide.after.step2">Use Correct Me to review your own Cantonese line.</li>
+            <li data-i18n="guide.after.step3">Tell staff if an answer felt wrong, unsafe, or culturally unclear.</li>
+          </ol>
+        </article>
+      </div>
+
+      <div class="guide-info-grid">
+        <article class="guide-info-card" id="aboutCard">
+          <h3 data-i18n="guide.about.title">About this app</h3>
+          <p data-i18n="guide.about.body">Hong Kong Buddy is an AI Cantonese practice assistant for student life and supervised HKBU activity support. It is a learning and translation aid, not a replacement for staff judgement.</p>
+        </article>
+        <article class="guide-info-card privacy-card" id="privacyCard">
+          <h3 data-i18n="guide.privacy.title">Privacy and AI limits</h3>
+          <p data-i18n="guide.privacy.body">Microphone access is optional. Typed and spoken practice may be sent to configured AI providers to generate responses. Avoid names, addresses, medical details, student IDs, and other sensitive information.</p>
+        </article>
+      </div>
     </section>
 
     <section class="mission-strip" aria-label="Learning missions">
@@ -276,6 +333,7 @@
       <div class="modal-content">
         <h2 id="micDialogTitle" data-i18n="dialogs.micPermission.title">麥克風權限</h2>
         <p data-i18n="dialogs.micPermission.body">我哋需要您嘅麥克風權限，先可以聽到您嘅廣東話發音並提供反饋。</p>
+        <p><a href="#privacyCard" data-i18n="dialogs.micPermission.privacyLink">查看私隱同 AI 限制</a></p>
         <div class="modal-actions">
           <button id="micDenyBtn" class="ghost" data-i18n="dialogs.micPermission.deny">使用打字代替</button>
           <button id="micAllowBtn" data-i18n="dialogs.micPermission.allow">允許麥克風</button>
@@ -299,7 +357,14 @@
       </div>
     </dialog>
 
-    <footer class="footer">Hong Kong Buddy · Cantonese practice for international student life</footer>
+    <footer class="footer">
+      <span>Hong Kong Buddy · Cantonese practice for international student life</span>
+      <nav class="footer-links" aria-label="Footer links">
+        <a href="#guidePanel" data-i18n="guide.nav.guide">Guide</a>
+        <a href="#aboutCard" data-i18n="guide.nav.about">About</a>
+        <a href="#privacyCard" data-i18n="guide.nav.privacy">Privacy</a>
+      </nav>
+    </footer>
   </main>
 
   <script type="module" src="app.js?v=20260514asr1"></script>

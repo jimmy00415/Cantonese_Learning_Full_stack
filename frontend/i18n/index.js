@@ -39,6 +39,46 @@ export const locales = {
       body: '練習飯堂、港鐵、小組功課、識新朋友同本地文化語感，由 AI 教練用廣東話即時回應。'
     },
 
+    guide: {
+      nav: {
+        guide: '使用指引',
+        about: '關於',
+        privacy: '私隱'
+      },
+      eyebrow: '使用指引',
+      title: '點樣喺活動入面使用 Hong Kong Buddy',
+      body: '探訪或廣東話練習前、中、後，都可以跟住呢個流程使用。',
+      before: {
+        title: '探訪前',
+        body: '先揀角色，學禮貌問候，練發音，並睇清楚私隱提醒。',
+        step1: '選擇國際學生或探訪翻譯模式。',
+        step2: '用粵拼同意思練習短問候句。',
+        step3: '唔好記錄私人或敏感資料。'
+      },
+      during: {
+        title: '探訪期間',
+        body: '用短句、確認意思，需要時顯示大字，並請 AI 講簡單啲。',
+        step1: '由一句問候或關心短句開始。',
+        step2: '環境嘈或唔適合用咪時，可以改用打字。',
+        step3: '重要意思要同真人義工再確認。'
+      },
+      after: {
+        title: '探訪後',
+        body: '重溫有用短句、回報令人混亂嘅 AI 回答，必要時清除本地練習記錄。',
+        step1: '只儲存之後想練、而且唔敏感嘅短句。',
+        step2: '用「Correct Me」重溫自己講過嘅廣東話。',
+        step3: '如果答案錯、唔安全或文化上唔清楚，要同職員講。'
+      },
+      about: {
+        title: '關於呢個 App',
+        body: 'Hong Kong Buddy 係 AI 廣東話練習助手，用於學生生活同受監督嘅 HKBU 活動支援。佢係學習同翻譯輔助工具，唔可以取代職員判斷。'
+      },
+      privacy: {
+        title: '私隱同 AI 限制',
+        body: '麥克風係自選使用。打字或語音練習可能會送去已設定嘅 AI 供應商產生回應。請避免輸入姓名、地址、醫療資料、學生編號同其他敏感資料。'
+      }
+    },
+
     onboarding: {
       changeMode: '轉換模式',
       eyebrow: '由呢度開始',
@@ -84,7 +124,8 @@ export const locales = {
       },
       notices: {
         visitTranslationComingSoon: '探訪翻譯入口已準備好；完整翻譯功能會喺下一步加入。',
-        visitGuideComingSoon: '探訪前指引會喺下一步加入。'
+        visitGuideComingSoon: '探訪前指引會喺下一步加入。',
+        visitGuideReady: '已打開探訪使用指引。'
       }
     },
     
@@ -141,6 +182,7 @@ export const locales = {
       micPermission: {
         title: '麥克風權限',
         body: '我哋需要您嘅麥克風權限，先可以聽到您嘅廣東話發音並提供反饋。',
+        privacyLink: '查看私隱同 AI 限制',
         allow: '允許麥克風',
         deny: '使用打字代替'
       },
@@ -227,6 +269,46 @@ export const locales = {
       body: '练习饭堂、港铁、小组作业、认识新朋友和本地文化语感，由 AI 教练用粤语即时回应。'
     },
 
+    guide: {
+      nav: {
+        guide: '使用指引',
+        about: '关于',
+        privacy: '隐私'
+      },
+      eyebrow: '使用指引',
+      title: '如何在活动中使用 Hong Kong Buddy',
+      body: '探访或粤语练习前、中、后，都可以跟着这个流程使用。',
+      before: {
+        title: '探访前',
+        body: '先选择角色，学习礼貌问候，练习发音，并看清楚隐私提醒。',
+        step1: '选择国际学生或探访翻译模式。',
+        step2: '用粤拼和意思练习短问候句。',
+        step3: '不要记录私人或敏感资料。'
+      },
+      during: {
+        title: '探访期间',
+        body: '用短句、确认意思，需要时显示大字，并请 AI 说简单一点。',
+        step1: '由一句问候或关心短句开始。',
+        step2: '环境嘈杂或不适合用麦克风时，可以改用打字。',
+        step3: '重要意思要和真人义工再确认。'
+      },
+      after: {
+        title: '探访后',
+        body: '重温有用短句、回报令人混乱的 AI 回答，必要时清除本地练习记录。',
+        step1: '只保存之后想练、而且不敏感的短句。',
+        step2: '用“Correct Me”重温自己讲过的粤语。',
+        step3: '如果答案错误、不安全或文化上不清楚，要告诉工作人员。'
+      },
+      about: {
+        title: '关于这个 App',
+        body: 'Hong Kong Buddy 是 AI 粤语练习助手，用于学生生活和受监督的 HKBU 活动支援。它是学习和翻译辅助工具，不能取代工作人员判断。'
+      },
+      privacy: {
+        title: '隐私和 AI 限制',
+        body: '麦克风是自选使用。打字或语音练习可能会发送给已设置的 AI 供应商生成回应。请避免输入姓名、地址、医疗资料、学生编号和其他敏感资料。'
+      }
+    },
+
     onboarding: {
       changeMode: '切换模式',
       eyebrow: '从这里开始',
@@ -272,7 +354,8 @@ export const locales = {
       },
       notices: {
         visitTranslationComingSoon: '探访翻译入口已准备好；完整翻译功能会在下一步加入。',
-        visitGuideComingSoon: '探访前指引会在下一步加入。'
+        visitGuideComingSoon: '探访前指引会在下一步加入。',
+        visitGuideReady: '已打开探访使用指引。'
       }
     },
     
@@ -329,6 +412,7 @@ export const locales = {
       micPermission: {
         title: '麦克风权限',
         body: '我们需要您的麦克风权限，才可以听到您的粤语发音并提供反馈。',
+        privacyLink: '查看隐私和 AI 限制',
         allow: '允许麦克风',
         deny: '使用打字代替'
       },
@@ -415,6 +499,46 @@ export const locales = {
       body: 'Practice restaurant orders, MTR moments, group-project small talk, and culture cues with an AI coach that answers in Cantonese voice.'
     },
 
+    guide: {
+      nav: {
+        guide: 'Guide',
+        about: 'About',
+        privacy: 'Privacy'
+      },
+      eyebrow: 'User guide',
+      title: 'How to use Hong Kong Buddy in an activity',
+      body: 'Use this guide before, during, and after a Cantonese practice or HKBU visit activity.',
+      before: {
+        title: 'Before the visit',
+        body: 'Choose your role, learn polite greetings, practise pronunciation, and check the privacy reminder.',
+        step1: 'Pick International Student or Visit Translation mode.',
+        step2: 'Practise short greetings with Jyutping and meaning.',
+        step3: 'Do not record private or sensitive information.'
+      },
+      during: {
+        title: 'During the visit',
+        body: 'Use short sentences, confirm meaning, show large text when helpful, and ask the AI to simplify.',
+        step1: 'Start with one greeting or comfort-check phrase.',
+        step2: 'Type if the room is noisy or microphone use is not appropriate.',
+        step3: 'Confirm important meanings with a human volunteer.'
+      },
+      after: {
+        title: 'After the visit',
+        body: 'Review useful phrases, report confusing AI output, and clear local practice notes when needed.',
+        step1: 'Save only non-sensitive phrases you want to practise again.',
+        step2: 'Use Correct Me to review your own Cantonese line.',
+        step3: 'Tell staff if an answer felt wrong, unsafe, or culturally unclear.'
+      },
+      about: {
+        title: 'About this app',
+        body: 'Hong Kong Buddy is an AI Cantonese practice assistant for student life and supervised HKBU activity support. It is a learning and translation aid, not a replacement for staff judgement.'
+      },
+      privacy: {
+        title: 'Privacy and AI limits',
+        body: 'Microphone access is optional. Typed and spoken practice may be sent to configured AI providers to generate responses. Avoid names, addresses, medical details, student IDs, and other sensitive information.'
+      }
+    },
+
     onboarding: {
       changeMode: 'Change mode',
       eyebrow: 'Start here',
@@ -460,7 +584,8 @@ export const locales = {
       },
       notices: {
         visitTranslationComingSoon: 'Visit Translation entry is ready; the full translation workflow will be added next.',
-        visitGuideComingSoon: 'The before-visit guide will be added next.'
+        visitGuideComingSoon: 'The before-visit guide will be added next.',
+        visitGuideReady: 'Visit guide opened.'
       }
     },
     
@@ -517,6 +642,7 @@ export const locales = {
       micPermission: {
         title: 'Microphone Access',
         body: 'We need microphone access to hear your Cantonese pronunciation and provide feedback.',
+        privacyLink: 'View privacy and AI limits',
         allow: 'Allow Microphone',
         deny: 'Use Typing Instead'
       },

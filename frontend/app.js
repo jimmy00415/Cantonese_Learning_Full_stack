@@ -262,8 +262,8 @@ function handleRoleAction(action) {
   }
 
   if (action === 'prepareVisit') {
-    setNotice(t('onboarding.notices.visitGuideComingSoon'), 'info');
-    roleContextPanel?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    document.getElementById('guidePanel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    setNotice(t('onboarding.notices.visitGuideReady'), 'info');
     return;
   }
 
@@ -1878,6 +1878,13 @@ if (uiLangSelect) {
               '界面語言已切換為繁體中文', 'info');
   });
 }
+
+document.querySelectorAll('.modal a[href^="#"]').forEach((link) => {
+  link.addEventListener('click', () => {
+    const dialog = link.closest('dialog');
+    if (dialog?.open) dialog.close();
+  });
+});
 
 // P3-1: Update all UI text when language changes
 function updateUILanguage() {

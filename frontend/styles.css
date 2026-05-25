@@ -93,7 +93,8 @@ summary {
 button:focus-visible,
 select:focus-visible,
 input:focus-visible,
-summary:focus-visible {
+summary:focus-visible,
+a:focus-visible {
   outline: 3px solid rgba(37, 99, 235, 0.28);
   outline-offset: 3px;
 }
@@ -199,6 +200,22 @@ h1 {
   justify-content: flex-end;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.header-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 2px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 800;
+  box-shadow: 3px 3px 0 rgba(17, 24, 39, 0.18);
+  text-decoration: none;
 }
 
 .language-toggle,
@@ -540,6 +557,107 @@ h1 {
   flex-wrap: wrap;
   gap: 10px;
   justify-content: flex-end;
+}
+
+.guide-panel {
+  display: grid;
+  gap: 18px;
+  margin: 28px 0;
+  padding: 22px;
+  border: 2px solid var(--ink);
+  border-radius: var(--radius-xl);
+  background: #f8fafc;
+  box-shadow: var(--shadow);
+}
+
+.guide-copy {
+  display: grid;
+  gap: 8px;
+  max-width: 760px;
+}
+
+.guide-copy h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(30px, 4vw, 48px);
+  line-height: 0.98;
+}
+
+.guide-copy p:last-child {
+  margin: 0;
+  color: var(--ink-soft);
+  font-weight: 750;
+}
+
+.guide-card-grid,
+.guide-info-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.guide-card,
+.guide-info-card {
+  padding: 16px;
+  border: 2px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: #fff;
+}
+
+.guide-card:nth-child(1) {
+  background: #fff7ed;
+}
+
+.guide-card:nth-child(2) {
+  background: #eff6ff;
+}
+
+.guide-card:nth-child(3) {
+  background: #f0fdf4;
+}
+
+.guide-step-code {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 42px;
+  min-height: 34px;
+  margin-bottom: 10px;
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  background: var(--yellow);
+  font-weight: 950;
+}
+
+.guide-card h3,
+.guide-info-card h3 {
+  margin: 0 0 8px;
+  font-family: var(--font-display);
+  font-size: 22px;
+}
+
+.guide-card p,
+.guide-info-card p,
+.guide-card li {
+  color: var(--ink-soft);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.guide-card ol {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0 0;
+  padding-left: 22px;
+}
+
+.guide-info-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.privacy-card {
+  background: #fef2f2;
 }
 
 .change-mode-btn {
@@ -1252,11 +1370,24 @@ h1 {
 }
 
 .footer {
+  display: grid;
+  gap: 10px;
   padding: 20px 0 8px;
   color: var(--muted);
   font-size: 13px;
   font-weight: 800;
   text-align: center;
+}
+
+.footer-links {
+  display: flex;
+  justify-content: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.footer-links a {
+  color: var(--ink);
 }
 
 .modal {
@@ -1387,6 +1518,8 @@ h1 {
 
   .mission-strip,
   .role-onboarding,
+  .guide-card-grid,
+  .guide-info-grid,
   .practice-stage,
   .info-grid,
   .feedback-panel {
