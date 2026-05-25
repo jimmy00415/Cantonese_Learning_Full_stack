@@ -5,7 +5,7 @@
       "id": "wrong-language-international",
       "type": "wrong_language",
       "input": "How do I greet an elderly person politely?",
-      "expected": "English explanation with optional Cantonese, Jyutping, and meaning."
+      "expected": "Main tutor response stays in natural Cantonese; English support is only available in Coach Notes or translation surfaces."
     },
     {
       "id": "over-formal-cantonese",

@@ -264,36 +264,17 @@ function normalizeUiLanguage(language) {
 
 function resolveLanguagePolicy({ userMode = 'international_student', uiLanguage = 'zh-TW', responseLanguage = 'auto' } = {}) {
   const normalizedUiLanguage = normalizeUiLanguage(uiLanguage);
-  const requestedLanguage = normalizeUiLanguage(responseLanguage);
   const explicitLanguage = responseLanguage && responseLanguage !== 'auto';
+  const requestedLanguage = explicitLanguage ? normalizeUiLanguage(responseLanguage) : 'auto';
 
-  if (explicitLanguage) {
-    return {
-      responseLanguage: requestedLanguage,
-      languagePolicyApplied: `explicit_${requestedLanguage}`,
-      needsConfirmation: false
-    };
-  }
-
-  if (userMode === 'international_student' || normalizedUiLanguage === 'en') {
-    return {
-      responseLanguage: 'en',
-      languagePolicyApplied: 'international_english_first',
-      needsConfirmation: false
-    };
-  }
-
-  if (userMode === 'mainland_learner') {
-    return {
-      responseLanguage: normalizedUiLanguage === 'zh-TW' ? 'zh-TW' : 'zh-CN',
-      languagePolicyApplied: 'mainland_chinese_explanation',
-      needsConfirmation: false
-    };
-  }
-
+  // Main tutor replies must stay in written Cantonese. English support belongs in Coach Notes/translation surfaces.
   return {
-    responseLanguage: normalizedUiLanguage,
-    languagePolicyApplied: 'ui_language_default',
+    responseLanguage: 'zh-TW',
+    languagePolicyApplied: explicitLanguage
+      ? `cantonese_tutor_overrode_${requestedLanguage}`
+      : userMode === 'international_student' || normalizedUiLanguage === 'en'
+        ? 'cantonese_tutor_with_english_coach_notes'
+        : 'cantonese_tutor_default',
     needsConfirmation: false
   };
 }
@@ -304,10 +285,6 @@ function getSystemPrompt(mode, scenario, culturalContext = null, languagePolicy 
   if (culturalContext && culturalContext.hasContent) {
     culturalNote = `\n\n## 文化背景（學生用咗以下元素）\n${culturalContext.summary}`;
   }
-  const englishCulturalNote = culturalContext && culturalContext.hasContent
-    ? `\n\n## Cultural context detected\n${culturalContext.summary}`
-    : '';
-
   if (mode === 'coachNotes') {
     return `You are a friendly Cantonese learning coach for international students living or studying in Hong Kong.
 
@@ -327,37 +304,17 @@ Next try: [one short action]
 ## Scenario: ${scenario || 'Hong Kong student life'}${culturalNote}`;
   }
 
-  if (languagePolicy.responseLanguage === 'en') {
-    return `You are Hong Kong Buddy, an English-first Cantonese helper for international students in HKBU activities.
-
-## Language contract:
-1. Reply in clear English first.
-2. Do not answer with Chinese-only text.
-3. Cantonese may appear only as useful examples, Traditional Chinese phrase targets, Jyutping, or short labels.
-4. If the learner asks what to do next, give step-by-step guidance.
-5. Keep the response practical for Hong Kong student life or community visits.
-6. If the input is unclear, ask one simple English clarification question.
-
-## Response shape:
-Start with one direct English answer.
-Then, if useful, add:
-- Cantonese: [short phrase]
-- Jyutping: [romanisation if known]
-- When to use it: [one short note]
-
-## Scenario: ${scenario || 'Hong Kong student life'}${englishCulturalNote}`;
-  }
-
   if (mode === 'teaching') {
     return `你係一個嚴謹但友善嘅廣東話老師。你嘅工作係幫學生改善廣東話。
 
 ## 指引：
-1. **必須糾正錯誤**：每當學生有發音、文法、用詞錯誤，一定要指出並解釋
-2. **提供正確示範**：講出正確嘅講法
-3. **語氣專業但鼓勵**：像老師咁教導，但要有耐心
-4. **使用繁體中文**書寫
-5. **保持簡潔**：糾正後繼續對話，回應1-3句
-6. **認識文化背景**：如果學生用咗俚語或潮語，解釋佢哋嘅適當用法
+1. **任何時候都要用廣東話回覆**：即使學生用英文、普通話或英文介面提問，主對話都必須用自然廣東話（繁體中文）回答；英文解釋只可以出現在 Coach Notes 或翻譯功能
+2. **必須糾正錯誤**：每當學生有發音、文法、用詞錯誤，一定要指出並解釋
+3. **提供正確示範**：講出正確嘅講法
+4. **語氣專業但鼓勵**：像老師咁教導，但要有耐心
+5. **使用繁體中文**書寫
+6. **保持簡潔**：糾正後繼續對話，回應1-3句
+7. **認識文化背景**：如果學生用咗俚語或潮語，解釋佢哋嘅適當用法
 
 ## 糾正格式：
 「[學生講嘅話]」→ 應該講「[正確講法]」
@@ -370,12 +327,13 @@ Then, if useful, add:
     return `你係一個好傾得嘅香港朋友，鍾意同人聊天。
 
 ## 指引：
-1. **唔好過份糾正**：除非聽唔明，否則唔使指出小錯誤
-2. **講地道廣東話**：用俗語、潮語，講嘢自然啲
-3. **保持輕鬆**：像朋友咁傾計，可以講笑
-4. **推動對話**：問問題，分享睇法
-5. **用繁體中文**書寫
-6. **回應長度保持 1-3 句**
+1. **任何時候都要用廣東話回覆**：即使學生用英文、普通話或英文介面提問，主對話都必須用自然廣東話（繁體中文）回答；英文解釋只可以出現在 Coach Notes 或翻譯功能
+2. **唔好過份糾正**：除非聽唔明，否則唔使指出小錯誤
+3. **講地道廣東話**：用俗語、潮語，講嘢自然啲
+4. **保持輕鬆**：像朋友咁傾計，可以講笑
+5. **推動對話**：問問題，分享睇法
+6. **用繁體中文**書寫
+7. **回應長度保持 1-3 句**
 
 ## 場景：${scenario || '自由傾計'}${culturalNote}`;
   }
@@ -559,13 +517,7 @@ async function generateAIResponse(userText, scenario, history, mode = 'freeChat'
   };
 }
 
-function mockAiReply(userText, scenario, languagePolicy = resolveLanguagePolicy()) {
-  if (languagePolicy.responseLanguage === 'en') {
-    const scenarioHint = scenario ? `Scenario: ${scenario}.` : 'Scenario: Hong Kong student life.';
-    const echo = userText ? `You asked: "${userText}"` : 'Tell me what you want to practise first.';
-    return `${echo}\n\n${scenarioHint}\n\nStart with one simple phrase and I will help you improve it. For an elderly visit, try: Cantonese: 「你好，好高興見到你。」 Jyutping: nei5 hou2, hou2 gou1 hing3 gin3 dou3 nei5. When to use it: a polite first greeting.`;
-  }
-
+function mockAiReply(userText, scenario) {
   const opener = politeOpeners[Math.floor(Math.random() * politeOpeners.length)];
   const seed = promptSeeds[Math.floor(Math.random() * promptSeeds.length)];
   const scenarioHint = scenario ? `（情景：${scenario}）` : '';
