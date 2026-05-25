@@ -140,43 +140,34 @@ const starterPhrases = {
 
 const scenarioGuideCopy = {
   en: {
-    nextStep: 'Next step',
-    guidedScenario: 'Guided scenario',
-    fallbackTitle: 'Try one useful line',
-    fallbackBody: 'Use a starter card, say or type one short Cantonese line, then ask for correction.',
+    promptTitle: 'Scenario prompts',
+    promptHint: 'Basic lines',
+    fallbackBody: 'Pick one short line for this situation.',
     meetingTitle: 'Meeting New Friends',
-    meetingBody: 'Use this when you want to introduce yourself, ask someone to slow down, or start a friendly campus conversation.',
-    phraseLabel: 'Try this first',
+    meetingBody: 'Useful for greetings, self-introduction, and asking someone to slow down.',
     phrase: '你好，我叫 Alex。可唔可以講慢少少？',
     jyutping: 'nei5 hou2, ngo5 giu3 Alex. ho2 m4 ho2 ji5 gong2 maan6 siu2 siu2?',
-    meaning: 'Hi, I am Alex. Could you speak a little slower?',
-    steps: ['Load the phrase', 'Try the phrase', 'Get feedback', 'Save or report']
+    meaning: 'Hi, I am Alex. Could you speak a little slower?'
   },
   'zh-TW': {
-    nextStep: '下一步',
-    guidedScenario: '情景指引',
-    fallbackTitle: '試一句有用短句',
-    fallbackBody: '先用開場句子卡，講或打一句短廣東話，再請 AI 糾正。',
+    promptTitle: '情景提示',
+    promptHint: '基本短句',
+    fallbackBody: '揀一句短句，直接用喺而家情景。',
     meetingTitle: '認識新朋友',
-    meetingBody: '適合自我介紹、請對方講慢啲，或者開始校園友善對話。',
-    phraseLabel: '先試呢句',
+    meetingBody: '適合打招呼、自我介紹、請對方講慢啲。',
     phrase: '你好，我叫 Alex。可唔可以講慢少少？',
     jyutping: 'nei5 hou2, ngo5 giu3 Alex. ho2 m4 ho2 ji5 gong2 maan6 siu2 siu2?',
-    meaning: '你好，我叫 Alex。可以講慢一點嗎？',
-    steps: ['載入短句', '試講呢句', '取得回饋', '儲存或回報']
+    meaning: '你好，我叫 Alex。可以講慢一點嗎？'
   },
   'zh-CN': {
-    nextStep: '下一步',
-    guidedScenario: '情景指引',
-    fallbackTitle: '试一句有用短句',
-    fallbackBody: '先用开场句子卡，说或打一短句粤语，再请 AI 纠正。',
+    promptTitle: '情景提示',
+    promptHint: '基本短句',
+    fallbackBody: '选一句短句，直接用于当前情景。',
     meetingTitle: '认识新朋友',
-    meetingBody: '适合自我介绍、请对方说慢一点，或者开始校园友善对话。',
-    phraseLabel: '先试这句',
+    meetingBody: '适合打招呼、自我介绍、请对方说慢一点。',
     phrase: '你好，我叫 Alex。可唔可以講慢少少？',
     jyutping: 'nei5 hou2, ngo5 giu3 Alex. ho2 m4 ho2 ji5 gong2 maan6 siu2 siu2?',
-    meaning: '你好，我叫 Alex。可以说慢一点吗？',
-    steps: ['载入短句', '试说这句', '取得反馈', '保存或回报']
+    meaning: '你好，我叫 Alex。可以说慢一点吗？'
   }
 };
 
@@ -377,29 +368,26 @@ function renderScenarioGuide(val) {
   if (!scenarioGuideEl || !scenarioGuideSteps) return;
   const copy = getScenarioGuideCopy();
   const hasMeetingGuide = isMeetingScenario(val);
-  const title = hasMeetingGuide ? copy.meetingTitle : copy.fallbackTitle;
   const body = hasMeetingGuide ? copy.meetingBody : copy.fallbackBody;
-  const phrase = hasMeetingGuide
-    ? copy.phrase
-    : (starterPhrases[scenarioKey(val)] || starterPhrases.default)[0];
+  const basePhrases = starterPhrases[scenarioKey(val)] || starterPhrases.default;
+  const phrases = [...new Set(hasMeetingGuide ? [copy.phrase, ...basePhrases] : basePhrases)].slice(0, 3);
 
-  scenarioGuideTitle.textContent = `${copy.nextStep}: ${title}`;
-  scenarioGuideHint.textContent = copy.guidedScenario;
+  scenarioGuideTitle.textContent = hasMeetingGuide ? copy.meetingTitle : copy.promptTitle;
+  scenarioGuideHint.textContent = copy.promptHint;
   scenarioGuideBody.textContent = body;
-  scenarioGuidePhrase.innerHTML = `
-    <strong>${copy.phraseLabel}</strong>
-    <span>${phrase}</span>
-    ${hasMeetingGuide ? `<small>${copy.jyutping}<br>${copy.meaning}</small>` : ''}
-  `;
+  scenarioGuidePhrase.innerHTML = '';
   scenarioGuideSteps.innerHTML = '';
 
-  copy.steps.forEach((label, index) => {
-    const step = document.createElement('button');
-    step.type = 'button';
-    step.className = index === 1 ? 'scenario-step primary' : 'scenario-step';
-    step.textContent = `${index + 1}. ${label}`;
-    step.addEventListener('click', () => handleScenarioStep(index, phrase));
-    scenarioGuideSteps.appendChild(step);
+  phrases.forEach((phrase) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'chip scenario-prompt';
+    button.textContent = phrase;
+    button.addEventListener('click', () => {
+      textInput.value = phrase;
+      textInput.focus();
+    });
+    scenarioGuidePhrase.appendChild(button);
   });
 }
 

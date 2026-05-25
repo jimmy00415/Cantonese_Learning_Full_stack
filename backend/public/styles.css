@@ -965,8 +965,21 @@ h1 {
   line-height: 1.45;
 }
 
+.basic-prompts .scenario-phrase {
+  gap: 8px;
+  padding: 0;
+  background: transparent;
+}
+
+.scenario-prompt {
+  min-height: 42px;
+  border: 1px solid rgba(17, 24, 39, 0.14);
+  border-radius: 18px;
+  box-shadow: none;
+}
+
 .scenario-steps {
-  display: grid;
+  display: none;
   gap: 8px;
 }
 
@@ -991,6 +1004,14 @@ h1 {
   border-radius: var(--radius-lg);
   background: #f0fdf4;
   box-shadow: var(--shadow-sm);
+}
+
+body:not([data-user-mode="visit_translation"]) .visit-translate-panel {
+  display: none;
+}
+
+body[data-user-mode="visit_translation"] .visit-translate-panel {
+  display: grid;
 }
 
 .visit-translate-panel label {
