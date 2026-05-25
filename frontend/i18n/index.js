@@ -71,7 +71,13 @@ export const locales = {
       },
       about: {
         title: '關於呢個 App',
-        body: 'Hong Kong Buddy 係 AI 廣東話練習助手，用於學生生活同受監督嘅 HKBU 活動支援。佢係學習同翻譯輔助工具，唔可以取代職員判斷。'
+        body: 'Hong Kong Buddy 由一個好真實嘅需要開始：好多同學想參與香港生活、探訪長者、認識本地朋友，但第一句廣東話往往最難開口。呢個 App 幫你用短句、即時回饋同英文 Coach Notes，將尷尬嘅第一步變成可以練習、可以理解、可以放心嘗試嘅交流。',
+        insightTitle: 'User insight',
+        insightBody: '同學唔係一開始就需要完美廣東話；佢哋需要一條安全、自然、有人情味嘅開場線。',
+        missionTitle: 'Mission',
+        missionBody: '幫國際生同新來港同學由「聽唔明、唔敢講」走向「敢打招呼、敢參與、慢慢融入香港」。',
+        safetyTitle: 'Human first',
+        safetyBody: 'AI 只係練習同翻譯輔助；探訪、文化理解同重要意思，仍然要同職員或本地義工確認。'
       },
       privacy: {
         title: '私隱同 AI 限制',
@@ -389,7 +395,13 @@ export const locales = {
       },
       about: {
         title: '关于这个 App',
-        body: 'Hong Kong Buddy 是 AI 粤语练习助手，用于学生生活和受监督的 HKBU 活动支援。它是学习和翻译辅助工具，不能取代工作人员判断。'
+        body: 'Hong Kong Buddy 来自一个真实需求：很多同学想参与香港生活、探访长者、认识本地朋友，但第一句广东话往往最难开口。这个 App 通过短句、即时反馈和英文 Coach Notes，把尴尬的第一步变成可以练习、可以理解、可以安心尝试的交流。',
+        insightTitle: 'User insight',
+        insightBody: '同学一开始不需要完美广东话；他们更需要一句安全、自然、有人情味的开场白。',
+        missionTitle: 'Mission',
+        missionBody: '帮助国际生和新来港同学从“听不懂、不敢说”走向“敢打招呼、敢参与、慢慢融入香港”。',
+        safetyTitle: 'Human first',
+        safetyBody: 'AI 只是练习和翻译辅助；探访、文化理解和重要意思，仍然要和工作人员或本地义工确认。'
       },
       privacy: {
         title: '隐私和 AI 限制',
@@ -707,7 +719,13 @@ export const locales = {
       },
       about: {
         title: 'About this app',
-        body: 'Hong Kong Buddy is an AI Cantonese practice assistant for student life and supervised HKBU activity support. It is a learning and translation aid, not a replacement for staff judgement.'
+        body: 'Hong Kong Buddy starts from a real student moment: you want to join Hong Kong life, visit elders, or make local friends, but the first Cantonese sentence feels hard. The app turns that first step into something you can practise, understand, and try with confidence through short phrases, real-time feedback, and English Coach Notes.',
+        insightTitle: 'User insight',
+        insightBody: 'Students do not need perfect Cantonese on day one; they need one safe, natural, human line to begin.',
+        missionTitle: 'Mission',
+        missionBody: 'Help international and newly arrived students move from “I do not understand” to “I can greet, join in, and slowly belong in Hong Kong.”',
+        safetyTitle: 'Human first',
+        safetyBody: 'AI supports practice and translation. For visits, culture, and important meaning, confirm with staff or local volunteers.'
       },
       privacy: {
         title: 'Privacy and AI limits',
