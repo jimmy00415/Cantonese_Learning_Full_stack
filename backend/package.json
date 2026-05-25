@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "eval:cantonese": "node scripts/evaluate-cantonese-quality.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
