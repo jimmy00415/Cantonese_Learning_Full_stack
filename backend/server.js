@@ -554,6 +554,136 @@ function mockAiReply(userText, scenario, languagePolicy = resolveLanguagePolicy(
   return `${opener} ${echo} ${scenarioHint} ${seed}`.trim();
 }
 
+const visitTranslationDirections = {
+  en_to_yue: {
+    label: 'English to Cantonese',
+    target: 'Cantonese',
+    includeRomanization: true
+  },
+  yue_to_en: {
+    label: 'Cantonese to English',
+    target: 'English',
+    includeRomanization: false
+  },
+  yue_to_zh: {
+    label: 'Cantonese to written Chinese',
+    target: 'written Chinese',
+    includeRomanization: false
+  },
+  zh_to_yue: {
+    label: 'Chinese to Cantonese',
+    target: 'Cantonese',
+    includeRomanization: true
+  }
+};
+
+function getConfiguredLlmProviders() {
+  const hasAzureOpenAI = azureOpenAIKey && azureOpenAIEndpoint;
+  const hasHKBU = hkbuApiKey;
+  const hasMiniMax = !!minimaxApiKey;
+
+  if (llmProvider === 'minimax' && hasMiniMax) {
+    return ['minimax', ...(hasAzureOpenAI ? ['azure-openai'] : []), ...(hasHKBU ? ['hkbu'] : [])];
+  }
+  if (llmProvider === 'azure-openai' && hasAzureOpenAI) {
+    return ['azure-openai', ...(hasMiniMax ? ['minimax'] : []), ...(hasHKBU ? ['hkbu'] : [])];
+  }
+  if (llmProvider === 'hkbu' && hasHKBU) {
+    return ['hkbu', ...(hasMiniMax ? ['minimax'] : []), ...(hasAzureOpenAI ? ['azure-openai'] : [])];
+  }
+  if (hasMiniMax) return ['minimax'];
+  if (hasAzureOpenAI) return ['azure-openai'];
+  if (hasHKBU) return ['hkbu'];
+  return [];
+}
+
+function mockVisitTranslation(sourceText, direction) {
+  const normalized = sourceText.toLowerCase();
+  const mockByDirection = {
+    en_to_yue: normalized.includes('water')
+      ? { translatedText: '你想唔想飲啲水？', romanization: 'nei5 soeng2 m4 soeng2 jam2 di1 seoi2?', displayText: '你想唔想飲啲水？' }
+      : { translatedText: '你好，好高興見到你。', romanization: 'nei5 hou2, hou2 gou1 hing3 gin3 dou3 nei5.', displayText: '你好，好高興見到你。' },
+    yue_to_en: sourceText.includes('水')
+      ? { translatedText: 'Would you like some water?', romanization: '', displayText: 'Would you like some water?' }
+      : { translatedText: 'Hello, nice to meet you.', romanization: '', displayText: 'Hello, nice to meet you.' },
+    yue_to_zh: sourceText.includes('水')
+      ? { translatedText: '你想喝点水吗？', romanization: '', displayText: '你想喝点水吗？' }
+      : { translatedText: '你好，很高兴见到你。', romanization: '', displayText: '你好，很高兴见到你。' },
+    zh_to_yue: sourceText.includes('水')
+      ? { translatedText: '你想唔想飲啲水？', romanization: 'nei5 soeng2 m4 soeng2 jam2 di1 seoi2?', displayText: '你想唔想飲啲水？' }
+      : { translatedText: '你好，好高興見到你。', romanization: 'nei5 hou2, hou2 gou1 hing3 gin3 dou3 nei5.', displayText: '你好，好高興見到你。' }
+  };
+
+  return {
+    sourceText,
+    ...(mockByDirection[direction] || mockByDirection.en_to_yue),
+    confidence: 0.55,
+    needsConfirmation: true,
+    provider: 'mock'
+  };
+}
+
+function parseVisitTranslation(rawText, sourceText, direction, provider) {
+  const cleaned = String(rawText || '').trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim();
+  try {
+    const parsed = JSON.parse(cleaned);
+    return {
+      sourceText,
+      translatedText: String(parsed.translatedText || parsed.displayText || '').trim(),
+      displayText: String(parsed.displayText || parsed.translatedText || '').trim(),
+      romanization: String(parsed.romanization || '').trim(),
+      confidence: Number.isFinite(Number(parsed.confidence)) ? Number(parsed.confidence) : 0.78,
+      needsConfirmation: Boolean(parsed.needsConfirmation),
+      provider
+    };
+  } catch {
+    return {
+      sourceText,
+      translatedText: cleaned,
+      displayText: cleaned,
+      romanization: '',
+      confidence: 0.72,
+      needsConfirmation: true,
+      provider
+    };
+  }
+}
+
+async function translateForVisit(sourceText, direction) {
+  const directionConfig = visitTranslationDirections[direction] || visitTranslationDirections.en_to_yue;
+  const providers = getConfiguredLlmProviders();
+  if (!providers.length) return mockVisitTranslation(sourceText, direction);
+
+  const messages = [
+    {
+      role: 'system',
+      content: `You translate for a supervised HKBU elderly visit. Direction: ${directionConfig.label}. Return ONLY JSON with keys translatedText, displayText, romanization, confidence, needsConfirmation. Keep wording polite, short, and safe. If meaning is uncertain, set needsConfirmation true. ${directionConfig.includeRomanization ? 'Include Jyutping romanization.' : 'Leave romanization empty.'}`
+    },
+    { role: 'user', content: sourceText }
+  ];
+
+  for (const provider of providers) {
+    try {
+      const raw = await callLLMProvider(provider, messages);
+      const result = parseVisitTranslation(raw, sourceText, direction, provider);
+      if (result.translatedText || result.displayText) return result;
+    } catch (err) {
+      console.error(`❌ ${provider} visit translation error:`, err.message);
+    }
+  }
+
+  return mockVisitTranslation(sourceText, direction);
+}
+
+async function synthesizeVisitTranslationAudio(text) {
+  if ((ttsProvider === 'azure' && azureTtsKey) || (ttsProvider === 'minimax' && minimaxApiKey)) {
+    return ttsProvider === 'minimax'
+      ? await synthesizeMiniMax(text, minimaxTtsVoice)
+      : await synthesizeAzure(text);
+  }
+  return generateMockTtsDataUri();
+}
+
 function generateMockTtsDataUri() {
   // Minimal valid WAV file (silent audio)
   return 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
@@ -1047,6 +1177,62 @@ app.post('/api/recognize-and-respond', async (req, res) => {
     responseLanguage: languagePolicy.responseLanguage,
     languagePolicyApplied: languagePolicy.languagePolicyApplied,
     needsConfirmation: languagePolicy.needsConfirmation
+  });
+});
+
+app.post('/api/visit-translate', async (req, res) => {
+  const {
+    sessionId,
+    sourceText = '',
+    direction = 'en_to_yue',
+    inputType = 'text',
+    userMode = 'visit_translation'
+  } = req.body || {};
+
+  const trimmedSourceText = String(sourceText || '').trim();
+  if (!trimmedSourceText) {
+    return res.status(400).json({ error: 'sourceText is required' });
+  }
+
+  if (!Object.prototype.hasOwnProperty.call(visitTranslationDirections, direction)) {
+    return res.status(400).json({ error: 'invalid direction', allowedDirections: Object.keys(visitTranslationDirections) });
+  }
+
+  const startedAt = Date.now();
+  const translation = await translateForVisit(trimmedSourceText, direction);
+  let ttsAudio = null;
+  let ttsError = null;
+
+  try {
+    ttsAudio = await synthesizeVisitTranslationAudio(translation.displayText || translation.translatedText);
+  } catch (err) {
+    ttsError = err.message;
+    ttsAudio = generateMockTtsDataUri();
+  }
+
+  if (sessionId && conversations.has(sessionId)) {
+    const session = conversations.get(sessionId);
+    session.userMode = userMode;
+    session.history.push({ role: 'user', text: trimmedSourceText, timestamp: Date.now(), mode: 'visit_translation', inputType, direction });
+    session.history.push({ role: 'ai', text: translation.displayText || translation.translatedText, timestamp: Date.now(), mode: 'visit_translation', direction });
+    if (session.history.length > 20) session.history = session.history.slice(-20);
+    conversations.set(sessionId, session);
+  }
+
+  res.json({
+    sourceText: trimmedSourceText,
+    translatedText: translation.translatedText,
+    displayText: translation.displayText || translation.translatedText,
+    romanization: translation.romanization,
+    confidence: translation.confidence,
+    needsConfirmation: translation.needsConfirmation || translation.provider === 'mock' || Number(translation.confidence || 0) < 0.7,
+    ttsAudio,
+    provider: translation.provider,
+    direction,
+    inputType,
+    latencyMs: Date.now() - startedAt,
+    ttsProvider: ttsAudio && !ttsError ? ttsProvider : 'mock',
+    ttsError
   });
 });
 

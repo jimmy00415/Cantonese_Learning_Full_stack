@@ -56,6 +56,10 @@ const visitPhraseList = document.getElementById('visitPhraseList');
 const visitLargeText = document.getElementById('visitLargeText');
 const startVisitTranslationFromPlaybook = document.getElementById('startVisitTranslationFromPlaybook');
 const clearVisitPhrase = document.getElementById('clearVisitPhrase');
+const visitDirection = document.getElementById('visitDirection');
+const visitTranslateBtn = document.getElementById('visitTranslateBtn');
+const visitTranslationOutput = document.getElementById('visitTranslationOutput');
+const visitTranslationWarning = document.getElementById('visitTranslationWarning');
 
 // P1: Mode toggle elements
 const modeFreeTalkBtn = document.getElementById('modeFreeTalk');
@@ -465,6 +469,90 @@ function resetVisitPhrase() {
   }
 }
 
+function resetVisitTranslationOutput() {
+  if (!visitTranslationOutput) return;
+  visitTranslationOutput.innerHTML = `
+    <strong>${t('visitTranslate.outputTitle')}</strong>
+    <span>${t('visitTranslate.outputEmpty')}</span>
+  `;
+  if (visitTranslationWarning) {
+    visitTranslationWarning.hidden = true;
+    visitTranslationWarning.textContent = '';
+  }
+}
+
+function renderVisitTranslation(res) {
+  if (!visitTranslationOutput) return;
+  visitTranslationOutput.innerHTML = `
+    <strong>${res.displayText || res.translatedText}</strong>
+    ${res.romanization ? `<span>${res.romanization}</span>` : ''}
+    <small>${t('visitTranslate.sourceLabel')}: ${res.sourceText}</small>
+  `;
+
+  if (visitLargeText) {
+    visitLargeText.innerHTML = `
+      <strong>${res.displayText || res.translatedText}</strong>
+      ${res.romanization ? `<span>${res.romanization}</span>` : ''}
+      <small>${res.sourceText}</small>
+    `;
+  }
+
+  const needsConfirmation = res.needsConfirmation || res.provider === 'mock' || Number(res.confidence || 0) < 0.7;
+  if (visitTranslationWarning) {
+    visitTranslationWarning.hidden = !needsConfirmation;
+    visitTranslationWarning.textContent = needsConfirmation
+      ? t('visitTranslate.confirmationWarning')
+      : '';
+  }
+}
+
+async function translateVisitText(text, inputType = 'text') {
+  const sourceText = String(text || '').trim();
+  if (!sourceText) {
+    setNotice(t('visitTranslate.notices.emptyInput'), 'info');
+    return;
+  }
+
+  if (!sessionId) await startSession();
+  selectUserMode('visit_translation', { fromStorage: true });
+  setSystemState(STATES.PROCESSING);
+  sendBtn.disabled = true;
+  holdBtn.disabled = true;
+  visitTranslateBtn.disabled = true;
+  setStatus(t('visitTranslate.notices.translating'));
+
+  try {
+    renderMessage({ role: 'user', text: sourceText, timestamp: Date.now() });
+    const res = await fetchJSON('/visit-translate', {
+      method: 'POST',
+      body: JSON.stringify({
+        sessionId,
+        sourceText,
+        direction: visitDirection?.value || 'en_to_yue',
+        inputType,
+        userMode: 'visit_translation'
+      })
+    });
+
+    renderVisitTranslation(res);
+    renderMessage({ role: 'ai', text: res.displayText || res.translatedText, ttsAudio: res.ttsAudio, timestamp: Date.now() });
+    textInput.value = '';
+    setNotice(res.needsConfirmation ? t('visitTranslate.notices.confirmWithStaff') : t('visitTranslate.notices.done'), res.needsConfirmation ? 'warning' : 'success');
+    if (res.ttsAudio) await playAudio(res.ttsAudio, getPlaybackRate());
+  } catch (err) {
+    console.error(err);
+    setNotice(t('visitTranslate.notices.failed'), 'error');
+    setSystemState(STATES.ERROR);
+    setTimeout(() => setSystemState(STATES.IDLE), 2000);
+  } finally {
+    sendBtn.disabled = false;
+    holdBtn.disabled = false;
+    visitTranslateBtn.disabled = false;
+    setStatus(sessionId ? `對話進行中：${sessionId.slice(0, 8)}` : t('states.idle'));
+    if (systemStateEl?.classList.contains('state-processing')) setSystemState(STATES.IDLE);
+  }
+}
+
 function renderEmptyState() {
   if (!transcriptEl) return;
   transcriptEl.innerHTML = '';
@@ -823,7 +911,11 @@ async function processAudioRecording(audioBlob) {
       setNotice(`Azure Speech 已識別：${res.language || currentAsrLanguage}`, 'success');
     }
 
-    await sendUtterance(res.transcript);
+    if (currentUserMode === 'visit_translation') {
+      await translateVisitText(res.transcript, 'speech');
+    } else {
+      await sendUtterance(res.transcript);
+    }
   } catch (err) {
     console.error('ASR error:', err);
     setNotice('語音辨識失敗：' + (err.message || '請重試或使用打字'), 'error');
@@ -1117,9 +1209,11 @@ async function startSession() {
   renderEmptyState();
 
   // P1: Mode-specific greeting
-  const greeting = currentMode === 'teaching'
-    ? '你好！我係你嘅廣東話老師。今日我會幫你糾正發音同文法，有咩想練習？'
-    : '你好！我係你嘅廣東話導師，講句嘢嚟聽下？';
+  const greeting = currentUserMode === 'visit_translation'
+    ? t('visitTranslate.greeting')
+    : currentMode === 'teaching'
+      ? '你好！我係你嘅廣東話老師。今日我會幫你糾正發音同文法，有咩想練習？'
+      : '你好！我係你嘅廣東話導師，講句嘢嚟聽下？';
   renderMessage({ role: 'ai', text: greeting, timestamp: Date.now() });
 
   setStatus(`已建立對話：${sessionId.slice(0, 8)}`);
@@ -1128,7 +1222,13 @@ async function startSession() {
 }
 
 async function sendUtterance(text) {
-  if (!text || !sessionId) return;
+  if (!text) return;
+  if (!sessionId) await startSession();
+
+  if (currentUserMode === 'visit_translation') {
+    await translateVisitText(text, 'text');
+    return;
+  }
 
   // P2: Track last user utterance for "Correct Me" feature
   lastUserUtterance = text;
@@ -1565,7 +1665,11 @@ function handleRecordStop() {
           }
 
           setNotice(`Azure Speech 已識別：${currentAsrLanguage}`, 'success');
-          await sendUtterance(transcript);
+          if (currentUserMode === 'visit_translation') {
+            await translateVisitText(transcript, 'speech');
+          } else {
+            await sendUtterance(transcript);
+          }
         })().catch((err) => {
           console.error('Azure Speech finalize error:', err);
           holdBtn.textContent = '按住說話';
@@ -1944,6 +2048,7 @@ startVisitTranslationFromPlaybook?.addEventListener('click', () => {
 });
 
 clearVisitPhrase?.addEventListener('click', resetVisitPhrase);
+visitTranslateBtn?.addEventListener('click', () => translateVisitText(textInput.value, 'text'));
 
 // P3-1: Update all UI text when language changes
 function updateUILanguage() {
@@ -2005,6 +2110,7 @@ function updateUILanguage() {
   renderRoleContext();
   renderScenarioGuide(scenarioSelect.value);
   renderElderlyVisitPlaybook();
+  resetVisitTranslationOutput();
 
   // Update badges
   const badges = document.querySelectorAll('.badges .pill');

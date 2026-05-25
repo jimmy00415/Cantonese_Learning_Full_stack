@@ -111,6 +111,31 @@ export const locales = {
       }
     },
 
+    visitTranslate: {
+      title: '探訪翻譯',
+      hint: '大字輔助',
+      directionLabel: '翻譯方向',
+      translateButton: '翻譯目前文字',
+      outputTitle: '翻譯結果',
+      outputEmpty: '喺下面輸入一句，然後按翻譯。',
+      sourceLabel: '原文',
+      greeting: '探訪翻譯已準備好。輸入或講一句短句，然後按翻譯。',
+      confirmationWarning: 'AI 可能唔準，重要意思請同真人義工或職員確認。',
+      directions: {
+        en_to_yue: '英文 → 廣東話',
+        yue_to_en: '廣東話 → 英文',
+        yue_to_zh: '廣東話 → 中文',
+        zh_to_yue: '中文 → 廣東話'
+      },
+      notices: {
+        emptyInput: '請先輸入要翻譯嘅句子。',
+        translating: '翻譯中...',
+        done: '翻譯完成。',
+        failed: '翻譯失敗，請重試或改用短句。',
+        confirmWithStaff: '翻譯已完成；請同職員確認重要意思。'
+      }
+    },
+
     onboarding: {
       changeMode: '轉換模式',
       eyebrow: '由呢度開始',
@@ -373,6 +398,31 @@ export const locales = {
       }
     },
 
+    visitTranslate: {
+      title: '探访翻译',
+      hint: '大字辅助',
+      directionLabel: '翻译方向',
+      translateButton: '翻译当前文字',
+      outputTitle: '翻译结果',
+      outputEmpty: '在下面输入一句，然后按翻译。',
+      sourceLabel: '原文',
+      greeting: '探访翻译已准备好。输入或说一句短句，然后按翻译。',
+      confirmationWarning: 'AI 可能不准确，重要意思请和真人义工或工作人员确认。',
+      directions: {
+        en_to_yue: '英文 → 粤语',
+        yue_to_en: '粤语 → 英文',
+        yue_to_zh: '粤语 → 中文',
+        zh_to_yue: '中文 → 粤语'
+      },
+      notices: {
+        emptyInput: '请先输入要翻译的句子。',
+        translating: '翻译中...',
+        done: '翻译完成。',
+        failed: '翻译失败，请重试或改用短句。',
+        confirmWithStaff: '翻译已完成；请和工作人员确认重要意思。'
+      }
+    },
+
     onboarding: {
       changeMode: '切换模式',
       eyebrow: '从这里开始',
@@ -632,6 +682,31 @@ export const locales = {
       },
       notices: {
         phraseLoaded: 'Visit phrase loaded. You can send it for practice or show it to the resident.'
+      }
+    },
+
+    visitTranslate: {
+      title: 'Visit translation',
+      hint: 'Large-text helper',
+      directionLabel: 'Direction',
+      translateButton: 'Translate current text',
+      outputTitle: 'Translated text',
+      outputEmpty: 'Type a sentence below, then translate.',
+      sourceLabel: 'Source',
+      greeting: 'Visit translation is ready. Type or speak one short sentence, then translate.',
+      confirmationWarning: 'AI may be inaccurate. Confirm important meaning with a volunteer or staff member.',
+      directions: {
+        en_to_yue: 'English → Cantonese',
+        yue_to_en: 'Cantonese → English',
+        yue_to_zh: 'Cantonese → Chinese',
+        zh_to_yue: 'Chinese → Cantonese'
+      },
+      notices: {
+        emptyInput: 'Type a sentence to translate first.',
+        translating: 'Translating...',
+        done: 'Translation ready.',
+        failed: 'Translation failed. Try again with a shorter sentence.',
+        confirmWithStaff: 'Translation ready; confirm important meaning with staff.'
       }
     },
 

@@ -243,6 +243,26 @@
           <button id="newSession" data-i18n="controls.newSession">開始任務</button>
         </section>
 
+        <section class="visit-translate-panel" id="visitTranslatePanel" aria-labelledby="visitTranslateTitle">
+          <div class="starter-header">
+            <span id="visitTranslateTitle" data-i18n="visitTranslate.title">Visit translation</span>
+            <small data-i18n="visitTranslate.hint">Large-text helper</small>
+          </div>
+          <label for="visitDirection" data-i18n="visitTranslate.directionLabel">Direction</label>
+          <select id="visitDirection">
+            <option value="en_to_yue" data-i18n="visitTranslate.directions.en_to_yue">English → Cantonese</option>
+            <option value="yue_to_en" data-i18n="visitTranslate.directions.yue_to_en">Cantonese → English</option>
+            <option value="yue_to_zh" data-i18n="visitTranslate.directions.yue_to_zh">Cantonese → Chinese</option>
+            <option value="zh_to_yue" data-i18n="visitTranslate.directions.zh_to_yue">Chinese → Cantonese</option>
+          </select>
+          <button type="button" id="visitTranslateBtn" data-i18n="visitTranslate.translateButton">Translate current text</button>
+          <div class="visit-translation-output" id="visitTranslationOutput" aria-live="polite">
+            <strong data-i18n="visitTranslate.outputTitle">Translated text</strong>
+            <span data-i18n="visitTranslate.outputEmpty">Type a sentence below, then translate.</span>
+          </div>
+          <div class="visit-translation-warning" id="visitTranslationWarning" hidden></div>
+        </section>
+
         <section class="scenario-guide" id="scenarioGuide" aria-labelledby="scenarioGuideTitle">
           <div class="starter-header">
             <span id="scenarioGuideTitle">Next step</span>

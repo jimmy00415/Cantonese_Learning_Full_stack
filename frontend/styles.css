@@ -984,6 +984,60 @@ h1 {
   background: var(--yellow);
 }
 
+.visit-translate-panel {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 2px solid var(--ink);
+  border-radius: var(--radius-lg);
+  background: #f0fdf4;
+  box-shadow: var(--shadow-sm);
+}
+
+.visit-translate-panel label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.visit-translation-output {
+  display: grid;
+  gap: 8px;
+  min-height: 120px;
+  padding: 14px;
+  border: 2px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+}
+
+.visit-translation-output strong {
+  color: var(--ink);
+  font-size: clamp(22px, 4vw, 34px);
+  line-height: 1.1;
+}
+
+.visit-translation-output span {
+  color: var(--ink-soft);
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.visit-translation-output small,
+.visit-translation-warning {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.4;
+}
+
+.visit-translation-warning {
+  padding: 10px;
+  border: 2px solid #f97316;
+  border-radius: var(--radius);
+  background: #fff7ed;
+  color: var(--ink-soft);
+}
+
 .starter {
   display: grid;
   gap: 12px;
