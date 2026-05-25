@@ -686,19 +686,64 @@ function mockConversationTranslation(turns) {
   };
 }
 
+function cleanJsonText(rawText) {
+  return String(rawText || '').trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim();
+}
+
+function parseJsonObject(rawText) {
+  const cleaned = cleanJsonText(rawText);
+  const candidates = [cleaned];
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    candidates.push(cleaned.slice(firstBrace, lastBrace + 1));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // Try the next candidate; some providers wrap JSON in prose or a string field.
+    }
+  }
+  return null;
+}
+
+function unwrapEnglishTranslation(value, index = 0) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+
+  const nested = parseJsonObject(text);
+  if (nested) {
+    const nestedTurns = Array.isArray(nested.turns) ? nested.turns : [];
+    const nestedTurn = nestedTurns[index] || nestedTurns[0] || {};
+    const nestedText = nestedTurn.englishText
+      || nestedTurn.translation
+      || nestedTurn.text
+      || nested.englishText
+      || nested.translation
+      || nested.summary;
+    if (nestedText) return String(nestedText).trim();
+  }
+
+  return text;
+}
+
 function parseConversationTranslation(rawText, turns, provider) {
-  const cleaned = String(rawText || '').trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim();
+  const cleaned = cleanJsonText(rawText);
   try {
-    const parsed = JSON.parse(cleaned);
+    const parsed = parseJsonObject(cleaned);
+    if (!parsed) throw new Error('No JSON object found');
     const translatedTurns = Array.isArray(parsed.turns) ? parsed.turns : [];
     return {
-      summary: String(parsed.summary || '').trim(),
+      summary: unwrapEnglishTranslation(parsed.summary || ''),
       turns: turns.map((sourceTurn, index) => {
         const translated = translatedTurns[index] || {};
+        const candidate = translated.englishText || translated.translation || translated.text || sourceTurn.text;
         return {
           role: sourceTurn.role,
           originalText: sourceTurn.text,
-          englishText: String(translated.englishText || translated.translation || translated.text || sourceTurn.text).trim()
+          englishText: unwrapEnglishTranslation(candidate, index)
         };
       }),
       provider,
