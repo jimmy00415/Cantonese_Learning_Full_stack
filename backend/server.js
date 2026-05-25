@@ -574,6 +574,22 @@ async function generateAIResponse(userText, scenario, history, mode = 'freeChat'
 }
 
 function mockAiReply(userText, scenario) {
+  const combined = `${userText || ''} ${scenario || ''}`.toLowerCase();
+  if (/elder|old|長者|老人|count|數|help|幫/.test(combined)) {
+    return `我明你想問點樣同長者互動、做計數活動，同埋點樣幫到佢哋。你可以咁做：
+
+1. 先用簡單問候開始，例如：「你好，我可唔可以同你玩個小遊戲？」
+2. 計數活動要慢慢嚟，可以用實物，例如卡、豆袋或者圖片，一齊由一數到十。
+3. 唔好急住糾正，長者答啱少少都可以先讚：「好叻呀，我哋再試多次。」
+4. 如果佢哋唔明，就用短句重複一次，或者請職員幫手確認。
+
+你可以先練一句：「我哋一齊慢慢數，好唔好呀？」`;
+  }
+
+  if (/club|societ|friend|朋友|社團|學會/.test(combined)) {
+    return `我明你想問點樣加入社團同識新朋友。你可以先揀一個自己有興趣嘅學會，然後用一句簡單廣東話開場：「你好，我第一次嚟，可以一齊參加嗎？」之後多啲出席活動，慢慢就會熟絡。`;
+  }
+
   const opener = politeOpeners[Math.floor(Math.random() * politeOpeners.length)];
   const seed = promptSeeds[Math.floor(Math.random() * promptSeeds.length)];
   const scenarioHint = scenario && !/[A-Za-z]{3,}/.test(String(scenario)) ? `（情景：${scenario}）` : '';
