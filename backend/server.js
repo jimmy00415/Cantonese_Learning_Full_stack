@@ -434,6 +434,58 @@ async function callLLMProvider(provider, messages) {
   return aiResponse.trim();
 }
 
+function isCantoneseTutorReply(text) {
+  const value = String(text || '').trim();
+  if (!value) return false;
+
+  const cjkCount = (value.match(/[\u3400-\u9fff]/g) || []).length;
+  const latinWords = (value.match(/[A-Za-z]{3,}/g) || [])
+    .filter(word => !/^(HKBU|App|AI)$/i.test(word));
+  const englishLead = /^(the student|great question|first,|let me|you asked|here'?s|to help|in this)/i.test(value);
+
+  return cjkCount >= 12 && !englishLead && latinWords.length === 0;
+}
+
+async function enforceCantoneseTutorReply(text, provider, userText, scenario, mode) {
+  if (mode === 'coachNotes' || isCantoneseTutorReply(text)) {
+    return { text, rewritten: false };
+  }
+
+  console.warn('⚠️ Tutor reply was not Cantonese-dominant; rewriting to Cantonese.');
+  const rewriteMessages = [
+    {
+      role: 'system',
+      content: `你係 Hong Kong Buddy 嘅語言守門員。將導師回覆完整改寫成自然、口語、繁體中文廣東話。
+
+硬性規則：
+1. 只可以輸出改寫後嘅廣東話回覆，唔好解釋。
+2. 唔好用英文句子；除咗 HKBU、App 呢類必要專名，其他英文要改成廣東話，例如 club 要寫做「社團」或「學會」。
+3. 保留原本意思：如果原文係糾正、建議或活動指引，都要用廣東話講返。
+4. 保持簡潔清楚，適合國際生跟住做。`
+    },
+    {
+      role: 'user',
+      content: JSON.stringify({
+        learnerText: userText,
+        scenario,
+        mode,
+        tutorReplyToRewrite: text
+      })
+    }
+  ];
+
+  try {
+    const rewritten = await callLLMProvider(provider, rewriteMessages);
+    return {
+      text: isCantoneseTutorReply(rewritten) ? rewritten : mockAiReply(userText, scenario),
+      rewritten: true
+    };
+  } catch (err) {
+    console.error(`❌ ${provider} Cantonese rewrite error:`, err.message);
+    return { text: mockAiReply(userText, scenario), rewritten: true };
+  }
+}
+
 async function generateAIResponse(userText, scenario, history, mode = 'freeChat', culturalContext = null, languagePolicy = resolveLanguagePolicy()) {
   console.log('🤖 generateAIResponse called with:', { userText: userText.substring(0, 20), scenario, mode, provider: llmProvider, responseLanguage: languagePolicy.responseLanguage, hasCulturalContext: !!culturalContext });
 
@@ -490,12 +542,16 @@ async function generateAIResponse(userText, scenario, history, mode = 'freeChat'
   // Try each provider in order, fall back on failure
   for (const provider of providers) {
     try {
+      const rawText = await callLLMProvider(provider, messages);
+      const enforced = await enforceCantoneseTutorReply(rawText, provider, userText, scenario, mode);
       return {
-        text: await callLLMProvider(provider, messages),
+        text: enforced.text,
         aiProvider: provider,
         aiFallback: provider !== providers[0],
-        confidence: provider === providers[0] ? 0.84 : 0.74,
-        uncertaintyReason: provider === providers[0] ? null : 'fallback_provider_used'
+        confidence: enforced.rewritten ? 0.78 : provider === providers[0] ? 0.84 : 0.74,
+        uncertaintyReason: enforced.rewritten
+          ? 'rewritten_to_cantonese'
+          : provider === providers[0] ? null : 'fallback_provider_used'
       };
     } catch (err) {
       console.error(`❌ ${provider} error:`, err.message);
@@ -520,8 +576,13 @@ async function generateAIResponse(userText, scenario, history, mode = 'freeChat'
 function mockAiReply(userText, scenario) {
   const opener = politeOpeners[Math.floor(Math.random() * politeOpeners.length)];
   const seed = promptSeeds[Math.floor(Math.random() * promptSeeds.length)];
-  const scenarioHint = scenario ? `（情景：${scenario}）` : '';
-  const echo = userText ? `你啱啱講：「${userText}」` : '你可以先講講你想練習嘅內容。';
+  const scenarioHint = scenario && !/[A-Za-z]{3,}/.test(String(scenario)) ? `（情景：${scenario}）` : '';
+  const hasEnglishInput = /[A-Za-z]{3,}/.test(String(userText || ''));
+  const echo = userText
+    ? hasEnglishInput
+      ? '我明你想問點樣用廣東話表達同長者互動、幫手或者參加活動。'
+      : `你啱啱講：「${userText}」`
+    : '你可以先講講你想練習嘅內容。';
   return `${opener} ${echo} ${scenarioHint} ${seed}`.trim();
 }
 
@@ -691,7 +752,8 @@ function cleanJsonText(rawText) {
   return String(rawText || '').trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim();
 }
 
-function parseJsonObject(rawText) {
+function parseJsonObject(rawText, depth = 0) {
+  if (depth > 4) return null;
   const cleaned = cleanJsonText(rawText);
   const candidates = [cleaned];
   const firstBrace = cleaned.indexOf('{');
@@ -702,7 +764,9 @@ function parseJsonObject(rawText) {
 
   for (const candidate of candidates) {
     try {
-      return JSON.parse(candidate);
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+      if (typeof parsed === 'string') return parseJsonObject(parsed, depth + 1);
     } catch {
       // Try the next candidate; some providers wrap JSON in prose or a string field.
     }
@@ -710,9 +774,10 @@ function parseJsonObject(rawText) {
   return null;
 }
 
-function unwrapEnglishTranslation(value, index = 0) {
+function unwrapEnglishTranslation(value, index = 0, depth = 0) {
   const text = String(value || '').trim();
   if (!text) return '';
+  if (depth > 4) return text;
 
   const nested = parseJsonObject(text);
   if (nested) {
@@ -724,7 +789,7 @@ function unwrapEnglishTranslation(value, index = 0) {
       || nested.englishText
       || nested.translation
       || nested.summary;
-    if (nestedText) return String(nestedText).trim();
+    if (nestedText) return unwrapEnglishTranslation(nestedText, index, depth + 1);
   }
 
   return text;
@@ -752,9 +817,10 @@ function parseConversationTranslation(rawText, turns, provider) {
       needsConfirmation: Boolean(parsed.needsConfirmation)
     };
   } catch {
+    const fallbackText = unwrapEnglishTranslation(cleaned, 0);
     return {
       summary: 'English translation generated from the current conversation.',
-      turns: [{ role: 'tutor', originalText: turns.map((turn) => `${turn.role}: ${turn.text}`).join('\n'), englishText: cleaned }],
+      turns: [{ role: 'tutor', originalText: turns.map((turn) => `${turn.role}: ${turn.text}`).join('\n'), englishText: fallbackText }],
       provider,
       confidence: 0.72,
       needsConfirmation: true
