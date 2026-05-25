@@ -36,6 +36,11 @@ const stateLabelEl = document.getElementById('stateLabel');
 const feedbackImmediateEl = document.getElementById('feedbackImmediate');
 const topCorrectionsEl = document.getElementById('topCorrections');
 const feedbackDetailsEl = document.getElementById('feedbackDetails');
+const openCoachDetailBtn = document.getElementById('openCoachDetailBtn');
+const coachTranslationDialog = document.getElementById('coachTranslationDialog');
+const coachTranslationBody = document.getElementById('coachTranslationBody');
+const coachDetailDialog = document.getElementById('coachDetailDialog');
+const coachDetailBody = document.getElementById('coachDetailBody');
 const micPermissionDialog = document.getElementById('micPermissionDialog');
 const micBlockedDialog = document.getElementById('micBlockedDialog');
 const roleOnboardingEl = document.getElementById('roleOnboarding');
@@ -107,6 +112,7 @@ let currentTtsProvider = 'mock';
 let currentTtsVoice = localStorage.getItem('ttsVoice') || 'Cantonese_GentleLady';
 let availableTtsVoices = [];
 let voiceSelectionEnabled = false;
+let latestCoachNotes = [];
 
 // System states: idle, listening, processing, speaking, error
 const STATES = {
@@ -736,6 +742,7 @@ function renderMessage({ role, text, ttsAudio, timestamp, corrections }) {
   }
 
   const body = document.createElement('div');
+  body.className = 'message-body';
   body.innerText = text || '';
 
   div.appendChild(meta);
@@ -1036,66 +1043,186 @@ function buildEnglishCoachNotes(userText, aiText, mode) {
 function renderImmediateFeedback(corrections) {
   if (!topCorrectionsEl) return;
 
+  latestCoachNotes = corrections || [];
   topCorrectionsEl.innerHTML = '';
   const topThree = corrections.slice(0, 3);
 
   if (topThree.length === 0) {
-    topCorrectionsEl.innerHTML = '<p class="feedback-empty">Nice start. Keep going with one short, real-life sentence.</p>';
+    topCorrectionsEl.innerHTML = `
+      <div class="coach-summary-card">
+        <p class="feedback-empty">${t('feedback.empty')}</p>
+        <button type="button" id="openTranslationEmpty" class="coach-action-primary">${t('feedback.viewTranslation')}</button>
+      </div>
+    `;
+    topCorrectionsEl.querySelector('#openTranslationEmpty')?.addEventListener('click', openConversationTranslation);
     return;
   }
 
-  topThree.forEach((corr, idx) => {
-    const item = document.createElement('div');
-    item.className = 'correction-item';
+  const firstNote = topThree[0];
+  const item = document.createElement('div');
+  item.className = 'coach-summary-card';
+  item.innerHTML = `
+    <p class="coach-summary-kicker">${t('feedback.latestLine')}</p>
+    <p class="coach-summary-text">${firstNote.suggested}</p>
+    <div class="coach-actions">
+      <button type="button" class="coach-action-primary" data-action="translation">${t('feedback.viewTranslation')}</button>
+      <button type="button" class="ghost" data-action="details">${t('feedback.openDetails')}</button>
+    </div>
+  `;
 
-    const original = document.createElement('div');
-    original.className = 'original';
-    original.textContent = `Your line: ${corr.original}`;
+  item.querySelector('[data-action="translation"]')?.addEventListener('click', openConversationTranslation);
+  item.querySelector('[data-action="details"]')?.addEventListener('click', openCoachDetails);
+  topCorrectionsEl.appendChild(item);
+}
 
-    const suggested = document.createElement('div');
-    suggested.className = 'suggested';
-    suggested.textContent = `Coach note: ${corr.suggested}`;
+function getVisibleConversationTurns() {
+  return Array.from(transcriptEl?.querySelectorAll('.message') || [])
+    .map((message) => {
+      const role = message.classList.contains('user') ? 'learner' : 'tutor';
+      const text = message.dataset.text || message.querySelector('.message-body')?.textContent || '';
+      return { role, text: text.trim() };
+    })
+    .filter((turn) => turn.text);
+}
 
-    const reason = document.createElement('div');
-    reason.className = 'reason';
-    reason.textContent = corr.reason;
+function showDialog(dialog) {
+  if (!dialog) return;
+  if (dialog.open) return;
+  if (typeof dialog.showModal === 'function') {
+    dialog.showModal();
+  } else {
+    dialog.setAttribute('open', '');
+  }
+}
 
-    const actions = document.createElement('div');
-    actions.className = 'correction-actions';
+function renderTranslationLoading() {
+  if (!coachTranslationBody) return;
+  coachTranslationBody.innerHTML = `
+    <div class="coach-loading">
+      <span class="coach-loading-dot" aria-hidden="true"></span>
+      <p>${t('feedback.translationLoading')}</p>
+    </div>
+  `;
+}
 
-    const hearBtn = document.createElement('button');
-    hearBtn.textContent = 'Hear Model Audio';
-    hearBtn.className = 'ghost';
-    hearBtn.addEventListener('click', () => {
-      // Placeholder: would synthesize correct audio
-      setNotice('Model audio preview is coming soon.', 'info');
+function renderConversationTranslation(result) {
+  if (!coachTranslationBody) return;
+  coachTranslationBody.innerHTML = '';
+
+  const summary = document.createElement('p');
+  summary.className = 'coach-translation-summary';
+  summary.textContent = result.summary || t('feedback.translationSummaryFallback');
+  coachTranslationBody.appendChild(summary);
+
+  const list = document.createElement('div');
+  list.className = 'coach-translation-list';
+  (result.turns || []).forEach((turn) => {
+    const card = document.createElement('article');
+    card.className = 'coach-translation-turn';
+
+    const role = document.createElement('span');
+    role.className = 'coach-turn-role';
+    role.textContent = turn.role === 'learner' ? t('feedback.learnerRole') : t('feedback.tutorRole');
+
+    const english = document.createElement('p');
+    english.className = 'coach-turn-english';
+    english.textContent = turn.englishText || turn.text || '';
+
+    const original = document.createElement('p');
+    original.className = 'coach-turn-original';
+    original.textContent = turn.originalText || turn.text || '';
+
+    card.appendChild(role);
+    card.appendChild(english);
+    card.appendChild(original);
+    list.appendChild(card);
+  });
+  coachTranslationBody.appendChild(list);
+
+  if (result.provider === 'mock' || result.needsConfirmation) {
+    const warning = document.createElement('p');
+    warning.className = 'coach-modal-warning';
+    warning.textContent = t('feedback.translationWarning');
+    coachTranslationBody.appendChild(warning);
+  }
+}
+
+async function openConversationTranslation() {
+  const turns = getVisibleConversationTurns();
+  if (!turns.length) {
+    setNotice(t('feedback.noConversation'), 'info');
+    return;
+  }
+
+  renderTranslationLoading();
+  showDialog(coachTranslationDialog);
+
+  try {
+    const result = await fetchJSON('/conversation-translation', {
+      method: 'POST',
+      body: JSON.stringify({
+        sessionId,
+        turns,
+        userMode: currentUserMode || 'international_student',
+        uiLanguage: getLanguage()
+      })
     });
+    renderConversationTranslation(result);
+  } catch (err) {
+    console.error(err);
+    if (coachTranslationBody) {
+      coachTranslationBody.innerHTML = `<p class="coach-modal-warning">${t('feedback.translationFailed')}</p>`;
+    }
+  }
+}
+
+function openCoachDetails() {
+  if (!coachDetailBody) return;
+  coachDetailBody.innerHTML = '';
+
+  if (!latestCoachNotes.length) {
+    const empty = document.createElement('p');
+    empty.className = 'feedback-empty';
+    empty.textContent = t('feedback.empty');
+    coachDetailBody.appendChild(empty);
+    showDialog(coachDetailDialog);
+    return;
+  }
+
+  latestCoachNotes.forEach((note) => {
+    const card = document.createElement('article');
+    card.className = 'coach-detail-card';
+
+    const original = labelledCoachLine(t('feedback.yourLine'), note.original);
+    const suggested = labelledCoachLine(t('feedback.coachNote'), note.suggested);
+    const reason = labelledCoachLine(t('feedback.why'), note.reason);
 
     const tryBtn = document.createElement('button');
-    tryBtn.textContent = 'Try Again';
+    tryBtn.type = 'button';
+    tryBtn.textContent = t('feedback.tryAgain');
     tryBtn.addEventListener('click', () => {
-      textInput.value = corr.retryText || corr.original || '';
+      textInput.value = note.retryText || note.original || '';
+      coachDetailDialog?.close();
       textInput.focus();
     });
 
-    const saveBtn = document.createElement('button');
-    saveBtn.textContent = 'Save Card';
-    saveBtn.className = 'ghost';
-    saveBtn.addEventListener('click', () => {
-      setNotice('Saved to review cards.', 'info');
-    });
-
-    actions.appendChild(hearBtn);
-    actions.appendChild(tryBtn);
-    actions.appendChild(saveBtn);
-
-    item.appendChild(original);
-    item.appendChild(suggested);
-    item.appendChild(reason);
-    item.appendChild(actions);
-
-    topCorrectionsEl.appendChild(item);
+    card.appendChild(original);
+    card.appendChild(suggested);
+    card.appendChild(reason);
+    card.appendChild(tryBtn);
+    coachDetailBody.appendChild(card);
   });
+
+  showDialog(coachDetailDialog);
+}
+
+function labelledCoachLine(label, text) {
+  const line = document.createElement('p');
+  const strong = document.createElement('strong');
+  strong.textContent = `${label}: `;
+  line.appendChild(strong);
+  line.append(document.createTextNode(text || ''));
+  return line;
 }
 
 async function fetchJSON(path, options) {
@@ -1206,6 +1333,8 @@ async function startSession() {
 
   transcriptEl.innerHTML = '';
   if (feedbackEl) feedbackEl.textContent = '';
+  latestCoachNotes = [];
+  if (topCorrectionsEl) topCorrectionsEl.innerHTML = '';
   renderEmptyState();
 
   // P1: Mode-specific greeting
@@ -1706,6 +1835,8 @@ newSessionBtn.addEventListener('click', startSession);
 clearChatBtn.addEventListener('click', () => {
   transcriptEl.innerHTML = '';
   if (feedbackEl) feedbackEl.textContent = '';
+  latestCoachNotes = [];
+  if (topCorrectionsEl) topCorrectionsEl.innerHTML = '';
   setNotice('已清除對話記錄', 'info');
   renderEmptyState();
 });
@@ -2044,6 +2175,14 @@ document.querySelectorAll('.modal a[href^="#"]').forEach((link) => {
   });
 });
 
+document.querySelectorAll('[data-dialog-close]').forEach((button) => {
+  button.addEventListener('click', () => {
+    const dialog = document.getElementById(button.dataset.dialogClose);
+    if (dialog?.open) dialog.close();
+  });
+});
+
+openCoachDetailBtn?.addEventListener('click', openCoachDetails);
 startVisitTranslationFromPlaybook?.addEventListener('click', () => {
   selectUserMode('visit_translation');
   document.getElementById('practice')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -2114,6 +2253,7 @@ function updateUILanguage() {
   renderScenarioGuide(scenarioSelect.value);
   renderElderlyVisitPlaybook();
   resetVisitTranslationOutput();
+  if (latestCoachNotes.length) renderImmediateFeedback(latestCoachNotes);
 
   // Update badges
   const badges = document.querySelectorAll('.badges .pill');
@@ -2152,6 +2292,7 @@ window.addEventListener('languageChanged', () => {
   initI18n();
   if (uiLangSelect) uiLangSelect.value = getLanguage();
   updateUILanguage();
+  renderImmediateFeedback([]);
   initUserMode();
   renderElderlyVisitPlaybook();
 

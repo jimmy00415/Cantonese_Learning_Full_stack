@@ -703,6 +703,94 @@ async function synthesizeVisitTranslationAudio(text) {
   return generateMockTtsDataUri();
 }
 
+function sanitizeConversationTurns(turns = []) {
+  return turns
+    .slice(-16)
+    .map((turn) => ({
+      role: turn.role === 'learner' || turn.role === 'user' ? 'learner' : 'tutor',
+      text: String(turn.text || turn.originalText || '').trim().slice(0, 1200)
+    }))
+    .filter((turn) => turn.text);
+}
+
+function mockConversationTranslation(turns) {
+  const dictionary = new Map([
+    ['你好，好高興見到你。', 'Hello, nice to meet you.'],
+    ['婆婆，你好，我係香港浸會大學嘅學生。', 'Hello, grandma. I am a student from Hong Kong Baptist University.'],
+    ['可唔可以講慢少少？', 'Could you speak a little slower?'],
+    ['你好， 好高興見到你。', 'Hello, nice to meet you.']
+  ]);
+
+  return {
+    summary: 'English translation preview is using mock mode. Confirm important meaning with a person.',
+    turns: turns.map((turn) => ({
+      role: turn.role,
+      originalText: turn.text,
+      englishText: dictionary.get(turn.text) || turn.text
+    })),
+    provider: 'mock',
+    confidence: 0.55,
+    needsConfirmation: true
+  };
+}
+
+function parseConversationTranslation(rawText, turns, provider) {
+  const cleaned = String(rawText || '').trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim();
+  try {
+    const parsed = JSON.parse(cleaned);
+    const translatedTurns = Array.isArray(parsed.turns) ? parsed.turns : [];
+    return {
+      summary: String(parsed.summary || '').trim(),
+      turns: turns.map((sourceTurn, index) => {
+        const translated = translatedTurns[index] || {};
+        return {
+          role: sourceTurn.role,
+          originalText: sourceTurn.text,
+          englishText: String(translated.englishText || translated.translation || translated.text || sourceTurn.text).trim()
+        };
+      }),
+      provider,
+      confidence: Number.isFinite(Number(parsed.confidence)) ? Number(parsed.confidence) : 0.8,
+      needsConfirmation: Boolean(parsed.needsConfirmation)
+    };
+  } catch {
+    return {
+      summary: 'English translation generated from the current conversation.',
+      turns: [{ role: 'tutor', originalText: turns.map((turn) => `${turn.role}: ${turn.text}`).join('\n'), englishText: cleaned }],
+      provider,
+      confidence: 0.72,
+      needsConfirmation: true
+    };
+  }
+}
+
+async function translateConversationToEnglish(turns) {
+  const providers = getConfiguredLlmProviders();
+  if (!providers.length) return mockConversationTranslation(turns);
+
+  const messages = [
+    {
+      role: 'system',
+      content: 'Translate a Cantonese learning conversation for an English-first international student. Return ONLY JSON: {"summary":"one short English summary","turns":[{"role":"tutor|learner","englishText":"English translation"}],"confidence":0.0,"needsConfirmation":false}. Keep translations concise, plain, and culturally clear. Do not add extra teaching content.'
+    },
+    {
+      role: 'user',
+      content: JSON.stringify(turns.map((turn) => ({ role: turn.role, text: turn.text })))
+    }
+  ];
+
+  for (const provider of providers) {
+    try {
+      const raw = await callLLMProvider(provider, messages);
+      return parseConversationTranslation(raw, turns, provider);
+    } catch (err) {
+      console.error(`❌ ${provider} conversation translation error:`, err.message);
+    }
+  }
+
+  return mockConversationTranslation(turns);
+}
+
 function generateMockTtsDataUri() {
   // Minimal valid WAV file (silent audio)
   return 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
@@ -1257,6 +1345,26 @@ app.post('/api/visit-translate', async (req, res) => {
     latencyMs: Date.now() - startedAt,
     ttsProvider: ttsAudio && !ttsError ? ttsProvider : 'mock',
     ttsError
+  });
+});
+
+app.post('/api/conversation-translation', async (req, res) => {
+  const { sessionId, turns = [] } = req.body || {};
+  const sessionTurns = sessionId && conversations.has(sessionId)
+    ? conversations.get(sessionId).history.map((turn) => ({ role: turn.role === 'user' ? 'learner' : 'tutor', text: turn.text }))
+    : [];
+  const sourceTurns = sanitizeConversationTurns(turns.length ? turns : sessionTurns);
+
+  if (!sourceTurns.length) {
+    return res.status(400).json({ error: 'conversation turns are required' });
+  }
+
+  const startedAt = Date.now();
+  const translation = await translateConversationToEnglish(sourceTurns);
+  res.json({
+    ...translation,
+    needsConfirmation: translation.needsConfirmation || translation.provider === 'mock' || Number(translation.confidence || 0) < 0.7,
+    latencyMs: Date.now() - startedAt
   });
 });
 

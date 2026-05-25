@@ -306,10 +306,11 @@
           <h3 data-i18n="feedback.immediate">Coach Notes</h3>
           <div id="topCorrections" class="corrections-list"></div>
         </div>
-        <details class="feedback-deep" id="feedbackDeep">
-          <summary data-i18n="feedback.details">Deep Dive</summary>
-          <div id="feedbackDetails" class="feedback-details"></div>
-        </details>
+        <div class="feedback-deep" id="feedbackDeep">
+          <h3 data-i18n="feedback.details">Deep Dive</h3>
+          <p data-i18n="feedback.deepPrompt">Keep the page focused. Open details only when you need them.</p>
+          <button type="button" id="openCoachDetailBtn" class="ghost" data-i18n="feedback.openDetails">Open practice details</button>
+        </div>
       </aside>
     </section>
 
@@ -394,6 +395,38 @@
         <div class="modal-actions">
           <button id="micBlockedClose" class="ghost">使用打字代替</button>
           <button id="micBlockedRetry">重試</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="coachTranslationDialog" class="modal coach-modal" aria-labelledby="coachTranslationTitle">
+      <div class="modal-content coach-modal-content">
+        <div class="coach-modal-header">
+          <div>
+            <p class="section-eyebrow" data-i18n="feedback.translationEyebrow">English support</p>
+            <h2 id="coachTranslationTitle" data-i18n="feedback.translationTitle">Conversation translation</h2>
+          </div>
+          <button type="button" class="ghost modal-close-btn" data-dialog-close="coachTranslationDialog" aria-label="Close">×</button>
+        </div>
+        <div id="coachTranslationBody" class="coach-translation-body"></div>
+        <div class="modal-actions">
+          <button type="button" class="ghost" data-dialog-close="coachTranslationDialog" data-i18n="feedback.close">Close</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="coachDetailDialog" class="modal coach-modal" aria-labelledby="coachDetailTitle">
+      <div class="modal-content coach-modal-content">
+        <div class="coach-modal-header">
+          <div>
+            <p class="section-eyebrow" data-i18n="feedback.detailsEyebrow">Practice details</p>
+            <h2 id="coachDetailTitle" data-i18n="feedback.detailsTitle">Coach note details</h2>
+          </div>
+          <button type="button" class="ghost modal-close-btn" data-dialog-close="coachDetailDialog" aria-label="Close">×</button>
+        </div>
+        <div id="coachDetailBody" class="coach-detail-body"></div>
+        <div class="modal-actions">
+          <button type="button" class="ghost" data-dialog-close="coachDetailDialog" data-i18n="feedback.close">Close</button>
         </div>
       </div>
     </dialog>
