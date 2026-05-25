@@ -2081,3 +2081,278 @@ h1 {
     width: 46px;
   }
 }
+
+/* Apple-inspired simplification layer: softer surfaces, fewer visible sections, progressive disclosure. */
+:root {
+  --bg-1: #f5f5f7;
+  --bg-2: #ffffff;
+  --bg-3: #f2f2f7;
+  --line: rgba(60, 60, 67, 0.18);
+  --line-soft: rgba(60, 60, 67, 0.12);
+  --ink: #1d1d1f;
+  --ink-soft: #3a3a3c;
+  --muted: #6e6e73;
+  --radius: 24px;
+  --shadow-hard: 0 18px 60px rgba(0, 0, 0, 0.08);
+  --shadow-soft: 0 12px 40px rgba(0, 0, 0, 0.06);
+}
+
+body {
+  background: #f5f5f7;
+  text-rendering: optimizeLegibility;
+}
+
+body::before,
+.hero-visual,
+.mission-strip,
+.info-grid {
+  display: none;
+}
+
+button,
+.header-link,
+.action-card {
+  box-shadow: none;
+}
+
+button:hover:not(:disabled),
+.action-card:hover {
+  transform: none;
+  box-shadow: none;
+}
+
+.app {
+  max-width: 1280px;
+}
+
+.topbar,
+.hero,
+.role-onboarding,
+.role-context-panel,
+.guide-panel,
+.control-rail,
+.transcript,
+.feedback-immediate,
+.feedback-deep,
+.input-panel {
+  border: 1px solid var(--line);
+  border-radius: 28px;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: var(--shadow-soft);
+  backdrop-filter: blur(18px);
+}
+
+.topbar {
+  padding: 14px 16px;
+}
+
+.brand-mark {
+  border: 0;
+  border-radius: 18px;
+  background: linear-gradient(135deg, #007aff, #5856d6);
+  color: #fff;
+  box-shadow: none;
+}
+
+.hero {
+  grid-template-columns: 1fr;
+  min-height: auto;
+  padding: clamp(28px, 5vw, 56px);
+}
+
+.hero-copy {
+  max-width: 760px;
+  padding: 0;
+}
+
+.hero h2 {
+  font-size: clamp(42px, 7vw, 78px);
+  letter-spacing: -0.05em;
+}
+
+.badges {
+  gap: 8px;
+}
+
+.pill,
+.status,
+.system-state,
+.language-toggle {
+  border: 1px solid var(--line);
+  box-shadow: none;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.header-link,
+.change-mode-btn,
+.footer-links button,
+.link-button {
+  border: 0;
+  border-radius: 999px;
+  background: rgba(118, 118, 128, 0.12);
+  color: #1d1d1f;
+  font-weight: 800;
+}
+
+.link-button {
+  min-height: 0;
+  padding: 0;
+  background: transparent;
+  color: #007aff;
+  font: inherit;
+}
+
+.role-onboarding {
+  grid-template-columns: 0.76fr 1.24fr;
+  padding: 18px;
+}
+
+.role-card,
+.mode-btn,
+.guide-card,
+.guide-info-card,
+.visit-phrase-card,
+.correction-item {
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  box-shadow: none;
+}
+
+.role-card {
+  min-height: 132px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.role-card.active,
+.role-card-primary,
+.mode-btn.active {
+  background: rgba(0, 122, 255, 0.12);
+  color: #1d1d1f;
+  box-shadow: inset 0 0 0 1px rgba(0, 122, 255, 0.25);
+}
+
+.guide-panel {
+  grid-template-columns: minmax(260px, 0.8fr) minmax(0, 1.2fr);
+  align-items: center;
+  padding: clamp(18px, 3vw, 28px);
+}
+
+.guide-copy h2 {
+  font-size: clamp(30px, 4.6vw, 52px);
+  letter-spacing: -0.04em;
+}
+
+.action-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.action-card {
+  display: grid;
+  gap: 8px;
+  min-height: 132px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  background: #fff;
+  color: #1d1d1f;
+  text-align: left;
+  text-decoration: none;
+}
+
+.action-card span {
+  color: #007aff;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.action-card strong {
+  font-size: 19px;
+  line-height: 1.1;
+}
+
+.action-card small {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 750;
+  line-height: 1.35;
+}
+
+.primary-action {
+  background: #007aff;
+  color: #fff;
+}
+
+.primary-action span,
+.primary-action small {
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.practice-stage {
+  grid-template-columns: 280px minmax(0, 1fr) 280px;
+}
+
+.control-rail {
+  gap: 14px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.scenario-guide,
+.visit-translate-panel {
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: none;
+}
+
+.transcript-body {
+  background: linear-gradient(180deg, #fff, #fbfbfd);
+}
+
+.message {
+  border-radius: 24px;
+  box-shadow: none;
+}
+
+.message.ai {
+  background: #f5f5f7;
+}
+
+.message.user {
+  background: rgba(0, 122, 255, 0.1);
+}
+
+.send-btn,
+.coach-action-primary,
+.controls button {
+  border: 0;
+  border-radius: 999px;
+  background: #007aff;
+  color: #fff;
+}
+
+.wide-modal {
+  width: min(94vw, 920px);
+}
+
+.modal-card-grid {
+  grid-template-columns: 1fr;
+}
+
+.footer-links button {
+  min-height: 36px;
+  padding: 6px 12px;
+}
+
+@media (max-width: 980px) {
+  .guide-panel,
+  .role-onboarding,
+  .practice-stage {
+    grid-template-columns: 1fr;
+  }
+
+  .action-grid {
+    grid-template-columns: 1fr;
+  }
+}

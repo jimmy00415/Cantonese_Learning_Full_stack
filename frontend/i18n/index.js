@@ -79,6 +79,27 @@ export const locales = {
       }
     },
 
+    simplify: {
+      actions: {
+        practice: {
+          title: '開始練習',
+          body: '直接講或打一句。'
+        },
+        guide: {
+          title: '探訪指引',
+          body: '睇探訪前、中、後步驟。'
+        },
+        playbook: {
+          title: '常用短句',
+          body: '打開長者探訪 phrasebook。'
+        },
+        privacy: {
+          title: '私隱優先',
+          body: '查看 AI 同麥克風限制。'
+        }
+      }
+    },
+
     playbook: {
       eyebrow: '長者探訪 Playbook',
       title: '探訪長者前、中、後點做',
@@ -391,6 +412,27 @@ export const locales = {
       }
     },
 
+    simplify: {
+      actions: {
+        practice: {
+          title: '开始练习',
+          body: '直接说或打一短句。'
+        },
+        guide: {
+          title: '探访指引',
+          body: '查看探访前、中、后步骤。'
+        },
+        playbook: {
+          title: '常用短句',
+          body: '打开长者探访 phrasebook。'
+        },
+        privacy: {
+          title: '隐私优先',
+          body: '查看 AI 和麦克风限制。'
+        }
+      }
+    },
+
     playbook: {
       eyebrow: '长者探访 Playbook',
       title: '探访长者前、中、后怎么做',
@@ -700,6 +742,27 @@ export const locales = {
       privacy: {
         title: 'Privacy and AI limits',
         body: 'Microphone access is optional. Typed and spoken practice may be sent to configured AI providers to generate responses. Avoid names, addresses, medical details, student IDs, and other sensitive information.'
+      }
+    },
+
+    simplify: {
+      actions: {
+        practice: {
+          title: 'Start practice',
+          body: 'Go straight to speaking or typing.'
+        },
+        guide: {
+          title: 'Visit guide',
+          body: 'Before, during, and after steps.'
+        },
+        playbook: {
+          title: 'Phrasebook',
+          body: 'Open elderly-visit quick phrases.'
+        },
+        privacy: {
+          title: 'Privacy first',
+          body: 'Check AI and microphone limits.'
+        }
       }
     },
 

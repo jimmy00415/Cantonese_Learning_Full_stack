@@ -277,7 +277,7 @@ function handleRoleAction(action) {
   }
 
   if (action === 'prepareVisit') {
-    document.getElementById('guidePanel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    showDialog(document.getElementById('guideDialog'));
     setNotice(t('onboarding.notices.visitGuideReady'), 'info');
     return;
   }
@@ -1088,6 +1088,9 @@ function getVisibleConversationTurns() {
 function showDialog(dialog) {
   if (!dialog) return;
   if (dialog.open) return;
+  document.querySelectorAll('dialog[open]').forEach((openDialog) => {
+    if (openDialog !== dialog) openDialog.close();
+  });
   if (typeof dialog.showModal === 'function') {
     dialog.showModal();
   } else {
@@ -2182,9 +2185,17 @@ document.querySelectorAll('[data-dialog-close]').forEach((button) => {
   });
 });
 
+document.querySelectorAll('[data-dialog-open]').forEach((button) => {
+  button.addEventListener('click', () => {
+    const dialog = document.getElementById(button.dataset.dialogOpen);
+    showDialog(dialog);
+  });
+});
+
 openCoachDetailBtn?.addEventListener('click', openCoachDetails);
 startVisitTranslationFromPlaybook?.addEventListener('click', () => {
   selectUserMode('visit_translation');
+  document.getElementById('playbookDialog')?.close();
   document.getElementById('practice')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   setNotice(t('onboarding.notices.visitTranslationComingSoon'), 'info');
 });
