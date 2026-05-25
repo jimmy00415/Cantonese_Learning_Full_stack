@@ -790,6 +790,45 @@ function parseJsonObject(rawText, depth = 0) {
   return null;
 }
 
+function extractLooseJsonField(rawText, fieldName) {
+  const text = String(rawText || '');
+  const fieldIndex = text.indexOf(`"${fieldName}"`);
+  if (fieldIndex < 0) return '';
+
+  const colonIndex = text.indexOf(':', fieldIndex);
+  if (colonIndex < 0) return '';
+
+  const startQuote = text.indexOf('"', colonIndex + 1);
+  if (startQuote < 0) return '';
+
+  let result = '';
+  let escaped = false;
+  for (let index = startQuote + 1; index < text.length; index += 1) {
+    const char = text[index];
+    const next = text[index + 1] || '';
+
+    if (escaped) {
+      const mapped = { n: '\n', r: '\r', t: '\t', '"': '"', '\\': '\\' }[char];
+      result += mapped ?? char;
+      escaped = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+
+    if (char === '"' && /[\s,\]}]/.test(next)) {
+      return result.trim();
+    }
+
+    result += char;
+  }
+
+  return result.trim();
+}
+
 function unwrapEnglishTranslation(value, index = 0, depth = 0) {
   const text = String(value || '').trim();
   if (!text) return '';
@@ -806,6 +845,13 @@ function unwrapEnglishTranslation(value, index = 0, depth = 0) {
       || nested.translation
       || nested.summary;
     if (nestedText) return unwrapEnglishTranslation(nestedText, index, depth + 1);
+  }
+
+  const looseText = extractLooseJsonField(text, 'englishText')
+    || extractLooseJsonField(text, 'translation')
+    || extractLooseJsonField(text, 'summary');
+  if (looseText && looseText !== text) {
+    return unwrapEnglishTranslation(looseText, index, depth + 1);
   }
 
   return text;
