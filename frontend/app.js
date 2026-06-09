@@ -56,6 +56,7 @@ const visitLargeText = document.getElementById('visitLargeText');
 const startVisitTranslationFromPlaybook = document.getElementById('startVisitTranslationFromPlaybook');
 const clearVisitPhrase = document.getElementById('clearVisitPhrase');
 const visitDirection = document.getElementById('visitDirection');
+const visitDirectionButtons = document.querySelectorAll('[data-visit-direction]');
 const visitTranslateBtn = document.getElementById('visitTranslateBtn');
 const visitTranslationOutput = document.getElementById('visitTranslationOutput');
 const visitTranslationWarning = document.getElementById('visitTranslationWarning');
@@ -97,9 +98,13 @@ let isRecording = false; // Guard flag for async recording lifecycle
 // P1: Current mode state
 let currentMode = 'freeChat'; // 'freeChat' or 'teaching'
 const USER_MODE_STORAGE_KEY = 'hkbuddy.userMode';
+const LEGACY_CHINESE_READER_MODE = ['main', 'land_learner'].join('');
+const USER_MODE_ALIASES = {
+  [LEGACY_CHINESE_READER_MODE]: 'chinese_reader_learner'
+};
 const initialUiLanguagePreference = localStorage.getItem('uiLang');
 let userChangedLanguage = false;
-let currentUserMode = localStorage.getItem(USER_MODE_STORAGE_KEY) || '';
+let currentUserMode = normalizeUserMode(localStorage.getItem(USER_MODE_STORAGE_KEY) || '');
 let currentAsrProvider = 'mock';
 let currentAsrLanguage = 'zh-HK';
 let currentTtsProvider = 'mock';
@@ -172,11 +177,11 @@ const scenarioGuideCopy = {
 };
 
 const userModeConfig = {
-  mainland_learner: {
+  chinese_reader_learner: {
     chatMode: 'teaching',
     defaultLanguage: 'zh-CN',
-    titleKey: 'onboarding.selected.mainland.title',
-    bodyKey: 'onboarding.selected.mainland.body',
+    titleKey: 'onboarding.selected.chineseReader.title',
+    bodyKey: 'onboarding.selected.chineseReader.body',
     actionKeys: [
       { labelKey: 'onboarding.actions.pronunciation', action: 'startPractice' },
       { labelKey: 'onboarding.actions.particles', action: 'focusParticles' },
@@ -235,7 +240,11 @@ function setSystemState(state) {
 }
 
 function getUserModeConfig(mode = currentUserMode) {
-  return userModeConfig[mode] || null;
+  return userModeConfig[normalizeUserMode(mode)] || null;
+}
+
+function normalizeUserMode(mode) {
+  return USER_MODE_ALIASES[mode] || mode;
 }
 
 function applyUserModeDefaults(mode, { preserveLanguage = false } = {}) {
@@ -303,6 +312,7 @@ function showRoleSelection() {
 }
 
 function selectUserMode(mode, { fromStorage = false } = {}) {
+  mode = normalizeUserMode(mode);
   const config = getUserModeConfig(mode);
   if (!config) return;
 
@@ -470,20 +480,49 @@ function resetVisitTranslationOutput() {
   }
 }
 
+function getRomanizationText(romanization) {
+  if (!romanization) return '';
+  if (typeof romanization === 'string') return romanization.trim();
+  if (typeof romanization === 'object') return String(romanization.text || '').trim();
+  return '';
+}
+
+function getRomanizationScheme(romanization) {
+  if (!romanization || typeof romanization !== 'object') return 'jyutping';
+  return String(romanization.scheme || 'jyutping').trim() || 'jyutping';
+}
+
+function appendTextElement(parent, tagName, text, className = '') {
+  const el = document.createElement(tagName);
+  if (className) el.className = className;
+  el.textContent = text || '';
+  parent.appendChild(el);
+  return el;
+}
+
 function renderVisitTranslation(res) {
   if (!visitTranslationOutput) return;
-  visitTranslationOutput.innerHTML = `
-    <strong>${res.displayText || res.translatedText}</strong>
-    ${res.romanization ? `<span>${res.romanization}</span>` : ''}
-    <small>${t('visitTranslate.sourceLabel')}: ${res.sourceText}</small>
-  `;
+  const displayText = res.displayText || res.translatedText || '';
+  const romanizationText = getRomanizationText(res.romanization);
+  const romanizationScheme = getRomanizationScheme(res.romanization);
+
+  visitTranslationOutput.innerHTML = '';
+  appendTextElement(visitTranslationOutput, 'strong', displayText);
+  if (romanizationText) {
+    const guide = document.createElement('div');
+    guide.className = 'romanization-guide';
+    appendTextElement(guide, 'small', `${t('visitTranslate.romanizationLabel')} (${romanizationScheme})`);
+    appendTextElement(guide, 'span', romanizationText);
+    appendTextElement(guide, 'small', t('visitTranslate.romanizationHelper'));
+    visitTranslationOutput.appendChild(guide);
+  }
+  appendTextElement(visitTranslationOutput, 'small', `${t('visitTranslate.sourceLabel')}: ${res.sourceText || ''}`);
 
   if (visitLargeText) {
-    visitLargeText.innerHTML = `
-      <strong>${res.displayText || res.translatedText}</strong>
-      ${res.romanization ? `<span>${res.romanization}</span>` : ''}
-      <small>${res.sourceText}</small>
-    `;
+    visitLargeText.innerHTML = '';
+    appendTextElement(visitLargeText, 'strong', displayText);
+    if (romanizationText) appendTextElement(visitLargeText, 'span', romanizationText);
+    appendTextElement(visitLargeText, 'small', res.sourceText || '');
   }
 
   const needsConfirmation = res.needsConfirmation || res.provider === 'mock' || Number(res.confidence || 0) < 0.7;
@@ -493,6 +532,22 @@ function renderVisitTranslation(res) {
       ? t('visitTranslate.confirmationWarning')
       : '';
   }
+}
+
+function syncVisitDirectionControls(direction = visitDirection?.value || 'en_to_yue') {
+  if (visitDirection && visitDirection.value !== direction) {
+    visitDirection.value = direction;
+  }
+  visitDirectionButtons.forEach((button) => {
+    const active = button.dataset.visitDirection === direction;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+}
+
+function getVisitSpeakerRole(direction = visitDirection?.value || 'en_to_yue') {
+  if (direction === 'yue_to_en' || direction === 'yue_to_zh') return 'resident';
+  return 'student';
 }
 
 async function translateVisitText(text, inputType = 'text') {
@@ -518,6 +573,7 @@ async function translateVisitText(text, inputType = 'text') {
         sessionId,
         sourceText,
         direction: visitDirection?.value || 'en_to_yue',
+        speakerRole: getVisitSpeakerRole(),
         inputType,
         userMode: 'visit_translation'
       })
@@ -1308,6 +1364,9 @@ async function sendUtterance(text) {
     if (res.needsConfirmation || res.aiProvider === 'mock' || Number(res.confidence || 1) < 0.7) {
       setNotice(t('reliability.confirmTutorOutput'), 'warning');
     }
+    if (res.ttsSkippedReason === 'romanization_not_speakable') {
+      setNotice(t('reliability.ttsRomanizationSkipped'), 'warning');
+    }
 
     renderMessage({ role: 'ai', text: res.aiText, ttsAudio: res.ttsAudio, timestamp: Date.now() });
     translateTutorFeedback(res.aiText);
@@ -2079,6 +2138,20 @@ startVisitTranslationFromPlaybook?.addEventListener('click', () => {
   setNotice(t('onboarding.notices.visitTranslationComingSoon'), 'info');
 });
 
+visitDirectionButtons.forEach((button) => {
+  button.setAttribute('aria-pressed', button.classList.contains('active') ? 'true' : 'false');
+  button.addEventListener('click', () => {
+    syncVisitDirectionControls(button.dataset.visitDirection || 'en_to_yue');
+    resetVisitTranslationOutput();
+    textInput?.focus();
+  });
+});
+
+visitDirection?.addEventListener('change', () => {
+  syncVisitDirectionControls(visitDirection.value);
+  resetVisitTranslationOutput();
+});
+
 clearVisitPhrase?.addEventListener('click', resetVisitPhrase);
 visitTranslateBtn?.addEventListener('click', () => translateVisitText(textInput.value, 'text'));
 
@@ -2185,6 +2258,7 @@ window.addEventListener('languageChanged', () => {
   renderImmediateFeedback();
   initUserMode();
   renderElderlyVisitPlaybook();
+  syncVisitDirectionControls();
 
   setSystemState(STATES.IDLE);
   setActiveMode(currentMode); // Initialize mode UI

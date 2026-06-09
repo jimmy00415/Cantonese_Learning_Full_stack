@@ -318,6 +318,7 @@ Next try: [one short action]
 5. **使用繁體中文**書寫
 6. **保持簡潔**：糾正後繼續對話，回應1-3句
 7. **認識文化背景**：如果學生用咗俚語或潮語，解釋佢哋嘅適當用法
+8. 如果提供粵拼，只可以作為標示清楚嘅閱讀提示；唔可以只輸出粵拼或羅馬字母，必須同時有廣東話中文句子
 
 ## 糾正格式：
 「[學生講嘅話]」→ 應該講「[正確講法]」
@@ -337,6 +338,7 @@ Next try: [one short action]
 5. **推動對話**：問問題，分享睇法
 6. **用繁體中文**書寫
 7. **回應長度保持 1-3 句**
+8. 如果提供粵拼，只可以作為標示清楚嘅閱讀提示；唔可以只輸出粵拼或羅馬字母，必須同時有廣東話中文句子
 
 ## 場景：${scenario || '自由傾計'}${culturalNote}`;
   }
@@ -608,23 +610,39 @@ function mockAiReply(userText, scenario) {
 const visitTranslationDirections = {
   en_to_yue: {
     label: 'English to Cantonese',
+    sourceLanguage: 'en',
+    targetLanguage: 'yue-Hant-HK',
+    speakerRole: 'student',
     target: 'Cantonese',
-    includeRomanization: true
+    includeRomanization: true,
+    generateTts: true
   },
   yue_to_en: {
     label: 'Cantonese to English',
+    sourceLanguage: 'yue-Hant-HK',
+    targetLanguage: 'en',
+    speakerRole: 'resident',
     target: 'English',
-    includeRomanization: false
+    includeRomanization: false,
+    generateTts: false
   },
   yue_to_zh: {
     label: 'Cantonese to written Chinese',
+    sourceLanguage: 'yue-Hant-HK',
+    targetLanguage: 'zh-Hant',
+    speakerRole: 'resident',
     target: 'written Chinese',
-    includeRomanization: false
+    includeRomanization: false,
+    generateTts: false
   },
   zh_to_yue: {
     label: 'Chinese to Cantonese',
+    sourceLanguage: 'zh',
+    targetLanguage: 'yue-Hant-HK',
+    speakerRole: 'student',
     target: 'Cantonese',
-    includeRomanization: true
+    includeRomanization: true,
+    generateTts: true
   }
 };
 
@@ -648,21 +666,83 @@ function getConfiguredLlmProviders() {
   return [];
 }
 
+const JYUTPING_TONE_PATTERN = /\b[a-z]{1,8}[1-6]\b/i;
+const MANY_JYUTPING_SYLLABLES = /(?:\b[a-z]{1,8}[1-6]\b[\s,?.!?]*){2,}/i;
+
+function isRomanizationLikeText(text) {
+  const value = String(text || '').trim();
+  if (!value) return false;
+  const cjkCount = (value.match(/[\u3400-\u9fff]/g) || []).length;
+  if (cjkCount > 0) return false;
+  return MANY_JYUTPING_SYLLABLES.test(value) || JYUTPING_TONE_PATTERN.test(value);
+}
+
+function isRomanizationGuideLine(line) {
+  const value = String(line || '').trim();
+  if (!value) return false;
+  if (/^(jyutping|粵拼|粤拼|pinyin|romanization|pronunciation)\s*[:：]/i.test(value)) return true;
+  return isRomanizationLikeText(value);
+}
+
+function stripRomanizationForSpeech(text) {
+  const value = String(text || '').trim();
+  if (!value) return '';
+  const lines = value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !isRomanizationGuideLine(line));
+  const speechText = lines.join('\n')
+    .replace(/\s*[（(](?:\s*[a-z]{1,8}[1-6][\s,?.!?]*){2,}[）)]/gi, '')
+    .trim();
+  return speechText && !isRomanizationLikeText(speechText) ? speechText : '';
+}
+
+function normalizeRomanization(value) {
+  if (!value) return null;
+  if (typeof value === 'object') {
+    const text = String(value.text || '').trim();
+    if (!text) return null;
+    return {
+      scheme: String(value.scheme || 'jyutping').trim() || 'jyutping',
+      text,
+      toneNumbers: value.toneNumbers !== false
+    };
+  }
+  const text = String(value || '').trim();
+  return text ? { scheme: 'jyutping', text, toneNumbers: true } : null;
+}
+
+function resolveVisitTtsText(translation, directionConfig) {
+  if (!directionConfig.generateTts) return { text: '', warningCode: null };
+  const candidates = [
+    translation.speakableText,
+    translation.displayText,
+    translation.translatedText
+  ].map((item) => String(item || '').trim()).filter(Boolean);
+
+  for (const candidate of candidates) {
+    if (!isRomanizationLikeText(candidate)) return { text: stripRomanizationForSpeech(candidate) || candidate, warningCode: null };
+  }
+
+  return { text: '', warningCode: 'romanization_not_speakable' };
+}
+
 function mockVisitTranslation(sourceText, direction) {
   const normalized = sourceText.toLowerCase();
   const mockByDirection = {
     en_to_yue: normalized.includes('water')
-      ? { translatedText: '你想唔想飲啲水？', romanization: 'nei5 soeng2 m4 soeng2 jam2 di1 seoi2?', displayText: '你想唔想飲啲水？' }
-      : { translatedText: '你好，好高興見到你。', romanization: 'nei5 hou2, hou2 gou1 hing3 gin3 dou3 nei5.', displayText: '你好，好高興見到你。' },
+      ? { translatedText: '你想唔想飲啲水？', speakableText: '你想唔想飲啲水？', romanization: normalizeRomanization('nei5 soeng2 m4 soeng2 jam2 di1 seoi2?'), displayText: '你想唔想飲啲水？' }
+      : { translatedText: '你好，好高興見到你。', speakableText: '你好，好高興見到你。', romanization: normalizeRomanization('nei5 hou2, hou2 gou1 hing3 gin3 dou3 nei5.'), displayText: '你好，好高興見到你。' },
     yue_to_en: sourceText.includes('水')
-      ? { translatedText: 'Would you like some water?', romanization: '', displayText: 'Would you like some water?' }
-      : { translatedText: 'Hello, nice to meet you.', romanization: '', displayText: 'Hello, nice to meet you.' },
+      ? { translatedText: 'Would you like some water?', speakableText: '', romanization: null, displayText: 'Would you like some water?' }
+      : { translatedText: 'Hello, nice to meet you.', speakableText: '', romanization: null, displayText: 'Hello, nice to meet you.' },
     yue_to_zh: sourceText.includes('水')
-      ? { translatedText: '你想喝点水吗？', romanization: '', displayText: '你想喝点水吗？' }
-      : { translatedText: '你好，很高兴见到你。', romanization: '', displayText: '你好，很高兴见到你。' },
+      ? { translatedText: '你想喝点水吗？', speakableText: '', romanization: null, displayText: '你想喝点水吗？' }
+      : { translatedText: '你好，很高兴见到你。', speakableText: '', romanization: null, displayText: '你好，很高兴见到你。' },
     zh_to_yue: sourceText.includes('水')
-      ? { translatedText: '你想唔想飲啲水？', romanization: 'nei5 soeng2 m4 soeng2 jam2 di1 seoi2?', displayText: '你想唔想飲啲水？' }
-      : { translatedText: '你好，好高興見到你。', romanization: 'nei5 hou2, hou2 gou1 hing3 gin3 dou3 nei5.', displayText: '你好，好高興見到你。' }
+      ? { translatedText: '你想唔想飲啲水？', speakableText: '你想唔想飲啲水？', romanization: normalizeRomanization('nei5 soeng2 m4 soeng2 jam2 di1 seoi2?'), displayText: '你想唔想飲啲水？' }
+      : { translatedText: '你好，好高興見到你。', speakableText: '你好，好高興見到你。', romanization: normalizeRomanization('nei5 hou2, hou2 gou1 hing3 gin3 dou3 nei5.'), displayText: '你好，好高興見到你。' }
   };
 
   return {
@@ -676,23 +756,36 @@ function mockVisitTranslation(sourceText, direction) {
 
 function parseVisitTranslation(rawText, sourceText, direction, provider) {
   const cleaned = String(rawText || '').trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim();
+  const directionConfig = visitTranslationDirections[direction] || visitTranslationDirections.en_to_yue;
   try {
     const parsed = JSON.parse(cleaned);
+    const translatedText = String(parsed.translatedText || parsed.displayText || '').trim();
+    const displayText = String(parsed.displayText || parsed.translatedText || '').trim();
+    const speakableText = String(parsed.speakableText || '').trim()
+      || (directionConfig.generateTts && !isRomanizationLikeText(displayText) ? displayText : '')
+      || (directionConfig.generateTts && !isRomanizationLikeText(translatedText) ? translatedText : '');
     return {
       sourceText,
-      translatedText: String(parsed.translatedText || parsed.displayText || '').trim(),
-      displayText: String(parsed.displayText || parsed.translatedText || '').trim(),
-      romanization: String(parsed.romanization || '').trim(),
+      sourceLanguage: parsed.sourceLanguage || directionConfig.sourceLanguage,
+      targetLanguage: parsed.targetLanguage || directionConfig.targetLanguage,
+      translatedText,
+      displayText,
+      speakableText,
+      romanization: normalizeRomanization(parsed.romanization),
       confidence: Number.isFinite(Number(parsed.confidence)) ? Number(parsed.confidence) : 0.78,
       needsConfirmation: Boolean(parsed.needsConfirmation),
       provider
     };
   } catch {
+    const displayText = cleaned;
     return {
       sourceText,
-      translatedText: cleaned,
-      displayText: cleaned,
-      romanization: '',
+      sourceLanguage: directionConfig.sourceLanguage,
+      targetLanguage: directionConfig.targetLanguage,
+      translatedText: displayText,
+      displayText,
+      speakableText: directionConfig.generateTts && !isRomanizationLikeText(displayText) ? displayText : '',
+      romanization: null,
       confidence: 0.72,
       needsConfirmation: true,
       provider
@@ -708,7 +801,7 @@ async function translateForVisit(sourceText, direction) {
   const messages = [
     {
       role: 'system',
-      content: `You translate for a supervised HKBU elderly visit. Direction: ${directionConfig.label}. Return ONLY JSON with keys translatedText, displayText, romanization, confidence, needsConfirmation. Keep wording polite, short, and safe. If meaning is uncertain, set needsConfirmation true. ${directionConfig.includeRomanization ? 'Include Jyutping romanization.' : 'Leave romanization empty.'}`
+      content: `You translate for a supervised HKBU elderly visit. Direction: ${directionConfig.label}. Return ONLY JSON with keys sourceLanguage, targetLanguage, translatedText, displayText, speakableText, romanization, confidence, needsConfirmation. Keep wording polite, short, and safe. If meaning is uncertain, set needsConfirmation true. If the target is Cantonese, displayText and speakableText must be Traditional Chinese Cantonese text, never romanization. ${directionConfig.includeRomanization ? 'Include romanization as {"scheme":"jyutping","text":"...","toneNumbers":true}.' : 'Set romanization to null.'}`
     },
     { role: 'user', content: sourceText }
   ];
@@ -1514,19 +1607,25 @@ app.post('/api/recognize-and-respond', async (req, res) => {
   let ttsAudio = null;
   let ttsError = null;
   let ttsFallback = false;
+  let ttsSkippedReason = null;
+  const tutorTtsText = stripRomanizationForSpeech(aiText);
+  if (!tutorTtsText) {
+    ttsSkippedReason = 'romanization_not_speakable';
+    ttsError = 'Tutor reply looked like romanization only, so TTS was skipped.';
+  }
   const ttsStartTime = Date.now();
 
-  if ((ttsProvider === 'azure' && azureTtsKey) || (ttsProvider === 'minimax' && minimaxApiKey)) {
+  if (!ttsSkippedReason && ((ttsProvider === 'azure' && azureTtsKey) || (ttsProvider === 'minimax' && minimaxApiKey))) {
     try {
-      const cacheKey = `${ttsProvider}:${ttsProvider === 'minimax' ? selectedTtsVoice : azureVoice}:${aiText.trim().toLowerCase()}`;
+      const cacheKey = `${ttsProvider}:${ttsProvider === 'minimax' ? selectedTtsVoice : azureVoice}:${tutorTtsText.trim().toLowerCase()}`;
       if (ttsCache.has(cacheKey)) {
         ttsAudio = ttsCache.get(cacheKey);
         console.log('✓ TTS cache hit');
       } else {
-        console.log(`Synthesizing ${ttsProvider} TTS with ${selectedTtsVoice} for:`, aiText.substring(0, 30) + '...');
+        console.log(`Synthesizing ${ttsProvider} TTS with ${selectedTtsVoice} for:`, tutorTtsText.substring(0, 30) + '...');
         ttsAudio = ttsProvider === 'minimax'
-          ? await synthesizeMiniMax(aiText, selectedTtsVoice)
-          : await synthesizeAzure(aiText);
+          ? await synthesizeMiniMax(tutorTtsText, selectedTtsVoice)
+          : await synthesizeAzure(tutorTtsText);
         if (ttsAudio) {
           console.log('✓ TTS synthesized, length:', ttsAudio.length);
           ttsCache.set(cacheKey, ttsAudio);
@@ -1543,11 +1642,11 @@ app.post('/api/recognize-and-respond', async (req, res) => {
       ttsError = err.message;
       ttsFallback = true;
     }
-  } else {
+  } else if (!ttsSkippedReason) {
     console.log('TTS provider not configured, using mock');
   }
 
-  if (!ttsAudio) {
+  if (!ttsAudio && !ttsSkippedReason) {
     console.log('Generating mock TTS audio');
     ttsAudio = generateMockTtsDataUri();
     if (!ttsFallback) ttsFallback = true;
@@ -1569,10 +1668,12 @@ app.post('/api/recognize-and-respond', async (req, res) => {
     ttsAudio,
     history,
     latencyMs: totalLatency,
-    ttsProvider: ttsAudio && !ttsFallback ? ttsProvider : 'mock',
+    ttsProvider: ttsAudio && !ttsFallback ? ttsProvider : ttsSkippedReason ? 'none' : 'mock',
     ttsVoice: ttsAudio && !ttsFallback ? selectedTtsVoice : null,
     ttsLatency,
     ttsError,
+    ttsTextUsed: tutorTtsText,
+    ttsSkippedReason,
     ttsFallback,
     aiProvider: aiResult.aiProvider,
     aiFallback: aiResult.aiFallback,
@@ -1606,12 +1707,17 @@ app.post('/api/visit-translate', async (req, res) => {
   const translation = await translateForVisit(trimmedSourceText, direction);
   let ttsAudio = null;
   let ttsError = null;
+  const directionConfig = visitTranslationDirections[direction] || visitTranslationDirections.en_to_yue;
+  const ttsResolution = resolveVisitTtsText(translation, directionConfig);
+  let warningCode = ttsResolution.warningCode || null;
 
-  try {
-    ttsAudio = await synthesizeVisitTranslationAudio(translation.displayText || translation.translatedText);
-  } catch (err) {
-    ttsError = err.message;
-    ttsAudio = generateMockTtsDataUri();
+  if (ttsResolution.text) {
+    try {
+      ttsAudio = await synthesizeVisitTranslationAudio(ttsResolution.text);
+    } catch (err) {
+      ttsError = err.message;
+      ttsAudio = generateMockTtsDataUri();
+    }
   }
 
   if (sessionId && conversations.has(sessionId)) {
@@ -1625,18 +1731,24 @@ app.post('/api/visit-translate', async (req, res) => {
 
   res.json({
     sourceText: trimmedSourceText,
+    sourceLanguage: translation.sourceLanguage || directionConfig.sourceLanguage,
+    targetLanguage: translation.targetLanguage || directionConfig.targetLanguage,
     translatedText: translation.translatedText,
     displayText: translation.displayText || translation.translatedText,
+    speakableText: translation.speakableText || '',
     romanization: translation.romanization,
     confidence: translation.confidence,
-    needsConfirmation: translation.needsConfirmation || translation.provider === 'mock' || Number(translation.confidence || 0) < 0.7,
+    needsConfirmation: translation.needsConfirmation || translation.provider === 'mock' || Number(translation.confidence || 0) < 0.7 || Boolean(warningCode),
     ttsAudio,
+    ttsTextUsed: ttsResolution.text,
     provider: translation.provider,
     direction,
     inputType,
+    speakerRole: directionConfig.speakerRole,
     latencyMs: Date.now() - startedAt,
-    ttsProvider: ttsAudio && !ttsError ? ttsProvider : 'mock',
-    ttsError
+    ttsProvider: ttsAudio && !ttsError ? ttsProvider : ttsResolution.text ? 'mock' : 'none',
+    ttsError,
+    warningCode
   });
 });
 

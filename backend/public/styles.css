@@ -1020,6 +1020,58 @@ body[data-user-mode="visit_translation"] .visit-translate-panel {
   font-weight: 900;
 }
 
+.visit-mode-helper {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 750;
+  line-height: 1.35;
+}
+
+.visit-speaker-prompt {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.visit-direction-quick {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.visit-direction-btn {
+  display: grid;
+  gap: 4px;
+  min-height: 78px;
+  align-content: center;
+  justify-items: start;
+  padding: 10px;
+  border: 2px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+  color: var(--ink);
+  text-align: left;
+}
+
+.visit-direction-btn strong {
+  font-size: 15px;
+  line-height: 1.12;
+}
+
+.visit-direction-btn span {
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.25;
+}
+
+.visit-direction-btn.active {
+  border-color: var(--ink);
+  background: var(--yellow);
+  box-shadow: var(--shadow-sm);
+}
+
 .visit-translation-output {
   display: grid;
   gap: 8px;
@@ -1040,6 +1092,23 @@ body[data-user-mode="visit_translation"] .visit-translate-panel {
   color: var(--ink-soft);
   font-size: 14px;
   font-weight: 800;
+}
+
+.visit-translation-output .romanization-guide {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: #f8fafc;
+}
+
+.visit-translation-output .romanization-guide span {
+  color: var(--ink);
+}
+
+.visit-translation-output .romanization-guide small {
+  color: var(--muted);
 }
 
 .visit-translation-output small,
@@ -1977,7 +2046,8 @@ body[data-user-mode="visit_translation"] .visit-translate-panel {
     grid-template-columns: 1fr;
   }
 
-  .role-card-grid {
+  .role-card-grid,
+  .visit-direction-quick {
     grid-template-columns: 1fr;
   }
 

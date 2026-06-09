@@ -8,7 +8,7 @@ export const locales = {
   'zh-TW': {
     // App Title & Header
     appTitle: 'Hong Kong Buddy',
-    subtitle: '國際學生廣東話實戰練習',
+    subtitle: 'HKBU 同學廣東話實戰練習',
     badges: {
       aiTutor: '校園廣東話',
       voiceChat: '語音教練',
@@ -141,13 +141,27 @@ export const locales = {
     visitTranslate: {
       title: '探訪翻譯',
       hint: '大字輔助',
+      helper: '探訪即場溝通請用呢度；廣東話練習模式主要用嚟學習同糾正。',
+      speakerPrompt: '揀邊個講緊',
       directionLabel: '翻譯方向',
       translateButton: '翻譯目前文字',
       outputTitle: '翻譯結果',
       outputEmpty: '喺下面輸入一句，然後按翻譯。',
       sourceLabel: '原文',
+      romanizationLabel: '粵拼發音提示',
+      romanizationHelper: '數字代表廣東話聲調，只作閱讀提示。',
       greeting: '探訪翻譯已準備好。輸入或講一句短句，然後按翻譯。',
       confirmationWarning: 'AI 可能唔準，重要意思請同真人義工或職員確認。',
+      quickDirections: {
+        studentSpeaks: {
+          title: '我用英文講',
+          body: '顯示廣東話俾長者'
+        },
+        residentSpeaks: {
+          title: '長者講廣東話',
+          body: '將回答譯成英文'
+        }
+      },
       directions: {
         en_to_yue: '英文 → 廣東話',
         yue_to_en: '廣東話 → 英文',
@@ -164,7 +178,8 @@ export const locales = {
     },
 
     reliability: {
-      confirmTutorOutput: 'AI 正使用模擬或低信心回應；重要內容請同真人確認。'
+      confirmTutorOutput: 'AI 正使用模擬或低信心回應；重要內容請同真人確認。',
+      ttsRomanizationSkipped: '呢段似係粵拼發音提示，已避免朗讀聲調數字。請睇廣東話文字或重新輸入。'
     },
 
     onboarding: {
@@ -173,9 +188,9 @@ export const locales = {
       title: '你今日想做咩？',
       body: '先揀一條路，Hong Kong Buddy 會優先顯示合適語言、指引同工具。',
       cards: {
-        mainland: {
+        chineseReader: {
           title: '我想練習廣東話',
-          body: '適合識中文、想改善廣東話發音、語氣助詞同自然講法嘅內地學生。'
+          body: '適合識中文、想改善廣東話發音、語氣助詞同自然講法嘅同學。'
         },
         international: {
           title: '我係國際學生',
@@ -188,7 +203,7 @@ export const locales = {
       },
       selected: {
         eyebrow: '已選模式',
-        mainland: {
+        chineseReader: {
           title: '廣東話練習模式',
           body: '會優先顯示發音、語氣助詞、探訪短句同老師式糾正。'
         },
@@ -198,7 +213,7 @@ export const locales = {
         },
         visit: {
           title: '探訪翻譯模式',
-          body: '先保留一個主要行動：開始探訪翻譯。完整翻譯介面會喺下一個任務補上。'
+          body: '可以將英文問題轉成廣東話，也可以將長者嘅廣東話回答譯成英文。'
         }
       },
       actions: {
@@ -211,7 +226,7 @@ export const locales = {
         changeMode: '重新選擇模式'
       },
       notices: {
-        visitTranslationComingSoon: '探訪翻譯入口已準備好；完整翻譯功能會喺下一步加入。',
+        visitTranslationComingSoon: '探訪翻譯已準備好；請揀「我用英文講」或「長者講廣東話」。',
         visitGuideComingSoon: '探訪前指引會喺下一步加入。',
         visitGuideReady: '已打開探訪使用指引。'
       }
@@ -332,7 +347,7 @@ export const locales = {
   'zh-CN': {
     // App Title & Header
     appTitle: 'Hong Kong Buddy',
-    subtitle: '国际学生粤语实战练习',
+    subtitle: 'HKBU 同学粤语实战练习',
     badges: {
       aiTutor: '校园粤语',
       voiceChat: '语音教练',
@@ -465,13 +480,27 @@ export const locales = {
     visitTranslate: {
       title: '探访翻译',
       hint: '大字辅助',
+      helper: '探访现场沟通请用这里；粤语练习模式主要用于学习和纠正。',
+      speakerPrompt: '选择谁在说话',
       directionLabel: '翻译方向',
       translateButton: '翻译当前文字',
       outputTitle: '翻译结果',
       outputEmpty: '在下面输入一句，然后按翻译。',
       sourceLabel: '原文',
+      romanizationLabel: '粤拼发音提示',
+      romanizationHelper: '数字代表粤语声调，只作阅读提示。',
       greeting: '探访翻译已准备好。输入或说一句短句，然后按翻译。',
       confirmationWarning: 'AI 可能不准确，重要意思请和真人义工或工作人员确认。',
+      quickDirections: {
+        studentSpeaks: {
+          title: '我用英文说',
+          body: '显示粤语给长者'
+        },
+        residentSpeaks: {
+          title: '长者讲粤语',
+          body: '把回答译成英文'
+        }
+      },
       directions: {
         en_to_yue: '英文 → 粤语',
         yue_to_en: '粤语 → 英文',
@@ -488,7 +517,8 @@ export const locales = {
     },
 
     reliability: {
-      confirmTutorOutput: 'AI 正在使用模拟或低信心回应；重要内容请和真人确认。'
+      confirmTutorOutput: 'AI 正在使用模拟或低信心回应；重要内容请和真人确认。',
+      ttsRomanizationSkipped: '这段像粤拼发音提示，已避免朗读声调数字。请查看粤语文字或重新输入。'
     },
 
     onboarding: {
@@ -497,9 +527,9 @@ export const locales = {
       title: '你今天想做什么？',
       body: '先选择一条路径，Hong Kong Buddy 会优先显示合适语言、指引和工具。',
       cards: {
-        mainland: {
+        chineseReader: {
           title: '我想练习粤语',
-          body: '适合会读中文、想改善粤语发音、语气助词和自然表达的内地学生。'
+          body: '适合会读中文、想改善粤语发音、语气助词和自然表达的同学。'
         },
         international: {
           title: '我是国际学生',
@@ -512,7 +542,7 @@ export const locales = {
       },
       selected: {
         eyebrow: '已选模式',
-        mainland: {
+        chineseReader: {
           title: '粤语练习模式',
           body: '会优先显示发音、语气助词、探访短句和老师式纠正。'
         },
@@ -522,7 +552,7 @@ export const locales = {
         },
         visit: {
           title: '探访翻译模式',
-          body: '先保留一个主要行动：开始探访翻译。完整翻译界面会在下一项任务补上。'
+          body: '可以把英文问题转成粤语，也可以把长者的粤语回答译成英文。'
         }
       },
       actions: {
@@ -535,7 +565,7 @@ export const locales = {
         changeMode: '重新选择模式'
       },
       notices: {
-        visitTranslationComingSoon: '探访翻译入口已准备好；完整翻译功能会在下一步加入。',
+        visitTranslationComingSoon: '探访翻译已准备好；请选择“我用英文说”或“长者讲粤语”。',
         visitGuideComingSoon: '探访前指引会在下一步加入。',
         visitGuideReady: '已打开探访使用指引。'
       }
@@ -656,7 +686,7 @@ export const locales = {
   'en': {
     // App Title & Header
     appTitle: 'Hong Kong Buddy',
-    subtitle: 'Campus Cantonese practice for international students',
+    subtitle: 'Campus Cantonese practice for HKBU students',
     badges: {
       aiTutor: 'Campus-ready',
       voiceChat: 'Voice coach',
@@ -789,13 +819,27 @@ export const locales = {
     visitTranslate: {
       title: 'Visit translation',
       hint: 'Large-text helper',
+      helper: 'For live visit conversation, use Visit Translation. Cantonese Practice is for learning and coaching.',
+      speakerPrompt: 'Choose who is speaking',
       directionLabel: 'Direction',
       translateButton: 'Translate current text',
       outputTitle: 'Translated text',
       outputEmpty: 'Type a sentence below, then translate.',
       sourceLabel: 'Source',
+      romanizationLabel: 'Jyutping pronunciation guide',
+      romanizationHelper: 'Numbers show Cantonese tones and are for reading only.',
       greeting: 'Visit translation is ready. Type or speak one short sentence, then translate.',
       confirmationWarning: 'AI may be inaccurate. Confirm important meaning with a volunteer or staff member.',
+      quickDirections: {
+        studentSpeaks: {
+          title: 'I speak English',
+          body: 'Show Cantonese to resident'
+        },
+        residentSpeaks: {
+          title: 'Resident speaks Cantonese',
+          body: 'Translate reply to English'
+        }
+      },
       directions: {
         en_to_yue: 'English → Cantonese',
         yue_to_en: 'Cantonese → English',
@@ -812,7 +856,8 @@ export const locales = {
     },
 
     reliability: {
-      confirmTutorOutput: 'AI is using mock or lower-confidence output. Confirm important meaning with a person.'
+      confirmTutorOutput: 'AI is using mock or lower-confidence output. Confirm important meaning with a person.',
+      ttsRomanizationSkipped: 'This looks like a Jyutping pronunciation guide, so audio was skipped to avoid reading tone numbers aloud.'
     },
 
     onboarding: {
@@ -821,9 +866,9 @@ export const locales = {
       title: 'What do you need today?',
       body: 'Choose one path so Hong Kong Buddy shows the right language, guidance, and tools first.',
       cards: {
-        mainland: {
+        chineseReader: {
           title: 'I want to practise Cantonese',
-          body: 'Best for Mainland students who read Chinese and want pronunciation, particles, and natural phrasing.'
+          body: 'Best for students who read Chinese and want better Cantonese pronunciation, particles, and natural phrasing.'
         },
         international: {
           title: 'I am an international student',
@@ -836,7 +881,7 @@ export const locales = {
       },
       selected: {
         eyebrow: 'Selected mode',
-        mainland: {
+        chineseReader: {
           title: 'Cantonese Practice Mode',
           body: 'Pronunciation, particles, visit phrases, and teacher-style correction are prioritised.'
         },
@@ -846,7 +891,7 @@ export const locales = {
         },
         visit: {
           title: 'Visit Translation Mode',
-          body: 'One primary action is ready: Start Visit Translation. The full translation interface is the next implementation task.'
+          body: 'Translate English questions into Cantonese, or translate a resident’s Cantonese reply into English.'
         }
       },
       actions: {
@@ -859,7 +904,7 @@ export const locales = {
         changeMode: 'Choose another mode'
       },
       notices: {
-        visitTranslationComingSoon: 'Visit Translation entry is ready; the full translation workflow will be added next.',
+        visitTranslationComingSoon: 'Visit Translation is ready. Choose I speak English or Resident speaks Cantonese.',
         visitGuideComingSoon: 'The before-visit guide will be added next.',
         visitGuideReady: 'Visit guide opened.'
       }

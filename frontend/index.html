@@ -28,7 +28,7 @@
         <div class="brand-mark" aria-hidden="true">HK</div>
         <div>
           <h1>Hong Kong Buddy</h1>
-          <p class="subtitle">Campus Cantonese practice for international students</p>
+          <p class="subtitle">Campus Cantonese practice for HKBU students</p>
         </div>
       </div>
 
@@ -87,11 +87,11 @@
       </div>
 
       <div class="role-card-grid" role="list">
-        <button class="role-card" type="button" data-user-mode="mainland_learner" role="listitem">
+        <button class="role-card" type="button" data-user-mode="chinese_reader_learner" role="listitem">
           <span class="role-card-code" aria-hidden="true">CN</span>
           <span class="role-card-body">
-            <strong data-i18n="onboarding.cards.mainland.title">I want to practise Cantonese</strong>
-            <span data-i18n="onboarding.cards.mainland.body">Best for Mainland students who read Chinese and want pronunciation, particles, and natural phrasing.</span>
+            <strong data-i18n="onboarding.cards.chineseReader.title">I want to practise Cantonese</strong>
+            <span data-i18n="onboarding.cards.chineseReader.body">Best for students who read Chinese and want better Cantonese pronunciation, particles, and natural phrasing.</span>
           </span>
         </button>
 
@@ -185,6 +185,18 @@
           <div class="starter-header">
             <span id="visitTranslateTitle" data-i18n="visitTranslate.title">Visit translation</span>
             <small data-i18n="visitTranslate.hint">Large-text helper</small>
+          </div>
+          <p class="visit-mode-helper" data-i18n="visitTranslate.helper">For live visit conversation, use Visit Translation. Cantonese Practice is for learning and coaching.</p>
+          <span class="visit-speaker-prompt" data-i18n="visitTranslate.speakerPrompt">Choose who is speaking</span>
+          <div class="visit-direction-quick" role="group" aria-labelledby="visitTranslateTitle">
+            <button type="button" class="visit-direction-btn active" data-visit-direction="en_to_yue">
+              <strong data-i18n="visitTranslate.quickDirections.studentSpeaks.title">I speak English</strong>
+              <span data-i18n="visitTranslate.quickDirections.studentSpeaks.body">Show Cantonese to resident</span>
+            </button>
+            <button type="button" class="visit-direction-btn" data-visit-direction="yue_to_en">
+              <strong data-i18n="visitTranslate.quickDirections.residentSpeaks.title">Resident speaks Cantonese</strong>
+              <span data-i18n="visitTranslate.quickDirections.residentSpeaks.body">Translate reply to English</span>
+            </button>
           </div>
           <label for="visitDirection" data-i18n="visitTranslate.directionLabel">Direction</label>
           <select id="visitDirection">

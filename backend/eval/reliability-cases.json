@@ -36,6 +36,24 @@
       "type": "visit_translation",
       "input": "Translate an uncertain elderly-visit sentence.",
       "expected": "Response includes confidence and needsConfirmation metadata."
+    },
+    {
+      "id": "inclusive-copy-no-region-based",
+      "type": "copy",
+      "input": "Role onboarding learner path.",
+      "expected": "No visible region-based learner wording wording in the learner path; use students who read Chinese instead."
+    },
+    {
+      "id": "tts-does-not-read-jyutping-tone-numbers",
+      "type": "tts_safety",
+      "input": "English to Cantonese output includes romanization nei5 hou2 maa1.",
+      "expected": "TTS uses Cantonese Chinese speakableText and never reads Jyutping tone numbers aloud."
+    },
+    {
+      "id": "visit-resident-cantonese-to-english",
+      "type": "visit_translation",
+      "input": "Resident says Cantonese: 你好，好高興見到你。",
+      "expected": "Direction yue_to_en returns English meaning with the original Cantonese source visible and no irrelevant Jyutping by default."
     }
   ]
 }
