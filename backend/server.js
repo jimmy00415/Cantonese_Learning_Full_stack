@@ -734,23 +734,134 @@ function resolveVisitTtsText(translation, directionConfig) {
   return { text: '', warningCode: 'romanization_not_speakable' };
 }
 
+function normalizeVisitRuleText(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[，。！？,.!?]/g, '')
+    .replace(/\s+/g, '')
+    .trim();
+}
+
+function cantoneseQuestionToEnglish(sourceText) {
+  const text = normalizeVisitRuleText(sourceText);
+  if (!text) return '';
+
+  if (
+    (/邊度|边度|哪裡|哪里|乜地方|咩地方/.test(text) && /(嚟|來|来|從|从|由|喺|係|系)/.test(text))
+    || /邊度人|边度人|哪裡人|哪里人/.test(text)
+  ) {
+    return 'Where are you from?';
+  }
+  if (/(聽|听).*(明|懂|到)|明唔明|明吾明|聽唔聽得明|听不听得懂|聽得明|听得懂|聽唔聽到/.test(text)) {
+    return 'Can you understand what I am saying?';
+  }
+  if (/叫咩名|叫乜名|你叫咩|你叫乜|貴姓|贵姓|咩名|乜名/.test(text)) {
+    return 'What is your name?';
+  }
+  if (/幾多歲|几多岁|幾歲|几岁|多大/.test(text)) {
+    return 'How old are you?';
+  }
+  if (/食咗飯|食左飯|吃飯|吃饭|食飯|食饭/.test(text)) {
+    return 'Have you eaten yet?';
+  }
+  if (/住邊|住边|住喺邊|住在哪里|住哪裡|住哪里/.test(text)) {
+    return 'Where do you live?';
+  }
+  if (/水|飲|喝|口渴/.test(text)) return 'Would you like some water?';
+  if (/唔舒服|不舒服|痛|暈|晕|急|醫|医|救命|胸口/.test(text)) {
+    return 'The resident may need help or may not be feeling well. Please ask staff to check.';
+  }
+  if (/發音|发音|讀音|读音/.test(text)) return 'Can you help me correct my pronunciation?';
+  if (/唔該|多謝|谢谢|謝謝/.test(text)) return 'Thank you.';
+  const greetingText = text.replace(/(呀|啊|吖|啦|喇|呢|嘅|㗎|嗎|吗|嘛)+$/g, '');
+  if (/^(你好|您好|早晨|午安|晚安|好高興見到你|好高兴见到你|見到你|见到你)+$/.test(greetingText)) {
+    return 'Hello, nice to meet you.';
+  }
+
+  return '';
+}
+
+function cantoneseQuestionToMandarin(sourceText) {
+  const english = cantoneseQuestionToEnglish(sourceText);
+  const map = new Map([
+    ['Where are you from?', '你从哪里来？'],
+    ['Can you understand what I am saying?', '你听得懂我说的话吗？'],
+    ['What is your name?', '你叫什么名字？'],
+    ['How old are you?', '你今年多大？'],
+    ['Have you eaten yet?', '你吃饭了吗？'],
+    ['Where do you live?', '你住在哪里？'],
+    ['Would you like some water?', '你想喝点水吗？'],
+    ['The resident may need help or may not be feeling well. Please ask staff to check.', '长者可能需要帮助，或身体不舒服。请工作人员确认。'],
+    ['Can you help me correct my pronunciation?', '可以帮我纠正发音吗？'],
+    ['Thank you.', '谢谢。'],
+    ['Hello, nice to meet you.', '你好，很高兴见到你。']
+  ]);
+  return map.get(english) || '';
+}
+
+function volunteerLineToCantonese(sourceText) {
+  const text = normalizeVisitRuleText(sourceText);
+  if (!text) return '';
+
+  if (/water|drink|thirsty|水|喝水|饮水|飲水/.test(text)) return '你想唔想飲啲水？';
+  if (/where.*from|from.*where|哪里来|哪裡來|从哪里|從哪裡|邊度嚟/.test(text)) return '你喺邊度嚟㗎？';
+  if (/understand|hear.*me|听得懂|聽得明|明白/.test(text)) return '你聽唔聽得明我講嘢呀？';
+  if (/name|叫什么|叫咩|貴姓|贵姓/.test(text)) return '你叫咩名呀？';
+  if (/eat|meal|吃饭|食飯|食饭/.test(text)) return '你食咗飯未呀？';
+  if (/nice.*meet|hello|你好|您好/.test(text)) return '你好，好高興見到你。';
+  return '';
+}
+
+function buildRuleBasedVisitTranslation(sourceText, direction) {
+  if (direction === 'yue_to_en') {
+    const displayText = cantoneseQuestionToEnglish(sourceText);
+    return displayText ? { translatedText: displayText, speakableText: '', romanization: null, displayText } : null;
+  }
+  if (direction === 'yue_to_zh') {
+    const displayText = cantoneseQuestionToMandarin(sourceText);
+    return displayText ? { translatedText: displayText, speakableText: '', romanization: null, displayText } : null;
+  }
+  if (direction === 'en_to_yue' || direction === 'zh_to_yue') {
+    const displayText = volunteerLineToCantonese(sourceText);
+    return displayText
+      ? {
+          translatedText: displayText,
+          speakableText: displayText,
+          romanization: displayText.includes('水')
+            ? normalizeRomanization('nei5 soeng2 m4 soeng2 jam2 di1 seoi2?')
+            : null,
+          displayText
+        }
+      : null;
+  }
+  return null;
+}
+
+function completeRuleBasedVisitTranslation(sourceText, direction, ruleBased) {
+  const directionConfig = visitTranslationDirections[direction] || visitTranslationDirections.en_to_yue;
+  const displayText = String(ruleBased.displayText || ruleBased.translatedText || '').trim();
+  const needsConfirmation = /staff|confirm|職員|工作人员|确认/.test(displayText);
+  return {
+    sourceText,
+    sourceLanguage: directionConfig.sourceLanguage,
+    targetLanguage: directionConfig.targetLanguage,
+    ...ruleBased,
+    confidence: needsConfirmation ? 0.82 : 0.94,
+    needsConfirmation,
+    provider: 'rule_based'
+  };
+}
+
 function mockVisitTranslation(sourceText, direction) {
-  const normalized = sourceText.toLowerCase();
+  const ruleBased = buildRuleBasedVisitTranslation(sourceText, direction);
+  const safeUnknown = direction === 'yue_to_zh'
+    ? '长者说了一句粤语。请工作人员确认准确意思。'
+    : 'The resident said something in Cantonese. Please ask staff to confirm the exact meaning.';
   const mockByDirection = {
-    en_to_yue: normalized.includes('water')
-      ? { translatedText: '你想唔想飲啲水？', speakableText: '你想唔想飲啲水？', romanization: normalizeRomanization('nei5 soeng2 m4 soeng2 jam2 di1 seoi2?'), displayText: '你想唔想飲啲水？' }
-      : { translatedText: '你好，好高興見到你。', speakableText: '你好，好高興見到你。', romanization: normalizeRomanization('nei5 hou2, hou2 gou1 hing3 gin3 dou3 nei5.'), displayText: '你好，好高興見到你。' },
-    yue_to_en: sourceText.includes('水')
-      ? { translatedText: 'Would you like some water?', speakableText: '', romanization: null, displayText: 'Would you like some water?' }
-      : /發音|发音/.test(sourceText)
-        ? { translatedText: 'Can you help me correct my pronunciation?', speakableText: '', romanization: null, displayText: 'Can you help me correct my pronunciation?' }
-      : { translatedText: 'Hello, nice to meet you.', speakableText: '', romanization: null, displayText: 'Hello, nice to meet you.' },
-    yue_to_zh: sourceText.includes('水')
-      ? { translatedText: '你想喝点水吗？', speakableText: '', romanization: null, displayText: '你想喝点水吗？' }
-      : { translatedText: '你好，很高兴见到你。', speakableText: '', romanization: null, displayText: '你好，很高兴见到你。' },
-    zh_to_yue: sourceText.includes('水')
-      ? { translatedText: '你想唔想飲啲水？', speakableText: '你想唔想飲啲水？', romanization: normalizeRomanization('nei5 soeng2 m4 soeng2 jam2 di1 seoi2?'), displayText: '你想唔想飲啲水？' }
-      : { translatedText: '你好，好高興見到你。', speakableText: '你好，好高興見到你。', romanization: normalizeRomanization('nei5 hou2, hou2 gou1 hing3 gin3 dou3 nei5.'), displayText: '你好，好高興見到你。' }
+    en_to_yue: ruleBased || { translatedText: '請同職員確認一下。', speakableText: '請同職員確認一下。', romanization: null, displayText: '請同職員確認一下。' },
+    yue_to_en: ruleBased || { translatedText: safeUnknown, speakableText: '', romanization: null, displayText: safeUnknown },
+    yue_to_zh: ruleBased || { translatedText: safeUnknown, speakableText: '', romanization: null, displayText: safeUnknown },
+    zh_to_yue: ruleBased || { translatedText: '請同職員確認一下。', speakableText: '請同職員確認一下。', romanization: null, displayText: '請同職員確認一下。' }
   };
 
   return {
@@ -763,15 +874,12 @@ function mockVisitTranslation(sourceText, direction) {
 }
 
 function buildBasicVisitEnglishTranslation(sourceText) {
-  const text = String(sourceText || '');
-  if (/發音|发音|讀音|读音/.test(text)) return 'Can you help me correct my pronunciation?';
-  if (/水|飲|喝|口渴/.test(text)) return 'Would you like some water?';
-  if (/你好|您好|高興|高兴|見到|见到/.test(text)) return 'Hello, nice to meet you.';
-  if (/唔舒服|不舒服|痛|暈|晕|急|醫|医|救命/.test(text)) {
-    return 'The resident may need help or may not be feeling well. Please ask staff to check.';
-  }
-  if (/唔該|多謝|谢谢|謝謝/.test(text)) return 'Thank you.';
-  return 'The resident said something in Cantonese. Please ask staff to confirm the exact meaning.';
+  return cantoneseQuestionToEnglish(sourceText)
+    || 'The resident said something in Cantonese. Please ask staff to confirm the exact meaning.';
+}
+
+function isGenericEnglishGreeting(text) {
+  return /^(hello|hi|hello,\s*nice to meet you|nice to meet you|hello,\s*nice to meet you\.)[.!]?$/i.test(String(text || '').trim());
 }
 
 function extractJsonFieldLike(rawText, fieldNames = []) {
@@ -883,6 +991,9 @@ function sanitizeEnglishVisitTranslation(rawText, sourceText) {
   if (!candidate || cjkCount > 0 || !hasEnglish || looksLikeModelReasoningLeak(candidate)) {
     return { text: buildBasicVisitEnglishTranslation(sourceText), usedFallback: true };
   }
+  if (isGenericEnglishGreeting(candidate) && cantoneseQuestionToEnglish(sourceText) !== 'Hello, nice to meet you.') {
+    return { text: buildBasicVisitEnglishTranslation(sourceText), usedFallback: true };
+  }
 
   const sentences = candidate.match(/[^.!?]+[.!?]+/g);
   const concise = (sentences ? sentences.slice(0, 2).join(' ') : candidate)
@@ -961,6 +1072,9 @@ function parseVisitTranslation(rawText, sourceText, direction, provider) {
 
 async function translateForVisit(sourceText, direction) {
   const directionConfig = visitTranslationDirections[direction] || visitTranslationDirections.en_to_yue;
+  const ruleBased = buildRuleBasedVisitTranslation(sourceText, direction);
+  if (ruleBased) return completeRuleBasedVisitTranslation(sourceText, direction, ruleBased);
+
   const providers = getConfiguredLlmProviders();
   if (!providers.length) return mockVisitTranslation(sourceText, direction);
 

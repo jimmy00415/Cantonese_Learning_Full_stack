@@ -54,6 +54,24 @@
       "type": "visit_translation",
       "input": "Resident says Cantonese: 你好，好高興見到你。",
       "expected": "Direction yue_to_en is the visit-mode default and returns readable English for international students with the original Cantonese source visible, no irrelevant Jyutping, and no English TTS."
+    },
+    {
+      "id": "visit-resident-where-from-not-greeting",
+      "type": "visit_translation",
+      "input": "Resident says Cantonese: 你從邊度嚟呀？",
+      "expected": "Visit translation returns the meaning \"Where are you from?\" and must not fall back to \"Hello, nice to meet you.\""
+    },
+    {
+      "id": "visit-resident-understanding-not-greeting",
+      "type": "visit_translation",
+      "input": "Resident says Cantonese: 你好呀。你聽唔聽得明我講嘢呀？",
+      "expected": "Visit translation returns a readable English understanding/hearing check and must not fall back to a greeting."
+    },
+    {
+      "id": "visit-unknown-cantonese-no-confident-greeting",
+      "type": "visit_translation",
+      "input": "Resident says Cantonese: 我今日去咗公園散步。",
+      "expected": "If the app cannot determine the meaning, it uses a staff-confirmation fallback instead of a confident generic greeting."
     }
   ]
 }
