@@ -27,14 +27,15 @@ const allowedOrigins = [
   'https://jimmy00415.github.io',
   'http://localhost:5173',
   'http://localhost:60480',
-  'http://localhost:3000'
+  'http://localhost:3000',
+  'http://127.0.0.1:4000'
 ];
 // Check if origin matches any allowed pattern (including localhost with any port)
 const isOriginAllowed = (origin) => {
   if (!origin) return true;
   if (allowedOrigins.includes(origin)) return true;
   // Allow any localhost port for development
-  if (origin.match(/^http:\/\/localhost:\d+$/)) return true;
+  if (origin.match(/^http:\/\/(?:localhost|127\.0\.0\.1):\d+$/)) return true;
   return false;
 };
 const appVersion = process.env.APP_VERSION || '0.1.0-prototype';
@@ -739,6 +740,8 @@ function mockVisitTranslation(sourceText, direction) {
       : { translatedText: '你好，好高興見到你。', speakableText: '你好，好高興見到你。', romanization: normalizeRomanization('nei5 hou2, hou2 gou1 hing3 gin3 dou3 nei5.'), displayText: '你好，好高興見到你。' },
     yue_to_en: sourceText.includes('水')
       ? { translatedText: 'Would you like some water?', speakableText: '', romanization: null, displayText: 'Would you like some water?' }
+      : /發音|发音/.test(sourceText)
+        ? { translatedText: 'Can you help me correct my pronunciation?', speakableText: '', romanization: null, displayText: 'Can you help me correct my pronunciation?' }
       : { translatedText: 'Hello, nice to meet you.', speakableText: '', romanization: null, displayText: 'Hello, nice to meet you.' },
     yue_to_zh: sourceText.includes('水')
       ? { translatedText: '你想喝点水吗？', speakableText: '', romanization: null, displayText: '你想喝点水吗？' }
@@ -757,13 +760,92 @@ function mockVisitTranslation(sourceText, direction) {
   };
 }
 
+function buildBasicVisitEnglishTranslation(sourceText) {
+  const text = String(sourceText || '');
+  if (/發音|发音|讀音|读音/.test(text)) return 'Can you help me correct my pronunciation?';
+  if (/水|飲|喝|口渴/.test(text)) return 'Would you like some water?';
+  if (/你好|您好|高興|高兴|見到|见到/.test(text)) return 'Hello, nice to meet you.';
+  if (/唔舒服|不舒服|痛|暈|晕|急|醫|医|救命/.test(text)) {
+    return 'The resident may need help or may not be feeling well. Please ask staff to check.';
+  }
+  if (/唔該|多謝|谢谢|謝謝/.test(text)) return 'Thank you.';
+  return 'The resident said something in Cantonese. Please ask staff to confirm the exact meaning.';
+}
+
+function extractJsonFieldLike(rawText, fieldNames = []) {
+  const text = String(rawText || '');
+  for (const fieldName of fieldNames) {
+    const quoted = new RegExp(`["']${fieldName}["']\\s*:\\s*["“]([^"”\\n]{2,260})`, 'i').exec(text);
+    if (quoted?.[1]) return quoted[1].trim();
+    const bare = new RegExp(`${fieldName}\\s*:\\s*([^\\n,}]{2,260})`, 'i').exec(text);
+    if (bare?.[1]) return bare[1].replace(/^["“]|["”]$/g, '').trim();
+  }
+  return '';
+}
+
+function extractEnglishMeaning(rawText) {
+  const text = String(rawText || '');
+  const jsonField = extractJsonFieldLike(text, ['displayText', 'translatedText', 'englishText']);
+  if (jsonField) return jsonField;
+
+  const meansMatch = /(?:means|meaning is|translate(?:s|d)?(?: as| to)?)\s*["“]([^"”\n]{2,260})["”]/i.exec(text);
+  if (meansMatch?.[1]) return meansMatch[1].trim();
+
+  const quotedEnglish = text
+    .match(/["“]([A-Z][^"”\n]{8,220}[?.!])["”]/g)
+    ?.map((item) => item.replace(/^["“]|["”]$/g, '').trim())
+    .find((item) => /[A-Za-z]{3,}/.test(item) && !/sourceLanguage|targetLanguage|translatedText|displayText/i.test(item));
+  return quotedEnglish || '';
+}
+
+function looksLikeModelReasoningLeak(text) {
+  const value = String(text || '').trim();
+  if (!value) return false;
+  return /sourceLanguage|targetLanguage|translatedText|displayText|speakableText|romanization|Let me output|system prompt|The user is speaking|Actually, looking/i.test(value)
+    || value.startsWith('{')
+    || value.startsWith('```');
+}
+
+function sanitizeEnglishVisitTranslation(rawText, sourceText) {
+  let candidate = String(rawText || '').trim();
+  if (looksLikeModelReasoningLeak(candidate)) {
+    candidate = extractEnglishMeaning(candidate);
+  }
+
+  candidate = candidate
+    .replace(/^["“]|["”]$/g, '')
+    .replace(/^The resident (?:says|said):\s*/i, '')
+    .trim();
+
+  const cjkCount = (candidate.match(/[\u3400-\u9fff]/g) || []).length;
+  const hasEnglish = /[A-Za-z]{3,}/.test(candidate);
+  if (!candidate || cjkCount > 0 || !hasEnglish || looksLikeModelReasoningLeak(candidate)) {
+    return { text: buildBasicVisitEnglishTranslation(sourceText), usedFallback: true };
+  }
+
+  const sentences = candidate.match(/[^.!?]+[.!?]+/g);
+  const concise = (sentences ? sentences.slice(0, 2).join(' ') : candidate)
+    .replace(/\s+/g, ' ')
+    .slice(0, 260)
+    .trim();
+  return { text: concise || buildBasicVisitEnglishTranslation(sourceText), usedFallback: !concise };
+}
+
 function parseVisitTranslation(rawText, sourceText, direction, provider) {
   const cleaned = String(rawText || '').trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim();
   const directionConfig = visitTranslationDirections[direction] || visitTranslationDirections.en_to_yue;
+  const targetIsEnglish = directionConfig.targetLanguage === 'en';
   try {
     const parsed = JSON.parse(cleaned);
-    const translatedText = String(parsed.translatedText || parsed.displayText || '').trim();
-    const displayText = String(parsed.displayText || parsed.translatedText || '').trim();
+    let translatedText = String(parsed.translatedText || parsed.displayText || '').trim();
+    let displayText = String(parsed.displayText || parsed.translatedText || '').trim();
+    let needsConfirmation = Boolean(parsed.needsConfirmation);
+    if (targetIsEnglish) {
+      const sanitized = sanitizeEnglishVisitTranslation(displayText || translatedText || cleaned, sourceText);
+      translatedText = sanitized.text;
+      displayText = sanitized.text;
+      needsConfirmation = needsConfirmation || sanitized.usedFallback;
+    }
     const speakableText = String(parsed.speakableText || '').trim()
       || (directionConfig.generateTts && !isRomanizationLikeText(displayText) ? displayText : '')
       || (directionConfig.generateTts && !isRomanizationLikeText(translatedText) ? translatedText : '');
@@ -773,14 +855,17 @@ function parseVisitTranslation(rawText, sourceText, direction, provider) {
       targetLanguage: directionConfig.targetLanguage,
       translatedText,
       displayText,
-      speakableText,
-      romanization: normalizeRomanization(parsed.romanization),
+      speakableText: targetIsEnglish ? '' : speakableText,
+      romanization: targetIsEnglish ? null : normalizeRomanization(parsed.romanization),
       confidence: Number.isFinite(Number(parsed.confidence)) ? Number(parsed.confidence) : 0.78,
-      needsConfirmation: Boolean(parsed.needsConfirmation),
+      needsConfirmation,
       provider
     };
   } catch {
-    const displayText = cleaned;
+    const sanitized = targetIsEnglish
+      ? sanitizeEnglishVisitTranslation(cleaned, sourceText)
+      : { text: cleaned, usedFallback: false };
+    const displayText = sanitized.text;
     return {
       sourceText,
       sourceLanguage: directionConfig.sourceLanguage,
@@ -811,7 +896,10 @@ async function translateForVisit(sourceText, direction) {
 
   for (const provider of providers) {
     try {
-      const raw = await callLLMProvider(provider, messages);
+      const raw = await callLLMProvider(provider, messages, {
+        maxTokens: directionConfig.targetLanguage === 'en' ? 120 : 180,
+        temperature: 0.1
+      });
       const result = parseVisitTranslation(raw, sourceText, direction, provider);
       if (result.translatedText || result.displayText) return result;
     } catch (err) {

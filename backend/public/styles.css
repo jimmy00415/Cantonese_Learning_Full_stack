@@ -836,6 +836,17 @@ h1 {
   align-items: start;
 }
 
+.practice-stage,
+.control-rail,
+.transcript,
+.feedback-panel,
+.input-panel,
+.visit-translate-panel,
+.visit-direction-btn,
+.visit-translation-output {
+  min-width: 0;
+}
+
 .control-rail,
 .feedback-panel {
   position: sticky;
@@ -848,6 +859,7 @@ h1 {
   gap: 18px;
   padding: 16px;
   background: #fffaf6;
+  overflow-x: hidden;
 }
 
 .mode-section {
@@ -1036,17 +1048,17 @@ body[data-user-mode="visit_translation"] .visit-translate-panel {
 
 .visit-direction-quick {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 8px;
 }
 
 .visit-direction-btn {
   display: grid;
   gap: 4px;
-  min-height: 78px;
+  min-height: 64px;
   align-content: center;
   justify-items: start;
-  padding: 10px;
+  padding: 10px 12px;
   border: 2px solid var(--line);
   border-radius: var(--radius);
   background: #fff;
@@ -1055,8 +1067,9 @@ body[data-user-mode="visit_translation"] .visit-translate-panel {
 }
 
 .visit-direction-btn strong {
-  font-size: 15px;
-  line-height: 1.12;
+  font-size: 14px;
+  line-height: 1.16;
+  overflow-wrap: anywhere;
 }
 
 .visit-direction-btn span {
@@ -1075,7 +1088,9 @@ body[data-user-mode="visit_translation"] .visit-translate-panel {
 .visit-translation-output {
   display: grid;
   gap: 8px;
-  min-height: 120px;
+  min-height: 96px;
+  max-height: 240px;
+  overflow: auto;
   padding: 14px;
   border: 2px solid var(--line);
   border-radius: var(--radius);
@@ -1084,8 +1099,9 @@ body[data-user-mode="visit_translation"] .visit-translate-panel {
 
 .visit-translation-output strong {
   color: var(--ink);
-  font-size: clamp(22px, 4vw, 34px);
-  line-height: 1.1;
+  font-size: 20px;
+  line-height: 1.22;
+  overflow-wrap: anywhere;
 }
 
 .visit-translation-output span {
@@ -2452,7 +2468,7 @@ button:hover:not(:disabled),
 }
 
 .practice-stage {
-  grid-template-columns: 260px minmax(520px, 1fr) 320px;
+  grid-template-columns: minmax(300px, 0.85fr) minmax(460px, 1.7fr) minmax(280px, 0.95fr);
   gap: 16px;
 }
 
@@ -2564,7 +2580,7 @@ button:hover:not(:disabled),
 
 @media (max-width: 1180px) {
   .practice-stage {
-    grid-template-columns: minmax(240px, 0.35fr) minmax(0, 1fr);
+    grid-template-columns: minmax(300px, 0.38fr) minmax(0, 1fr);
   }
 
   .feedback-panel {
