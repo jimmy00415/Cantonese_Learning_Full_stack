@@ -141,7 +141,7 @@ export const locales = {
     visitTranslate: {
       title: '探訪翻譯',
       hint: '大字輔助',
-      helper: '探訪即場溝通請用呢度；廣東話練習模式主要用嚟學習同糾正。',
+      helper: '為長者探訪活動而設；長者講廣東話時，揀「長者講廣東話」即可譯成英文俾國際生睇。',
       speakerPrompt: '揀邊個講緊',
       directionLabel: '翻譯方向',
       translateButton: '翻譯目前文字',
@@ -150,7 +150,7 @@ export const locales = {
       sourceLabel: '原文',
       romanizationLabel: '粵拼發音提示',
       romanizationHelper: '數字代表廣東話聲調，只作閱讀提示。',
-      greeting: '探訪翻譯已準備好。輸入或講一句短句，然後按翻譯。',
+      greeting: '探訪翻譯已準備好。長者講廣東話時，可直接輸入或錄音，然後譯成英文。',
       confirmationWarning: 'AI 可能唔準，重要意思請同真人義工或職員確認。',
       quickDirections: {
         studentSpeaks: {
@@ -159,14 +159,14 @@ export const locales = {
         },
         residentSpeaks: {
           title: '長者講廣東話',
-          body: '將回答譯成英文'
+          body: '將長者回答譯成英文'
         }
       },
       directions: {
         en_to_yue: '英文 → 廣東話',
         yue_to_en: '廣東話 → 英文',
-        yue_to_zh: '廣東話 → 中文',
-        zh_to_yue: '中文 → 廣東話'
+        yue_to_zh: '廣東話 → 普通話',
+        zh_to_yue: '普通話 → 廣東話'
       },
       notices: {
         emptyInput: '請先輸入要翻譯嘅句子。',
@@ -190,15 +190,15 @@ export const locales = {
       cards: {
         chineseReader: {
           title: '我想練習廣東話',
-          body: '適合識中文、想改善廣東話發音、語氣助詞同自然講法嘅同學。'
+          body: '適合識普通話、想改善廣東話發音、語氣助詞同自然講法嘅同學。'
         },
         international: {
           title: '我係國際學生',
           body: '英文優先指引，配廣東話音頻、意思同逐步練習。'
         },
         visit: {
-          title: '我探訪期間需要翻譯',
-          body: '為 HKBU 探訪活動而設嘅簡化路徑，支援大字、常用短句同音頻。'
+          title: '我參與社區探訪活動需要翻譯',
+          body: '為長者探訪活動而設，支援大字、常用短句、即場錄音或輸入翻譯，幫國際生讀懂長者嘅廣東話。'
         }
       },
       selected: {
@@ -226,7 +226,7 @@ export const locales = {
         changeMode: '重新選擇模式'
       },
       notices: {
-        visitTranslationComingSoon: '探訪翻譯已準備好；請揀「我用英文講」或「長者講廣東話」。',
+        visitTranslationComingSoon: '探訪翻譯已準備好；已優先開啟「長者講廣東話 → 英文」。需要反向翻譯時可揀「我用英文講」。',
         visitGuideComingSoon: '探訪前指引會喺下一步加入。',
         visitGuideReady: '已打開探訪使用指引。'
       }
@@ -480,7 +480,7 @@ export const locales = {
     visitTranslate: {
       title: '探访翻译',
       hint: '大字辅助',
-      helper: '探访现场沟通请用这里；粤语练习模式主要用于学习和纠正。',
+      helper: '为长者探访活动而设；长者讲粤语时，选择“长者讲粤语”即可译成英文给国际生看。',
       speakerPrompt: '选择谁在说话',
       directionLabel: '翻译方向',
       translateButton: '翻译当前文字',
@@ -489,7 +489,7 @@ export const locales = {
       sourceLabel: '原文',
       romanizationLabel: '粤拼发音提示',
       romanizationHelper: '数字代表粤语声调，只作阅读提示。',
-      greeting: '探访翻译已准备好。输入或说一句短句，然后按翻译。',
+      greeting: '探访翻译已准备好。长者讲粤语时，可直接输入或录音，然后译成英文。',
       confirmationWarning: 'AI 可能不准确，重要意思请和真人义工或工作人员确认。',
       quickDirections: {
         studentSpeaks: {
@@ -498,14 +498,14 @@ export const locales = {
         },
         residentSpeaks: {
           title: '长者讲粤语',
-          body: '把回答译成英文'
+          body: '把长者回答译成英文'
         }
       },
       directions: {
         en_to_yue: '英文 → 粤语',
         yue_to_en: '粤语 → 英文',
-        yue_to_zh: '粤语 → 中文',
-        zh_to_yue: '中文 → 粤语'
+        yue_to_zh: '粤语 → 普通话',
+        zh_to_yue: '普通话 → 粤语'
       },
       notices: {
         emptyInput: '请先输入要翻译的句子。',
@@ -529,15 +529,15 @@ export const locales = {
       cards: {
         chineseReader: {
           title: '我想练习粤语',
-          body: '适合会读中文、想改善粤语发音、语气助词和自然表达的同学。'
+          body: '适合会普通话、想改善粤语发音、语气助词和自然表达的同学。'
         },
         international: {
           title: '我是国际学生',
           body: '英文优先指引，配粤语音频、意思和逐步练习。'
         },
         visit: {
-          title: '我探访期间需要翻译',
-          body: '为 HKBU 探访活动而设的简化路径，支持大字、常用短句和音频。'
+          title: '我参与社区探访活动需要翻译',
+          body: '为长者探访活动而设，支持大字、常用短句、现场录音或输入翻译，帮助国际生读懂长者的粤语。'
         }
       },
       selected: {
@@ -565,7 +565,7 @@ export const locales = {
         changeMode: '重新选择模式'
       },
       notices: {
-        visitTranslationComingSoon: '探访翻译已准备好；请选择“我用英文说”或“长者讲粤语”。',
+        visitTranslationComingSoon: '探访翻译已准备好；已优先开启“长者讲粤语 → 英文”。需要反向翻译时可选择“我用英文说”。',
         visitGuideComingSoon: '探访前指引会在下一步加入。',
         visitGuideReady: '已打开探访使用指引。'
       }
@@ -819,7 +819,7 @@ export const locales = {
     visitTranslate: {
       title: 'Visit translation',
       hint: 'Large-text helper',
-      helper: 'For live visit conversation, use Visit Translation. Cantonese Practice is for learning and coaching.',
+      helper: 'Designed for elderly visit activities. When a resident speaks Cantonese, choose “Resident speaks Cantonese” to translate the reply into readable English.',
       speakerPrompt: 'Choose who is speaking',
       directionLabel: 'Direction',
       translateButton: 'Translate current text',
@@ -828,7 +828,7 @@ export const locales = {
       sourceLabel: 'Source',
       romanizationLabel: 'Jyutping pronunciation guide',
       romanizationHelper: 'Numbers show Cantonese tones and are for reading only.',
-      greeting: 'Visit translation is ready. Type or speak one short sentence, then translate.',
+      greeting: 'Visit translation is ready. If a resident speaks Cantonese, type or record it, then translate it into English.',
       confirmationWarning: 'AI may be inaccurate. Confirm important meaning with a volunteer or staff member.',
       quickDirections: {
         studentSpeaks: {
@@ -837,14 +837,14 @@ export const locales = {
         },
         residentSpeaks: {
           title: 'Resident speaks Cantonese',
-          body: 'Translate reply to English'
+          body: 'Translate elder reply to English'
         }
       },
       directions: {
         en_to_yue: 'English → Cantonese',
         yue_to_en: 'Cantonese → English',
-        yue_to_zh: 'Cantonese → Chinese',
-        zh_to_yue: 'Chinese → Cantonese'
+        yue_to_zh: 'Cantonese → Mandarin',
+        zh_to_yue: 'Mandarin → Cantonese'
       },
       notices: {
         emptyInput: 'Type a sentence to translate first.',
@@ -868,15 +868,15 @@ export const locales = {
       cards: {
         chineseReader: {
           title: 'I want to practise Cantonese',
-          body: 'Best for students who read Chinese and want better Cantonese pronunciation, particles, and natural phrasing.'
+          body: 'Best for Mandarin speakers who want better Cantonese pronunciation, particles, and natural phrasing.'
         },
         international: {
           title: 'I am an international student',
           body: 'English-first help with Cantonese audio, meaning, and practice steps.'
         },
         visit: {
-          title: 'I need translation during a visit',
-          body: 'A simple path for HKBU activity visits with large text, quick phrases, and audio.'
+          title: 'I need translation for a community visit',
+          body: 'Designed for elderly visit activities, with large text, quick phrases, audio, and Cantonese-to-English help for international students.'
         }
       },
       selected: {
@@ -904,7 +904,7 @@ export const locales = {
         changeMode: 'Choose another mode'
       },
       notices: {
-        visitTranslationComingSoon: 'Visit Translation is ready. Choose I speak English or Resident speaks Cantonese.',
+        visitTranslationComingSoon: 'Visit Translation is ready with “Resident speaks Cantonese → English” first. Choose “I speak English” when you need the reverse direction.',
         visitGuideComingSoon: 'The before-visit guide will be added next.',
         visitGuideReady: 'Visit guide opened.'
       }

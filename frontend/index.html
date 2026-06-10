@@ -19,7 +19,7 @@
       console.log('Speech SDK loaded from: local (v1.38.0)');
     }
   </script>
-  <link rel="stylesheet" href="styles.css?v=20260525coachtranslation1" />
+  <link rel="stylesheet" href="styles.css?v=20260610visittranslation1" />
 </head>
 <body>
   <main class="app">
@@ -91,7 +91,7 @@
           <span class="role-card-code" aria-hidden="true">CN</span>
           <span class="role-card-body">
             <strong data-i18n="onboarding.cards.chineseReader.title">I want to practise Cantonese</strong>
-            <span data-i18n="onboarding.cards.chineseReader.body">Best for students who read Chinese and want better Cantonese pronunciation, particles, and natural phrasing.</span>
+            <span data-i18n="onboarding.cards.chineseReader.body">Best for Mandarin speakers who want better Cantonese pronunciation, particles, and natural phrasing.</span>
           </span>
         </button>
 
@@ -106,8 +106,8 @@
         <button class="role-card" type="button" data-user-mode="visit_translation" role="listitem">
           <span class="role-card-code" aria-hidden="true">VISIT</span>
           <span class="role-card-body">
-            <strong data-i18n="onboarding.cards.visit.title">I need translation during a visit</strong>
-            <span data-i18n="onboarding.cards.visit.body">A simple path for HKBU activity visits with large text, quick phrases, and audio.</span>
+            <strong data-i18n="onboarding.cards.visit.title">I need translation for a community visit</strong>
+            <span data-i18n="onboarding.cards.visit.body">Designed for elderly visit activities, with large text, quick phrases, audio, and Cantonese-to-English help for international students.</span>
           </span>
         </button>
       </div>
@@ -186,24 +186,24 @@
             <span id="visitTranslateTitle" data-i18n="visitTranslate.title">Visit translation</span>
             <small data-i18n="visitTranslate.hint">Large-text helper</small>
           </div>
-          <p class="visit-mode-helper" data-i18n="visitTranslate.helper">For live visit conversation, use Visit Translation. Cantonese Practice is for learning and coaching.</p>
+          <p class="visit-mode-helper" data-i18n="visitTranslate.helper">Designed for elderly visit activities. When a resident speaks Cantonese, choose “Resident speaks Cantonese” to translate the reply into readable English.</p>
           <span class="visit-speaker-prompt" data-i18n="visitTranslate.speakerPrompt">Choose who is speaking</span>
           <div class="visit-direction-quick" role="group" aria-labelledby="visitTranslateTitle">
-            <button type="button" class="visit-direction-btn active" data-visit-direction="en_to_yue">
+            <button type="button" class="visit-direction-btn" data-visit-direction="en_to_yue">
               <strong data-i18n="visitTranslate.quickDirections.studentSpeaks.title">I speak English</strong>
               <span data-i18n="visitTranslate.quickDirections.studentSpeaks.body">Show Cantonese to resident</span>
             </button>
-            <button type="button" class="visit-direction-btn" data-visit-direction="yue_to_en">
+            <button type="button" class="visit-direction-btn active" data-visit-direction="yue_to_en">
               <strong data-i18n="visitTranslate.quickDirections.residentSpeaks.title">Resident speaks Cantonese</strong>
-              <span data-i18n="visitTranslate.quickDirections.residentSpeaks.body">Translate reply to English</span>
+              <span data-i18n="visitTranslate.quickDirections.residentSpeaks.body">Translate elder reply to English</span>
             </button>
           </div>
           <label for="visitDirection" data-i18n="visitTranslate.directionLabel">Direction</label>
           <select id="visitDirection">
             <option value="en_to_yue" data-i18n="visitTranslate.directions.en_to_yue">English → Cantonese</option>
-            <option value="yue_to_en" data-i18n="visitTranslate.directions.yue_to_en">Cantonese → English</option>
-            <option value="yue_to_zh" data-i18n="visitTranslate.directions.yue_to_zh">Cantonese → Chinese</option>
-            <option value="zh_to_yue" data-i18n="visitTranslate.directions.zh_to_yue">Chinese → Cantonese</option>
+            <option value="yue_to_en" data-i18n="visitTranslate.directions.yue_to_en" selected>Cantonese → English</option>
+            <option value="yue_to_zh" data-i18n="visitTranslate.directions.yue_to_zh">Cantonese → Mandarin</option>
+            <option value="zh_to_yue" data-i18n="visitTranslate.directions.zh_to_yue">Mandarin → Cantonese</option>
           </select>
           <button type="button" id="visitTranslateBtn" data-i18n="visitTranslate.translateButton">Translate current text</button>
           <div class="visit-translation-output" id="visitTranslationOutput" aria-live="polite">
@@ -454,6 +454,6 @@
     </footer>
   </main>
 
-  <script type="module" src="app.js?v=20260525coachtranslation1"></script>
+  <script type="module" src="app.js?v=20260610visittranslation1"></script>
 </body>
 </html>

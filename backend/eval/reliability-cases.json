@@ -41,7 +41,7 @@
       "id": "inclusive-copy-no-region-based",
       "type": "copy",
       "input": "Role onboarding learner path.",
-      "expected": "No visible region-based learner wording wording in the learner path; use students who read Chinese instead."
+      "expected": "No visible region-based learner wording in the learner path; use Mandarin-first learner wording instead of Chinese as a spoken-language label."
     },
     {
       "id": "tts-does-not-read-jyutping-tone-numbers",
@@ -53,7 +53,7 @@
       "id": "visit-resident-cantonese-to-english",
       "type": "visit_translation",
       "input": "Resident says Cantonese: 你好，好高興見到你。",
-      "expected": "Direction yue_to_en returns English meaning with the original Cantonese source visible and no irrelevant Jyutping by default."
+      "expected": "Direction yue_to_en is the visit-mode default and returns readable English for international students with the original Cantonese source visible, no irrelevant Jyutping, and no English TTS."
     }
   ]
 }

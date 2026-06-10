@@ -1,5 +1,5 @@
 // P3-1: Import i18n module
-import { t, setLanguage, getLanguage, initI18n, getAvailableLanguages, locales } from './i18n/index.js?v=20260525coachtranslation1';
+import { t, setLanguage, getLanguage, initI18n, getAvailableLanguages, locales } from './i18n/index.js?v=20260610visittranslation1';
 import { elderlyVisitPlaybook } from './content/playbooks.js?v=20260522visit1';
 
 const META_API = document.querySelector('meta[name="api-base"]');
@@ -98,6 +98,7 @@ let isRecording = false; // Guard flag for async recording lifecycle
 // P1: Current mode state
 let currentMode = 'freeChat'; // 'freeChat' or 'teaching'
 const USER_MODE_STORAGE_KEY = 'hkbuddy.userMode';
+const DEFAULT_VISIT_DIRECTION = 'yue_to_en';
 const LEGACY_CHINESE_READER_MODE = ['main', 'land_learner'].join('');
 const USER_MODE_ALIASES = {
   [LEGACY_CHINESE_READER_MODE]: 'chinese_reader_learner'
@@ -202,6 +203,7 @@ const userModeConfig = {
   visit_translation: {
     chatMode: 'freeChat',
     defaultLanguage: 'en',
+    defaultVisitDirection: DEFAULT_VISIT_DIRECTION,
     titleKey: 'onboarding.selected.visit.title',
     bodyKey: 'onboarding.selected.visit.body',
     actionKeys: [
@@ -266,6 +268,8 @@ function handleRoleAction(action) {
 
   if (action === 'startVisitTranslation') {
     document.body.dataset.userMode = 'visit_translation';
+    syncVisitDirectionControls(DEFAULT_VISIT_DIRECTION);
+    resetVisitTranslationOutput();
     document.getElementById('practice')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     setNotice(t('onboarding.notices.visitTranslationComingSoon'), 'info');
     return;
@@ -316,6 +320,7 @@ function selectUserMode(mode, { fromStorage = false } = {}) {
   const config = getUserModeConfig(mode);
   if (!config) return;
 
+  const previousUserMode = currentUserMode;
   currentUserMode = mode;
   localStorage.setItem(USER_MODE_STORAGE_KEY, mode);
   document.body.dataset.userMode = mode;
@@ -332,6 +337,11 @@ function selectUserMode(mode, { fromStorage = false } = {}) {
   if (roleOnboardingEl) roleOnboardingEl.hidden = true;
   if (changeModeBtn) changeModeBtn.hidden = false;
   renderRoleContext();
+
+  if (mode === 'visit_translation' && previousUserMode !== 'visit_translation') {
+    syncVisitDirectionControls(config.defaultVisitDirection || DEFAULT_VISIT_DIRECTION);
+    resetVisitTranslationOutput();
+  }
 }
 
 function initUserMode() {
@@ -534,7 +544,7 @@ function renderVisitTranslation(res) {
   }
 }
 
-function syncVisitDirectionControls(direction = visitDirection?.value || 'en_to_yue') {
+function syncVisitDirectionControls(direction = visitDirection?.value || DEFAULT_VISIT_DIRECTION) {
   if (visitDirection && visitDirection.value !== direction) {
     visitDirection.value = direction;
   }
@@ -545,7 +555,7 @@ function syncVisitDirectionControls(direction = visitDirection?.value || 'en_to_
   });
 }
 
-function getVisitSpeakerRole(direction = visitDirection?.value || 'en_to_yue') {
+function getVisitSpeakerRole(direction = visitDirection?.value || DEFAULT_VISIT_DIRECTION) {
   if (direction === 'yue_to_en' || direction === 'yue_to_zh') return 'resident';
   return 'student';
 }
@@ -572,7 +582,7 @@ async function translateVisitText(text, inputType = 'text') {
       body: JSON.stringify({
         sessionId,
         sourceText,
-        direction: visitDirection?.value || 'en_to_yue',
+        direction: visitDirection?.value || DEFAULT_VISIT_DIRECTION,
         speakerRole: getVisitSpeakerRole(),
         inputType,
         userMode: 'visit_translation'
@@ -2141,7 +2151,7 @@ startVisitTranslationFromPlaybook?.addEventListener('click', () => {
 visitDirectionButtons.forEach((button) => {
   button.setAttribute('aria-pressed', button.classList.contains('active') ? 'true' : 'false');
   button.addEventListener('click', () => {
-    syncVisitDirectionControls(button.dataset.visitDirection || 'en_to_yue');
+    syncVisitDirectionControls(button.dataset.visitDirection || DEFAULT_VISIT_DIRECTION);
     resetVisitTranslationOutput();
     textInput?.focus();
   });

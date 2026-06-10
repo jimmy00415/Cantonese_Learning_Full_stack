@@ -623,24 +623,27 @@ const visitTranslationDirections = {
     targetLanguage: 'en',
     speakerRole: 'resident',
     target: 'English',
+    promptHint: 'The source is likely spoken Cantonese from an older resident. Translate the meaning into plain, short English that an international student can read quickly during a community visit. Preserve polite nuance, uncertainty, names, times, health or safety concerns, and requests for help. Do not output Cantonese, Jyutping, Mandarin, or audio speakable text.',
     includeRomanization: false,
     generateTts: false
   },
   yue_to_zh: {
-    label: 'Cantonese to written Chinese',
+    label: 'Cantonese to Mandarin',
     sourceLanguage: 'yue-Hant-HK',
-    targetLanguage: 'zh-Hant',
+    targetLanguage: 'cmn-Hans',
     speakerRole: 'resident',
-    target: 'written Chinese',
+    target: 'Mandarin',
+    promptHint: 'Translate spoken Cantonese into natural written Mandarin for quick understanding. Do not output Jyutping.',
     includeRomanization: false,
     generateTts: false
   },
   zh_to_yue: {
-    label: 'Chinese to Cantonese',
-    sourceLanguage: 'zh',
+    label: 'Mandarin to Cantonese',
+    sourceLanguage: 'cmn',
     targetLanguage: 'yue-Hant-HK',
     speakerRole: 'student',
     target: 'Cantonese',
+    promptHint: 'Translate Mandarin or English-influenced Mandarin into polite spoken Hong Kong Cantonese for an elderly visit. Use Traditional Chinese Cantonese text for display and speech.',
     includeRomanization: true,
     generateTts: true
   }
@@ -766,8 +769,8 @@ function parseVisitTranslation(rawText, sourceText, direction, provider) {
       || (directionConfig.generateTts && !isRomanizationLikeText(translatedText) ? translatedText : '');
     return {
       sourceText,
-      sourceLanguage: parsed.sourceLanguage || directionConfig.sourceLanguage,
-      targetLanguage: parsed.targetLanguage || directionConfig.targetLanguage,
+      sourceLanguage: directionConfig.sourceLanguage,
+      targetLanguage: directionConfig.targetLanguage,
       translatedText,
       displayText,
       speakableText,
@@ -801,7 +804,7 @@ async function translateForVisit(sourceText, direction) {
   const messages = [
     {
       role: 'system',
-      content: `You translate for a supervised HKBU elderly visit. Direction: ${directionConfig.label}. Return ONLY JSON with keys sourceLanguage, targetLanguage, translatedText, displayText, speakableText, romanization, confidence, needsConfirmation. Keep wording polite, short, and safe. If meaning is uncertain, set needsConfirmation true. If the target is Cantonese, displayText and speakableText must be Traditional Chinese Cantonese text, never romanization. ${directionConfig.includeRomanization ? 'Include romanization as {"scheme":"jyutping","text":"...","toneNumbers":true}.' : 'Set romanization to null.'}`
+      content: `You translate for a supervised HKBU elderly/community visit. Direction: ${directionConfig.label}. ${directionConfig.promptHint || ''} Return ONLY JSON with keys sourceLanguage, targetLanguage, translatedText, displayText, speakableText, romanization, confidence, needsConfirmation. Keep wording polite, short, and safe. If meaning is uncertain, set needsConfirmation true. If the target is English, displayText must be readable English and speakableText must be an empty string. If the target is Cantonese, displayText and speakableText must be Traditional Chinese Cantonese text, never romanization. ${directionConfig.includeRomanization ? 'Include romanization as {"scheme":"jyutping","text":"...","toneNumbers":true}.' : 'Set romanization to null.'}`
     },
     { role: 'user', content: sourceText }
   ];
@@ -1689,7 +1692,7 @@ app.post('/api/visit-translate', async (req, res) => {
   const {
     sessionId,
     sourceText = '',
-    direction = 'en_to_yue',
+    direction = 'yue_to_en',
     inputType = 'text',
     userMode = 'visit_translation'
   } = req.body || {};
@@ -1735,7 +1738,7 @@ app.post('/api/visit-translate', async (req, res) => {
     targetLanguage: translation.targetLanguage || directionConfig.targetLanguage,
     translatedText: translation.translatedText,
     displayText: translation.displayText || translation.translatedText,
-    speakableText: translation.speakableText || '',
+    speakableText: directionConfig.generateTts ? translation.speakableText || '' : '',
     romanization: translation.romanization,
     confidence: translation.confidence,
     needsConfirmation: translation.needsConfirmation || translation.provider === 'mock' || Number(translation.confidence || 0) < 0.7 || Boolean(warningCode),
