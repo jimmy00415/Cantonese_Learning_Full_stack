@@ -107,7 +107,7 @@
           <span class="role-card-code" aria-hidden="true">VISIT</span>
           <span class="role-card-body">
             <strong data-i18n="onboarding.cards.visit.title">I need translation for a community visit</strong>
-            <span data-i18n="onboarding.cards.visit.body">Designed for elderly visit activities, with large text, quick phrases, audio, and Cantonese-to-English help for international students.</span>
+            <span data-i18n="onboarding.cards.visit.body">Two live tools for visits: resident Cantonese to English or Mandarin, and volunteer English or Mandarin to Cantonese.</span>
           </span>
         </button>
       </div>
@@ -182,33 +182,65 @@
         </section>
 
         <section class="visit-translate-panel" id="visitTranslatePanel" aria-labelledby="visitTranslateTitle">
-          <div class="starter-header">
-            <span id="visitTranslateTitle" data-i18n="visitTranslate.title">Visit translation</span>
-            <small data-i18n="visitTranslate.hint">Large-text helper</small>
+          <div class="visit-console-hero">
+            <span class="visit-live-badge" data-i18n="visitTranslate.liveBadge">Live visit interpreter</span>
+            <h3 id="visitTranslateTitle" data-i18n="visitTranslate.consoleTitle">Community visit interpreter</h3>
+            <p class="visit-mode-helper" data-i18n="visitTranslate.helper">Choose one of two live translation jobs for an elderly visit. Use the microphone for speech or type when the room is noisy.</p>
           </div>
-          <p class="visit-mode-helper" data-i18n="visitTranslate.helper">Designed for elderly visit activities. When a resident speaks Cantonese, choose “Resident speaks Cantonese” to translate the reply into readable English.</p>
-          <span class="visit-speaker-prompt" data-i18n="visitTranslate.speakerPrompt">Choose who is speaking</span>
-          <div class="visit-direction-quick" role="group" aria-labelledby="visitTranslateTitle">
-            <button type="button" class="visit-direction-btn" data-visit-direction="en_to_yue">
-              <strong data-i18n="visitTranslate.quickDirections.studentSpeaks.title">I speak English</strong>
-              <span data-i18n="visitTranslate.quickDirections.studentSpeaks.body">Show Cantonese to resident</span>
+
+          <div class="visit-task-grid" role="group" aria-labelledby="visitTranslateTitle">
+            <button type="button" class="visit-task-card active" data-visit-task="resident">
+              <span class="visit-task-code">01</span>
+              <strong data-i18n="visitTranslate.tasks.resident.title">Resident speaks Cantonese</strong>
+              <span data-i18n="visitTranslate.tasks.resident.body">Translate the resident’s Cantonese into English or Mandarin.</span>
             </button>
-            <button type="button" class="visit-direction-btn active" data-visit-direction="yue_to_en">
-              <strong data-i18n="visitTranslate.quickDirections.residentSpeaks.title">Resident speaks Cantonese</strong>
-              <span data-i18n="visitTranslate.quickDirections.residentSpeaks.body">Translate elder reply to English</span>
+            <button type="button" class="visit-task-card" data-visit-task="volunteer">
+              <span class="visit-task-code">02</span>
+              <strong data-i18n="visitTranslate.tasks.volunteer.title">Volunteer speaks English or Mandarin</strong>
+              <span data-i18n="visitTranslate.tasks.volunteer.body">Translate the volunteer’s line into polite Cantonese.</span>
             </button>
           </div>
-          <label for="visitDirection" data-i18n="visitTranslate.directionLabel">Direction</label>
-          <select id="visitDirection">
+
+          <div class="visit-direction-panel" data-visit-option-group="resident">
+            <span class="visit-speaker-prompt" data-i18n="visitTranslate.groups.resident">Translate resident answer to</span>
+            <div class="visit-direction-quick" role="group" aria-label="Resident output language">
+              <button type="button" class="visit-direction-btn active" data-visit-direction="yue_to_en">
+                <strong data-i18n="visitTranslate.quickDirections.residentEnglish.title">English</strong>
+                <span data-i18n="visitTranslate.quickDirections.residentEnglish.body">For international volunteers</span>
+              </button>
+              <button type="button" class="visit-direction-btn" data-visit-direction="yue_to_zh">
+                <strong data-i18n="visitTranslate.quickDirections.residentMandarin.title">Mandarin</strong>
+                <span data-i18n="visitTranslate.quickDirections.residentMandarin.body">For Mandarin-speaking volunteers</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="visit-direction-panel" data-visit-option-group="volunteer" hidden>
+            <span class="visit-speaker-prompt" data-i18n="visitTranslate.groups.volunteer">Translate volunteer line from</span>
+            <div class="visit-direction-quick" role="group" aria-label="Volunteer input language">
+              <button type="button" class="visit-direction-btn" data-visit-direction="en_to_yue">
+                <strong data-i18n="visitTranslate.quickDirections.volunteerEnglish.title">English</strong>
+                <span data-i18n="visitTranslate.quickDirections.volunteerEnglish.body">English question to Cantonese</span>
+              </button>
+              <button type="button" class="visit-direction-btn" data-visit-direction="zh_to_yue">
+                <strong data-i18n="visitTranslate.quickDirections.volunteerMandarin.title">Mandarin</strong>
+                <span data-i18n="visitTranslate.quickDirections.volunteerMandarin.body">Mandarin question to Cantonese</span>
+              </button>
+            </div>
+          </div>
+
+          <label class="sr-only" for="visitDirection" data-i18n="visitTranslate.directionLabel">Direction</label>
+          <select id="visitDirection" class="visit-direction-select" aria-label="Visit translation direction">
             <option value="en_to_yue" data-i18n="visitTranslate.directions.en_to_yue">English → Cantonese</option>
             <option value="yue_to_en" data-i18n="visitTranslate.directions.yue_to_en" selected>Cantonese → English</option>
             <option value="yue_to_zh" data-i18n="visitTranslate.directions.yue_to_zh">Cantonese → Mandarin</option>
             <option value="zh_to_yue" data-i18n="visitTranslate.directions.zh_to_yue">Mandarin → Cantonese</option>
           </select>
-          <button type="button" id="visitTranslateBtn" data-i18n="visitTranslate.translateButton">Translate current text</button>
+          <button type="button" id="visitTranslateBtn" class="visit-primary-action" data-i18n="visitTranslate.actions.translateResident">Translate resident speech</button>
           <div class="visit-translation-output" id="visitTranslationOutput" aria-live="polite">
-            <strong data-i18n="visitTranslate.outputTitle">Translated text</strong>
-            <span data-i18n="visitTranslate.outputEmpty">Type a sentence below, then translate.</span>
+            <span class="visit-output-kicker" data-i18n="visitTranslate.outputReady">Ready</span>
+            <strong data-i18n="visitTranslate.outputTitle">Choose a task above</strong>
+            <span data-i18n="visitTranslate.outputEmpty">Then type or hold the microphone to translate.</span>
           </div>
           <div class="visit-translation-warning" id="visitTranslationWarning" hidden></div>
         </section>
@@ -237,8 +269,8 @@
       <section class="transcript" aria-label="對話內容">
         <div class="transcript-header">
           <div class="transcript-titleblock">
-            <span class="section-eyebrow">Live Practice</span>
-            <h3>Conversation Deck</h3>
+            <span class="section-eyebrow" data-i18n="transcript.eyebrow">Live Practice</span>
+            <h3 data-i18n="transcript.title">Conversation Deck</h3>
           </div>
           <div class="transcript-meta">
             <div class="pill" id="scenarioPill">情景：自由對話</div>

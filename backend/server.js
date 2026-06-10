@@ -726,7 +726,9 @@ function resolveVisitTtsText(translation, directionConfig) {
   ].map((item) => String(item || '').trim()).filter(Boolean);
 
   for (const candidate of candidates) {
-    if (!isRomanizationLikeText(candidate)) return { text: stripRomanizationForSpeech(candidate) || candidate, warningCode: null };
+    if (!looksLikeModelReasoningLeak(candidate) && hasCjkText(candidate) && !isRomanizationLikeText(candidate)) {
+      return { text: stripRomanizationForSpeech(candidate) || candidate, warningCode: null };
+    }
   }
 
   return { text: '', warningCode: 'romanization_not_speakable' };
@@ -801,9 +803,68 @@ function extractEnglishMeaning(rawText) {
 function looksLikeModelReasoningLeak(text) {
   const value = String(text || '').trim();
   if (!value) return false;
-  return /sourceLanguage|targetLanguage|translatedText|displayText|speakableText|romanization|Let me output|system prompt|The user is speaking|Actually, looking/i.test(value)
+  return /sourceLanguage|targetLanguage|translatedText|displayText|speakableText|romanization|Let me output|system prompt|The user is speaking|The user wants me|I need to translate|Cantonese translation would|tone numbers|formatting the response|Actually, looking/i.test(value)
     || value.startsWith('{')
     || value.startsWith('```');
+}
+
+function hasCjkText(text) {
+  return /[\u3400-\u9fff]/.test(String(text || ''));
+}
+
+function getSafeVisitFallback(sourceText, direction, provider) {
+  const fallback = mockVisitTranslation(sourceText, direction);
+  return {
+    ...fallback,
+    provider: provider || fallback.provider,
+    needsConfirmation: true
+  };
+}
+
+function extractCjkTranslationLine(rawText) {
+  const lines = String(rawText || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/^[-*]\s*/, ''))
+    .filter(Boolean);
+
+  for (const line of lines) {
+    if (!hasCjkText(line)) continue;
+    if (/The user|I need|Let me|tone numbers|formatting|translation would/i.test(line)) continue;
+    let candidate = line.includes('→') ? line.split('→').pop() : line;
+    candidate = candidate
+      .replace(/\([^()]*[a-z]{1,8}[1-6][^()]*\)/gi, '')
+      .replace(/^[："“']+|[："”']+$/g, '')
+      .trim();
+    if (hasCjkText(candidate) && candidate.length <= 120 && !looksLikeModelReasoningLeak(candidate)) {
+      return candidate;
+    }
+  }
+
+  return '';
+}
+
+function extractStructuredVisitText(rawText, fieldNames = ['displayText', 'translatedText']) {
+  const text = String(rawText || '').trim();
+  const extracted = extractJsonFieldLike(text, fieldNames);
+  if (extracted) return extracted;
+
+  const jsonBlock = text.match(/\{[\s\S]+\}/)?.[0];
+  if (jsonBlock) {
+    try {
+      const parsed = JSON.parse(jsonBlock);
+      for (const fieldName of fieldNames) {
+        const value = parsed?.[fieldName];
+        if (typeof value === 'string' && value.trim()) return value.trim();
+      }
+    } catch {
+      // Fall through to plain text handling.
+    }
+  }
+
+  const cjkLine = extractCjkTranslationLine(text);
+  if (cjkLine) return cjkLine;
+
+  return '';
 }
 
 function sanitizeEnglishVisitTranslation(rawText, sourceText) {
@@ -835,6 +896,7 @@ function parseVisitTranslation(rawText, sourceText, direction, provider) {
   const cleaned = String(rawText || '').trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim();
   const directionConfig = visitTranslationDirections[direction] || visitTranslationDirections.en_to_yue;
   const targetIsEnglish = directionConfig.targetLanguage === 'en';
+  const targetNeedsCjk = directionConfig.targetLanguage !== 'en';
   try {
     const parsed = JSON.parse(cleaned);
     let translatedText = String(parsed.translatedText || parsed.displayText || '').trim();
@@ -845,6 +907,15 @@ function parseVisitTranslation(rawText, sourceText, direction, provider) {
       translatedText = sanitized.text;
       displayText = sanitized.text;
       needsConfirmation = needsConfirmation || sanitized.usedFallback;
+    }
+    if (targetNeedsCjk && (looksLikeModelReasoningLeak(displayText) || !hasCjkText(displayText))) {
+      const extracted = extractStructuredVisitText(displayText || translatedText || cleaned);
+      displayText = extracted || displayText;
+      translatedText = extracted || translatedText;
+      needsConfirmation = true;
+    }
+    if (targetNeedsCjk && (looksLikeModelReasoningLeak(displayText) || !hasCjkText(displayText))) {
+      return getSafeVisitFallback(sourceText, direction, provider);
     }
     const speakableText = String(parsed.speakableText || '').trim()
       || (directionConfig.generateTts && !isRomanizationLikeText(displayText) ? displayText : '')
@@ -862,17 +933,24 @@ function parseVisitTranslation(rawText, sourceText, direction, provider) {
       provider
     };
   } catch {
+    const extracted = extractStructuredVisitText(cleaned);
     const sanitized = targetIsEnglish
-      ? sanitizeEnglishVisitTranslation(cleaned, sourceText)
-      : { text: cleaned, usedFallback: false };
+      ? sanitizeEnglishVisitTranslation(extracted || cleaned, sourceText)
+      : { text: extracted || cleaned, usedFallback: Boolean(extracted) };
     const displayText = sanitized.text;
+    if (targetNeedsCjk && (looksLikeModelReasoningLeak(displayText) || !hasCjkText(displayText))) {
+      return getSafeVisitFallback(sourceText, direction, provider);
+    }
+    const speakableText = directionConfig.generateTts && !looksLikeModelReasoningLeak(displayText) && !isRomanizationLikeText(displayText)
+      ? displayText
+      : '';
     return {
       sourceText,
       sourceLanguage: directionConfig.sourceLanguage,
       targetLanguage: directionConfig.targetLanguage,
       translatedText: displayText,
       displayText,
-      speakableText: directionConfig.generateTts && !isRomanizationLikeText(displayText) ? displayText : '',
+      speakableText,
       romanization: null,
       confidence: 0.72,
       needsConfirmation: true,
@@ -897,7 +975,7 @@ async function translateForVisit(sourceText, direction) {
   for (const provider of providers) {
     try {
       const raw = await callLLMProvider(provider, messages, {
-        maxTokens: directionConfig.targetLanguage === 'en' ? 120 : 180,
+        maxTokens: directionConfig.targetLanguage === 'en' ? 120 : 320,
         temperature: 0.1
       });
       const result = parseVisitTranslation(raw, sourceText, direction, provider);
@@ -1447,6 +1525,19 @@ function azureAudioContentType(audioFormat) {
   return 'audio/wav; codec=audio/pcm; samplerate=16000';
 }
 
+function resolveAsrLanguage(language, direction) {
+  const directionLanguages = {
+    yue_to_en: 'zh-HK',
+    yue_to_zh: 'zh-HK',
+    en_to_yue: 'en-US',
+    zh_to_yue: 'zh-CN'
+  };
+  const requested = String(language || '').trim();
+  const allowed = new Set(['zh-HK', 'zh-CN', 'cmn-Hans-CN', 'en-US', 'en-GB']);
+  if (allowed.has(requested)) return requested;
+  return directionLanguages[direction] || azureAsrLanguage;
+}
+
 async function transcribeMiniMax(audioBuffer, audioFormat, mimeType) {
   if (!minimaxApiKey) throw new Error('MINIMAX_API_KEY not configured');
 
@@ -1478,7 +1569,7 @@ async function transcribeMiniMax(audioBuffer, audioFormat, mimeType) {
   return { transcript, result };
 }
 
-async function transcribeAzure(audioBuffer, audioFormat) {
+async function transcribeAzure(audioBuffer, audioFormat, language = azureAsrLanguage) {
   const speechKey = process.env.AZURE_SPEECH_KEY;
   const speechRegion = process.env.AZURE_SPEECH_REGION || 'eastasia';
 
@@ -1487,7 +1578,7 @@ async function transcribeAzure(audioBuffer, audioFormat) {
   }
 
   const contentType = azureAudioContentType(audioFormat);
-  console.log(`Sending to Azure ASR with Content-Type: ${contentType}`);
+  console.log(`Sending to Azure ASR with Content-Type: ${contentType}, language=${language}`);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
@@ -1495,7 +1586,7 @@ async function transcribeAzure(audioBuffer, audioFormat) {
   let response;
   try {
     response = await fetch(
-      `https://${speechRegion}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=${encodeURIComponent(azureAsrLanguage)}`,
+      `https://${speechRegion}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=${encodeURIComponent(language)}`,
       {
         method: 'POST',
         headers: {
@@ -1530,7 +1621,7 @@ async function transcribeAzure(audioBuffer, audioFormat) {
 
 // Speech-to-Text endpoint for browser-recorded audio.
 app.post('/api/speech-to-text', async (req, res) => {
-  const { audioData } = req.body;
+  const { audioData, language, direction } = req.body;
 
   if (!audioData) {
     return res.status(400).json({ error: 'Missing audioData' });
@@ -1538,7 +1629,8 @@ app.post('/api/speech-to-text', async (req, res) => {
 
   try {
     const { audioBuffer, audioFormat, mimeType } = parseAudioData(audioData);
-    console.log(`Received audio: format=${audioFormat}, mime=${mimeType}, size=${audioBuffer.length} bytes`);
+    const requestedAsrLanguage = resolveAsrLanguage(language, direction);
+    console.log(`Received audio: format=${audioFormat}, mime=${mimeType}, size=${audioBuffer.length} bytes, asrLanguage=${requestedAsrLanguage}`);
 
     const providerOrder = asrProvider === 'azure'
       ? ['azure']
@@ -1572,12 +1664,12 @@ app.post('/api/speech-to-text', async (req, res) => {
         }
 
         if (provider === 'azure') {
-          const { transcript, result } = await transcribeAzure(audioBuffer, audioFormat);
+          const { transcript, result } = await transcribeAzure(audioBuffer, audioFormat, requestedAsrLanguage);
           return res.json({
             transcript,
             confidence: 0.9,
             provider: 'azure',
-            language: azureAsrLanguage,
+            language: requestedAsrLanguage,
             recognitionStatus: result.RecognitionStatus
           });
         }

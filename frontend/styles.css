@@ -2578,6 +2578,234 @@ button:hover:not(:disabled),
   padding: 6px 12px;
 }
 
+body[data-user-mode="visit_translation"] .hero,
+body[data-user-mode="visit_translation"] .guide-panel,
+body[data-user-mode="visit_translation"] .mode-section,
+body[data-user-mode="visit_translation"] .controls,
+body[data-user-mode="visit_translation"] .scenario-guide,
+body[data-user-mode="visit_translation"] .starter,
+body[data-user-mode="visit_translation"] .feedback-panel,
+body[data-user-mode="visit_translation"] #correctMeBtn,
+body[data-user-mode="visit_translation"] .voice-control {
+  display: none;
+}
+
+body[data-user-mode="visit_translation"] .role-context-actions {
+  display: none;
+}
+
+body[data-user-mode="visit_translation"] .role-context-panel {
+  align-items: center;
+  border-color: rgba(0, 122, 255, 0.26);
+  background: linear-gradient(135deg, rgba(232, 244, 255, 0.94), rgba(255, 255, 255, 0.88));
+}
+
+body[data-user-mode="visit_translation"] .practice-stage {
+  grid-template-columns: minmax(340px, 0.9fr) minmax(0, 1.35fr);
+  gap: 18px;
+}
+
+body[data-user-mode="visit_translation"] .control-rail {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  max-height: none;
+  overflow: visible;
+}
+
+body[data-user-mode="visit_translation"] .visit-translate-panel {
+  gap: 16px;
+  padding: 20px;
+  border-color: rgba(0, 122, 255, 0.22);
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.14);
+}
+
+.visit-console-hero {
+  display: grid;
+  gap: 8px;
+}
+
+.visit-live-badge,
+.visit-output-kicker,
+.visit-task-code {
+  color: #007aff;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.visit-console-hero h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(30px, 4vw, 46px);
+  line-height: 1.02;
+  letter-spacing: 0;
+}
+
+body[data-user-mode="visit_translation"] .visit-mode-helper {
+  max-width: 62ch;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.visit-task-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.visit-task-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 6px 12px;
+  align-items: start;
+  min-height: 104px;
+  padding: 14px;
+  border: 1px solid rgba(17, 24, 39, 0.14);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  text-align: left;
+  box-shadow: none;
+}
+
+.visit-task-card strong,
+.visit-task-card span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.visit-task-card strong {
+  font-size: 20px;
+  line-height: 1.12;
+}
+
+.visit-task-card span:last-child {
+  grid-column: 2;
+  color: var(--ink-soft);
+  font-size: 14px;
+  font-weight: 760;
+  line-height: 1.35;
+}
+
+.visit-task-card.active {
+  border-color: rgba(0, 122, 255, 0.44);
+  background: #eaf4ff;
+  box-shadow: inset 0 0 0 1px rgba(0, 122, 255, 0.22);
+}
+
+.visit-direction-panel {
+  display: grid;
+  gap: 8px;
+}
+
+.visit-direction-panel[hidden] {
+  display: none;
+}
+
+body[data-user-mode="visit_translation"] .visit-direction-quick {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+body[data-user-mode="visit_translation"] .visit-direction-btn {
+  min-height: 76px;
+  border-radius: 8px;
+}
+
+body[data-user-mode="visit_translation"] .visit-direction-btn.active {
+  background: #111827;
+  color: #fff;
+}
+
+body[data-user-mode="visit_translation"] .visit-direction-btn.active span {
+  color: rgba(255, 255, 255, 0.76);
+}
+
+.visit-direction-select {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.visit-primary-action {
+  min-height: 52px;
+  border: 0;
+  border-radius: 999px;
+  background: #007aff;
+  color: #fff;
+  font-size: 16px;
+  box-shadow: 0 12px 26px rgba(0, 122, 255, 0.24);
+}
+
+body[data-user-mode="visit_translation"] .visit-translation-output {
+  min-height: 170px;
+  max-height: none;
+  border-radius: 8px;
+  border-color: rgba(17, 24, 39, 0.12);
+  background: linear-gradient(180deg, #fff, #f8fafc);
+}
+
+body[data-user-mode="visit_translation"] .visit-translation-output strong {
+  font-size: clamp(24px, 2.2vw, 34px);
+  line-height: 1.08;
+}
+
+body[data-user-mode="visit_translation"] .visit-translation-output small {
+  color: var(--muted);
+  font-weight: 780;
+}
+
+body[data-user-mode="visit_translation"] .visit-translation-warning {
+  padding: 10px 12px;
+  border: 1px solid rgba(180, 83, 9, 0.24);
+  border-radius: 8px;
+  background: #fffbeb;
+  color: #92400e;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+body[data-user-mode="visit_translation"] .transcript {
+  min-height: 640px;
+}
+
+body[data-user-mode="visit_translation"] .transcript-body {
+  min-height: 520px;
+  max-height: calc(100vh - 250px);
+}
+
+body[data-user-mode="visit_translation"] .message {
+  max-width: 88%;
+}
+
+body[data-user-mode="visit_translation"] .message.ai {
+  border-color: rgba(0, 122, 255, 0.22);
+  background: #eef6ff;
+}
+
+body[data-user-mode="visit_translation"] .input-panel {
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+}
+
+body[data-user-mode="visit_translation"] .mic {
+  background: #111827;
+  color: #fff;
+}
+
+body[data-user-mode="visit_translation"] .audio-controls {
+  grid-column: auto;
+  grid-template-columns: auto auto;
+}
+
 @media (max-width: 1180px) {
   .practice-stage {
     grid-template-columns: minmax(300px, 0.38fr) minmax(0, 1fr);
@@ -2641,5 +2869,29 @@ button:hover:not(:disabled),
 
   .about-mission-card {
     min-height: 0;
+  }
+}
+
+@media (max-width: 980px) {
+  body[data-user-mode="visit_translation"] .practice-stage,
+  body[data-user-mode="visit_translation"] .input-panel {
+    grid-template-columns: 1fr;
+  }
+
+  body[data-user-mode="visit_translation"] .visit-direction-quick {
+    grid-template-columns: 1fr;
+  }
+
+  body[data-user-mode="visit_translation"] .transcript {
+    min-height: 520px;
+  }
+
+  body[data-user-mode="visit_translation"] .transcript-body {
+    min-height: 440px;
+    max-height: none;
+  }
+
+  body[data-user-mode="visit_translation"] .audio-controls {
+    grid-column: 1;
   }
 }

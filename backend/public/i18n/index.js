@@ -140,26 +140,51 @@ export const locales = {
 
     visitTranslate: {
       title: '探訪翻譯',
-      hint: '大字輔助',
-      helper: '為長者探訪活動而設；長者講廣東話時，揀「長者講廣東話」即可譯成英文俾國際生睇。',
-      speakerPrompt: '揀邊個講緊',
+      hint: '即時口譯',
+      liveBadge: '探訪即時口譯',
+      consoleTitle: '社區探訪口譯台',
+      helper: '只做兩件事：長者講廣東話時譯成英文或普通話；義工講英文或普通話時譯成廣東話。可用咪高峰即時翻譯，嘈雜環境就用打字。',
+      speakerPrompt: '揀翻譯方向',
       directionLabel: '翻譯方向',
       translateButton: '翻譯目前文字',
-      outputTitle: '翻譯結果',
-      outputEmpty: '喺下面輸入一句，然後按翻譯。',
+      outputReady: '準備好',
+      outputTitle: '先揀上面其中一個任務',
+      outputEmpty: '然後喺下面打字，或者按住咪高峰即時翻譯。',
       sourceLabel: '原文',
       romanizationLabel: '粵拼發音提示',
       romanizationHelper: '數字代表廣東話聲調，只作閱讀提示。',
-      greeting: '探訪翻譯已準備好。長者講廣東話時，可直接輸入或錄音，然後譯成英文。',
+      greeting: '探訪口譯台已準備好。先揀「長者講廣東話」或「義工講英文／普通話」，再打字或按住咪高峰。',
       confirmationWarning: 'AI 可能唔準，重要意思請同真人義工或職員確認。',
-      quickDirections: {
-        studentSpeaks: {
-          title: '我用英文講',
-          body: '顯示廣東話俾長者'
-        },
-        residentSpeaks: {
+      tasks: {
+        resident: {
           title: '長者講廣東話',
-          body: '將長者回答譯成英文'
+          body: '即時譯成英文或普通話，方便義工讀懂。'
+        },
+        volunteer: {
+          title: '義工講英文或普通話',
+          body: '即時譯成禮貌廣東話，方便同長者溝通。'
+        }
+      },
+      groups: {
+        resident: '將長者回答譯成',
+        volunteer: '將義工說話由呢種語言譯出'
+      },
+      quickDirections: {
+        residentEnglish: {
+          title: '英文',
+          body: '俾國際義工睇'
+        },
+        residentMandarin: {
+          title: '普通話',
+          body: '俾普通話義工睇'
+        },
+        volunteerEnglish: {
+          title: '英文',
+          body: '英文問題譯成廣東話'
+        },
+        volunteerMandarin: {
+          title: '普通話',
+          body: '普通話問題譯成廣東話'
         }
       },
       directions: {
@@ -167,6 +192,43 @@ export const locales = {
         yue_to_en: '廣東話 → 英文',
         yue_to_zh: '廣東話 → 普通話',
         zh_to_yue: '普通話 → 廣東話'
+      },
+      placeholders: {
+        residentToEnglish: '輸入長者講嘅廣東話，例如：我想飲水。',
+        residentToMandarin: '輸入長者講嘅廣東話，例如：今日好開心。',
+        volunteerEnglish: 'Type the volunteer’s English line, e.g. Would you like some water?',
+        volunteerMandarin: '輸入義工嘅普通話，例如：您想喝水嗎？'
+      },
+      actions: {
+        translateResident: '翻譯長者說話',
+        translateVolunteer: '翻譯義工說話',
+        translateResidentShort: '翻譯長者',
+        translateVolunteerShort: '翻譯義工',
+        holdToTranslate: '按住即時翻譯',
+        recording: '錄音中… 放開即翻譯',
+        processingSpeech: '處理語音中…',
+        recognizing: '識別中',
+        recognized: '已識別'
+      },
+      routes: {
+        residentEnglish: '長者廣東話 → 英文',
+        residentMandarin: '長者廣東話 → 普通話',
+        volunteerEnglish: '義工英文 → 廣東話',
+        volunteerMandarin: '義工普通話 → 廣東話'
+      },
+      results: {
+        residentEnglish: '長者意思（英文）',
+        residentMandarin: '長者意思（普通話）',
+        volunteerEnglish: '俾長者睇／聽嘅廣東話',
+        volunteerMandarin: '俾長者睇／聽嘅廣東話'
+      },
+      emptyState: {
+        title: '準備即時口譯',
+        body: '左邊只保留兩個功能：長者廣東話譯成英文／普通話，或義工英文／普通話譯成廣東話。'
+      },
+      history: {
+        inputBadge: '輸入',
+        outputBadge: '譯文'
       },
       notices: {
         emptyInput: '請先輸入要翻譯嘅句子。',
@@ -198,7 +260,7 @@ export const locales = {
         },
         visit: {
           title: '我參與社區探訪活動需要翻譯',
-          body: '為長者探訪活動而設，支援大字、常用短句、即場錄音或輸入翻譯，幫國際生讀懂長者嘅廣東話。'
+          body: '兩個即時工具：長者廣東話譯成英文或普通話；義工英文或普通話譯成廣東話。'
         }
       },
       selected: {
@@ -213,7 +275,7 @@ export const locales = {
         },
         visit: {
           title: '探訪翻譯模式',
-          body: '可以將英文問題轉成廣東話，也可以將長者嘅廣東話回答譯成英文。'
+          body: '只保留兩個探訪口譯功能：長者廣東話 → 英文／普通話，以及義工英文／普通話 → 廣東話。'
         }
       },
       actions: {
@@ -226,7 +288,7 @@ export const locales = {
         changeMode: '重新選擇模式'
       },
       notices: {
-        visitTranslationComingSoon: '探訪翻譯已準備好；已優先開啟「長者講廣東話 → 英文」。需要反向翻譯時可揀「我用英文講」。',
+        visitTranslationComingSoon: '探訪口譯台已準備好；請揀長者說話或義工說話。',
         visitGuideComingSoon: '探訪前指引會喺下一步加入。',
         visitGuideReady: '已打開探訪使用指引。'
       }
@@ -256,6 +318,8 @@ export const locales = {
     
     // Transcript
     transcript: {
+      eyebrow: '即時記錄',
+      title: '口譯歷史',
       scenarioPrefix: '情景：',
       freeChat: '自由對話',
       sessionNotStarted: '未開始',
@@ -479,26 +543,51 @@ export const locales = {
 
     visitTranslate: {
       title: '探访翻译',
-      hint: '大字辅助',
-      helper: '为长者探访活动而设；长者讲粤语时，选择“长者讲粤语”即可译成英文给国际生看。',
-      speakerPrompt: '选择谁在说话',
+      hint: '实时口译',
+      liveBadge: '探访实时口译',
+      consoleTitle: '社区探访口译台',
+      helper: '只做两件事：长者讲粤语时译成英文或普通话；义工讲英文或普通话时译成粤语。可用麦克风实时翻译，嘈杂环境就用打字。',
+      speakerPrompt: '选择翻译方向',
       directionLabel: '翻译方向',
       translateButton: '翻译当前文字',
-      outputTitle: '翻译结果',
-      outputEmpty: '在下面输入一句，然后按翻译。',
+      outputReady: '准备好',
+      outputTitle: '先选择上面其中一个任务',
+      outputEmpty: '然后在下面打字，或者按住麦克风实时翻译。',
       sourceLabel: '原文',
       romanizationLabel: '粤拼发音提示',
       romanizationHelper: '数字代表粤语声调，只作阅读提示。',
-      greeting: '探访翻译已准备好。长者讲粤语时，可直接输入或录音，然后译成英文。',
+      greeting: '探访口译台已准备好。先选“长者讲粤语”或“义工讲英文/普通话”，再打字或按住麦克风。',
       confirmationWarning: 'AI 可能不准确，重要意思请和真人义工或工作人员确认。',
-      quickDirections: {
-        studentSpeaks: {
-          title: '我用英文说',
-          body: '显示粤语给长者'
-        },
-        residentSpeaks: {
+      tasks: {
+        resident: {
           title: '长者讲粤语',
-          body: '把长者回答译成英文'
+          body: '实时译成英文或普通话，方便义工读懂。'
+        },
+        volunteer: {
+          title: '义工讲英文或普通话',
+          body: '实时译成礼貌粤语，方便和长者沟通。'
+        }
+      },
+      groups: {
+        resident: '把长者回答译成',
+        volunteer: '把义工说话从这种语言译出'
+      },
+      quickDirections: {
+        residentEnglish: {
+          title: '英文',
+          body: '给国际义工看'
+        },
+        residentMandarin: {
+          title: '普通话',
+          body: '给普通话义工看'
+        },
+        volunteerEnglish: {
+          title: '英文',
+          body: '英文问题译成粤语'
+        },
+        volunteerMandarin: {
+          title: '普通话',
+          body: '普通话问题译成粤语'
         }
       },
       directions: {
@@ -506,6 +595,43 @@ export const locales = {
         yue_to_en: '粤语 → 英文',
         yue_to_zh: '粤语 → 普通话',
         zh_to_yue: '普通话 → 粤语'
+      },
+      placeholders: {
+        residentToEnglish: '输入长者讲的粤语，例如：我想饮水。',
+        residentToMandarin: '输入长者讲的粤语，例如：今日好开心。',
+        volunteerEnglish: 'Type the volunteer’s English line, e.g. Would you like some water?',
+        volunteerMandarin: '输入义工的普通话，例如：您想喝水吗？'
+      },
+      actions: {
+        translateResident: '翻译长者说话',
+        translateVolunteer: '翻译义工说话',
+        translateResidentShort: '翻译长者',
+        translateVolunteerShort: '翻译义工',
+        holdToTranslate: '按住实时翻译',
+        recording: '录音中… 放开即翻译',
+        processingSpeech: '处理语音中…',
+        recognizing: '识别中',
+        recognized: '已识别'
+      },
+      routes: {
+        residentEnglish: '长者粤语 → 英文',
+        residentMandarin: '长者粤语 → 普通话',
+        volunteerEnglish: '义工英文 → 粤语',
+        volunteerMandarin: '义工普通话 → 粤语'
+      },
+      results: {
+        residentEnglish: '长者意思（英文）',
+        residentMandarin: '长者意思（普通话）',
+        volunteerEnglish: '给长者看/听的粤语',
+        volunteerMandarin: '给长者看/听的粤语'
+      },
+      emptyState: {
+        title: '准备实时口译',
+        body: '左边只保留两个功能：长者粤语译成英文/普通话，或义工英文/普通话译成粤语。'
+      },
+      history: {
+        inputBadge: '输入',
+        outputBadge: '译文'
       },
       notices: {
         emptyInput: '请先输入要翻译的句子。',
@@ -537,7 +663,7 @@ export const locales = {
         },
         visit: {
           title: '我参与社区探访活动需要翻译',
-          body: '为长者探访活动而设，支持大字、常用短句、现场录音或输入翻译，帮助国际生读懂长者的粤语。'
+          body: '两个实时工具：长者粤语译成英文或普通话；义工英文或普通话译成粤语。'
         }
       },
       selected: {
@@ -552,7 +678,7 @@ export const locales = {
         },
         visit: {
           title: '探访翻译模式',
-          body: '可以把英文问题转成粤语，也可以把长者的粤语回答译成英文。'
+          body: '只保留两个探访口译功能：长者粤语 → 英文/普通话，以及义工英文/普通话 → 粤语。'
         }
       },
       actions: {
@@ -565,7 +691,7 @@ export const locales = {
         changeMode: '重新选择模式'
       },
       notices: {
-        visitTranslationComingSoon: '探访翻译已准备好；已优先开启“长者讲粤语 → 英文”。需要反向翻译时可选择“我用英文说”。',
+        visitTranslationComingSoon: '探访口译台已准备好；请选择长者说话或义工说话。',
         visitGuideComingSoon: '探访前指引会在下一步加入。',
         visitGuideReady: '已打开探访使用指引。'
       }
@@ -595,6 +721,8 @@ export const locales = {
     
     // Transcript
     transcript: {
+      eyebrow: '实时记录',
+      title: '口译历史',
       scenarioPrefix: '情景：',
       freeChat: '自由对话',
       sessionNotStarted: '未开始',
@@ -818,26 +946,51 @@ export const locales = {
 
     visitTranslate: {
       title: 'Visit translation',
-      hint: 'Large-text helper',
-      helper: 'Designed for elderly visit activities. When a resident speaks Cantonese, choose “Resident speaks Cantonese” to translate the reply into readable English.',
-      speakerPrompt: 'Choose who is speaking',
+      hint: 'Live interpreter',
+      liveBadge: 'Live visit interpreter',
+      consoleTitle: 'Community visit interpreter',
+      helper: 'Only two jobs: translate a resident’s Cantonese into English or Mandarin, or translate a volunteer’s English or Mandarin into Cantonese. Use the microphone for live speech or type when the room is noisy.',
+      speakerPrompt: 'Choose translation direction',
       directionLabel: 'Direction',
       translateButton: 'Translate current text',
-      outputTitle: 'Translated text',
-      outputEmpty: 'Type a sentence below, then translate.',
+      outputReady: 'Ready',
+      outputTitle: 'Choose one task above',
+      outputEmpty: 'Then type below or hold the microphone to translate.',
       sourceLabel: 'Source',
       romanizationLabel: 'Jyutping pronunciation guide',
       romanizationHelper: 'Numbers show Cantonese tones and are for reading only.',
-      greeting: 'Visit translation is ready. If a resident speaks Cantonese, type or record it, then translate it into English.',
+      greeting: 'The visit interpreter is ready. Choose “Resident speaks Cantonese” or “Volunteer speaks English or Mandarin”, then type or hold the microphone.',
       confirmationWarning: 'AI may be inaccurate. Confirm important meaning with a volunteer or staff member.',
-      quickDirections: {
-        studentSpeaks: {
-          title: 'I speak English',
-          body: 'Show Cantonese to resident'
-        },
-        residentSpeaks: {
+      tasks: {
+        resident: {
           title: 'Resident speaks Cantonese',
-          body: 'Translate elder reply to English'
+          body: 'Translate the resident’s Cantonese into English or Mandarin.'
+        },
+        volunteer: {
+          title: 'Volunteer speaks English or Mandarin',
+          body: 'Translate the volunteer’s line into polite Cantonese.'
+        }
+      },
+      groups: {
+        resident: 'Translate resident answer to',
+        volunteer: 'Translate volunteer line from'
+      },
+      quickDirections: {
+        residentEnglish: {
+          title: 'English',
+          body: 'For international volunteers'
+        },
+        residentMandarin: {
+          title: 'Mandarin',
+          body: 'For Mandarin-speaking volunteers'
+        },
+        volunteerEnglish: {
+          title: 'English',
+          body: 'English question to Cantonese'
+        },
+        volunteerMandarin: {
+          title: 'Mandarin',
+          body: 'Mandarin question to Cantonese'
         }
       },
       directions: {
@@ -845,6 +998,43 @@ export const locales = {
         yue_to_en: 'Cantonese → English',
         yue_to_zh: 'Cantonese → Mandarin',
         zh_to_yue: 'Mandarin → Cantonese'
+      },
+      placeholders: {
+        residentToEnglish: 'Type what the resident said in Cantonese, e.g. 我想飲水。',
+        residentToMandarin: 'Type what the resident said in Cantonese, e.g. 今日好開心。',
+        volunteerEnglish: 'Type the volunteer’s English line, e.g. Would you like some water?',
+        volunteerMandarin: 'Type the volunteer’s Mandarin line, e.g. 您想喝水吗？'
+      },
+      actions: {
+        translateResident: 'Translate resident speech',
+        translateVolunteer: 'Translate volunteer line',
+        translateResidentShort: 'Translate resident',
+        translateVolunteerShort: 'Translate volunteer',
+        holdToTranslate: 'Hold to translate live',
+        recording: 'Recording… release to translate',
+        processingSpeech: 'Processing speech…',
+        recognizing: 'Recognizing',
+        recognized: 'Recognized'
+      },
+      routes: {
+        residentEnglish: 'Resident Cantonese → English',
+        residentMandarin: 'Resident Cantonese → Mandarin',
+        volunteerEnglish: 'Volunteer English → Cantonese',
+        volunteerMandarin: 'Volunteer Mandarin → Cantonese'
+      },
+      results: {
+        residentEnglish: 'Resident meaning in English',
+        residentMandarin: 'Resident meaning in Mandarin',
+        volunteerEnglish: 'Cantonese for the resident',
+        volunteerMandarin: 'Cantonese for the resident'
+      },
+      emptyState: {
+        title: 'Ready for live interpreting',
+        body: 'The left panel now has only two jobs: resident Cantonese to English/Mandarin, or volunteer English/Mandarin to Cantonese.'
+      },
+      history: {
+        inputBadge: 'Input',
+        outputBadge: 'Translation'
       },
       notices: {
         emptyInput: 'Type a sentence to translate first.',
@@ -876,7 +1066,7 @@ export const locales = {
         },
         visit: {
           title: 'I need translation for a community visit',
-          body: 'Designed for elderly visit activities, with large text, quick phrases, audio, and Cantonese-to-English help for international students.'
+          body: 'Two live tools for visits: resident Cantonese to English or Mandarin, and volunteer English or Mandarin to Cantonese.'
         }
       },
       selected: {
@@ -891,7 +1081,7 @@ export const locales = {
         },
         visit: {
           title: 'Visit Translation Mode',
-          body: 'Translate English questions into Cantonese, or translate a resident’s Cantonese reply into English.'
+          body: 'Only two live interpreting tools are shown: resident Cantonese to English/Mandarin, and volunteer English/Mandarin to Cantonese.'
         }
       },
       actions: {
@@ -904,7 +1094,7 @@ export const locales = {
         changeMode: 'Choose another mode'
       },
       notices: {
-        visitTranslationComingSoon: 'Visit Translation is ready with “Resident speaks Cantonese → English” first. Choose “I speak English” when you need the reverse direction.',
+        visitTranslationComingSoon: 'The visit interpreter is ready. Choose resident speech or volunteer speech.',
         visitGuideComingSoon: 'The before-visit guide will be added next.',
         visitGuideReady: 'Visit guide opened.'
       }
@@ -934,6 +1124,8 @@ export const locales = {
     
     // Transcript
     transcript: {
+      eyebrow: 'Live log',
+      title: 'Interpreter history',
       scenarioPrefix: 'Scenario: ',
       freeChat: 'Free Chat',
       sessionNotStarted: 'Not Started',

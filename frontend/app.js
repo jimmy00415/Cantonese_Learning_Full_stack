@@ -57,6 +57,8 @@ const startVisitTranslationFromPlaybook = document.getElementById('startVisitTra
 const clearVisitPhrase = document.getElementById('clearVisitPhrase');
 const visitDirection = document.getElementById('visitDirection');
 const visitDirectionButtons = document.querySelectorAll('[data-visit-direction]');
+const visitTaskButtons = document.querySelectorAll('[data-visit-task]');
+const visitOptionGroups = document.querySelectorAll('[data-visit-option-group]');
 const visitTranslateBtn = document.getElementById('visitTranslateBtn');
 const visitTranslationOutput = document.getElementById('visitTranslationOutput');
 const visitTranslationWarning = document.getElementById('visitTranslationWarning');
@@ -99,6 +101,52 @@ let isRecording = false; // Guard flag for async recording lifecycle
 let currentMode = 'freeChat'; // 'freeChat' or 'teaching'
 const USER_MODE_STORAGE_KEY = 'hkbuddy.userMode';
 const DEFAULT_VISIT_DIRECTION = 'yue_to_en';
+const VISIT_TASK_DEFAULT_DIRECTIONS = {
+  resident: 'yue_to_en',
+  volunteer: 'en_to_yue'
+};
+const VISIT_DIRECTION_TASKS = {
+  yue_to_en: 'resident',
+  yue_to_zh: 'resident',
+  en_to_yue: 'volunteer',
+  zh_to_yue: 'volunteer'
+};
+const VISIT_ASR_LANGUAGES = {
+  yue_to_en: 'zh-HK',
+  yue_to_zh: 'zh-HK',
+  en_to_yue: 'en-US',
+  zh_to_yue: 'zh-CN'
+};
+const VISIT_DIRECTION_UI = {
+  yue_to_en: {
+    placeholderKey: 'visitTranslate.placeholders.residentToEnglish',
+    actionKey: 'visitTranslate.actions.translateResident',
+    sendKey: 'visitTranslate.actions.translateResidentShort',
+    routeKey: 'visitTranslate.routes.residentEnglish',
+    resultKey: 'visitTranslate.results.residentEnglish'
+  },
+  yue_to_zh: {
+    placeholderKey: 'visitTranslate.placeholders.residentToMandarin',
+    actionKey: 'visitTranslate.actions.translateResident',
+    sendKey: 'visitTranslate.actions.translateResidentShort',
+    routeKey: 'visitTranslate.routes.residentMandarin',
+    resultKey: 'visitTranslate.results.residentMandarin'
+  },
+  en_to_yue: {
+    placeholderKey: 'visitTranslate.placeholders.volunteerEnglish',
+    actionKey: 'visitTranslate.actions.translateVolunteer',
+    sendKey: 'visitTranslate.actions.translateVolunteerShort',
+    routeKey: 'visitTranslate.routes.volunteerEnglish',
+    resultKey: 'visitTranslate.results.volunteerEnglish'
+  },
+  zh_to_yue: {
+    placeholderKey: 'visitTranslate.placeholders.volunteerMandarin',
+    actionKey: 'visitTranslate.actions.translateVolunteer',
+    sendKey: 'visitTranslate.actions.translateVolunteerShort',
+    routeKey: 'visitTranslate.routes.volunteerMandarin',
+    resultKey: 'visitTranslate.results.volunteerMandarin'
+  }
+};
 const LEGACY_CHINESE_READER_MODE = ['main', 'land_learner'].join('');
 const USER_MODE_ALIASES = {
   [LEGACY_CHINESE_READER_MODE]: 'chinese_reader_learner'
@@ -270,6 +318,7 @@ function handleRoleAction(action) {
     document.body.dataset.userMode = 'visit_translation';
     syncVisitDirectionControls(DEFAULT_VISIT_DIRECTION);
     resetVisitTranslationOutput();
+    updateInputLabelsForMode();
     document.getElementById('practice')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     setNotice(t('onboarding.notices.visitTranslationComingSoon'), 'info');
     return;
@@ -313,6 +362,7 @@ function showRoleSelection() {
   if (roleContextPanel) roleContextPanel.hidden = true;
   if (changeModeBtn) changeModeBtn.hidden = true;
   document.body.dataset.userMode = '';
+  updateInputLabelsForMode();
 }
 
 function selectUserMode(mode, { fromStorage = false } = {}) {
@@ -342,6 +392,7 @@ function selectUserMode(mode, { fromStorage = false } = {}) {
     syncVisitDirectionControls(config.defaultVisitDirection || DEFAULT_VISIT_DIRECTION);
     resetVisitTranslationOutput();
   }
+  updateInputLabelsForMode();
 }
 
 function initUserMode() {
@@ -480,14 +531,53 @@ function resetVisitPhrase() {
 
 function resetVisitTranslationOutput() {
   if (!visitTranslationOutput) return;
+  const meta = getVisitDirectionMeta();
+  const title = isVisitTranslationMode() ? t(meta.resultKey) : t('visitTranslate.outputTitle');
+  const body = isVisitTranslationMode() ? t(meta.placeholderKey) : t('visitTranslate.outputEmpty');
   visitTranslationOutput.innerHTML = `
-    <strong>${t('visitTranslate.outputTitle')}</strong>
-    <span>${t('visitTranslate.outputEmpty')}</span>
+    <span class="visit-output-kicker">${t('visitTranslate.outputReady')}</span>
+    <strong>${title}</strong>
+    <span>${body}</span>
   `;
   if (visitTranslationWarning) {
     visitTranslationWarning.hidden = true;
     visitTranslationWarning.textContent = '';
   }
+}
+
+function getVisitDirectionMeta(direction = visitDirection?.value || DEFAULT_VISIT_DIRECTION) {
+  return VISIT_DIRECTION_UI[direction] || VISIT_DIRECTION_UI[DEFAULT_VISIT_DIRECTION];
+}
+
+function getVisitTaskForDirection(direction = visitDirection?.value || DEFAULT_VISIT_DIRECTION) {
+  return VISIT_DIRECTION_TASKS[direction] || 'resident';
+}
+
+function getVisitAsrLanguage(direction = visitDirection?.value || DEFAULT_VISIT_DIRECTION) {
+  return VISIT_ASR_LANGUAGES[direction] || currentAsrLanguage || 'zh-HK';
+}
+
+function isVisitTranslationMode() {
+  return currentUserMode === 'visit_translation' || document.body.dataset.userMode === 'visit_translation';
+}
+
+function updateInputLabelsForMode() {
+  if (!textInput || !sendBtn || !holdBtn) return;
+
+  if (isVisitTranslationMode()) {
+    const meta = getVisitDirectionMeta();
+    const placeholder = t(meta.placeholderKey);
+    textInput.placeholder = placeholder && placeholder !== meta.placeholderKey
+      ? placeholder
+      : t('visitTranslate.outputEmpty');
+    sendBtn.textContent = t(meta.sendKey);
+    holdBtn.textContent = t('visitTranslate.actions.holdToTranslate');
+    return;
+  }
+
+  textInput.placeholder = t('input.textPlaceholder');
+  sendBtn.textContent = t('input.send');
+  holdBtn.textContent = t('input.holdToSpeak');
 }
 
 function getRomanizationText(romanization) {
@@ -515,8 +605,11 @@ function renderVisitTranslation(res) {
   const displayText = res.displayText || res.translatedText || '';
   const romanizationText = getRomanizationText(res.romanization);
   const romanizationScheme = getRomanizationScheme(res.romanization);
+  const meta = getVisitDirectionMeta(res.direction || visitDirection?.value || DEFAULT_VISIT_DIRECTION);
+  const resultLabel = t(meta.resultKey);
 
   visitTranslationOutput.innerHTML = '';
+  appendTextElement(visitTranslationOutput, 'span', resultLabel, 'visit-output-kicker');
   appendTextElement(visitTranslationOutput, 'strong', displayText);
   if (romanizationText) {
     const guide = document.createElement('div');
@@ -548,11 +641,26 @@ function syncVisitDirectionControls(direction = visitDirection?.value || DEFAULT
   if (visitDirection && visitDirection.value !== direction) {
     visitDirection.value = direction;
   }
+  const activeTask = getVisitTaskForDirection(direction);
+  visitTaskButtons.forEach((button) => {
+    const active = button.dataset.visitTask === activeTask;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+  visitOptionGroups.forEach((group) => {
+    const active = group.dataset.visitOptionGroup === activeTask;
+    group.hidden = !active;
+    group.setAttribute('aria-hidden', active ? 'false' : 'true');
+  });
   visitDirectionButtons.forEach((button) => {
     const active = button.dataset.visitDirection === direction;
     button.classList.toggle('active', active);
     button.setAttribute('aria-pressed', active ? 'true' : 'false');
   });
+  const meta = getVisitDirectionMeta(direction);
+  if (visitTranslateBtn) visitTranslateBtn.textContent = t(meta.actionKey);
+  if (scenarioPill && isVisitTranslationMode()) scenarioPill.textContent = t(meta.routeKey);
+  updateInputLabelsForMode();
 }
 
 function getVisitSpeakerRole(direction = visitDirection?.value || DEFAULT_VISIT_DIRECTION) {
@@ -569,6 +677,7 @@ async function translateVisitText(text, inputType = 'text') {
 
   if (!sessionId) await startSession();
   selectUserMode('visit_translation', { fromStorage: true });
+  const direction = visitDirection?.value || DEFAULT_VISIT_DIRECTION;
   setSystemState(STATES.PROCESSING);
   sendBtn.disabled = true;
   holdBtn.disabled = true;
@@ -582,10 +691,15 @@ async function translateVisitText(text, inputType = 'text') {
       body: JSON.stringify({
         sessionId,
         sourceText,
-        direction: visitDirection?.value || DEFAULT_VISIT_DIRECTION,
-        speakerRole: getVisitSpeakerRole(),
+        direction,
+        speakerRole: getVisitSpeakerRole(direction),
         inputType,
-        userMode: 'visit_translation'
+        userMode: 'visit_translation',
+        sourceLanguage: getVisitAsrLanguage(direction),
+        outputOptions: {
+          includeRomanization: direction === 'en_to_yue' || direction === 'zh_to_yue',
+          generateTts: direction === 'en_to_yue' || direction === 'zh_to_yue'
+        }
       })
     });
 
@@ -613,7 +727,11 @@ function renderEmptyState() {
   transcriptEl.innerHTML = '';
   const box = document.createElement('div');
   box.className = 'empty-state';
-  box.innerHTML = '<strong>Ready for your first line</strong><p>Pick a mission, freestyle a Cantonese sentence, or warm up with a starter card.</p>';
+  if (isVisitTranslationMode()) {
+    box.innerHTML = `<strong>${t('visitTranslate.emptyState.title')}</strong><p>${t('visitTranslate.emptyState.body')}</p>`;
+  } else {
+    box.innerHTML = '<strong>Ready for your first line</strong><p>Pick a mission, freestyle a Cantonese sentence, or warm up with a starter card.</p>';
+  }
   transcriptEl.appendChild(box);
 }
 
@@ -735,7 +853,9 @@ function renderMessage({ role, text, ttsAudio, timestamp }) {
   meta.className = 'meta';
   const badge = document.createElement('span');
   badge.className = 'badge';
-  badge.textContent = role === 'ai' ? '導師' : '我';
+  badge.textContent = isVisitTranslationMode()
+    ? (role === 'ai' ? t('visitTranslate.history.outputBadge') : t('visitTranslate.history.inputBadge'))
+    : (role === 'ai' ? '導師' : '我');
   const time = document.createElement('span');
   time.textContent = fmtTime(timestamp || Date.now());
   meta.appendChild(badge);
@@ -932,7 +1052,11 @@ async function processAudioRecording(audioBlob) {
 
     const res = await fetchJSON('/speech-to-text', {
       method: 'POST',
-      body: JSON.stringify({ audioData })
+      body: JSON.stringify({
+        audioData,
+        direction: isVisitTranslationMode() ? (visitDirection?.value || DEFAULT_VISIT_DIRECTION) : undefined,
+        language: isVisitTranslationMode() ? getVisitAsrLanguage() : currentAsrLanguage
+      })
     });
 
     console.log('ASR response:', res);
@@ -1203,7 +1327,11 @@ async function loadScenarios() {
     opt.textContent = s;
     scenarioSelect.appendChild(opt);
   });
-  scenarioPill.textContent = `情景：${scenarioSelect.value || '自由對話'}`;
+  if (isVisitTranslationMode()) {
+    scenarioPill.textContent = t(getVisitDirectionMeta().routeKey);
+  } else {
+    scenarioPill.textContent = `情景：${scenarioSelect.value || '自由對話'}`;
+  }
   renderStarterChips(scenarioSelect.value);
   renderScenarioGuide(scenarioSelect.value);
 }
@@ -1298,6 +1426,7 @@ async function startSession() {
   setStatus(`已建立對話：${sessionId.slice(0, 8)}`);
   sessionPill.textContent = `會話 ${sessionId.slice(0, 8)}`;
   updateModePill();
+  if (isVisitTranslationMode()) syncVisitDirectionControls(visitDirection?.value || DEFAULT_VISIT_DIRECTION);
 }
 
 async function sendUtterance(text) {
@@ -1432,6 +1561,7 @@ holdBtn.addEventListener('touchstart', (e) => {
 // Azure Speech SDK recognizer (initialized on demand)
 let speechRecognizer = null;
 let speechConfig = null;
+let speechConfigLanguage = null;
 let audioConfig = null;
 let azureSdkTranscript = '';
 let azureSdkError = null;
@@ -1440,11 +1570,14 @@ let azureSdkError = null;
 
 // Initialize Azure Speech SDK with Language Identification
 async function initSpeechSDK() {
+  const desiredLanguage = isVisitTranslationMode() ? getVisitAsrLanguage() : (currentAsrLanguage || 'zh-HK');
   // Always create fresh audioConfig since closing a recognizer disposes the mic stream.
   // Only reuse speechConfig (token-based, valid for ~10 min).
   if (speechConfig && audioConfig) {
     console.log('Speech SDK config exists, creating fresh audioConfig');
     const SpeechSDK = window.SpeechSDK || window.Microsoft.CognitiveServices.Speech;
+    speechConfig.speechRecognitionLanguage = desiredLanguage;
+    speechConfigLanguage = desiredLanguage;
     audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
     return;
   }
@@ -1498,9 +1631,10 @@ async function initSpeechSDK() {
 
     // Set primary recognition language to Cantonese (Hong Kong)
     // Using zh-HK which is better supported than yue-CN for most cases
-    speechConfig.speechRecognitionLanguage = language || currentAsrLanguage || 'zh-HK';
+    speechConfig.speechRecognitionLanguage = desiredLanguage || language || currentAsrLanguage || 'zh-HK';
+    speechConfigLanguage = speechConfig.speechRecognitionLanguage;
 
-    console.log('Speech config created with 3s pause threshold');
+    console.log('Speech config created with 3s pause threshold and language:', speechConfigLanguage);
 
     // Configure audio from microphone
     audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
@@ -1553,7 +1687,7 @@ async function startBackendSpeechRecording() {
     recordingStream?.getTracks().forEach(track => track.stop());
     recordingStream = null;
     mediaRecorder = null;
-    holdBtn.textContent = '按住說話';
+    updateInputLabelsForMode();
 
     if (audioBlob.size === 0) {
       setNotice('未錄到聲音，請再試一次', 'error');
@@ -1588,7 +1722,7 @@ async function startAzureSpeechSdkRecording() {
 
   if (!isRecording) {
     console.log('Recording was stopped during SDK init, aborting');
-    holdBtn.textContent = '按住說話';
+    updateInputLabelsForMode();
     return;
   }
 
@@ -1620,7 +1754,7 @@ async function startAzureSpeechSdkRecording() {
   speechRecognizer.recognizing = (_sender, event) => {
     clearPauseTimer();
     const partialText = event.result?.text || '';
-    if (partialText) holdBtn.textContent = `識別中: ${partialText.substring(0, 20)}...`;
+    if (partialText) holdBtn.textContent = `${t('visitTranslate.actions.recognizing')}: ${partialText.substring(0, 20)}...`;
     pauseTimer = setTimeout(() => setNotice('唔緊要，慢慢講...', 'info'), 2000);
   };
 
@@ -1630,7 +1764,7 @@ async function startAzureSpeechSdkRecording() {
       const transcript = (event.result.text || '').trim();
       if (transcript) {
         azureSdkTranscript = [azureSdkTranscript, transcript].filter(Boolean).join(' ');
-        holdBtn.textContent = `已識別: ${transcript.substring(0, 20)}...`;
+        holdBtn.textContent = `${t('visitTranslate.actions.recognized')}: ${transcript.substring(0, 20)}...`;
         console.log(`Azure SDK recognized: ${transcript}`);
       }
     } else if (event.result.reason === SpeechSDK.ResultReason.NoMatch) {
@@ -1670,7 +1804,9 @@ async function handleRecordStart() {
   try {
     isRecording = true;
     setSystemState(STATES.LISTENING);
-    holdBtn.textContent = '錄音中... 放開即發送';
+    holdBtn.textContent = isVisitTranslationMode()
+      ? t('visitTranslate.actions.recording')
+      : '錄音中... 放開即發送';
     if (currentAsrProvider === 'azure') {
       await startAzureSpeechSdkRecording();
     } else {
@@ -1685,7 +1821,9 @@ async function handleRecordStart() {
   try {
     isRecording = true;
     setSystemState(STATES.LISTENING);
-    holdBtn.textContent = '錄音中... 放開即發送';
+    holdBtn.textContent = isVisitTranslationMode()
+      ? t('visitTranslate.actions.recording')
+      : '錄音中... 放開即發送';
     if (currentAsrProvider === 'azure') {
       await startBackendSpeechRecording();
     } else {
@@ -1697,7 +1835,7 @@ async function handleRecordStart() {
     setNotice('無法啟動錄音：' + err.message, 'error');
     setSystemState(STATES.ERROR);
     setTimeout(() => setSystemState(STATES.IDLE), 2000);
-    holdBtn.textContent = '按住說話';
+    updateInputLabelsForMode();
     stopRecordingTimer();
     isRecording = false;
     cleanupRecordingResources();
@@ -1710,7 +1848,9 @@ function handleRecordStop() {
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     isRecording = false;
     stopRecordingTimer();
-    holdBtn.textContent = '處理錄音中...';
+    holdBtn.textContent = isVisitTranslationMode()
+      ? t('visitTranslate.actions.processingSpeech')
+      : '處理錄音中...';
     mediaRecorder.stop();
     return;
   }
@@ -1724,7 +1864,9 @@ function handleRecordStop() {
   if (speechRecognizer) {
     const recognizerRef = speechRecognizer;
     speechRecognizer = null; // Prevent double-stop
-    holdBtn.textContent = '處理錄音中...';
+    holdBtn.textContent = isVisitTranslationMode()
+      ? t('visitTranslate.actions.processingSpeech')
+      : '處理錄音中...';
     setSystemState(STATES.PROCESSING);
     setStatus('Azure Speech 轉換中...');
     recognizerRef.stopContinuousRecognitionAsync(
@@ -1734,7 +1876,7 @@ function handleRecordStop() {
           await new Promise(resolve => setTimeout(resolve, 250));
           recognizerRef.close();
           audioConfig = null; // Force fresh audioConfig on next recording
-          holdBtn.textContent = '按住說話';
+          updateInputLabelsForMode();
 
           const transcript = azureSdkTranscript.trim().replace(/\s+/g, ' ');
           const recognitionError = azureSdkError;
@@ -1749,7 +1891,7 @@ function handleRecordStop() {
             return;
           }
 
-          setNotice(`Azure Speech 已識別：${currentAsrLanguage}`, 'success');
+          setNotice(`Azure Speech 已識別：${speechConfigLanguage || getVisitAsrLanguage() || currentAsrLanguage}`, 'success');
           if (currentUserMode === 'visit_translation') {
             await translateVisitText(transcript, 'speech');
           } else {
@@ -1757,7 +1899,7 @@ function handleRecordStop() {
           }
         })().catch((err) => {
           console.error('Azure Speech finalize error:', err);
-          holdBtn.textContent = '按住說話';
+          updateInputLabelsForMode();
           audioConfig = null;
           azureSdkTranscript = '';
           azureSdkError = null;
@@ -1772,14 +1914,14 @@ function handleRecordStop() {
         audioConfig = null;
         azureSdkTranscript = '';
         azureSdkError = null;
-        holdBtn.textContent = '按住說話';
+        updateInputLabelsForMode();
         setNotice('語音識別停止失敗：' + (err?.message || err), 'error');
         setSystemState(STATES.ERROR);
         setTimeout(() => setSystemState(STATES.IDLE), 2000);
       }
     );
   } else {
-    holdBtn.textContent = '按住說話';
+    updateInputLabelsForMode();
     setSystemState(STATES.IDLE);
   }
 }
@@ -1794,7 +1936,9 @@ clearChatBtn.addEventListener('click', () => {
 });
 
 scenarioSelect.addEventListener('change', () => {
-  scenarioPill.textContent = `${t('transcript.scenarioPrefix')}${scenarioSelect.value}`;
+  scenarioPill.textContent = isVisitTranslationMode()
+    ? t(getVisitDirectionMeta().routeKey)
+    : `${t('transcript.scenarioPrefix')}${scenarioSelect.value}`;
   renderStarterChips(scenarioSelect.value);
   renderScenarioGuide(scenarioSelect.value);
 });
@@ -1961,17 +2105,23 @@ document.addEventListener('keydown', (e) => {
 
 // P1: Mode toggle handlers
 function updateModePill() {
-  const modePill = document.querySelector('.pill.mode-teaching, .pill.mode-freeChat');
+  const modePill = document.querySelector('.pill.mode-teaching, .pill.mode-freeChat, .pill.mode-visit');
+  const modeClass = isVisitTranslationMode() ? 'mode-visit' : `mode-${currentMode}`;
+  const modeText = isVisitTranslationMode()
+    ? t('visitTranslate.hint')
+    : currentMode === 'teaching'
+      ? 'Teaching Lab'
+      : 'Free Talk';
   if (!modePill) {
     // Create mode pill if it doesn't exist
     const newPill = document.createElement('div');
-    newPill.className = `pill mode-${currentMode}`;
+    newPill.className = `pill ${modeClass}`;
     newPill.id = 'modePill';
-    newPill.textContent = currentMode === 'teaching' ? 'Teaching Lab' : 'Free Talk';
+    newPill.textContent = modeText;
     sessionPill?.parentNode?.insertBefore(newPill, sessionPill.nextSibling);
   } else {
-    modePill.className = `pill mode-${currentMode}`;
-    modePill.textContent = currentMode === 'teaching' ? 'Teaching Lab' : 'Free Talk';
+    modePill.className = `pill ${modeClass}`;
+    modePill.textContent = modeText;
   }
 }
 
@@ -2148,6 +2298,16 @@ startVisitTranslationFromPlaybook?.addEventListener('click', () => {
   setNotice(t('onboarding.notices.visitTranslationComingSoon'), 'info');
 });
 
+visitTaskButtons.forEach((button) => {
+  button.setAttribute('aria-pressed', button.classList.contains('active') ? 'true' : 'false');
+  button.addEventListener('click', () => {
+    const task = button.dataset.visitTask || 'resident';
+    syncVisitDirectionControls(VISIT_TASK_DEFAULT_DIRECTIONS[task] || DEFAULT_VISIT_DIRECTION);
+    resetVisitTranslationOutput();
+    textInput?.focus();
+  });
+});
+
 visitDirectionButtons.forEach((button) => {
   button.setAttribute('aria-pressed', button.classList.contains('active') ? 'true' : 'false');
   button.addEventListener('click', () => {
@@ -2225,7 +2385,9 @@ function updateUILanguage() {
   renderRoleContext();
   renderScenarioGuide(scenarioSelect.value);
   renderElderlyVisitPlaybook();
+  syncVisitDirectionControls(visitDirection?.value || DEFAULT_VISIT_DIRECTION);
   resetVisitTranslationOutput();
+  updateInputLabelsForMode();
   renderImmediateFeedback();
 
   // Update badges
