@@ -1,7 +1,7 @@
 // P3-1: Import i18n module
 import { t, setLanguage, getLanguage, initI18n, getAvailableLanguages, locales } from './i18n/index.js?v=20260708v2uiux1';
 import { elderlyVisitPlaybook } from './content/playbooks.js?v=20260522visit1';
-import { createAsrErrorNotice, createVisitModeStartNotice, isVoiceInputAvailable } from './errors.js?v=20260630asrlayout1';
+import { createAsrErrorNotice, createVisitModeStartNotice, isVoiceInputAvailable } from './errors.js?v=20260708v2uiux1';
 
 const META_API = document.querySelector('meta[name="api-base"]');
 

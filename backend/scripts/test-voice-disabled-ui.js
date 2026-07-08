@@ -36,6 +36,11 @@ assert.match(
   /styles\.css\?v=20260708v2uiux1/,
   'stylesheet cache-bust should change when unavailable voice styling changes'
 );
+assert.match(
+  source,
+  /\.\/errors\.js\?v=20260708v2uiux1/,
+  'voice availability helper import should be cache-busted with the V2 asset version'
+);
 assert.doesNotMatch(
   source,
   /holdBtn\.disabled\s*=\s*false/,
