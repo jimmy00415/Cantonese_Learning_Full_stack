@@ -176,6 +176,25 @@ const COMMON_VISIT_RULES = [
   },
   {
     patterns: {
+      cantonese: [/活動|活动|安排|節目|节目|今個星期|呢個星期|這個星期|这个星期|本週|本周/],
+      english: [/activit|event|plan|schedule|this week|weekly/],
+      mandarin: [/活动|活動|安排|节目|節目|这个星期|這個星期|本周|本週/]
+    },
+    outputs: {
+      yue_to_en: visitResult('Are there any activities planned this week?'),
+      yue_to_zh: visitResult('这周有没有活动安排？'),
+      en_to_yue: visitResult('今個星期有冇活動安排呀？', {
+        speakableText: '今個星期有冇活動安排呀？',
+        romanization: jyutping('gam1 go3 sing1 kei4 jau5 mou5 wut6 dung6 on1 paai4 aa3?')
+      }),
+      zh_to_yue: visitResult('今個星期有冇活動安排呀？', {
+        speakableText: '今個星期有冇活動安排呀？',
+        romanization: jyutping('gam1 go3 sing1 kei4 jau5 mou5 wut6 dung6 on1 paai4 aa3?')
+      })
+    }
+  },
+  {
+    patterns: {
       cantonese: [/唔舒服|不舒服|痛|暈|晕|急|醫|医|救命|胸口/],
       english: [/pain|dizzy|unwell|doctor|help|emergency/],
       mandarin: [/不舒服|疼|痛|头晕|頭暈|医生|醫生|帮忙|幫忙/]

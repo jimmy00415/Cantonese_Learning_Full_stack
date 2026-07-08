@@ -153,6 +153,47 @@ const tutorFeedbackTranslationCache = new Map();
 const tutorFeedbackTranslationInflight = new Map();
 const MAX_TUTOR_FEEDBACK_TRANSLATION_CACHE = 80;
 
+function readPositiveInt(value, fallback, { min = 1, max = 60000 } = {}) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+const DEFAULT_LLM_REQUEST_TIMEOUT_MS = readPositiveInt(process.env.LLM_PROVIDER_TIMEOUT_MS, 12000, { min: 500, max: 60000 });
+const VISIT_TRANSLATION_PROVIDER_TIMEOUT_MS = readPositiveInt(process.env.VISIT_TRANSLATION_PROVIDER_TIMEOUT_MS, 4500, { min: 250, max: 15000 });
+const DEFAULT_TTS_REQUEST_TIMEOUT_MS = readPositiveInt(process.env.TTS_PROVIDER_TIMEOUT_MS, 10000, { min: 500, max: 60000 });
+const VISIT_TTS_TIMEOUT_MS = readPositiveInt(process.env.VISIT_TTS_TIMEOUT_MS, 3500, { min: 250, max: 15000 });
+
+function isAbortLikeError(err) {
+  return err?.name === 'AbortError' || err?.code === 'ABORT_ERR';
+}
+
+function isRequestTimeoutError(err) {
+  return err?.code === 'REQUEST_TIMEOUT' || /timeout|aborted/i.test(String(err?.message || ''));
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_LLM_REQUEST_TIMEOUT_MS, label = 'request') {
+  const timeout = readPositiveInt(timeoutMs, DEFAULT_LLM_REQUEST_TIMEOUT_MS, { min: 1, max: 60000 });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
+  } catch (err) {
+    if (isAbortLikeError(err)) {
+      const timeoutError = new Error(`${label} timeout after ${timeout}ms`);
+      timeoutError.code = 'REQUEST_TIMEOUT';
+      throw timeoutError;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function normalizeMiniMaxVoiceId(voiceId) {
   const normalized = typeof voiceId === 'string' ? voiceId.trim() : '';
   if (!normalized || normalized.length > 120) return '';
@@ -412,11 +453,11 @@ async function callLLMProvider(provider, messages, options = {}) {
     throw new Error(`Provider ${provider} not configured`);
   }
 
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     method: 'POST',
     headers: headers,
     body: JSON.stringify(body)
-  });
+  }, options.timeoutMs || DEFAULT_LLM_REQUEST_TIMEOUT_MS, `${provider} API`);
 
   console.log(`📥 ${provider} API response status:`, response.status, response.statusText);
 
@@ -1053,6 +1094,17 @@ function parseVisitTranslation(rawText, sourceText, direction, provider) {
   }
 }
 
+async function attemptVisitTranslationProvider(provider, messages, sourceText, direction, directionConfig) {
+  const raw = await callLLMProvider(provider, messages, {
+    maxTokens: directionConfig.targetLanguage === 'en' ? 120 : 320,
+    temperature: 0.1,
+    timeoutMs: VISIT_TRANSLATION_PROVIDER_TIMEOUT_MS
+  });
+  const result = parseVisitTranslation(raw, sourceText, direction, provider);
+  if (result.translatedText || result.displayText) return result;
+  throw new Error(`${provider} returned an empty visit translation`);
+}
+
 async function translateForVisit(sourceText, direction) {
   const directionConfig = visitTranslationDirections[direction] || visitTranslationDirections.en_to_yue;
   const ruleBased = buildRuleBasedVisitTranslation(sourceText, direction);
@@ -1069,17 +1121,19 @@ async function translateForVisit(sourceText, direction) {
     { role: 'user', content: sourceText }
   ];
 
-  for (const provider of providers) {
+  const attempts = providers.map(async (provider) => {
     try {
-      const raw = await callLLMProvider(provider, messages, {
-        maxTokens: directionConfig.targetLanguage === 'en' ? 120 : 320,
-        temperature: 0.1
-      });
-      const result = parseVisitTranslation(raw, sourceText, direction, provider);
-      if (result.translatedText || result.displayText) return result;
+      return await attemptVisitTranslationProvider(provider, messages, sourceText, direction, directionConfig);
     } catch (err) {
       console.error(`❌ ${provider} visit translation error:`, err.message);
+      throw err;
     }
+  });
+
+  try {
+    return await Promise.any(attempts);
+  } catch (err) {
+    console.error('❌ all visit translation providers failed:', err.errors?.map(error => error.message).join(' | ') || err.message);
   }
 
   return mockVisitTranslation(sourceText, direction);
@@ -1088,8 +1142,8 @@ async function translateForVisit(sourceText, direction) {
 async function synthesizeVisitTranslationAudio(text) {
   if ((ttsProvider === 'azure' && azureTtsKey) || (ttsProvider === 'minimax' && minimaxApiKey)) {
     return ttsProvider === 'minimax'
-      ? await synthesizeMiniMax(text, minimaxTtsVoice)
-      : await synthesizeAzure(text);
+      ? await synthesizeMiniMax(text, minimaxTtsVoice, { timeoutMs: VISIT_TTS_TIMEOUT_MS })
+      : await synthesizeAzure(text, { timeoutMs: VISIT_TTS_TIMEOUT_MS });
   }
   return generateMockTtsDataUri();
 }
@@ -2112,7 +2166,7 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ error: 'internal_error', message: 'Server error, please try again.' });
 });
 
-async function synthesizeAzure(text) {
+async function synthesizeAzure(text, { timeoutMs = DEFAULT_TTS_REQUEST_TIMEOUT_MS } = {}) {
   if (!azureTtsKey || !azureTtsRegion) throw new Error('Azure TTS key/region missing');
 
   // Escape XML special characters
@@ -2132,7 +2186,7 @@ async function synthesizeAzure(text) {
   const ttsEndpoint = `https://${azureTtsRegion}.tts.speech.microsoft.com/cognitiveservices/v1`;
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const ttsRes = await fetch(ttsEndpoint, {
@@ -2161,10 +2215,10 @@ async function synthesizeAzure(text) {
   }
 }
 
-async function synthesizeMiniMax(text, voiceId = minimaxTtsVoice) {
+async function synthesizeMiniMax(text, voiceId = minimaxTtsVoice, { timeoutMs = DEFAULT_TTS_REQUEST_TIMEOUT_MS } = {}) {
   if (!minimaxApiKey) throw new Error('MiniMax API key missing');
 
-  const response = await fetch(`${minimaxBaseUrl}/v1/t2a_v2`, {
+  const response = await fetchWithTimeout(`${minimaxBaseUrl}/v1/t2a_v2`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${minimaxApiKey}`,
@@ -2189,7 +2243,7 @@ async function synthesizeMiniMax(text, voiceId = minimaxTtsVoice) {
         channel: 1
       }
     })
-  });
+  }, timeoutMs, 'MiniMax TTS');
 
   if (!response.ok) {
     const errorBody = await response.text();

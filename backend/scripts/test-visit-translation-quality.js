@@ -63,6 +63,18 @@ assert.equal(volunteerOrigin.displayText, '你喺邊度嚟㗎？');
 assert.equal(volunteerOrigin.speakableText, '你喺邊度嚟㗎？');
 assert.equal(volunteerOrigin.romanization.text, 'nei5 hai2 bin1 dou6 lai4 gaa3?');
 
+const weeklyActivityEnglish = createDailyLifeVisitTranslation('呢個星期有冇活動安排呀？', 'yue_to_en');
+assert.ok(weeklyActivityEnglish, 'expected a local fallback for weekly activity schedule questions');
+assert.equal(weeklyActivityEnglish.displayText, 'Are there any activities planned this week?');
+assert.equal(weeklyActivityEnglish.speakableText, '');
+assert.equal(weeklyActivityEnglish.romanization, null);
+
+const weeklyActivityCantonese = createDailyLifeVisitTranslation('Are there any activities planned this week?', 'en_to_yue');
+assert.ok(weeklyActivityCantonese, 'expected an English-to-Cantonese fallback for weekly activity schedule questions');
+assert.equal(weeklyActivityCantonese.displayText, '今個星期有冇活動安排呀？');
+assert.equal(weeklyActivityCantonese.speakableText, '今個星期有冇活動安排呀？');
+assert.equal(weeklyActivityCantonese.romanization.text, 'gam1 go3 sing1 kei4 jau5 mou5 wut6 dung6 on1 paai4 aa3?');
+
 assert.equal(
   isGenericVisitTranslation('The resident said something in Cantonese. Please ask staff to confirm the exact meaning.'),
   true

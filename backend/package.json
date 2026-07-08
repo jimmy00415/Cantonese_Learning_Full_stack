@@ -14,6 +14,7 @@
     "test:v2-phrasebook-review": "node scripts/test-v2-phrasebook-review-contract.js",
     "test:visit-direction-routing": "node scripts/test-visit-direction-routing.js",
     "test:visit-http-routing": "node scripts/test-visit-http-routing.js",
+    "test:visit-resilience": "node scripts/test-visit-resilience-contract.js",
     "test:visit-translation-quality": "node scripts/test-visit-translation-quality.js",
     "test:visit-layout-contract": "node scripts/test-visit-layout-contract.js",
     "test:voice-disabled-ui": "node scripts/test-voice-disabled-ui.js",
