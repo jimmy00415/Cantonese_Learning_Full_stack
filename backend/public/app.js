@@ -773,13 +773,25 @@ function renderVisitError(error, sourceText) {
   visitTranslationOutput.innerHTML = '';
   appendTextElement(visitTranslationOutput, 'span', t('v2.translate.failedLabel'), 'visit-output-kicker');
   appendTextElement(visitTranslationOutput, 'strong', t('visitTranslate.notices.failed'));
-  appendTextElement(visitTranslationOutput, 'p', error?.message || t('v2.translate.failedBody'));
+  appendTextElement(visitTranslationOutput, 'p', t('v2.translate.failedBody'));
   appendTextElement(visitTranslationOutput, 'p', `${t('visitTranslate.sourceLabel')}: ${sourceText || ''}`);
+  if (visitTranslationWarning) {
+    visitTranslationWarning.hidden = true;
+    visitTranslationWarning.textContent = '';
+  }
   if (visitRetryBtn) {
     visitRetryBtn.hidden = false;
     visitRetryBtn.textContent = t('v2.translate.retryTranslation');
-    visitRetryBtn.onclick = () => translateVisitText(sourceText, visitTranslationState.inputType || 'text');
+    visitRetryBtn.onclick = retryVisitTranslation;
   }
+}
+
+function retryVisitTranslation() {
+  return translateVisitText(
+    visitTranslationState.sourceText,
+    visitTranslationState.inputType || 'text',
+    visitTranslationState.direction || DEFAULT_VISIT_DIRECTION
+  );
 }
 
 function renderVisitTranslation(res) {
@@ -870,7 +882,7 @@ function getVisitSpeakerRole(direction = visitDirection?.value || DEFAULT_VISIT_
   return 'student';
 }
 
-async function translateVisitText(text, inputType = 'text') {
+async function translateVisitText(text, inputType = 'text', directionOverride) {
   const sourceText = String(text || '').trim();
   if (!sourceText) {
     setNotice(t('visitTranslate.notices.emptyInput'), 'info');
@@ -879,7 +891,7 @@ async function translateVisitText(text, inputType = 'text') {
 
   if (!sessionId) await startSession();
   selectUserMode('visit_translation', { fromStorage: true });
-  const direction = visitDirection?.value || DEFAULT_VISIT_DIRECTION;
+  const direction = directionOverride || visitDirection?.value || DEFAULT_VISIT_DIRECTION;
   visitTranslationState = { sourceText, inputType, direction, status: 'pending' };
   renderVisitInputCard(text, inputType, direction);
   setSystemState(STATES.PROCESSING);
