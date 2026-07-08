@@ -702,23 +702,37 @@ h1 {
   border-radius: var(--radius-lg);
   background: #fff;
   color: var(--ink);
+  overflow: hidden;
 }
 
 .visit-large-text strong {
   font-size: clamp(22px, 4vw, 34px);
   line-height: 1.1;
+  overflow-wrap: anywhere;
 }
 
 .visit-large-text span {
   color: var(--ink-soft);
   font-size: 16px;
   font-weight: 800;
+  overflow-wrap: anywhere;
 }
 
 .visit-large-text small {
   color: var(--muted);
   font-size: 14px;
   font-weight: 750;
+  overflow-wrap: anywhere;
+}
+
+.visit-large-text.is-fallback {
+  border-color: #f97316;
+  background: #fffbeb;
+}
+
+.visit-large-text.is-fallback strong {
+  font-size: clamp(18px, 2.2vw, 24px);
+  line-height: 1.2;
 }
 
 .playbook-warning {
@@ -1104,10 +1118,34 @@ body[data-user-mode="visit_translation"] .visit-translate-panel {
   overflow-wrap: anywhere;
 }
 
+.visit-translation-output.is-fallback {
+  border-color: #f97316;
+  background: #fffbeb;
+}
+
+.visit-translation-output.is-fallback strong {
+  font-size: 18px;
+  line-height: 1.25;
+}
+
 .visit-translation-output span {
   color: var(--ink-soft);
   font-size: 14px;
   font-weight: 800;
+}
+
+.visit-route-note {
+  width: fit-content;
+  max-width: 100%;
+  padding: 6px 9px;
+  border: 1px solid rgba(0, 122, 255, 0.2);
+  border-radius: 999px;
+  background: #eaf4ff;
+  color: #005ecb;
+  font-size: 12px;
+  font-weight: 850;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 
 .visit-translation-output .romanization-guide {
@@ -1547,6 +1585,11 @@ body[data-user-mode="visit_translation"] .visit-translate-panel {
 
 .text-entry {
   min-width: 220px;
+}
+
+.text-entry,
+.text-entry input {
+  width: 100%;
 }
 
 .mic {
@@ -2757,6 +2800,15 @@ body[data-user-mode="visit_translation"] .visit-translation-output strong {
   line-height: 1.08;
 }
 
+body[data-user-mode="visit_translation"] .visit-route-note {
+  font-size: 13px;
+}
+
+body[data-user-mode="visit_translation"] .visit-translation-output.is-fallback strong {
+  font-size: clamp(18px, 1.8vw, 24px);
+  line-height: 1.2;
+}
+
 body[data-user-mode="visit_translation"] .visit-translation-output small {
   color: var(--muted);
   font-weight: 780;
@@ -2792,18 +2844,115 @@ body[data-user-mode="visit_translation"] .message.ai {
 }
 
 body[data-user-mode="visit_translation"] .input-panel {
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
+  gap: 10px;
+  padding: 12px;
 }
 
 body[data-user-mode="visit_translation"] .mic {
   background: #111827;
   color: #fff;
+  min-width: 164px;
+  white-space: nowrap;
+}
+
+body[data-user-mode="visit_translation"] .text-entry {
+  min-width: 0;
+}
+
+body[data-user-mode="visit_translation"] #textInput {
+  width: 100%;
+  min-width: 0;
+  text-overflow: ellipsis;
+}
+
+body[data-user-mode="visit_translation"] .mic.is-unavailable,
+body[data-user-mode="visit_translation"] .mic:disabled {
+  background: #e8eef7;
+  color: #526070;
+  border-color: #c8d4e3;
+  box-shadow: 3px 3px 0 rgba(82, 96, 112, 0.22);
+  cursor: not-allowed;
+  opacity: 1;
+  pointer-events: none;
+}
+
+body[data-user-mode="visit_translation"] .mic.is-unavailable:hover,
+body[data-user-mode="visit_translation"] .mic:disabled:hover,
+body[data-user-mode="visit_translation"] .mic.is-unavailable:active,
+body[data-user-mode="visit_translation"] .mic:disabled:active {
+  transform: none;
 }
 
 body[data-user-mode="visit_translation"] .audio-controls {
-  grid-column: auto;
-  grid-template-columns: auto auto;
+  grid-column: 1 / -1;
+  width: 100%;
+  min-width: 0;
+  justify-content: center;
+  overflow: hidden;
+}
+
+body[data-user-mode="visit_translation"] .send-btn {
+  min-width: 178px;
+  white-space: nowrap;
+}
+
+.pilot-cta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 28px;
+}
+
+.pilot-cta {
+  min-width: min(100%, 210px);
+  padding: 0 20px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  box-shadow: none;
+  white-space: normal;
+}
+
+.pilot-cta.primary {
+  background: #007aff;
+  color: #fff;
+}
+
+.pilot-cta.ghost {
+  background: rgba(118, 118, 128, 0.12);
+  color: var(--ink);
+}
+
+.pilot-status-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.pilot-status-card {
+  min-height: 92px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.pilot-status-card span {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.pilot-status-card strong {
+  display: block;
+  color: var(--ink);
+  font-size: clamp(14px, 1.6vw, 18px);
+  line-height: 1.16;
 }
 
 @media (max-width: 1180px) {
@@ -2825,6 +2974,25 @@ body[data-user-mode="visit_translation"] .audio-controls {
 
   .audio-controls {
     grid-column: 1 / -1;
+  }
+
+  body[data-user-mode="visit_translation"] .input-panel {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  body[data-user-mode="visit_translation"] .mic,
+  body[data-user-mode="visit_translation"] .text-entry {
+    grid-column: 1;
+  }
+
+  body[data-user-mode="visit_translation"] .send-btn {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+  }
+
+  body[data-user-mode="visit_translation"] .audio-controls {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
   }
 }
 
@@ -2870,12 +3038,24 @@ body[data-user-mode="visit_translation"] .audio-controls {
   .about-mission-card {
     min-height: 0;
   }
+
+  .pilot-status-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 980px) {
   body[data-user-mode="visit_translation"] .practice-stage,
   body[data-user-mode="visit_translation"] .input-panel {
     grid-template-columns: 1fr;
+  }
+
+  body[data-user-mode="visit_translation"] .mic,
+  body[data-user-mode="visit_translation"] .text-entry,
+  body[data-user-mode="visit_translation"] .send-btn,
+  body[data-user-mode="visit_translation"] .audio-controls {
+    grid-column: 1;
+    grid-row: auto;
   }
 
   body[data-user-mode="visit_translation"] .visit-direction-quick {

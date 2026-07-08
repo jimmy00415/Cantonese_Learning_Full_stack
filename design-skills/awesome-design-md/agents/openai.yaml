@@ -1,0 +1,4 @@
+interface:
+  display_name: "Awesome DESIGN.md"
+  short_description: "Brand DESIGN.md references for UI work"
+  default_prompt: "Use $awesome-design-md to choose a DESIGN.md reference before redesigning this interface."

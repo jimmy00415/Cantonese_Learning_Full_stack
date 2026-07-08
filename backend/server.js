@@ -9,6 +9,8 @@ import { dirname, join } from 'path';
 
 // P2: Cultural Context Service
 import { getCulturalContext } from './services/culturalContext.js';
+import { createDailyLifeVisitTranslation, isGenericVisitTranslation } from './services/visitTranslationFallback.js';
+import { resolveVisitDirection } from './services/visitDirectionRouting.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -815,24 +817,27 @@ function volunteerLineToCantonese(sourceText) {
 function buildRuleBasedVisitTranslation(sourceText, direction) {
   if (direction === 'yue_to_en') {
     const displayText = cantoneseQuestionToEnglish(sourceText);
-    return displayText ? { translatedText: displayText, speakableText: '', romanization: null, displayText } : null;
+    if (displayText) return { translatedText: displayText, speakableText: '', romanization: null, displayText };
+    return createDailyLifeVisitTranslation(sourceText, direction);
   }
   if (direction === 'yue_to_zh') {
     const displayText = cantoneseQuestionToMandarin(sourceText);
-    return displayText ? { translatedText: displayText, speakableText: '', romanization: null, displayText } : null;
+    if (displayText) return { translatedText: displayText, speakableText: '', romanization: null, displayText };
+    return createDailyLifeVisitTranslation(sourceText, direction);
   }
   if (direction === 'en_to_yue' || direction === 'zh_to_yue') {
     const displayText = volunteerLineToCantonese(sourceText);
-    return displayText
-      ? {
-          translatedText: displayText,
-          speakableText: displayText,
-          romanization: displayText.includes('水')
-            ? normalizeRomanization('nei5 soeng2 m4 soeng2 jam2 di1 seoi2?')
-            : null,
-          displayText
-        }
-      : null;
+    if (displayText) {
+      return {
+        translatedText: displayText,
+        speakableText: displayText,
+        romanization: displayText.includes('水')
+          ? normalizeRomanization('nei5 soeng2 m4 soeng2 jam2 di1 seoi2?')
+          : null,
+        displayText
+      };
+    }
+    return createDailyLifeVisitTranslation(sourceText, direction);
   }
   return null;
 }
@@ -875,6 +880,7 @@ function mockVisitTranslation(sourceText, direction) {
 
 function buildBasicVisitEnglishTranslation(sourceText) {
   return cantoneseQuestionToEnglish(sourceText)
+    || createDailyLifeVisitTranslation(sourceText, 'yue_to_en')?.displayText
     || 'The resident said something in Cantonese. Please ask staff to confirm the exact meaning.';
 }
 
@@ -1040,7 +1046,7 @@ function parseVisitTranslation(rawText, sourceText, direction, provider) {
       speakableText: targetIsEnglish ? '' : speakableText,
       romanization: targetIsEnglish ? null : normalizeRomanization(parsed.romanization),
       confidence: Number.isFinite(Number(parsed.confidence)) ? Number(parsed.confidence) : 0.78,
-      needsConfirmation,
+      needsConfirmation: needsConfirmation || isGenericVisitTranslation(displayText),
       provider
     };
   } catch {
@@ -2001,10 +2007,12 @@ app.post('/api/visit-translate', async (req, res) => {
   }
 
   const startedAt = Date.now();
-  const translation = await translateForVisit(trimmedSourceText, direction);
+  const route = resolveVisitDirection(trimmedSourceText, direction);
+  const effectiveDirection = route.effectiveDirection;
+  const translation = await translateForVisit(trimmedSourceText, effectiveDirection);
   let ttsAudio = null;
   let ttsError = null;
-  const directionConfig = visitTranslationDirections[direction] || visitTranslationDirections.en_to_yue;
+  const directionConfig = visitTranslationDirections[effectiveDirection] || visitTranslationDirections.en_to_yue;
   const ttsResolution = resolveVisitTtsText(translation, directionConfig);
   let warningCode = ttsResolution.warningCode || null;
 
@@ -2020,8 +2028,8 @@ app.post('/api/visit-translate', async (req, res) => {
   if (sessionId && conversations.has(sessionId)) {
     const session = conversations.get(sessionId);
     session.userMode = userMode;
-    session.history.push({ role: 'user', text: trimmedSourceText, timestamp: Date.now(), mode: 'visit_translation', inputType, direction });
-    session.history.push({ role: 'ai', text: translation.displayText || translation.translatedText, timestamp: Date.now(), mode: 'visit_translation', direction });
+    session.history.push({ role: 'user', text: trimmedSourceText, timestamp: Date.now(), mode: 'visit_translation', inputType, direction: effectiveDirection, requestedDirection: direction, autoRouted: route.autoRouted });
+    session.history.push({ role: 'ai', text: translation.displayText || translation.translatedText, timestamp: Date.now(), mode: 'visit_translation', direction: effectiveDirection, requestedDirection: direction, autoRouted: route.autoRouted });
     if (session.history.length > 20) session.history = session.history.slice(-20);
     conversations.set(sessionId, session);
   }
@@ -2039,7 +2047,10 @@ app.post('/api/visit-translate', async (req, res) => {
     ttsAudio,
     ttsTextUsed: ttsResolution.text,
     provider: translation.provider,
-    direction,
+    direction: effectiveDirection,
+    requestedDirection: direction,
+    autoRouted: route.autoRouted,
+    routeReason: route.routeReason,
     inputType,
     speakerRole: directionConfig.speakerRole,
     latencyMs: Date.now() - startedAt,

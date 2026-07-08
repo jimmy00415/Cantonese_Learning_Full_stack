@@ -1,6 +1,7 @@
 // P3-1: Import i18n module
-import { t, setLanguage, getLanguage, initI18n, getAvailableLanguages, locales } from './i18n/index.js?v=20260610visittranslation1';
+import { t, setLanguage, getLanguage, initI18n, getAvailableLanguages, locales } from './i18n/index.js?v=20260704directionfix1';
 import { elderlyVisitPlaybook } from './content/playbooks.js?v=20260522visit1';
+import { createAsrErrorNotice, createVisitModeStartNotice, isVoiceInputAvailable } from './errors.js?v=20260630asrlayout1';
 
 const META_API = document.querySelector('meta[name="api-base"]');
 
@@ -62,6 +63,7 @@ const visitOptionGroups = document.querySelectorAll('[data-visit-option-group]')
 const visitTranslateBtn = document.getElementById('visitTranslateBtn');
 const visitTranslationOutput = document.getElementById('visitTranslationOutput');
 const visitTranslationWarning = document.getElementById('visitTranslationWarning');
+const pilotVoiceStatus = document.getElementById('pilotVoiceStatus');
 
 // P1: Mode toggle elements
 const modeFreeTalkBtn = document.getElementById('modeFreeTalk');
@@ -160,8 +162,10 @@ let currentTtsProvider = 'mock';
 let currentTtsVoice = localStorage.getItem('ttsVoice') || 'Cantonese_GentleLady';
 let availableTtsVoices = [];
 let voiceSelectionEnabled = false;
+let voiceInputEnabled = false;
 let coachTranslationState = { status: 'empty' };
 let coachTranslationRequestId = 0;
+let pilotHealthSnapshot = null;
 
 // System states: idle, listening, processing, speaking, error
 const STATES = {
@@ -320,7 +324,12 @@ function handleRoleAction(action) {
     resetVisitTranslationOutput();
     updateInputLabelsForMode();
     document.getElementById('practice')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    setNotice(t('onboarding.notices.visitTranslationComingSoon'), 'info');
+    const notice = createVisitModeStartNotice({
+      voiceInputEnabled,
+      readyMessage: t('onboarding.notices.visitTranslationComingSoon'),
+      voiceUnavailableHint: t('input.voiceUnavailableHint')
+    });
+    setNotice(notice.text, notice.kind);
     return;
   }
 
@@ -519,6 +528,7 @@ function selectVisitPhrase(phrase) {
 
 function resetVisitPhrase() {
   if (visitLargeText) {
+    visitLargeText.classList.remove('is-fallback');
     visitLargeText.innerHTML = `
       <strong>${t('playbook.largeText.title')}</strong>
       <span>${t('playbook.largeText.empty')}</span>
@@ -534,6 +544,7 @@ function resetVisitTranslationOutput() {
   const meta = getVisitDirectionMeta();
   const title = isVisitTranslationMode() ? t(meta.resultKey) : t('visitTranslate.outputTitle');
   const body = isVisitTranslationMode() ? t(meta.placeholderKey) : t('visitTranslate.outputEmpty');
+  visitTranslationOutput.classList.remove('is-fallback');
   visitTranslationOutput.innerHTML = `
     <span class="visit-output-kicker">${t('visitTranslate.outputReady')}</span>
     <strong>${title}</strong>
@@ -543,6 +554,10 @@ function resetVisitTranslationOutput() {
     visitTranslationWarning.hidden = true;
     visitTranslationWarning.textContent = '';
   }
+}
+
+function isGenericVisitTranslationText(text) {
+  return /The resident said something in Cantonese|Please ask staff to confirm the exact meaning|长者.*粤语.*确认|長者.*粵語.*確認|請.*職員.*確認|请.*工作人员.*确认/i.test(String(text || ''));
 }
 
 function getVisitDirectionMeta(direction = visitDirection?.value || DEFAULT_VISIT_DIRECTION) {
@@ -571,13 +586,17 @@ function updateInputLabelsForMode() {
       ? placeholder
       : t('visitTranslate.outputEmpty');
     sendBtn.textContent = t(meta.sendKey);
-    holdBtn.textContent = t('visitTranslate.actions.holdToTranslate');
+    holdBtn.textContent = voiceInputEnabled
+      ? t('visitTranslate.actions.holdToTranslate')
+      : t('visitTranslate.actions.voiceUnavailable');
+    holdBtn.title = voiceInputEnabled ? '' : t('input.voiceUnavailableHint');
     return;
   }
 
   textInput.placeholder = t('input.textPlaceholder');
   sendBtn.textContent = t('input.send');
-  holdBtn.textContent = t('input.holdToSpeak');
+  holdBtn.textContent = voiceInputEnabled ? t('input.holdToSpeak') : t('input.voiceUnavailable');
+  holdBtn.title = voiceInputEnabled ? '' : t('input.voiceUnavailableHint');
 }
 
 function getRomanizationText(romanization) {
@@ -607,9 +626,14 @@ function renderVisitTranslation(res) {
   const romanizationScheme = getRomanizationScheme(res.romanization);
   const meta = getVisitDirectionMeta(res.direction || visitDirection?.value || DEFAULT_VISIT_DIRECTION);
   const resultLabel = t(meta.resultKey);
+  const fallbackResult = res.provider === 'mock' || isGenericVisitTranslationText(displayText);
 
   visitTranslationOutput.innerHTML = '';
+  visitTranslationOutput.classList.toggle('is-fallback', fallbackResult);
   appendTextElement(visitTranslationOutput, 'span', resultLabel, 'visit-output-kicker');
+  if (res.autoRouted) {
+    appendTextElement(visitTranslationOutput, 'span', t('visitTranslate.autoRouted'), 'visit-route-note');
+  }
   appendTextElement(visitTranslationOutput, 'strong', displayText);
   if (romanizationText) {
     const guide = document.createElement('div');
@@ -623,12 +647,13 @@ function renderVisitTranslation(res) {
 
   if (visitLargeText) {
     visitLargeText.innerHTML = '';
+    visitLargeText.classList.toggle('is-fallback', fallbackResult);
     appendTextElement(visitLargeText, 'strong', displayText);
     if (romanizationText) appendTextElement(visitLargeText, 'span', romanizationText);
     appendTextElement(visitLargeText, 'small', res.sourceText || '');
   }
 
-  const needsConfirmation = res.needsConfirmation || res.provider === 'mock' || Number(res.confidence || 0) < 0.7;
+  const needsConfirmation = res.needsConfirmation || fallbackResult || Number(res.confidence || 0) < 0.7;
   if (visitTranslationWarning) {
     visitTranslationWarning.hidden = !needsConfirmation;
     visitTranslationWarning.textContent = needsConfirmation
@@ -703,6 +728,9 @@ async function translateVisitText(text, inputType = 'text') {
       })
     });
 
+    if (res.autoRouted && res.direction) {
+      syncVisitDirectionControls(res.direction);
+    }
     renderVisitTranslation(res);
     renderMessage({ role: 'ai', text: res.displayText || res.translatedText, ttsAudio: res.ttsAudio, timestamp: Date.now() });
     textInput.value = '';
@@ -819,10 +847,26 @@ function setNotice(text, kind = 'info') {
 }
 
 function setControlsEnabled(enabled) {
-  [sendBtn, holdBtn, newSessionBtn, scenarioSelect, textInput, replayBtn].forEach((el) => {
+  [sendBtn, newSessionBtn, scenarioSelect, textInput, replayBtn].forEach((el) => {
     if (el) el.disabled = !enabled;
   });
+  if (holdBtn) {
+    const holdDisabled = !enabled || !voiceInputEnabled;
+    holdBtn.disabled = holdDisabled;
+    holdBtn.setAttribute('aria-disabled', String(holdDisabled));
+    holdBtn.classList.toggle('is-unavailable', !voiceInputEnabled);
+  }
   if (voiceSelect) voiceSelect.disabled = !enabled || !voiceSelectionEnabled;
+}
+
+function updateVoiceInputAvailability(health = pilotHealthSnapshot) {
+  voiceInputEnabled = isVoiceInputAvailable(health);
+  updateInputLabelsForMode();
+  if (holdBtn) {
+    holdBtn.disabled = !voiceInputEnabled;
+    holdBtn.setAttribute('aria-disabled', String(!voiceInputEnabled));
+    holdBtn.classList.toggle('is-unavailable', !voiceInputEnabled);
+  }
 }
 
 function setStatus(text) {
@@ -1086,7 +1130,7 @@ async function processAudioRecording(audioBlob) {
     }
   } catch (err) {
     console.error('ASR error:', err);
-    setNotice('語音辨識失敗：' + (err.message || '請重試或使用打字'), 'error');
+    setNotice(createAsrErrorNotice(err), 'error');
     setSystemState(STATES.ERROR);
     setTimeout(() => setSystemState(STATES.IDLE), 2000);
   }
@@ -1307,13 +1351,17 @@ async function fetchJSON(path, options) {
   });
   if (!res.ok) {
     let detail = `HTTP ${res.status}`;
+    let payload = null;
     try {
-      const payload = await res.json();
+      payload = await res.json();
       detail = payload.details || payload.message || payload.error || detail;
     } catch {
       // Keep the status fallback when the response body is not JSON.
     }
-    throw new Error(detail);
+    const error = new Error(detail);
+    error.status = res.status;
+    error.payload = payload;
+    throw error;
   }
   return res.json();
 }
@@ -1355,6 +1403,19 @@ function updateTtsPill(provider = currentTtsProvider) {
   }
 }
 
+function updatePilotVoiceStatus(health = pilotHealthSnapshot) {
+  if (!pilotVoiceStatus) return;
+  const provider = health?.ttsProvider || currentTtsProvider;
+  const minimaxReady = Boolean(health?.capabilities?.minimax || provider === 'minimax');
+  if (provider === 'minimax' && minimaxReady) {
+    pilotVoiceStatus.textContent = t('pilot.status.voice.ready');
+  } else if (provider === 'azure') {
+    pilotVoiceStatus.textContent = t('pilot.status.voice.azureFallback');
+  } else {
+    pilotVoiceStatus.textContent = t('pilot.status.voice.mock');
+  }
+}
+
 function renderVoiceOptions() {
   if (!voiceSelect) return;
   voiceSelect.innerHTML = '';
@@ -1392,6 +1453,7 @@ async function loadTtsVoices() {
   }
   renderVoiceOptions();
   updateTtsPill(currentTtsProvider);
+  updatePilotVoiceStatus();
   setControlsEnabled(true);
 }
 
@@ -1789,6 +1851,16 @@ async function startAzureSpeechSdkRecording() {
 }
 
 async function handleRecordStart() {
+  if (!voiceInputEnabled) {
+    isRecording = false;
+    cleanupRecordingResources();
+    stopRecordingTimer();
+    updateInputLabelsForMode();
+    setSystemState(STATES.IDLE);
+    setNotice(t('input.voiceUnavailableHint'), 'warning');
+    return;
+  }
+
   const hasPermission = await requestMicPermission();
   if (!hasPermission) {
     setNotice('需要麥克風權限，已切換至打字模式', 'info');
@@ -1814,31 +1886,15 @@ async function handleRecordStart() {
     }
     return;
   } catch (err) {
-    console.warn(`${currentAsrProvider === 'azure' ? 'Azure Speech SDK' : 'Backend ASR'} recording failed, trying fallback:`, err);
+    console.warn(`${currentAsrProvider === 'azure' ? 'Azure Speech SDK' : 'Backend ASR'} recording failed:`, err);
     cleanupRecordingResources();
-  }
-
-  try {
-    isRecording = true;
-    setSystemState(STATES.LISTENING);
-    holdBtn.textContent = isVisitTranslationMode()
-      ? t('visitTranslate.actions.recording')
-      : '錄音中... 放開即發送';
-    if (currentAsrProvider === 'azure') {
-      await startBackendSpeechRecording();
-    } else {
-      await startAzureSpeechSdkRecording();
-    }
-    return;
-  } catch (err) {
-    console.error('Recording error:', err);
-    setNotice('無法啟動錄音：' + err.message, 'error');
+    setNotice(createAsrErrorNotice(err), 'error');
     setSystemState(STATES.ERROR);
     setTimeout(() => setSystemState(STATES.IDLE), 2000);
     updateInputLabelsForMode();
     stopRecordingTimer();
     isRecording = false;
-    cleanupRecordingResources();
+    return;
   }
 }
 
@@ -1903,7 +1959,7 @@ function handleRecordStop() {
           audioConfig = null;
           azureSdkTranscript = '';
           azureSdkError = null;
-          setNotice('語音辨識失敗：' + (err.message || '請重試或使用打字'), 'error');
+          setNotice(createAsrErrorNotice(err), 'error');
           setSystemState(STATES.ERROR);
           setTimeout(() => setSystemState(STATES.IDLE), 2000);
         });
@@ -1915,7 +1971,7 @@ function handleRecordStop() {
         azureSdkTranscript = '';
         azureSdkError = null;
         updateInputLabelsForMode();
-        setNotice('語音識別停止失敗：' + (err?.message || err), 'error');
+        setNotice(createAsrErrorNotice(err), 'error');
         setSystemState(STATES.ERROR);
         setTimeout(() => setSystemState(STATES.IDLE), 2000);
       }
@@ -2291,6 +2347,29 @@ document.querySelectorAll('[data-dialog-open]').forEach((button) => {
   });
 });
 
+document.querySelectorAll('[data-pilot-action]').forEach((button) => {
+  button.addEventListener('click', async () => {
+    const action = button.dataset.pilotAction;
+    if (action === 'visit') {
+      selectUserMode('visit_translation');
+      syncVisitDirectionControls(DEFAULT_VISIT_DIRECTION);
+      resetVisitTranslationOutput();
+      document.getElementById('practice')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      textInput?.focus();
+      setNotice(t('pilot.notices.visitReady'), 'info');
+      return;
+    }
+
+    if (action === 'practice') {
+      selectUserMode('international_student');
+      document.getElementById('practice')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (!sessionId) await startSession();
+      textInput?.focus();
+      setNotice(t('pilot.notices.practiceReady'), 'info');
+    }
+  });
+});
+
 startVisitTranslationFromPlaybook?.addEventListener('click', () => {
   selectUserMode('visit_translation');
   document.getElementById('playbookDialog')?.close();
@@ -2379,9 +2458,9 @@ function updateUILanguage() {
   const heroKicker = document.querySelector('.hero-kicker');
   const heroTitle = document.querySelector('.hero h2');
   const heroBody = document.querySelector('.hero-body');
-  if (heroKicker) heroKicker.textContent = t('hero.kicker');
-  if (heroTitle) heroTitle.textContent = t('hero.title');
-  if (heroBody) heroBody.textContent = t('hero.body');
+  if (heroKicker) heroKicker.textContent = t('pilot.kicker');
+  if (heroTitle) heroTitle.textContent = t('pilot.title');
+  if (heroBody) heroBody.textContent = t('pilot.body');
   renderRoleContext();
   renderScenarioGuide(scenarioSelect.value);
   renderElderlyVisitPlaybook();
@@ -2412,6 +2491,7 @@ function updateUILanguage() {
   }
 
   updateTtsPill(currentTtsProvider);
+  updatePilotVoiceStatus();
   resetVisitPhrase();
 }
 
@@ -2437,13 +2517,19 @@ window.addEventListener('languageChanged', () => {
 
   try {
     const health = await fetchJSON('/health');
+    pilotHealthSnapshot = health;
     setStatus(t('status.connected') || '連線成功');
     currentAsrProvider = health.asrProvider || currentAsrProvider;
     currentAsrLanguage = health.asrLanguage || currentAsrLanguage;
     currentTtsProvider = health.ttsProvider || currentTtsProvider;
     currentTtsVoice = health.ttsVoice || currentTtsVoice;
     updateTtsPill(currentTtsProvider);
+    updatePilotVoiceStatus(health);
+    updateVoiceInputAvailability(health);
     setNotice(`${t('status.connected')} API：${API_BASE}`, 'info');
+    if (!voiceInputEnabled) {
+      setNotice(t('input.voiceUnavailableHint'), 'warning');
+    }
     setControlsEnabled(true);
   } catch {
     setStatus(t('status.disconnected') || '後端未連線');

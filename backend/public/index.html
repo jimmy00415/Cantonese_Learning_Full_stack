@@ -19,7 +19,7 @@
       console.log('Speech SDK loaded from: local (v1.38.0)');
     }
   </script>
-  <link rel="stylesheet" href="styles.css?v=20260610visittranslation1" />
+  <link rel="stylesheet" href="styles.css?v=20260704directionfix1" />
 </head>
 <body>
   <main class="app">
@@ -55,14 +55,29 @@
 
     <section class="hero" aria-labelledby="heroTitle">
       <div class="hero-copy">
-        <p class="hero-kicker">Campus Cantonese Sprint</p>
-        <h2 id="heroTitle">Speak Cantonese for real Hong Kong student life</h2>
-        <p class="hero-body">Practice restaurant orders, MTR moments, group-project small talk, and culture cues with an AI coach that answers in Cantonese voice.</p>
+        <p class="hero-kicker" data-i18n="pilot.kicker">External Pilot</p>
+        <h2 id="heroTitle" data-i18n="pilot.title">Start a Cantonese visit in under one minute</h2>
+        <p class="hero-body" data-i18n="pilot.body">Choose a role, translate a visit exchange, or practise one useful Cantonese line with MiniMax voice support.</p>
 
-        <div class="badges" aria-label="Product highlights">
-          <span class="pill">Campus-ready</span>
-          <span class="pill">Voice coach</span>
-          <span class="pill">Culture signals</span>
+        <div class="pilot-cta-row" aria-label="Pilot actions">
+          <button type="button" class="pilot-cta primary" data-pilot-action="visit" data-i18n="pilot.actions.visit">Start visit translation</button>
+          <button type="button" class="pilot-cta" data-pilot-action="practice" data-i18n="pilot.actions.practice">Start Cantonese practice</button>
+          <button type="button" class="pilot-cta ghost" data-dialog-open="privacyDialog" data-i18n="pilot.actions.privacy">Privacy and AI limits</button>
+        </div>
+
+        <div class="pilot-status-grid" aria-label="Pilot readiness">
+          <article class="pilot-status-card">
+            <span data-i18n="pilot.status.voice.label">Voice</span>
+            <strong id="pilotVoiceStatus" data-i18n="pilot.status.voice.pending">Checking MiniMax...</strong>
+          </article>
+          <article class="pilot-status-card">
+            <span data-i18n="pilot.status.fallback.label">Fallback</span>
+            <strong data-i18n="pilot.status.fallback.ready">Typing works without microphone</strong>
+          </article>
+          <article class="pilot-status-card">
+            <span data-i18n="pilot.status.safety.label">Safety</span>
+            <strong data-i18n="pilot.status.safety.ready">Confirm important meaning with staff</strong>
+          </article>
         </div>
       </div>
 
@@ -292,7 +307,7 @@
     </section>
 
     <section class="input-panel" aria-label="Practice input">
-      <button id="holdToSpeak" class="mic" data-i18n="input.holdToSpeak">按住說話</button>
+      <button id="holdToSpeak" class="mic is-unavailable" data-i18n="input.holdToSpeak" disabled aria-disabled="true">按住說話</button>
       <button id="stopSpeaking" class="stop-btn" data-i18n="input.stopSpeaking" hidden>停止播放</button>
       <div class="recording-indicator" id="recordingIndicator" hidden>
         <svg class="countdown-ring" viewBox="0 0 40 40" aria-hidden="true">
@@ -486,6 +501,6 @@
     </footer>
   </main>
 
-  <script type="module" src="app.js?v=20260610visittranslation1"></script>
+  <script type="module" src="app.js?v=20260704directionfix1"></script>
 </body>
 </html>
