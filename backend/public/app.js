@@ -194,6 +194,38 @@ const STATES = {
   ERROR: 'error'
 };
 
+const VOICE_UI_STATES = {
+  CHECKING: 'checking',
+  AVAILABLE: 'available',
+  UNAVAILABLE: 'unavailable',
+  BLOCKED: 'blocked',
+  RECORDING: 'recording',
+  PROCESSING: 'processing',
+  FAILED: 'failed'
+};
+
+function setVoiceUiState(stateName) {
+  const state = stateName || VOICE_UI_STATES.CHECKING;
+  document.body.dataset.voiceState = state;
+  if (!holdBtn) return;
+  holdBtn.classList.toggle('voice-state-unavailable', state === VOICE_UI_STATES.UNAVAILABLE);
+  holdBtn.classList.toggle('voice-state-recording', state === VOICE_UI_STATES.RECORDING);
+  holdBtn.classList.toggle('voice-state-processing', state === VOICE_UI_STATES.PROCESSING);
+  if (state === VOICE_UI_STATES.UNAVAILABLE) {
+    holdBtn.textContent = t('input.voiceUnavailable');
+    holdBtn.title = t('input.voiceUnavailableHint');
+  } else if (state === VOICE_UI_STATES.AVAILABLE) {
+    holdBtn.title = '';
+  }
+}
+
+function updateReplayAvailability(controlsEnabled = true) {
+  if (!replayBtn) return;
+  replayBtn.disabled = !lastTtsAudio;
+  if (!controlsEnabled) replayBtn.disabled = true;
+  replayBtn.setAttribute('aria-disabled', String(replayBtn.disabled));
+}
+
 const STATE_LABELS = {
   idle: '就緒',
   listening: '聽緊中…',
@@ -1040,7 +1072,7 @@ function setNotice(text, kind = 'info') {
 }
 
 function setControlsEnabled(enabled) {
-  [sendBtn, newSessionBtn, scenarioSelect, textInput, replayBtn].forEach((el) => {
+  [sendBtn, newSessionBtn, scenarioSelect, textInput].forEach((el) => {
     if (el) el.disabled = !enabled;
   });
   if (holdBtn) {
@@ -1049,6 +1081,8 @@ function setControlsEnabled(enabled) {
     holdBtn.setAttribute('aria-disabled', String(holdDisabled));
     holdBtn.classList.toggle('is-unavailable', !voiceInputEnabled);
   }
+  setVoiceUiState(voiceInputEnabled ? 'available' : 'unavailable');
+  updateReplayAvailability(enabled);
   if (voiceSelect) voiceSelect.disabled = !enabled || !voiceSelectionEnabled;
 }
 
@@ -1061,6 +1095,7 @@ function updateVoiceInputAvailability(health = pilotHealthSnapshot) {
     holdBtn.setAttribute('aria-disabled', String(!voiceInputEnabled));
     holdBtn.classList.toggle('is-unavailable', !voiceInputEnabled);
   }
+  setVoiceUiState(voiceInputEnabled ? 'available' : 'unavailable');
 }
 
 function setStatus(text) {
@@ -1180,6 +1215,7 @@ async function playAudio(ttsAudio, rate = 1) {
     console.log('Audio playback started successfully');
 
     lastTtsAudio = ttsAudio;
+    updateReplayAvailability();
     audio.addEventListener('ended', () => {
       console.log('Audio playback ended');
       setSystemState(STATES.IDLE);
@@ -1278,6 +1314,7 @@ function blobToDataUrl(blob) {
 async function processAudioRecording(audioBlob) {
   try {
     setSystemState(STATES.PROCESSING);
+    setVoiceUiState('processing');
     setStatus(currentAsrProvider === 'azure' ? 'Azure Speech 轉換中...' : '轉換語音中...');
 
     console.log('Processing audio, blob size:', audioBlob.size, 'type:', audioBlob.type, 'provider:', currentAsrProvider);
@@ -1308,6 +1345,7 @@ async function processAudioRecording(audioBlob) {
     if (res.transcript.includes('(模擬)')) {
       setNotice('語音辨識服務未啟用，請使用打字模式', 'warning');
       setSystemState(STATES.IDLE);
+      setVoiceUiState(voiceInputEnabled ? 'available' : 'unavailable');
       return;
     }
 
@@ -1322,11 +1360,13 @@ async function processAudioRecording(audioBlob) {
     } else {
       await sendUtterance(res.transcript);
     }
+    setVoiceUiState(voiceInputEnabled ? 'available' : 'unavailable');
   } catch (err) {
     console.error('ASR error:', err);
     setNotice(createAsrErrorNotice(err), 'error');
     setSystemState(STATES.ERROR);
     setTimeout(() => setSystemState(STATES.IDLE), 2000);
+    setVoiceUiState(voiceInputEnabled ? 'available' : 'unavailable');
   }
 }
 
@@ -1675,6 +1715,8 @@ async function startSession() {
   transcriptEl.innerHTML = '';
   if (feedbackEl) feedbackEl.textContent = '';
   resetCoachTranslation();
+  lastTtsAudio = null;
+  updateReplayAvailability();
   renderEmptyState();
 
   // P1: Mode-specific greeting
@@ -1956,6 +1998,7 @@ async function startBackendSpeechRecording() {
     if (audioBlob.size === 0) {
       setNotice('未錄到聲音，請再試一次', 'error');
       setSystemState(STATES.IDLE);
+      setVoiceUiState(voiceInputEnabled ? 'available' : 'unavailable');
       return;
     }
 
@@ -2054,6 +2097,7 @@ async function startAzureSpeechSdkRecording() {
 
 async function handleRecordStart() {
   if (!voiceInputEnabled) {
+    setVoiceUiState('unavailable');
     isRecording = false;
     cleanupRecordingResources();
     stopRecordingTimer();
@@ -2065,6 +2109,7 @@ async function handleRecordStart() {
 
   const hasPermission = await requestMicPermission();
   if (!hasPermission) {
+    setVoiceUiState('unavailable');
     setNotice('需要麥克風權限，已切換至打字模式', 'info');
     return;
   }
@@ -2077,6 +2122,7 @@ async function handleRecordStart() {
 
   try {
     isRecording = true;
+    setVoiceUiState('recording');
     setSystemState(STATES.LISTENING);
     holdBtn.textContent = isVisitTranslationMode()
       ? t('visitTranslate.actions.recording')
@@ -2093,6 +2139,7 @@ async function handleRecordStart() {
     setNotice(createAsrErrorNotice(err), 'error');
     setSystemState(STATES.ERROR);
     setTimeout(() => setSystemState(STATES.IDLE), 2000);
+    setVoiceUiState(voiceInputEnabled ? 'available' : 'unavailable');
     updateInputLabelsForMode();
     stopRecordingTimer();
     isRecording = false;
@@ -2106,6 +2153,7 @@ function handleRecordStop() {
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     isRecording = false;
     stopRecordingTimer();
+    setVoiceUiState('processing');
     holdBtn.textContent = isVisitTranslationMode()
       ? t('visitTranslate.actions.processingSpeech')
       : '處理錄音中...';
@@ -2122,6 +2170,7 @@ function handleRecordStop() {
   if (speechRecognizer) {
     const recognizerRef = speechRecognizer;
     speechRecognizer = null; // Prevent double-stop
+    setVoiceUiState('processing');
     holdBtn.textContent = isVisitTranslationMode()
       ? t('visitTranslate.actions.processingSpeech')
       : '處理錄音中...';
@@ -2145,6 +2194,7 @@ function handleRecordStop() {
           if (!transcript) {
             setNotice('未能識別語音，請重試或使用打字', 'error');
             setSystemState(STATES.IDLE);
+            setVoiceUiState(voiceInputEnabled ? 'available' : 'unavailable');
             setStatus(sessionId ? `對話進行中：${sessionId.slice(0, 8)}` : '就緒');
             return;
           }
@@ -2155,6 +2205,7 @@ function handleRecordStop() {
           } else {
             await sendUtterance(transcript);
           }
+          setVoiceUiState(voiceInputEnabled ? 'available' : 'unavailable');
         })().catch((err) => {
           console.error('Azure Speech finalize error:', err);
           updateInputLabelsForMode();
@@ -2164,6 +2215,7 @@ function handleRecordStop() {
           setNotice(createAsrErrorNotice(err), 'error');
           setSystemState(STATES.ERROR);
           setTimeout(() => setSystemState(STATES.IDLE), 2000);
+          setVoiceUiState(voiceInputEnabled ? 'available' : 'unavailable');
         });
       },
       (err) => {
@@ -2176,11 +2228,13 @@ function handleRecordStop() {
         setNotice(createAsrErrorNotice(err), 'error');
         setSystemState(STATES.ERROR);
         setTimeout(() => setSystemState(STATES.IDLE), 2000);
+        setVoiceUiState(voiceInputEnabled ? 'available' : 'unavailable');
       }
     );
   } else {
     updateInputLabelsForMode();
     setSystemState(STATES.IDLE);
+    setVoiceUiState(voiceInputEnabled ? 'available' : 'unavailable');
   }
 }
 
@@ -2189,6 +2243,8 @@ clearChatBtn.addEventListener('click', () => {
   transcriptEl.innerHTML = '';
   if (feedbackEl) feedbackEl.textContent = '';
   resetCoachTranslation();
+  lastTtsAudio = null;
+  updateReplayAvailability();
   setNotice('已清除對話記錄', 'info');
   renderEmptyState();
 });
@@ -2738,6 +2794,8 @@ window.addEventListener('languageChanged', () => {
   syncVisitDirectionControls();
 
   setSystemState(STATES.IDLE);
+  setVoiceUiState('unavailable');
+  updateReplayAvailability(false);
   setActiveMode(currentMode); // Initialize mode UI
 
   try {
