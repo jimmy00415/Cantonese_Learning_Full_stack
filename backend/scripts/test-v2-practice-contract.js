@@ -23,6 +23,18 @@ assert.doesNotMatch(app, /scenarioPill\.textContent\s*=\s*label/, 'practice mode
 assert.match(app, /markHabitPractised\(\)/, 'successful user exchange should mark habit practised');
 assert.match(css, /\.practice-workspace-grid\b/, 'practice workspace grid styling should exist');
 assert.match(css, /\.practice-input-dock\b/, 'practice input dock styling should exist');
+assert.match(css, /\.practice-stage\s*{[\s\S]*grid-template-areas:/, 'Practice desktop layout should use named grid areas instead of implicit placement');
+assert.match(css, /"task setup history"\s*"coach setup history"\s*"feedback setup history"/, 'Practice desktop layout should keep task, setup, coach, feedback, and history in stable columns');
+assert.match(css, /\.practice-workspace-grid\s*{[\s\S]*display:\s*contents;/, 'Practice workspace wrapper should not create a nested overflowing grid');
+assert.match(css, /\.practice-task-card\s*{[\s\S]*grid-area:\s*task;/, 'Practice task card should occupy the task area');
+assert.match(css, /\.practice-coach-panel\s*{[\s\S]*grid-area:\s*coach;/, 'Practice coach panel should occupy the coach area');
+assert.match(css, /\.control-rail\s*{[\s\S]*grid-area:\s*setup;/, 'Practice setup controls should occupy the setup area');
+assert.match(css, /\.transcript\s*{[\s\S]*grid-area:\s*history;/, 'Practice transcript should occupy the history area');
+assert.match(css, /\.feedback-panel\s*{[\s\S]*grid-area:\s*feedback;/, 'Practice feedback panel should occupy the feedback area');
+assert.match(css, /\.practice-conversation-slot\s*{[\s\S]*position:\s*absolute;[\s\S]*pointer-events:\s*none;/, 'Legacy #practice scroll anchor should not take visible layout space');
+assert.match(css, /\.transcript-meta\s*{[\s\S]*min-width:\s*0;/, 'Transcript metadata should be allowed to shrink inside the history column');
+assert.match(css, /\.transcript-meta\s+\.pill[\s\S]*text-overflow:\s*ellipsis;/, 'Transcript pills should truncate instead of overflowing the history panel');
+assert.match(css, /@media \(max-width:\s*1100px\)[\s\S]*\.practice-stage\s*{[\s\S]*grid-template-areas:\s*"task"\s*"setup"\s*"history"\s*"coach"\s*"feedback";/, 'Practice layout should collapse to one column before columns become cramped');
 assert.match(i18n, /practice:\s*{/, 'V2 practice copy should exist');
 assert.equal(pkg.scripts['test:v2-practice'], 'node scripts/test-v2-practice-contract.js');
 

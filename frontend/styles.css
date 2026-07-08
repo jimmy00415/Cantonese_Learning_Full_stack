@@ -2540,7 +2540,45 @@ button:hover:not(:disabled),
   gap: 16px;
 }
 
+.practice-stage {
+  grid-template-columns: minmax(220px, 280px) minmax(420px, 1fr) minmax(320px, 0.9fr);
+  grid-template-areas:
+    "task setup history"
+    "coach setup history"
+    "feedback setup history";
+  align-items: start;
+}
+
+.practice-workspace-grid {
+  display: contents;
+}
+
+.practice-task-card {
+  grid-area: task;
+  min-width: 0;
+}
+
+.practice-coach-panel {
+  grid-area: coach;
+  min-width: 0;
+}
+
+.practice-conversation-slot {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+#practice {
+  scroll-margin-top: 96px;
+}
+
 .control-rail {
+  grid-area: setup;
+  min-width: 0;
   gap: 14px;
   background: rgba(255, 255, 255, 0.72);
   max-height: calc(100vh - 44px);
@@ -2564,7 +2602,39 @@ button:hover:not(:disabled),
   scroll-padding-bottom: 24px;
 }
 
+.transcript {
+  grid-area: history;
+  min-width: 0;
+}
+
+.transcript-header,
+.transcript-titleblock,
+.transcript-meta {
+  min-width: 0;
+}
+
+.transcript-titleblock {
+  overflow: hidden;
+}
+
+.transcript-meta {
+  max-width: 100%;
+}
+
+.transcript-meta .pill {
+  min-width: 0;
+  max-width: min(100%, 260px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.transcript-meta .ghost {
+  flex: 0 0 auto;
+}
+
 .feedback-panel {
+  grid-area: feedback;
+  min-width: 0;
   max-height: calc(100vh - 44px);
   overflow: auto;
   scrollbar-width: thin;
@@ -3301,15 +3371,22 @@ body[data-user-mode="visit_translation"] .send-btn {
 
 @media (max-width: 1180px) {
   .practice-stage {
-    grid-template-columns: minmax(300px, 0.38fr) minmax(0, 1fr);
+    grid-template-columns: minmax(240px, 0.76fr) minmax(420px, 1fr);
+    grid-template-areas:
+      "task setup"
+      "coach setup"
+      "history history"
+      "feedback feedback";
   }
 
   .feedback-panel {
-    grid-column: 1 / -1;
     position: static;
     max-height: none;
-    display: grid;
-    grid-template-columns: 1fr 1fr;
+    display: block;
+  }
+
+  .transcript {
+    min-height: 560px;
   }
 
   .input-panel {
@@ -3336,6 +3413,38 @@ body[data-user-mode="visit_translation"] .send-btn {
 
   body[data-user-mode="visit_translation"] .audio-controls {
     grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 1100px) {
+  .practice-stage {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "task"
+      "setup"
+      "history"
+      "coach"
+      "feedback";
+  }
+
+  .control-rail,
+  .feedback-panel {
+    position: static;
+    max-height: none;
+    overflow: visible;
+  }
+
+  .transcript {
+    min-height: 520px;
+  }
+
+  .transcript-body {
+    max-height: none;
+    min-height: 360px;
+  }
+
+  .transcript-meta {
     justify-content: flex-start;
   }
 }

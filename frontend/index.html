@@ -20,7 +20,7 @@
       console.log('Speech SDK loaded from: local (v1.38.0)');
     }
   </script>
-  <link rel="stylesheet" href="styles.css?v=20260708v2uiux1" />
+  <link rel="stylesheet" href="styles.css?v=20260708practice1" />
 </head>
 <body>
   <main class="app">
@@ -303,8 +303,8 @@
           <h2 id="practiceTaskTitle" data-i18n="v2.practice.taskTitle">Today's Cantonese line</h2>
           <p data-i18n="v2.practice.taskBody">Practise asking someone to speak a little slower.</p>
         </aside>
-        <div class="practice-conversation-slot" id="practiceConversationSlot">
-          <div id="practice"></div>
+        <div class="practice-conversation-slot" id="practiceConversationSlot" aria-hidden="true">
+          <div id="practice" tabindex="-1"></div>
         </div>
         <aside class="practice-coach-panel" id="practiceCoachPanel">
           <p class="section-eyebrow" data-i18n="v2.practice.coachEyebrow">Coach</p>
@@ -593,6 +593,6 @@
     </footer>
   </main>
 
-  <script type="module" src="app.js?v=20260708v2uiux1"></script>
+  <script type="module" src="app.js?v=20260708practice1"></script>
 </body>
 </html>
