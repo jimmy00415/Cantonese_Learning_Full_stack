@@ -62,6 +62,44 @@ function jyutping(text) {
 const COMMON_VISIT_RULES = [
   {
     patterns: {
+      cantonese: [/伸展|拉筋|鬆一鬆|松一松|郁一郁|活動.*(手|肩|膊|胳膊)|手.*伸展/],
+      english: [/(stretch|move|exercise|relax).{0,24}(hand|hands|arm|arms|shoulder|shoulders)/, /(hand|hands|arm|arms|shoulder|shoulders).{0,24}(stretch|move|exercise|relax)/],
+      mandarin: [/伸展|拉筋|放松|放鬆|活动.*(手|胳膊|肩膀)|手.*伸展/]
+    },
+    outputs: {
+      yue_to_en: visitResult('Would you like me to help you gently stretch your hands?'),
+      yue_to_zh: visitResult('你想让我帮你轻轻伸展一下双手吗？'),
+      en_to_yue: visitResult('我可唔可以幫你伸展一下雙手？', {
+        speakableText: '我可唔可以幫你伸展一下雙手？',
+        romanization: jyutping('ngo5 ho2 m4 ho2 ji5 bong1 nei5 san1 zin2 jat1 haa5 soeng1 sau2?')
+      }),
+      zh_to_yue: visitResult('我可唔可以幫你伸展一下雙手？', {
+        speakableText: '我可唔可以幫你伸展一下雙手？',
+        romanization: jyutping('ngo5 ho2 m4 ho2 ji5 bong1 nei5 san1 zin2 jat1 haa5 soeng1 sau2?')
+      })
+    }
+  },
+  {
+    patterns: {
+      cantonese: [/按摩|按一按|按吓|按下|鬆骨|松骨/],
+      english: [/massage|massaging|rub|shoulder\s*massage|back\s*massage/],
+      mandarin: [/按摩|按一按|揉一揉/]
+    },
+    outputs: {
+      yue_to_en: visitResult('Would you like me to help you with a short massage?'),
+      yue_to_zh: visitResult('你想让我帮你按摩一下吗？'),
+      en_to_yue: visitResult('你想唔想我幫你按摩一下？', {
+        speakableText: '你想唔想我幫你按摩一下？',
+        romanization: jyutping('nei5 soeng2 m4 soeng2 ngo5 bong1 nei5 on3 mo1 jat1 haa5?')
+      }),
+      zh_to_yue: visitResult('你想唔想我幫你按摩一下？', {
+        speakableText: '你想唔想我幫你按摩一下？',
+        romanization: jyutping('nei5 soeng2 m4 soeng2 ngo5 bong1 nei5 on3 mo1 jat1 haa5?')
+      })
+    }
+  },
+  {
+    patterns: {
       cantonese: [/我.*(想|要|飲|喝).*水/, /我.*口渴/, /唔該.*水/],
       english: [/water|drink|thirsty/],
       mandarin: [/我.*(想|要|喝).*水/, /口渴/]

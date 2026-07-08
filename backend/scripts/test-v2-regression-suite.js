@@ -9,6 +9,7 @@ const commands = [
   ['node', ['scripts/test-visit-direction-routing.js']],
   ['node', ['scripts/test-visit-http-routing.js']],
   ['node', ['scripts/test-visit-resilience-contract.js']],
+  ['node', ['scripts/test-visit-azure-translator-provider.js']],
   ['node', ['scripts/test-visit-translation-quality.js']],
   ['node', ['scripts/test-visit-layout-contract.js']],
   ['node', ['scripts/test-voice-disabled-ui.js']],

@@ -56,6 +56,10 @@ const azureOpenAIKey = process.env.AZURE_OPENAI_KEY;
 const azureOpenAIEndpoint = process.env.AZURE_OPENAI_ENDPOINT;
 const azureOpenAIDeployment = process.env.AZURE_OPENAI_DEPLOYMENT || 'gpt-4o';
 const azureOpenAIApiVersion = process.env.AZURE_OPENAI_API_VERSION || '2024-08-01-preview';
+const azureTranslatorKey = process.env.AZURE_TRANSLATOR_KEY || process.env.AZURE_TEXT_TRANSLATOR_KEY || process.env.AZURE_TRANSLATOR_TEXT_KEY;
+const azureTranslatorEndpoint = (process.env.AZURE_TRANSLATOR_ENDPOINT || process.env.AZURE_TEXT_TRANSLATOR_ENDPOINT || 'https://api.cognitive.microsofttranslator.com').replace(/\/+$/, '');
+const azureTranslatorRegion = process.env.AZURE_TRANSLATOR_REGION || process.env.AZURE_TEXT_TRANSLATOR_REGION || process.env.AZURE_COGNITIVE_SERVICES_REGION || '';
+const azureTranslatorPath = process.env.AZURE_TRANSLATOR_PATH || '';
 const llmProvider = (process.env.LLM_PROVIDER || 'hkbu').toLowerCase();
 const asrProvider = (process.env.ASR_PROVIDER || process.env.SPEECH_PROVIDER || ttsProvider).toLowerCase();
 const asrFallbackProvider = (process.env.ASR_FALLBACK_PROVIDER || '').toLowerCase();
@@ -161,6 +165,7 @@ function readPositiveInt(value, fallback, { min = 1, max = 60000 } = {}) {
 
 const DEFAULT_LLM_REQUEST_TIMEOUT_MS = readPositiveInt(process.env.LLM_PROVIDER_TIMEOUT_MS, 12000, { min: 500, max: 60000 });
 const VISIT_TRANSLATION_PROVIDER_TIMEOUT_MS = readPositiveInt(process.env.VISIT_TRANSLATION_PROVIDER_TIMEOUT_MS, 4500, { min: 250, max: 15000 });
+const AZURE_TRANSLATOR_TIMEOUT_MS = readPositiveInt(process.env.AZURE_TRANSLATOR_TIMEOUT_MS, 3500, { min: 250, max: 15000 });
 const DEFAULT_TTS_REQUEST_TIMEOUT_MS = readPositiveInt(process.env.TTS_PROVIDER_TIMEOUT_MS, 10000, { min: 500, max: 60000 });
 const VISIT_TTS_TIMEOUT_MS = readPositiveInt(process.env.VISIT_TTS_TIMEOUT_MS, 3500, { min: 250, max: 15000 });
 
@@ -659,6 +664,7 @@ const visitTranslationDirections = {
     targetLanguage: 'yue-Hant-HK',
     speakerRole: 'student',
     target: 'Cantonese',
+    promptHint: 'Translate the international volunteer line into natural spoken Hong Kong Cantonese for an older resident. Use a short, polite, consent-first sentence. Translate the intended meaning of common daily-life help, comfort, food, activity, and conversation requests instead of falling back to staff-confirmation text unless the sentence is medically unsafe or truly unclear.',
     includeRomanization: true,
     generateTts: true
   },
@@ -712,6 +718,48 @@ function getConfiguredLlmProviders() {
   if (hasAzureOpenAI) return ['azure-openai'];
   if (hasHKBU) return ['hkbu'];
   return [];
+}
+
+function isAzureTranslatorReady() {
+  return Boolean(azureTranslatorKey && azureTranslatorEndpoint);
+}
+
+function getConfiguredVisitTranslationProviders() {
+  const providers = getConfiguredLlmProviders();
+  if (isAzureTranslatorReady()) providers.push('azure-translator');
+  return providers;
+}
+
+function mapAzureTranslatorLanguage(language) {
+  const value = String(language || '').toLowerCase();
+  if (!value) return '';
+  if (value.startsWith('en')) return 'en';
+  if (value.startsWith('yue')) return 'yue';
+  if (value.startsWith('cmn') || value.startsWith('zh-hans')) return 'zh-Hans';
+  if (value.startsWith('zh-hant')) return 'zh-Hant';
+  return value;
+}
+
+function defaultAzureTranslatorPath(endpoint) {
+  try {
+    const host = new URL(endpoint).hostname.toLowerCase();
+    if (host.endsWith('.cognitiveservices.azure.com')) return '/translator/text/v3.0/translate';
+  } catch {
+    // Fall back to the public Translator endpoint path.
+  }
+  return '/translate';
+}
+
+function buildAzureTranslatorUrl(directionConfig) {
+  const fromLanguage = mapAzureTranslatorLanguage(directionConfig.sourceLanguage);
+  const toLanguage = mapAzureTranslatorLanguage(directionConfig.targetLanguage);
+  const baseUrl = new URL(`${azureTranslatorEndpoint}/`);
+  const path = azureTranslatorPath || defaultAzureTranslatorPath(azureTranslatorEndpoint);
+  const url = new URL(path, `${baseUrl.origin}/`);
+  url.searchParams.set('api-version', '3.0');
+  if (fromLanguage) url.searchParams.set('from', fromLanguage);
+  if (toLanguage) url.searchParams.set('to', toLanguage);
+  return url.toString();
 }
 
 const JYUTPING_TONE_PATTERN = /\b[a-z]{1,8}[1-6]\b/i;
@@ -944,6 +992,67 @@ function hasCjkText(text) {
   return /[\u3400-\u9fff]/.test(String(text || ''));
 }
 
+async function translateWithAzureTranslator(sourceText, direction, directionConfig) {
+  if (!isAzureTranslatorReady()) {
+    throw new Error('Azure Translator is not configured');
+  }
+
+  const url = buildAzureTranslatorUrl(directionConfig);
+  const headers = {
+    'Ocp-Apim-Subscription-Key': azureTranslatorKey,
+    'Content-Type': 'application/json'
+  };
+  if (azureTranslatorRegion) {
+    headers['Ocp-Apim-Subscription-Region'] = azureTranslatorRegion;
+  }
+
+  const response = await fetchWithTimeout(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify([{ Text: sourceText }])
+  }, AZURE_TRANSLATOR_TIMEOUT_MS, 'azure-translator API');
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`azure-translator API failed: ${response.status} ${response.statusText} - ${errorText}`);
+  }
+
+  const payload = await response.json();
+  const translatedText = String(payload?.[0]?.translations?.[0]?.text || '').trim();
+  if (!translatedText) {
+    throw new Error('azure-translator returned an empty visit translation');
+  }
+
+  const targetIsEnglish = directionConfig.targetLanguage === 'en';
+  const targetNeedsCjk = !targetIsEnglish;
+  if (targetNeedsCjk && !hasCjkText(translatedText)) {
+    throw new Error('azure-translator returned non-CJK text for a CJK target');
+  }
+  if (targetIsEnglish && !/[A-Za-z]{2,}/.test(translatedText)) {
+    throw new Error('azure-translator returned non-English text for an English target');
+  }
+
+  const sanitized = targetIsEnglish
+    ? sanitizeEnglishVisitTranslation(translatedText, sourceText)
+    : { text: translatedText, usedFallback: false };
+  const displayText = sanitized.text;
+  const genericFallback = isGenericVisitTranslation(displayText);
+
+  return {
+    sourceText,
+    sourceLanguage: directionConfig.sourceLanguage,
+    targetLanguage: directionConfig.targetLanguage,
+    translatedText: displayText,
+    displayText,
+    speakableText: targetIsEnglish ? '' : displayText,
+    romanization: null,
+    confidence: genericFallback ? 0.62 : 0.86,
+    needsConfirmation: genericFallback || Boolean(sanitized.usedFallback),
+    provider: 'azure-translator',
+    direction
+  };
+}
+
 function getSafeVisitFallback(sourceText, direction, provider) {
   const fallback = mockVisitTranslation(sourceText, direction);
   return {
@@ -1095,6 +1204,10 @@ function parseVisitTranslation(rawText, sourceText, direction, provider) {
 }
 
 async function attemptVisitTranslationProvider(provider, messages, sourceText, direction, directionConfig) {
+  if (provider === 'azure-translator') {
+    return translateWithAzureTranslator(sourceText, direction, directionConfig);
+  }
+
   const raw = await callLLMProvider(provider, messages, {
     maxTokens: directionConfig.targetLanguage === 'en' ? 120 : 320,
     temperature: 0.1,
@@ -1110,7 +1223,7 @@ async function translateForVisit(sourceText, direction) {
   const ruleBased = buildRuleBasedVisitTranslation(sourceText, direction);
   if (ruleBased) return completeRuleBasedVisitTranslation(sourceText, direction, ruleBased);
 
-  const providers = getConfiguredLlmProviders();
+  const providers = getConfiguredVisitTranslationProviders();
   if (!providers.length) return mockVisitTranslation(sourceText, direction);
 
   const messages = [
@@ -1506,6 +1619,7 @@ app.get('/api/health', (_req, res) => {
   const minimaxAsrReady = Boolean(minimaxReady && minimaxAsrEnabled);
   const azureSpeechReady = Boolean(azureTtsKey && azureTtsRegion);
   const azureOpenAIReady = Boolean(azureOpenAIKey && azureOpenAIEndpoint);
+  const azureTranslatorReady = isAzureTranslatorReady();
   const hkbuReady = Boolean(hkbuApiKey);
   const activeAsrProvider = asrProvider === 'azure' && azureSpeechReady
     ? 'azure'
@@ -1524,8 +1638,9 @@ app.get('/api/health', (_req, res) => {
     timestamp: Date.now(),
     version: appVersion,
     appVersion,
-    readyForPilot: Boolean((minimaxReady || azureOpenAIReady || hkbuReady) && activeTtsProvider !== 'mock'),
+    readyForPilot: Boolean((minimaxReady || azureOpenAIReady || hkbuReady || azureTranslatorReady) && activeTtsProvider !== 'mock'),
     llmProvider: minimaxReady && llmProvider === 'minimax' ? 'minimax' : llmProvider,
+    visitTranslationProviders: getConfiguredVisitTranslationProviders(),
     asrProvider: activeAsrProvider,
     asrFallbackProvider: asrFallbackProvider || null,
     asrLanguage: activeAsrProvider === 'azure' ? azureAsrLanguage : minimaxAsrLanguage,
@@ -1537,6 +1652,7 @@ app.get('/api/health', (_req, res) => {
       minimax: minimaxReady,
       minimaxAsr: minimaxAsrReady,
       azureSpeech: azureSpeechReady,
+      azureTranslator: azureTranslatorReady,
       azureOpenAI: azureOpenAIReady,
       hkbu: hkbuReady
     }

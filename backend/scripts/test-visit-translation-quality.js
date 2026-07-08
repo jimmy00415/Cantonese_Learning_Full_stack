@@ -75,6 +75,25 @@ assert.equal(weeklyActivityCantonese.displayText, '今個星期有冇活動安�
 assert.equal(weeklyActivityCantonese.speakableText, '今個星期有冇活動安排呀？');
 assert.equal(weeklyActivityCantonese.romanization.text, 'gam1 go3 sing1 kei4 jau5 mou5 wut6 dung6 on1 paai4 aa3?');
 
+const massageOffer = createDailyLifeVisitTranslation('Do you want to do massaging?', 'en_to_yue');
+assert.ok(massageOffer, 'expected a natural Cantonese fallback for common massage offers');
+assert.equal(massageOffer.displayText, '你想唔想我幫你按摩一下？');
+assert.equal(massageOffer.speakableText, '你想唔想我幫你按摩一下？');
+assert.equal(massageOffer.romanization.text, 'nei5 soeng2 m4 soeng2 ngo5 bong1 nei5 on3 mo1 jat1 haa5?');
+assert.equal(massageOffer.needsConfirmation, false);
+assert.equal(isGenericVisitTranslation(massageOffer.displayText), false);
+
+const politeMassageOffer = createDailyLifeVisitTranslation('Would you like a massage?', 'en_to_yue');
+assert.ok(politeMassageOffer, 'expected a natural Cantonese fallback for polite massage offers');
+assert.equal(politeMassageOffer.displayText, '你想唔想我幫你按摩一下？');
+
+const handStretchOffer = createDailyLifeVisitTranslation('Can I help you stretch your hands?', 'en_to_yue');
+assert.ok(handStretchOffer, 'expected a natural Cantonese fallback for gentle hand-stretch offers');
+assert.equal(handStretchOffer.displayText, '我可唔可以幫你伸展一下雙手？');
+assert.equal(handStretchOffer.speakableText, '我可唔可以幫你伸展一下雙手？');
+assert.equal(handStretchOffer.romanization.text, 'ngo5 ho2 m4 ho2 ji5 bong1 nei5 san1 zin2 jat1 haa5 soeng1 sau2?');
+assert.equal(handStretchOffer.needsConfirmation, false);
+
 assert.equal(
   isGenericVisitTranslation('The resident said something in Cantonese. Please ask staff to confirm the exact meaning.'),
   true
