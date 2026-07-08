@@ -17,6 +17,9 @@ assert.match(html, /data-practice-mode="habit"/, 'Practice should expose a habit
 assert.match(app, /function\s+startPracticeFromToday\s*\(/, 'startPracticeFromToday should exist');
 assert.match(app, /function\s+markHabitPractised\s*\(/, 'markHabitPractised should exist');
 assert.match(app, /function\s+renderPracticeOutcomeMode\s*\(/, 'practice mode rendering helper should exist');
+assert.match(app, /function\s+updatePracticeCoachSummary\s*\(/, 'practice coach summary helper should exist');
+assert.match(app, /renderImmediateFeedback[\s\S]*updatePracticeCoachSummary\(/, 'practice coach summary should be updated from the feedback rendering path');
+assert.doesNotMatch(app, /scenarioPill\.textContent\s*=\s*label/, 'practice mode rendering should not overwrite the scenario pill with mode text');
 assert.match(app, /markHabitPractised\(\)/, 'successful user exchange should mark habit practised');
 assert.match(css, /\.practice-workspace-grid\b/, 'practice workspace grid styling should exist');
 assert.match(css, /\.practice-input-dock\b/, 'practice input dock styling should exist');

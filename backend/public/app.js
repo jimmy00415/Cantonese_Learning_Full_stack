@@ -359,26 +359,24 @@ function renderTodayView() {
 function markHabitPractised() {
   const habit = getHabitState();
   const todayKey = getTodayKey();
+  const isNewDay = habit.lastPractisedDate !== todayKey;
   saveHabitState({
     ...habit,
     lastPractisedDate: todayKey,
-    completedCount: Number(habit.completedCount || 0) + 1
+    completedCount: isNewDay ? Number(habit.completedCount || 0) + 1 : Number(habit.completedCount || 0)
   });
   renderTodayView();
 }
 
-function renderPracticeOutcomeMode() {
-  const label = currentMode === 'teaching'
-    ? t('v2.practice.modeTeaching')
-    : currentMode === 'freeChat'
-      ? t('v2.practice.modeFree')
-      : t('v2.practice.modeHabit');
+function updatePracticeCoachSummary(text) {
   const coachSummary = document.getElementById('practiceCoachSummary');
-  if (coachSummary && !lastUserUtterance) {
-    coachSummary.textContent = t('v2.practice.coachEmpty');
-  }
-  if (scenarioPill && !isVisitTranslationMode()) {
-    scenarioPill.textContent = label;
+  if (!coachSummary) return;
+  coachSummary.textContent = text || t('v2.practice.coachEmpty');
+}
+
+function renderPracticeOutcomeMode() {
+  if (!lastUserUtterance) {
+    updatePracticeCoachSummary(t('v2.practice.coachEmpty'));
   }
 }
 
@@ -1355,6 +1353,7 @@ function renderImmediateFeedback() {
   card.className = 'coach-summary-card coach-translation-card';
 
   if (state.status === 'empty') {
+    updatePracticeCoachSummary(t('v2.practice.coachEmpty'));
     card.innerHTML = `
       <p class="coach-summary-kicker">${t('feedback.realtimeEnglish')}</p>
       <p class="feedback-empty">${t('feedback.empty')}</p>
@@ -1364,6 +1363,7 @@ function renderImmediateFeedback() {
   }
 
   if (state.status === 'loading') {
+    updatePracticeCoachSummary(t('feedback.translationLoading'));
     card.innerHTML = `
       <p class="coach-summary-kicker">${t('feedback.currentTutorReply')}</p>
       <div class="coach-loading inline-coach-loading">
@@ -1376,6 +1376,7 @@ function renderImmediateFeedback() {
   }
 
   if (state.status === 'error') {
+    updatePracticeCoachSummary(t('feedback.translationFailed'));
     card.innerHTML = `
       <p class="coach-summary-kicker">${t('feedback.currentTutorReply')}</p>
       <p class="coach-modal-warning">${t('feedback.translationFailed')}</p>
@@ -1388,6 +1389,7 @@ function renderImmediateFeedback() {
     <p class="coach-summary-kicker">${t('feedback.currentTutorReply')}</p>
     <p class="coach-summary-text">${state.englishText || t('feedback.translationSummaryFallback')}</p>
   `;
+  updatePracticeCoachSummary(state.englishText || t('feedback.translationSummaryFallback'));
   if (state.provider === 'mock' || state.needsConfirmation) {
     const warning = document.createElement('p');
     warning.className = 'coach-modal-warning';
