@@ -9,6 +9,10 @@ const app = readFileSync(join(__dirname, '..', 'public', 'app.js'), 'utf8');
 const css = readFileSync(join(__dirname, '..', 'public', 'styles.css'), 'utf8');
 const i18n = readFileSync(join(__dirname, '..', 'public', 'i18n', 'index.js'), 'utf8');
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8'));
+const roleVisitEntryBlock = app.match(/if\s*\(action\s*===\s*'startVisitTranslation'\)\s*{[\s\S]*?return;\s*}/)?.[0] || '';
+const pilotVisitEntryBlock = app.match(/if\s*\(action\s*===\s*'visit'\)\s*{[\s\S]*?return;\s*}/)?.[0] || '';
+const playbookVisitEntryBlock =
+  app.match(/startVisitTranslationFromPlaybook\?\.addEventListener\('click',\s*\(\)\s*=>\s*{[\s\S]*?}\);/)?.[0] || '';
 
 for (const id of ['todayView', 'practiceView', 'translateView', 'phrasebookView', 'privacyView']) {
   assert.match(html, new RegExp(`id="${id}"`), `${id} should exist in V2 app shell`);
@@ -32,6 +36,39 @@ assert.match(app, /function\s+setAppView\s*\(/, 'setAppView should control top-l
 assert.match(app, /function\s+getHabitState\s*\(/, 'getHabitState should read local habit state');
 assert.match(app, /function\s+saveHabitState\s*\(/, 'saveHabitState should persist local habit state');
 assert.match(app, /function\s+renderTodayView\s*\(/, 'renderTodayView should update Today cards');
+assert.ok(roleVisitEntryBlock, 'Role-action visit entry block should exist');
+assert.match(
+  roleVisitEntryBlock,
+  /setAppView\('translate'\)/,
+  'Role-action visit entry should route to the Translate workspace'
+);
+assert.doesNotMatch(
+  roleVisitEntryBlock,
+  /setAppView\('practice'\)/,
+  'Role-action visit entry should not be forced back through Practice'
+);
+assert.ok(pilotVisitEntryBlock, 'Pilot visit entry block should exist');
+assert.match(
+  pilotVisitEntryBlock,
+  /setAppView\('translate'\)/,
+  'Pilot visit entry should route to the Translate workspace'
+);
+assert.doesNotMatch(
+  pilotVisitEntryBlock,
+  /setAppView\('practice'\)/,
+  'Pilot visit entry should not be forced back through Practice'
+);
+assert.ok(playbookVisitEntryBlock, 'Playbook visit entry block should exist');
+assert.match(
+  playbookVisitEntryBlock,
+  /setAppView\('translate'\)/,
+  'Playbook visit entry should route to the Translate workspace'
+);
+assert.doesNotMatch(
+  playbookVisitEntryBlock,
+  /setAppView\('practice'\)/,
+  'Playbook visit entry should not be forced back through Practice'
+);
 assert.match(app, /function\s+getTodayKey\s*\(/, 'getTodayKey should exist');
 assert.match(app, /getFullYear\(\)/, 'getTodayKey should use the local calendar year');
 assert.match(app, /getMonth\(\)\s*\+\s*1/, 'getTodayKey should use the local calendar month');

@@ -386,8 +386,8 @@ function handleRoleAction(action) {
     syncVisitDirectionControls(DEFAULT_VISIT_DIRECTION);
     resetVisitTranslationOutput();
     updateInputLabelsForMode();
-    setAppView('practice');
-    document.getElementById('practice')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    setAppView('translate');
+    document.getElementById('translateView')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     const notice = createVisitModeStartNotice({
       voiceInputEnabled,
       readyMessage: t('onboarding.notices.visitTranslationComingSoon'),
@@ -2452,8 +2452,8 @@ document.querySelectorAll('[data-pilot-action]').forEach((button) => {
       selectUserMode('visit_translation');
       syncVisitDirectionControls(DEFAULT_VISIT_DIRECTION);
       resetVisitTranslationOutput();
-      setAppView('practice');
-      document.getElementById('practice')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      setAppView('translate');
+      document.getElementById('translateView')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       textInput?.focus();
       setNotice(t('pilot.notices.visitReady'), 'info');
       return;
@@ -2472,9 +2472,9 @@ document.querySelectorAll('[data-pilot-action]').forEach((button) => {
 
 startVisitTranslationFromPlaybook?.addEventListener('click', () => {
   selectUserMode('visit_translation');
-  setAppView('practice');
+  setAppView('translate');
   document.getElementById('playbookDialog')?.close();
-  document.getElementById('practice')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  document.getElementById('translateView')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   setNotice(t('onboarding.notices.visitTranslationComingSoon'), 'info');
 });
 
