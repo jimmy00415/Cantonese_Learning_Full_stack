@@ -53,7 +53,49 @@
       </div>
     </header>
 
-    <section class="hero" aria-labelledby="heroTitle">
+    <nav class="v2-shell" aria-label="Hong Kong Buddy workspace" data-default-view="today">
+      <button type="button" class="v2-nav-item active" data-app-view-target="today" aria-current="page" data-i18n="v2.nav.today">Today</button>
+      <button type="button" class="v2-nav-item" data-app-view-target="practice" data-i18n="v2.nav.practice">Practice</button>
+      <button type="button" class="v2-nav-item" data-app-view-target="translate" data-i18n="v2.nav.translate">Translate</button>
+      <button type="button" class="v2-nav-item" data-app-view-target="phrasebook" data-i18n="v2.nav.phrasebook">Phrasebook</button>
+      <button type="button" class="v2-nav-item" data-app-view-target="privacy" data-i18n="v2.nav.privacy">Privacy</button>
+    </nav>
+
+    <section class="today-dashboard app-view active" id="todayView" data-app-view="today" aria-labelledby="todayTitle">
+      <div class="today-primary">
+        <p class="section-eyebrow" data-i18n="v2.today.eyebrow">Today</p>
+        <h2 id="todayTitle" data-i18n="v2.today.title">Practise one Cantonese line today</h2>
+        <p data-i18n="v2.today.body">Build a small daily habit first. Translate when you need real-life help.</p>
+        <div class="today-actions">
+          <button type="button" id="todayQuickStart" class="today-action-primary" data-i18n="v2.today.quickStart">Start today's practice</button>
+          <button type="button" id="todayTranslateShortcut" class="today-action-secondary" data-app-view-target="translate" data-i18n="v2.today.translateShortcut">Open translator</button>
+        </div>
+      </div>
+      <div class="today-card-grid" aria-label="Today status">
+        <article class="today-card">
+          <span data-i18n="v2.today.habitLabel">Habit</span>
+          <strong id="todayHabitState" data-i18n="v2.today.habitEmpty">Not practised yet</strong>
+        </article>
+        <article class="today-card">
+          <span data-i18n="v2.today.taskLabel">Recommended</span>
+          <strong id="todayTaskState" data-i18n="v2.today.taskDefault">Ask someone to speak slower</strong>
+        </article>
+        <article class="today-card">
+          <span data-i18n="v2.today.voiceLabel">Voice</span>
+          <strong id="todayVoiceState" data-i18n="v2.today.voiceChecking">Checking voice...</strong>
+        </article>
+      </div>
+    </section>
+
+    <section class="translate-workspace app-view active" id="translateView" data-app-view="translate" aria-labelledby="translateViewTitle">
+      <div class="translate-view-copy">
+        <p class="section-eyebrow" data-i18n="v2.translate.eyebrow">Translate</p>
+        <h2 id="translateViewTitle" data-i18n="v2.translate.title">Daily-life visit translator</h2>
+        <p data-i18n="v2.translate.body">Use this when a resident, volunteer, or student needs fast meaning support.</p>
+      </div>
+    </section>
+
+    <section class="hero app-view" data-app-view="translate" aria-labelledby="heroTitle">
       <div class="hero-copy">
         <p class="hero-kicker" data-i18n="pilot.kicker">External Pilot</p>
         <h2 id="heroTitle" data-i18n="pilot.title">Start a Cantonese visit in under one minute</h2>
@@ -94,7 +136,7 @@
       </div>
     </section>
 
-    <section class="role-onboarding" id="roleOnboarding" aria-labelledby="roleOnboardingTitle">
+    <section class="role-onboarding app-view" id="roleOnboarding" data-app-view="translate" aria-labelledby="roleOnboardingTitle">
       <div class="role-onboarding-copy">
         <p class="section-eyebrow" data-i18n="onboarding.eyebrow">Start here</p>
         <h2 id="roleOnboardingTitle" data-i18n="onboarding.title">What do you need today?</h2>
@@ -128,7 +170,7 @@
       </div>
     </section>
 
-    <section class="role-context-panel" id="roleContextPanel" aria-live="polite" hidden>
+    <section class="role-context-panel app-view" id="roleContextPanel" data-app-view="translate" aria-live="polite" hidden>
       <div>
         <p class="section-eyebrow" id="roleContextEyebrow">Selected mode</p>
         <h2 id="roleContextTitle">International Student Mode</h2>
@@ -137,7 +179,7 @@
       <div class="role-context-actions" id="roleContextActions"></div>
     </section>
 
-    <section class="guide-panel action-hub" id="guidePanel" aria-labelledby="guideTitle">
+    <section class="guide-panel action-hub app-view" id="guidePanel" data-app-view="translate" aria-labelledby="guideTitle">
       <div class="guide-copy">
         <p class="section-eyebrow" data-i18n="guide.eyebrow">User guide</p>
         <h2 id="guideTitle" data-i18n="guide.title">How to use Hong Kong Buddy in an activity</h2>
@@ -168,7 +210,8 @@
       </div>
     </section>
 
-    <section class="practice-stage" id="practice" aria-label="Cantonese practice workspace">
+    <section class="practice-stage app-view" id="practiceView" data-app-view="practice" aria-label="Cantonese practice workspace">
+      <div id="practice"></div>
       <aside class="control-rail" aria-label="Practice setup">
         <section class="mode-section">
           <div class="section-eyebrow">Mode</div>
@@ -306,7 +349,7 @@
       </aside>
     </section>
 
-    <section class="input-panel" aria-label="Practice input">
+    <section class="input-panel app-view" data-app-view="practice" aria-label="Practice input">
       <button id="holdToSpeak" class="mic is-unavailable" data-i18n="input.holdToSpeak" disabled aria-disabled="true">按住說話</button>
       <button id="stopSpeaking" class="stop-btn" data-i18n="input.stopSpeaking" hidden>停止播放</button>
       <div class="recording-indicator" id="recordingIndicator" hidden>
@@ -372,6 +415,18 @@
         </div>
       </div>
     </dialog>
+
+    <section class="phrasebook-workspace app-view" id="phrasebookView" data-app-view="phrasebook" aria-labelledby="phrasebookViewTitle">
+      <p class="section-eyebrow" data-i18n="v2.phrasebook.eyebrow">Phrasebook</p>
+      <h2 id="phrasebookViewTitle" data-i18n="v2.phrasebook.title">Useful Cantonese lines</h2>
+      <p data-i18n="v2.phrasebook.body">Pick a safe line for practice or visit support.</p>
+    </section>
+
+    <section class="privacy-workspace app-view" id="privacyView" data-app-view="privacy" aria-labelledby="privacyViewTitle">
+      <p class="section-eyebrow" data-i18n="v2.privacy.eyebrow">Privacy</p>
+      <h2 id="privacyViewTitle" data-i18n="v2.privacy.title">Privacy and AI limits</h2>
+      <p data-i18n="v2.privacy.body">Avoid sensitive personal, medical, legal, or student-identifying information.</p>
+    </section>
 
     <dialog id="guideDialog" class="modal coach-modal" aria-labelledby="guideDialogTitle">
       <div class="modal-content coach-modal-content">

@@ -71,6 +71,47 @@ export const locales = {
       }
     },
 
+    v2: {
+      nav: {
+        today: 'Today',
+        practice: 'Practice',
+        translate: 'Translate',
+        phrasebook: 'Phrasebook',
+        privacy: 'Privacy'
+      },
+      today: {
+        eyebrow: 'Today',
+        title: '今日先練一句廣東話',
+        body: '先建立細小而穩定嘅每日習慣；需要即時幫助時再用翻譯。',
+        quickStart: '開始今日練習',
+        translateShortcut: '打開翻譯器',
+        habitLabel: '習慣',
+        habitEmpty: '今日未練習',
+        habitDone: '今日已練習',
+        taskLabel: '推薦',
+        taskDefault: '請對方講慢少少',
+        voiceLabel: '語音',
+        voiceChecking: '檢查語音中...',
+        voiceReady: '語音輸入已準備',
+        voiceTyping: '以打字為先'
+      },
+      translate: {
+        eyebrow: 'Translate',
+        title: '日常探訪翻譯器',
+        body: '當住戶、義工或學生需要快速理解意思時，用呢個功能。'
+      },
+      phrasebook: {
+        eyebrow: 'Phrasebook',
+        title: '實用廣東話短句',
+        body: '揀一句安全、實用嘅短句去練習或支援探訪。'
+      },
+      privacy: {
+        eyebrow: 'Privacy',
+        title: '私隱同 AI 限制',
+        body: '避免輸入敏感個人、醫療、法律或可識別學生身份嘅資料。'
+      }
+    },
+
     guide: {
       nav: {
         guide: '使用指引',
@@ -510,6 +551,47 @@ export const locales = {
       }
     },
 
+    v2: {
+      nav: {
+        today: 'Today',
+        practice: 'Practice',
+        translate: 'Translate',
+        phrasebook: 'Phrasebook',
+        privacy: 'Privacy'
+      },
+      today: {
+        eyebrow: 'Today',
+        title: '今天先练一句粤语',
+        body: '先建立一个小而稳的每日习惯；需要即时帮助时再使用翻译。',
+        quickStart: '开始今天练习',
+        translateShortcut: '打开翻译器',
+        habitLabel: '习惯',
+        habitEmpty: '今天还没练习',
+        habitDone: '今天已练习',
+        taskLabel: '推荐',
+        taskDefault: '请对方说慢一点',
+        voiceLabel: '语音',
+        voiceChecking: '正在检查语音...',
+        voiceReady: '语音输入已就绪',
+        voiceTyping: '以打字为先'
+      },
+      translate: {
+        eyebrow: 'Translate',
+        title: '日常探访翻译器',
+        body: '当住户、义工或学生需要快速理解意思时，使用这个功能。'
+      },
+      phrasebook: {
+        eyebrow: 'Phrasebook',
+        title: '实用粤语短句',
+        body: '挑一句安全、实用的短句用于练习或探访支援。'
+      },
+      privacy: {
+        eyebrow: 'Privacy',
+        title: '隐私和 AI 限制',
+        body: '避免输入敏感个人、医疗、法律或可识别学生身份的信息。'
+      }
+    },
+
     guide: {
       nav: {
         guide: '使用指引',
@@ -946,6 +1028,47 @@ export const locales = {
       notices: {
         visitReady: 'Visit Translation is ready. Type or hold the microphone.',
         practiceReady: 'Cantonese Practice is ready. Try one short line.'
+      }
+    },
+
+    v2: {
+      nav: {
+        today: 'Today',
+        practice: 'Practice',
+        translate: 'Translate',
+        phrasebook: 'Phrasebook',
+        privacy: 'Privacy'
+      },
+      today: {
+        eyebrow: 'Today',
+        title: 'Practise one Cantonese line today',
+        body: 'Build a small daily habit first. Translate when you need real-life help.',
+        quickStart: "Start today's practice",
+        translateShortcut: 'Open translator',
+        habitLabel: 'Habit',
+        habitEmpty: 'Not practised yet',
+        habitDone: 'Practised today',
+        taskLabel: 'Recommended',
+        taskDefault: 'Ask someone to speak slower',
+        voiceLabel: 'Voice',
+        voiceChecking: 'Checking voice...',
+        voiceReady: 'Voice input ready',
+        voiceTyping: 'Typing-first mode'
+      },
+      translate: {
+        eyebrow: 'Translate',
+        title: 'Daily-life visit translator',
+        body: 'Use this when a resident, volunteer, or student needs fast meaning support.'
+      },
+      phrasebook: {
+        eyebrow: 'Phrasebook',
+        title: 'Useful Cantonese lines',
+        body: 'Pick a safe line for practice or visit support.'
+      },
+      privacy: {
+        eyebrow: 'Privacy',
+        title: 'Privacy and AI limits',
+        body: 'Avoid sensitive personal, medical, legal, or student-identifying information.'
       }
     },
 

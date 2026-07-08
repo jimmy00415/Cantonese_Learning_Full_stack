@@ -64,6 +64,14 @@ const visitTranslateBtn = document.getElementById('visitTranslateBtn');
 const visitTranslationOutput = document.getElementById('visitTranslationOutput');
 const visitTranslationWarning = document.getElementById('visitTranslationWarning');
 const pilotVoiceStatus = document.getElementById('pilotVoiceStatus');
+const appViewButtons = document.querySelectorAll('[data-app-view-target]');
+const appViews = document.querySelectorAll('[data-app-view]');
+const todayQuickStart = document.getElementById('todayQuickStart');
+const todayTranslateShortcut = document.getElementById('todayTranslateShortcut');
+const todayHabitState = document.getElementById('todayHabitState');
+const todayTaskState = document.getElementById('todayTaskState');
+const todayVoiceState = document.getElementById('todayVoiceState');
+const V2_HABIT_STORAGE_KEY = 'hkbuddy.v2.habitState';
 
 // P1: Mode toggle elements
 const modeFreeTalkBtn = document.getElementById('modeFreeTalk');
@@ -166,6 +174,7 @@ let voiceInputEnabled = false;
 let coachTranslationState = { status: 'empty' };
 let coachTranslationRequestId = 0;
 let pilotHealthSnapshot = null;
+let currentAppView = 'today';
 
 // System states: idle, listening, processing, speaking, error
 const STATES = {
@@ -312,6 +321,57 @@ function applyUserModeDefaults(mode, { preserveLanguage = false } = {}) {
   }
 }
 
+function getTodayKey(date = new Date()) {
+  return date.toISOString().slice(0, 10);
+}
+
+function getHabitState() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(V2_HABIT_STORAGE_KEY) || '{}');
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveHabitState(nextState) {
+  localStorage.setItem(V2_HABIT_STORAGE_KEY, JSON.stringify(nextState || {}));
+}
+
+function renderTodayView() {
+  const habit = getHabitState();
+  const todayKey = getTodayKey();
+  const practisedToday = habit.lastPractisedDate === todayKey;
+  if (todayHabitState) {
+    todayHabitState.textContent = practisedToday ? t('v2.today.habitDone') : t('v2.today.habitEmpty');
+  }
+  if (todayTaskState) {
+    todayTaskState.textContent = t('v2.today.taskDefault');
+  }
+  if (todayVoiceState) {
+    todayVoiceState.textContent = voiceInputEnabled ? t('v2.today.voiceReady') : t('v2.today.voiceTyping');
+  }
+}
+
+function setAppView(viewName) {
+  currentAppView = viewName || 'today';
+  document.body.dataset.appView = currentAppView;
+  appViews.forEach((view) => {
+    const active = view.dataset.appView === currentAppView;
+    const managedHidden = view.dataset.viewState === 'hidden';
+    view.classList.toggle('active', active);
+    view.hidden = !active || managedHidden;
+  });
+  appViewButtons.forEach((button) => {
+    const active = button.dataset.appViewTarget === currentAppView;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-current', active ? 'page' : 'false');
+  });
+  if (currentAppView === 'today') renderTodayView();
+  if (currentAppView === 'translate') selectUserMode('visit_translation');
+  if (currentAppView === 'practice' && currentUserMode === 'visit_translation') selectUserMode('international_student');
+}
+
 function handleRoleAction(action) {
   if (action === 'changeMode') {
     showRoleSelection();
@@ -323,6 +383,7 @@ function handleRoleAction(action) {
     syncVisitDirectionControls(DEFAULT_VISIT_DIRECTION);
     resetVisitTranslationOutput();
     updateInputLabelsForMode();
+    setAppView('practice');
     document.getElementById('practice')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     const notice = createVisitModeStartNotice({
       voiceInputEnabled,
@@ -363,12 +424,19 @@ function renderRoleContext() {
     });
   }
 
-  roleContextPanel.hidden = false;
+  roleContextPanel.dataset.viewState = 'shown';
+  roleContextPanel.hidden = currentAppView !== 'translate';
 }
 
 function showRoleSelection() {
-  if (roleOnboardingEl) roleOnboardingEl.hidden = false;
-  if (roleContextPanel) roleContextPanel.hidden = true;
+  if (roleOnboardingEl) {
+    roleOnboardingEl.dataset.viewState = 'shown';
+    roleOnboardingEl.hidden = currentAppView !== 'translate';
+  }
+  if (roleContextPanel) {
+    roleContextPanel.dataset.viewState = 'hidden';
+    roleContextPanel.hidden = true;
+  }
   if (changeModeBtn) changeModeBtn.hidden = true;
   document.body.dataset.userMode = '';
   updateInputLabelsForMode();
@@ -393,7 +461,10 @@ function selectUserMode(mode, { fromStorage = false } = {}) {
     card.setAttribute('aria-pressed', active ? 'true' : 'false');
   });
 
-  if (roleOnboardingEl) roleOnboardingEl.hidden = true;
+  if (roleOnboardingEl) {
+    roleOnboardingEl.dataset.viewState = 'hidden';
+    roleOnboardingEl.hidden = true;
+  }
   if (changeModeBtn) changeModeBtn.hidden = false;
   renderRoleContext();
 
@@ -862,6 +933,7 @@ function setControlsEnabled(enabled) {
 function updateVoiceInputAvailability(health = pilotHealthSnapshot) {
   voiceInputEnabled = isVoiceInputAvailable(health);
   updateInputLabelsForMode();
+  renderTodayView();
   if (holdBtn) {
     holdBtn.disabled = !voiceInputEnabled;
     holdBtn.setAttribute('aria-disabled', String(!voiceInputEnabled));
@@ -1414,6 +1486,7 @@ function updatePilotVoiceStatus(health = pilotHealthSnapshot) {
   } else {
     pilotVoiceStatus.textContent = t('pilot.status.voice.mock');
   }
+  renderTodayView();
 }
 
 function renderVoiceOptions() {
@@ -1454,6 +1527,7 @@ async function loadTtsVoices() {
   renderVoiceOptions();
   updateTtsPill(currentTtsProvider);
   updatePilotVoiceStatus();
+  renderTodayView();
   setControlsEnabled(true);
 }
 
@@ -1562,6 +1636,11 @@ async function sendUtterance(text) {
     if (res.ttsProvider) currentTtsProvider = res.ttsProvider;
     if (res.ttsVoice) currentTtsVoice = res.ttsVoice;
     updateTtsPill(currentTtsProvider);
+    saveHabitState({
+      ...getHabitState(),
+      lastPractisedDate: getTodayKey()
+    });
+    renderTodayView();
     if (res.needsConfirmation || res.aiProvider === 'mock' || Number(res.confidence || 1) < 0.7) {
       setNotice(t('reliability.confirmTutorOutput'), 'warning');
     }
@@ -2347,6 +2426,22 @@ document.querySelectorAll('[data-dialog-open]').forEach((button) => {
   });
 });
 
+appViewButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    setAppView(button.dataset.appViewTarget || 'today');
+  });
+});
+
+todayQuickStart?.addEventListener('click', () => {
+  selectUserMode(currentUserMode && currentUserMode !== 'visit_translation' ? currentUserMode : 'international_student');
+  setAppView('practice');
+  textInput?.focus();
+});
+
+todayTranslateShortcut?.addEventListener('click', () => {
+  setAppView('translate');
+});
+
 document.querySelectorAll('[data-pilot-action]').forEach((button) => {
   button.addEventListener('click', async () => {
     const action = button.dataset.pilotAction;
@@ -2354,6 +2449,7 @@ document.querySelectorAll('[data-pilot-action]').forEach((button) => {
       selectUserMode('visit_translation');
       syncVisitDirectionControls(DEFAULT_VISIT_DIRECTION);
       resetVisitTranslationOutput();
+      setAppView('practice');
       document.getElementById('practice')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       textInput?.focus();
       setNotice(t('pilot.notices.visitReady'), 'info');
@@ -2362,6 +2458,7 @@ document.querySelectorAll('[data-pilot-action]').forEach((button) => {
 
     if (action === 'practice') {
       selectUserMode('international_student');
+      setAppView('practice');
       document.getElementById('practice')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       if (!sessionId) await startSession();
       textInput?.focus();
@@ -2372,6 +2469,7 @@ document.querySelectorAll('[data-pilot-action]').forEach((button) => {
 
 startVisitTranslationFromPlaybook?.addEventListener('click', () => {
   selectUserMode('visit_translation');
+  setAppView('practice');
   document.getElementById('playbookDialog')?.close();
   document.getElementById('practice')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   setNotice(t('onboarding.notices.visitTranslationComingSoon'), 'info');
@@ -2468,6 +2566,7 @@ function updateUILanguage() {
   resetVisitTranslationOutput();
   updateInputLabelsForMode();
   renderImmediateFeedback();
+  renderTodayView();
 
   // Update badges
   const badges = document.querySelectorAll('.badges .pill');
@@ -2509,6 +2608,7 @@ window.addEventListener('languageChanged', () => {
   updateUILanguage();
   renderImmediateFeedback();
   initUserMode();
+  setAppView('today');
   renderElderlyVisitPlaybook();
   syncVisitDirectionControls();
 
