@@ -3173,6 +3173,22 @@ body[data-user-mode="visit_translation"] .send-btn {
   line-height: 1.25;
 }
 
+.habit-review-panel {
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid rgba(22, 163, 74, 0.24);
+  border-radius: 12px;
+  background: #f0fdf4;
+}
+
+.habit-review-panel span {
+  display: block;
+  margin-bottom: 6px;
+  color: #166534;
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .translate-workspace,
 .phrasebook-workspace,
 .privacy-workspace {
@@ -3193,6 +3209,32 @@ body[data-user-mode="visit_translation"] .send-btn {
   font-family: var(--font-display);
   font-size: 32px;
   line-height: 1.08;
+}
+
+.phrasebook-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.phrasebook-card {
+  display: grid;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.phrasebook-card strong,
+.phrasebook-card span,
+.phrasebook-card p {
+  overflow-wrap: anywhere;
+}
+
+.phrasebook-card button {
+  min-height: 40px;
+  border-radius: 8px;
 }
 
 @media (max-width: 1180px) {
@@ -3304,6 +3346,10 @@ body[data-user-mode="visit_translation"] .send-btn {
     position: sticky;
     top: 0;
     z-index: 20;
+  }
+
+  .phrasebook-grid {
+    grid-template-columns: 1fr;
   }
 }
 

@@ -74,6 +74,8 @@ const todayTranslateShortcut = document.getElementById('todayTranslateShortcut')
 const todayHabitState = document.getElementById('todayHabitState');
 const todayTaskState = document.getElementById('todayTaskState');
 const todayVoiceState = document.getElementById('todayVoiceState');
+const phrasebookList = document.getElementById('phrasebookList');
+const habitReviewPanel = document.getElementById('habitReviewPanel');
 const V2_HABIT_STORAGE_KEY = 'hkbuddy.v2.habitState';
 
 // P1: Mode toggle elements
@@ -395,6 +397,7 @@ function renderTodayView() {
   if (todayVoiceState) {
     todayVoiceState.textContent = voiceInputEnabled ? t('v2.today.voiceReady') : t('v2.today.voiceTyping');
   }
+  renderHabitReview();
 }
 
 function markHabitPractised() {
@@ -407,6 +410,7 @@ function markHabitPractised() {
     completedCount: isNewDay ? Number(habit.completedCount || 0) + 1 : Number(habit.completedCount || 0)
   });
   renderTodayView();
+  renderHabitReview();
 }
 
 function updatePracticeCoachSummary(text) {
@@ -449,6 +453,7 @@ function setAppView(viewName) {
   if (currentAppView === 'translate') selectUserMode('visit_translation');
   if (currentAppView === 'practice' && currentUserMode === 'visit_translation') selectUserMode('international_student');
   if (currentAppView === 'practice') renderPracticeOutcomeMode();
+  if (currentAppView === 'phrasebook') renderPhrasebookView();
 }
 
 function handleRoleAction(action) {
@@ -660,6 +665,60 @@ function renderElderlyVisitPlaybook() {
     `;
     card.querySelector('button')?.addEventListener('click', () => selectVisitPhrase(phrase));
     visitPhraseList.appendChild(card);
+  });
+}
+
+function usePhraseForPractice(phraseText) {
+  setAppView('practice');
+  selectUserMode(currentUserMode && currentUserMode !== 'visit_translation' ? currentUserMode : 'international_student');
+  if (textInput) {
+    textInput.value = phraseText || '';
+    textInput.focus();
+  }
+}
+
+function usePhraseForTranslation(phraseText) {
+  setAppView('translate');
+  selectUserMode('visit_translation');
+  if (textInput) {
+    textInput.value = phraseText || '';
+    textInput.focus();
+  }
+}
+
+function renderHabitReview() {
+  if (!habitReviewPanel) return;
+  const habit = getHabitState();
+  const done = habit.lastPractisedDate === getTodayKey();
+  habitReviewPanel.innerHTML = '';
+  appendTextElement(habitReviewPanel, 'span', t('v2.review.label'));
+  appendTextElement(habitReviewPanel, 'strong', done ? t('v2.review.done') : t('v2.review.empty'));
+}
+
+function renderPhrasebookView() {
+  if (!phrasebookList) return;
+  phrasebookList.innerHTML = '';
+  elderlyVisitPlaybook.phrases.slice(0, 9).forEach((phrase) => {
+    const card = document.createElement('article');
+    card.className = 'phrasebook-card';
+    appendTextElement(card, 'strong', phrase.cantonese);
+    appendTextElement(card, 'span', phrase.jyutping || '');
+    appendTextElement(card, 'p', phrase.english || phrase.meaning || '');
+
+    const practiceButton = document.createElement('button');
+    practiceButton.type = 'button';
+    practiceButton.setAttribute('data-phrase-action', 'practice');
+    practiceButton.textContent = t('v2.phrasebook.practiceAction');
+    practiceButton.addEventListener('click', () => usePhraseForPractice(phrase.cantonese));
+
+    const translateButton = document.createElement('button');
+    translateButton.type = 'button';
+    translateButton.setAttribute('data-phrase-action', 'translate');
+    translateButton.textContent = t('v2.phrasebook.translateAction');
+    translateButton.addEventListener('click', () => usePhraseForTranslation(phrase.cantonese));
+
+    card.append(practiceButton, translateButton);
+    phrasebookList.appendChild(card);
   });
 }
 
@@ -2743,6 +2802,7 @@ function updateUILanguage() {
   renderRoleContext();
   renderScenarioGuide(scenarioSelect.value);
   renderElderlyVisitPlaybook();
+  renderPhrasebookView();
   syncVisitDirectionControls(visitDirection?.value || DEFAULT_VISIT_DIRECTION);
   resetVisitTranslationOutput();
   updateInputLabelsForMode();
@@ -2791,6 +2851,7 @@ window.addEventListener('languageChanged', () => {
   initUserMode();
   setAppView('today');
   renderElderlyVisitPlaybook();
+  renderPhrasebookView();
   syncVisitDirectionControls();
 
   setSystemState(STATES.IDLE);

@@ -122,10 +122,17 @@ export const locales = {
         failedBody: '今次請求未完成，但你啱啱輸入嘅內容仲喺度。',
         retryTranslation: '重新翻譯'
       },
+      review: {
+        label: 'Review',
+        empty: 'Complete one line to unlock review.',
+        done: 'Today practised. Replay or save one phrase.'
+      },
       phrasebook: {
         eyebrow: 'Phrasebook',
-        title: '實用廣東話短句',
-        body: '揀一句安全、實用嘅短句去練習或支援探訪。'
+        title: 'Useful Cantonese lines',
+        body: 'Pick a safe line for practice or visit support.',
+        practiceAction: 'Practise this',
+        translateAction: 'Use in translator'
       },
       privacy: {
         eyebrow: 'Privacy',
@@ -624,10 +631,17 @@ export const locales = {
         failedBody: '这次请求没有完成，但你刚才输入的内容还在这里。',
         retryTranslation: '重新翻译'
       },
+      review: {
+        label: 'Review',
+        empty: 'Complete one line to unlock review.',
+        done: 'Today practised. Replay or save one phrase.'
+      },
       phrasebook: {
         eyebrow: 'Phrasebook',
-        title: '实用粤语短句',
-        body: '挑一句安全、实用的短句用于练习或探访支援。'
+        title: 'Useful Cantonese lines',
+        body: 'Pick a safe line for practice or visit support.',
+        practiceAction: 'Practise this',
+        translateAction: 'Use in translator'
       },
       privacy: {
         eyebrow: 'Privacy',
@@ -1126,10 +1140,17 @@ export const locales = {
         failedBody: 'The request did not complete. Your input is still here.',
         retryTranslation: 'Retry translation'
       },
+      review: {
+        label: 'Review',
+        empty: 'Complete one line to unlock review.',
+        done: 'Today practised. Replay or save one phrase.'
+      },
       phrasebook: {
         eyebrow: 'Phrasebook',
         title: 'Useful Cantonese lines',
-        body: 'Pick a safe line for practice or visit support.'
+        body: 'Pick a safe line for practice or visit support.',
+        practiceAction: 'Practise this',
+        translateAction: 'Use in translator'
       },
       privacy: {
         eyebrow: 'Privacy',
