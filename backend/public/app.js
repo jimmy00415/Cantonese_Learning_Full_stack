@@ -356,6 +356,41 @@ function renderTodayView() {
   }
 }
 
+function markHabitPractised() {
+  const habit = getHabitState();
+  const todayKey = getTodayKey();
+  saveHabitState({
+    ...habit,
+    lastPractisedDate: todayKey,
+    completedCount: Number(habit.completedCount || 0) + 1
+  });
+  renderTodayView();
+}
+
+function renderPracticeOutcomeMode() {
+  const label = currentMode === 'teaching'
+    ? t('v2.practice.modeTeaching')
+    : currentMode === 'freeChat'
+      ? t('v2.practice.modeFree')
+      : t('v2.practice.modeHabit');
+  const coachSummary = document.getElementById('practiceCoachSummary');
+  if (coachSummary && !lastUserUtterance) {
+    coachSummary.textContent = t('v2.practice.coachEmpty');
+  }
+  if (scenarioPill && !isVisitTranslationMode()) {
+    scenarioPill.textContent = label;
+  }
+}
+
+async function startPracticeFromToday() {
+  selectUserMode(currentUserMode && currentUserMode !== 'visit_translation' ? currentUserMode : 'international_student');
+  setActiveMode('teaching');
+  setAppView('practice');
+  renderPracticeOutcomeMode();
+  if (!sessionId) await startSession();
+  textInput?.focus();
+}
+
 function setAppView(viewName) {
   currentAppView = viewName || 'today';
   document.body.dataset.appView = currentAppView;
@@ -374,6 +409,7 @@ function setAppView(viewName) {
   if (currentAppView === 'today') renderTodayView();
   if (currentAppView === 'translate') selectUserMode('visit_translation');
   if (currentAppView === 'practice' && currentUserMode === 'visit_translation') selectUserMode('international_student');
+  if (currentAppView === 'practice') renderPracticeOutcomeMode();
 }
 
 function handleRoleAction(action) {
@@ -1640,11 +1676,6 @@ async function sendUtterance(text) {
     if (res.ttsProvider) currentTtsProvider = res.ttsProvider;
     if (res.ttsVoice) currentTtsVoice = res.ttsVoice;
     updateTtsPill(currentTtsProvider);
-    saveHabitState({
-      ...getHabitState(),
-      lastPractisedDate: getTodayKey()
-    });
-    renderTodayView();
     if (res.needsConfirmation || res.aiProvider === 'mock' || Number(res.confidence || 1) < 0.7) {
       setNotice(t('reliability.confirmTutorOutput'), 'warning');
     }
@@ -1653,6 +1684,8 @@ async function sendUtterance(text) {
     }
 
     renderMessage({ role: 'ai', text: res.aiText, ttsAudio: res.ttsAudio, timestamp: Date.now() });
+    markHabitPractised();
+    renderPracticeOutcomeMode();
     translateTutorFeedback(res.aiText);
 
     if (res.latencyMs) {
@@ -2278,6 +2311,7 @@ function setActiveMode(mode) {
   }
 
   updateModePill();
+  renderPracticeOutcomeMode();
 }
 
 async function switchMode(newMode) {
@@ -2437,9 +2471,10 @@ appViewButtons.forEach((button) => {
 });
 
 todayQuickStart?.addEventListener('click', () => {
-  selectUserMode(currentUserMode && currentUserMode !== 'visit_translation' ? currentUserMode : 'international_student');
-  setAppView('practice');
-  textInput?.focus();
+  startPracticeFromToday().catch((err) => {
+    console.error(err);
+    setNotice(t('v2.practice.startFailed'), 'error');
+  });
 });
 
 todayTranslateShortcut?.addEventListener('click', () => {

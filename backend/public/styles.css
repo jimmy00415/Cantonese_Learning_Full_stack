@@ -850,6 +850,31 @@ h1 {
   align-items: start;
 }
 
+.practice-workspace-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.34fr) minmax(0, 1fr) minmax(260px, 0.32fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.practice-task-card,
+.practice-coach-panel {
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.practice-task-card h2,
+.practice-coach-panel h3 {
+  margin: 0 0 8px;
+  letter-spacing: 0;
+}
+
+.practice-input-dock {
+  border-radius: 12px;
+}
+
 .practice-stage,
 .control-rail,
 .transcript,
@@ -3133,6 +3158,14 @@ body[data-user-mode="visit_translation"] .send-btn {
   .role-onboarding,
   .practice-stage {
     grid-template-columns: 1fr;
+  }
+
+  .practice-workspace-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .practice-coach-panel {
+    order: 3;
   }
 
   .action-grid {

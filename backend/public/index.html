@@ -275,7 +275,21 @@
     </section>
 
     <section class="practice-stage app-view" id="practiceView" data-app-view="practice" aria-label="Cantonese practice workspace">
-      <div id="practice"></div>
+      <div class="practice-workspace-grid" data-practice-mode="habit">
+        <aside class="practice-task-card" id="practiceTaskCard" aria-labelledby="practiceTaskTitle">
+          <p class="section-eyebrow" data-i18n="v2.practice.eyebrow">Practice</p>
+          <h2 id="practiceTaskTitle" data-i18n="v2.practice.taskTitle">Today's Cantonese line</h2>
+          <p data-i18n="v2.practice.taskBody">Practise asking someone to speak a little slower.</p>
+        </aside>
+        <div class="practice-conversation-slot" id="practiceConversationSlot">
+          <div id="practice"></div>
+        </div>
+        <aside class="practice-coach-panel" id="practiceCoachPanel">
+          <p class="section-eyebrow" data-i18n="v2.practice.coachEyebrow">Coach</p>
+          <h3 data-i18n="v2.practice.coachTitle">One useful note</h3>
+          <p id="practiceCoachSummary" data-i18n="v2.practice.coachEmpty">Send one line to get a focused note.</p>
+        </aside>
+      </div>
       <aside class="control-rail" aria-label="Practice setup">
         <section class="mode-section">
           <div class="section-eyebrow">Mode</div>
@@ -349,7 +363,7 @@
       </aside>
     </section>
 
-    <section class="input-panel app-view" data-app-view="practice translate" aria-label="Practice input">
+    <section class="input-panel practice-input-dock app-view" id="practiceInputDock" data-app-view="practice translate" aria-label="Practice input">
       <button id="holdToSpeak" class="mic is-unavailable" data-i18n="input.holdToSpeak" disabled aria-disabled="true">按住說話</button>
       <button id="stopSpeaking" class="stop-btn" data-i18n="input.stopSpeaking" hidden>停止播放</button>
       <div class="recording-indicator" id="recordingIndicator" hidden>

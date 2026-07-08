@@ -95,6 +95,18 @@ export const locales = {
         voiceReady: '語音輸入已準備',
         voiceTyping: '以打字為先'
       },
+      practice: {
+        eyebrow: 'Practice',
+        taskTitle: "Today's Cantonese line",
+        taskBody: 'Practise asking someone to speak a little slower.',
+        coachEyebrow: 'Coach',
+        coachTitle: 'One useful note',
+        coachEmpty: 'Send one line to get a focused note.',
+        modeHabit: 'Daily practice',
+        modeTeaching: 'Correction practice',
+        modeFree: 'Free talk',
+        startFailed: 'Practice could not start. Please try again.'
+      },
       translate: {
         eyebrow: 'Translate',
         title: '日常探訪翻譯器',
@@ -575,6 +587,18 @@ export const locales = {
         voiceReady: '语音输入已就绪',
         voiceTyping: '以打字为先'
       },
+      practice: {
+        eyebrow: 'Practice',
+        taskTitle: "Today's Cantonese line",
+        taskBody: 'Practise asking someone to speak a little slower.',
+        coachEyebrow: 'Coach',
+        coachTitle: 'One useful note',
+        coachEmpty: 'Send one line to get a focused note.',
+        modeHabit: 'Daily practice',
+        modeTeaching: 'Correction practice',
+        modeFree: 'Free talk',
+        startFailed: 'Practice could not start. Please try again.'
+      },
       translate: {
         eyebrow: 'Translate',
         title: '日常探访翻译器',
@@ -1054,6 +1078,18 @@ export const locales = {
         voiceChecking: 'Checking voice...',
         voiceReady: 'Voice input ready',
         voiceTyping: 'Typing-first mode'
+      },
+      practice: {
+        eyebrow: 'Practice',
+        taskTitle: "Today's Cantonese line",
+        taskBody: 'Practise asking someone to speak a little slower.',
+        coachEyebrow: 'Coach',
+        coachTitle: 'One useful note',
+        coachEmpty: 'Send one line to get a focused note.',
+        modeHabit: 'Daily practice',
+        modeTeaching: 'Correction practice',
+        modeFree: 'Free talk',
+        startFailed: 'Practice could not start. Please try again.'
       },
       translate: {
         eyebrow: 'Translate',
