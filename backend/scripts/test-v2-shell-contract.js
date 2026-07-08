@@ -22,11 +22,21 @@ assert.match(html, /data-default-view="today"/, 'app shell should default to Tod
 assert.match(html, /id="todayQuickStart"/, 'Today view should expose a quick-start action');
 assert.match(html, /id="todayHabitState"/, 'Today view should expose habit state');
 assert.match(html, /id="todayVoiceState"/, 'Today view should expose voice readiness');
+assert.match(
+  html,
+  /<a class="action-card primary-action"[^>]*data-app-view-target="practice"[\s\S]*?href="#practice"[\s\S]*?Start practice<\/strong>/,
+  'Translate CTA should switch to the practice app view before jumping to #practice'
+);
 assert.match(app, /const\s+V2_HABIT_STORAGE_KEY\s*=\s*['"]hkbuddy\.v2\.habitState['"]/, 'habit storage key should be explicit');
 assert.match(app, /function\s+setAppView\s*\(/, 'setAppView should control top-level V2 navigation');
 assert.match(app, /function\s+getHabitState\s*\(/, 'getHabitState should read local habit state');
 assert.match(app, /function\s+saveHabitState\s*\(/, 'saveHabitState should persist local habit state');
 assert.match(app, /function\s+renderTodayView\s*\(/, 'renderTodayView should update Today cards');
+assert.match(app, /function\s+getTodayKey\s*\(/, 'getTodayKey should exist');
+assert.match(app, /getFullYear\(\)/, 'getTodayKey should use the local calendar year');
+assert.match(app, /getMonth\(\)\s*\+\s*1/, 'getTodayKey should use the local calendar month');
+assert.match(app, /getDate\(\)/, 'getTodayKey should use the local calendar day');
+assert.doesNotMatch(app, /function\s+getTodayKey\s*\([^)]*\)\s*{[\s\S]*?toISOString\(\)\.slice\(0,\s*10\)/, 'getTodayKey should not derive the day key from UTC');
 assert.match(css, /\.v2-shell\b/, 'V2 shell styling should exist');
 assert.match(css, /\.today-dashboard\b/, 'Today dashboard styling should exist');
 assert.match(css, /@media\s*\(max-width:\s*980px\)/, 'responsive breakpoint should be present');
