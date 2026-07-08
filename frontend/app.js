@@ -1,6 +1,7 @@
 // P3-1: Import i18n module
-import { t, setLanguage, getLanguage, initI18n, getAvailableLanguages, locales } from './i18n/index.js?v=20260610visittranslation1';
+import { t, setLanguage, getLanguage, initI18n, getAvailableLanguages, locales } from './i18n/index.js?v=20260708v2uiux1';
 import { elderlyVisitPlaybook } from './content/playbooks.js?v=20260522visit1';
+import { createAsrErrorNotice, createVisitModeStartNotice, isVoiceInputAvailable } from './errors.js?v=20260708v2uiux1';
 
 const META_API = document.querySelector('meta[name="api-base"]');
 
@@ -60,8 +61,22 @@ const visitDirectionButtons = document.querySelectorAll('[data-visit-direction]'
 const visitTaskButtons = document.querySelectorAll('[data-visit-task]');
 const visitOptionGroups = document.querySelectorAll('[data-visit-option-group]');
 const visitTranslateBtn = document.getElementById('visitTranslateBtn');
+const visitInputCard = document.getElementById('visitInputCard');
+const visitOutputCard = document.getElementById('visitOutputCard');
 const visitTranslationOutput = document.getElementById('visitTranslationOutput');
 const visitTranslationWarning = document.getElementById('visitTranslationWarning');
+const visitRetryBtn = document.getElementById('visitRetryBtn');
+const pilotVoiceStatus = document.getElementById('pilotVoiceStatus');
+const appViewButtons = document.querySelectorAll('[data-app-view-target]');
+const appViews = document.querySelectorAll('[data-app-view]');
+const todayQuickStart = document.getElementById('todayQuickStart');
+const todayTranslateShortcut = document.getElementById('todayTranslateShortcut');
+const todayHabitState = document.getElementById('todayHabitState');
+const todayTaskState = document.getElementById('todayTaskState');
+const todayVoiceState = document.getElementById('todayVoiceState');
+const phrasebookList = document.getElementById('phrasebookList');
+const habitReviewPanel = document.getElementById('habitReviewPanel');
+const V2_HABIT_STORAGE_KEY = 'hkbuddy.v2.habitState';
 
 // P1: Mode toggle elements
 const modeFreeTalkBtn = document.getElementById('modeFreeTalk');
@@ -160,8 +175,17 @@ let currentTtsProvider = 'mock';
 let currentTtsVoice = localStorage.getItem('ttsVoice') || 'Cantonese_GentleLady';
 let availableTtsVoices = [];
 let voiceSelectionEnabled = false;
+let voiceInputEnabled = false;
 let coachTranslationState = { status: 'empty' };
 let coachTranslationRequestId = 0;
+let pilotHealthSnapshot = null;
+let currentAppView = 'today';
+let visitTranslationState = {
+  sourceText: '',
+  inputType: 'text',
+  direction: 'yue_to_en',
+  status: 'empty'
+};
 
 // System states: idle, listening, processing, speaking, error
 const STATES = {
@@ -171,6 +195,38 @@ const STATES = {
   SPEAKING: 'speaking',
   ERROR: 'error'
 };
+
+const VOICE_UI_STATES = {
+  CHECKING: 'checking',
+  AVAILABLE: 'available',
+  UNAVAILABLE: 'unavailable',
+  BLOCKED: 'blocked',
+  RECORDING: 'recording',
+  PROCESSING: 'processing',
+  FAILED: 'failed'
+};
+
+function setVoiceUiState(stateName) {
+  const state = stateName || VOICE_UI_STATES.CHECKING;
+  document.body.dataset.voiceState = state;
+  if (!holdBtn) return;
+  holdBtn.classList.toggle('voice-state-unavailable', state === VOICE_UI_STATES.UNAVAILABLE);
+  holdBtn.classList.toggle('voice-state-recording', state === VOICE_UI_STATES.RECORDING);
+  holdBtn.classList.toggle('voice-state-processing', state === VOICE_UI_STATES.PROCESSING);
+  if (state === VOICE_UI_STATES.UNAVAILABLE) {
+    holdBtn.textContent = t('input.voiceUnavailable');
+    holdBtn.title = t('input.voiceUnavailableHint');
+  } else if (state === VOICE_UI_STATES.AVAILABLE) {
+    holdBtn.title = '';
+  }
+}
+
+function updateReplayAvailability(controlsEnabled = true) {
+  if (!replayBtn) return;
+  replayBtn.disabled = !lastTtsAudio;
+  if (!controlsEnabled) replayBtn.disabled = true;
+  replayBtn.setAttribute('aria-disabled', String(replayBtn.disabled));
+}
 
 const STATE_LABELS = {
   idle: '就緒',
@@ -308,6 +364,98 @@ function applyUserModeDefaults(mode, { preserveLanguage = false } = {}) {
   }
 }
 
+function getTodayKey(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function getHabitState() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(V2_HABIT_STORAGE_KEY) || '{}');
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveHabitState(nextState) {
+  localStorage.setItem(V2_HABIT_STORAGE_KEY, JSON.stringify(nextState || {}));
+}
+
+function renderTodayView() {
+  const habit = getHabitState();
+  const todayKey = getTodayKey();
+  const practisedToday = habit.lastPractisedDate === todayKey;
+  if (todayHabitState) {
+    todayHabitState.textContent = practisedToday ? t('v2.today.habitDone') : t('v2.today.habitEmpty');
+  }
+  if (todayTaskState) {
+    todayTaskState.textContent = t('v2.today.taskDefault');
+  }
+  if (todayVoiceState) {
+    todayVoiceState.textContent = voiceInputEnabled ? t('v2.today.voiceReady') : t('v2.today.voiceTyping');
+  }
+  renderHabitReview();
+}
+
+function markHabitPractised() {
+  const habit = getHabitState();
+  const todayKey = getTodayKey();
+  const isNewDay = habit.lastPractisedDate !== todayKey;
+  saveHabitState({
+    ...habit,
+    lastPractisedDate: todayKey,
+    completedCount: isNewDay ? Number(habit.completedCount || 0) + 1 : Number(habit.completedCount || 0)
+  });
+  renderTodayView();
+  renderHabitReview();
+}
+
+function updatePracticeCoachSummary(text) {
+  const coachSummary = document.getElementById('practiceCoachSummary');
+  if (!coachSummary) return;
+  coachSummary.textContent = text || t('v2.practice.coachEmpty');
+}
+
+function renderPracticeOutcomeMode() {
+  if (!lastUserUtterance) {
+    updatePracticeCoachSummary(t('v2.practice.coachEmpty'));
+  }
+}
+
+async function startPracticeFromToday() {
+  selectUserMode(currentUserMode && currentUserMode !== 'visit_translation' ? currentUserMode : 'international_student');
+  setActiveMode('teaching');
+  setAppView('practice');
+  renderPracticeOutcomeMode();
+  if (!sessionId) await startSession();
+  textInput?.focus();
+}
+
+function setAppView(viewName) {
+  currentAppView = viewName || 'today';
+  document.body.dataset.appView = currentAppView;
+  appViews.forEach((view) => {
+    const activeViews = (view.dataset.appView || '').split(/\s+/).filter(Boolean);
+    const active = activeViews.includes(currentAppView);
+    const managedHidden = view.dataset.viewState === 'hidden';
+    view.classList.toggle('active', active);
+    view.hidden = !active || managedHidden;
+  });
+  appViewButtons.forEach((button) => {
+    const active = button.dataset.appViewTarget === currentAppView;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-current', active ? 'page' : 'false');
+  });
+  if (currentAppView === 'today') renderTodayView();
+  if (currentAppView === 'translate') selectUserMode('visit_translation');
+  if (currentAppView === 'practice' && currentUserMode === 'visit_translation') selectUserMode('international_student');
+  if (currentAppView === 'practice') renderPracticeOutcomeMode();
+  if (currentAppView === 'phrasebook') renderPhrasebookView();
+}
+
 function handleRoleAction(action) {
   if (action === 'changeMode') {
     showRoleSelection();
@@ -319,8 +467,14 @@ function handleRoleAction(action) {
     syncVisitDirectionControls(DEFAULT_VISIT_DIRECTION);
     resetVisitTranslationOutput();
     updateInputLabelsForMode();
-    document.getElementById('practice')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    setNotice(t('onboarding.notices.visitTranslationComingSoon'), 'info');
+    setAppView('translate');
+    document.getElementById('visitTranslatePanel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    const notice = createVisitModeStartNotice({
+      voiceInputEnabled,
+      readyMessage: t('onboarding.notices.visitTranslationComingSoon'),
+      voiceUnavailableHint: t('input.voiceUnavailableHint')
+    });
+    setNotice(notice.text, notice.kind);
     return;
   }
 
@@ -354,12 +508,19 @@ function renderRoleContext() {
     });
   }
 
-  roleContextPanel.hidden = false;
+  roleContextPanel.dataset.viewState = 'shown';
+  roleContextPanel.hidden = currentAppView !== 'translate';
 }
 
 function showRoleSelection() {
-  if (roleOnboardingEl) roleOnboardingEl.hidden = false;
-  if (roleContextPanel) roleContextPanel.hidden = true;
+  if (roleOnboardingEl) {
+    roleOnboardingEl.dataset.viewState = 'shown';
+    roleOnboardingEl.hidden = currentAppView !== 'translate';
+  }
+  if (roleContextPanel) {
+    roleContextPanel.dataset.viewState = 'hidden';
+    roleContextPanel.hidden = true;
+  }
   if (changeModeBtn) changeModeBtn.hidden = true;
   document.body.dataset.userMode = '';
   updateInputLabelsForMode();
@@ -384,7 +545,10 @@ function selectUserMode(mode, { fromStorage = false } = {}) {
     card.setAttribute('aria-pressed', active ? 'true' : 'false');
   });
 
-  if (roleOnboardingEl) roleOnboardingEl.hidden = true;
+  if (roleOnboardingEl) {
+    roleOnboardingEl.dataset.viewState = 'hidden';
+    roleOnboardingEl.hidden = true;
+  }
   if (changeModeBtn) changeModeBtn.hidden = false;
   renderRoleContext();
 
@@ -504,6 +668,60 @@ function renderElderlyVisitPlaybook() {
   });
 }
 
+function usePhraseForPractice(phraseText) {
+  setAppView('practice');
+  selectUserMode(currentUserMode && currentUserMode !== 'visit_translation' ? currentUserMode : 'international_student');
+  if (textInput) {
+    textInput.value = phraseText || '';
+    textInput.focus();
+  }
+}
+
+function usePhraseForTranslation(phraseText) {
+  setAppView('translate');
+  selectUserMode('visit_translation');
+  if (textInput) {
+    textInput.value = phraseText || '';
+    textInput.focus();
+  }
+}
+
+function renderHabitReview() {
+  if (!habitReviewPanel) return;
+  const habit = getHabitState();
+  const done = habit.lastPractisedDate === getTodayKey();
+  habitReviewPanel.innerHTML = '';
+  appendTextElement(habitReviewPanel, 'span', t('v2.review.label'));
+  appendTextElement(habitReviewPanel, 'strong', done ? t('v2.review.done') : t('v2.review.empty'));
+}
+
+function renderPhrasebookView() {
+  if (!phrasebookList) return;
+  phrasebookList.innerHTML = '';
+  elderlyVisitPlaybook.phrases.slice(0, 9).forEach((phrase) => {
+    const card = document.createElement('article');
+    card.className = 'phrasebook-card';
+    appendTextElement(card, 'strong', phrase.cantonese);
+    appendTextElement(card, 'span', phrase.jyutping || '');
+    appendTextElement(card, 'p', phrase.english || phrase.meaning || '');
+
+    const practiceButton = document.createElement('button');
+    practiceButton.type = 'button';
+    practiceButton.setAttribute('data-phrase-action', 'practice');
+    practiceButton.textContent = t('v2.phrasebook.practiceAction');
+    practiceButton.addEventListener('click', () => usePhraseForPractice(phrase.cantonese));
+
+    const translateButton = document.createElement('button');
+    translateButton.type = 'button';
+    translateButton.setAttribute('data-phrase-action', 'translate');
+    translateButton.textContent = t('v2.phrasebook.translateAction');
+    translateButton.addEventListener('click', () => usePhraseForTranslation(phrase.cantonese));
+
+    card.append(practiceButton, translateButton);
+    phrasebookList.appendChild(card);
+  });
+}
+
 function selectVisitPhrase(phrase) {
   textInput.value = phrase.cantonese;
   textInput.focus();
@@ -519,6 +737,7 @@ function selectVisitPhrase(phrase) {
 
 function resetVisitPhrase() {
   if (visitLargeText) {
+    visitLargeText.classList.remove('is-fallback');
     visitLargeText.innerHTML = `
       <strong>${t('playbook.largeText.title')}</strong>
       <span>${t('playbook.largeText.empty')}</span>
@@ -534,15 +753,34 @@ function resetVisitTranslationOutput() {
   const meta = getVisitDirectionMeta();
   const title = isVisitTranslationMode() ? t(meta.resultKey) : t('visitTranslate.outputTitle');
   const body = isVisitTranslationMode() ? t(meta.placeholderKey) : t('visitTranslate.outputEmpty');
+  visitTranslationState = {
+    sourceText: '',
+    inputType: 'text',
+    direction: visitDirection?.value || DEFAULT_VISIT_DIRECTION,
+    status: 'empty'
+  };
+  renderVisitInputCard('', 'text', visitTranslationState.direction);
+  if (visitOutputCard) {
+    visitOutputCard.className = 'visit-pair-card';
+  }
+  visitTranslationOutput.classList.remove('is-fallback');
   visitTranslationOutput.innerHTML = `
-    <span class="visit-output-kicker">${t('visitTranslate.outputReady')}</span>
+    <span class="visit-output-kicker">${t('v2.translate.outputLabel')}</span>
     <strong>${title}</strong>
-    <span>${body}</span>
+    <p>${body}</p>
   `;
+  if (visitRetryBtn) {
+    visitRetryBtn.hidden = true;
+    visitRetryBtn.onclick = null;
+  }
   if (visitTranslationWarning) {
     visitTranslationWarning.hidden = true;
     visitTranslationWarning.textContent = '';
   }
+}
+
+function isGenericVisitTranslationText(text) {
+  return /The resident said something in Cantonese|Please ask staff to confirm the exact meaning|长者.*粤语.*确认|長者.*粵語.*確認|請.*職員.*確認|请.*工作人员.*确认/i.test(String(text || ''));
 }
 
 function getVisitDirectionMeta(direction = visitDirection?.value || DEFAULT_VISIT_DIRECTION) {
@@ -571,13 +809,17 @@ function updateInputLabelsForMode() {
       ? placeholder
       : t('visitTranslate.outputEmpty');
     sendBtn.textContent = t(meta.sendKey);
-    holdBtn.textContent = t('visitTranslate.actions.holdToTranslate');
+    holdBtn.textContent = voiceInputEnabled
+      ? t('visitTranslate.actions.holdToTranslate')
+      : t('visitTranslate.actions.voiceUnavailable');
+    holdBtn.title = voiceInputEnabled ? '' : t('input.voiceUnavailableHint');
     return;
   }
 
   textInput.placeholder = t('input.textPlaceholder');
   sendBtn.textContent = t('input.send');
-  holdBtn.textContent = t('input.holdToSpeak');
+  holdBtn.textContent = voiceInputEnabled ? t('input.holdToSpeak') : t('input.voiceUnavailable');
+  holdBtn.title = voiceInputEnabled ? '' : t('input.voiceUnavailableHint');
 }
 
 function getRomanizationText(romanization) {
@@ -600,6 +842,49 @@ function appendTextElement(parent, tagName, text, className = '') {
   return el;
 }
 
+function renderVisitInputCard(sourceText, inputType, direction) {
+  if (!visitInputCard) return;
+  const meta = getVisitDirectionMeta(direction);
+  visitInputCard.innerHTML = '';
+  appendTextElement(visitInputCard, 'span', t('v2.translate.inputLabel'), 'visit-output-kicker');
+  appendTextElement(visitInputCard, 'strong', sourceText || t('v2.translate.inputEmpty'));
+  appendTextElement(
+    visitInputCard,
+    'p',
+    sourceText
+      ? `${t(meta.routeKey)} · ${inputType === 'speech' ? t('v2.translate.inputSpeech') : t('v2.translate.inputTyped')}`
+      : t('v2.translate.inputHint')
+  );
+}
+
+function renderVisitError(error, sourceText) {
+  if (!visitOutputCard || !visitTranslationOutput) return;
+  visitOutputCard.className = 'visit-pair-card visit-result-state-error';
+  visitTranslationOutput.classList.remove('is-fallback');
+  visitTranslationOutput.innerHTML = '';
+  appendTextElement(visitTranslationOutput, 'span', t('v2.translate.failedLabel'), 'visit-output-kicker');
+  appendTextElement(visitTranslationOutput, 'strong', t('visitTranslate.notices.failed'));
+  appendTextElement(visitTranslationOutput, 'p', t('v2.translate.failedBody'));
+  appendTextElement(visitTranslationOutput, 'p', `${t('visitTranslate.sourceLabel')}: ${sourceText || ''}`);
+  if (visitTranslationWarning) {
+    visitTranslationWarning.hidden = true;
+    visitTranslationWarning.textContent = '';
+  }
+  if (visitRetryBtn) {
+    visitRetryBtn.hidden = false;
+    visitRetryBtn.textContent = t('v2.translate.retryTranslation');
+    visitRetryBtn.onclick = retryVisitTranslation;
+  }
+}
+
+function retryVisitTranslation() {
+  return translateVisitText(
+    visitTranslationState.sourceText,
+    visitTranslationState.inputType || 'text',
+    visitTranslationState.direction || DEFAULT_VISIT_DIRECTION
+  );
+}
+
 function renderVisitTranslation(res) {
   if (!visitTranslationOutput) return;
   const displayText = res.displayText || res.translatedText || '';
@@ -607,9 +892,24 @@ function renderVisitTranslation(res) {
   const romanizationScheme = getRomanizationScheme(res.romanization);
   const meta = getVisitDirectionMeta(res.direction || visitDirection?.value || DEFAULT_VISIT_DIRECTION);
   const resultLabel = t(meta.resultKey);
+  const fallbackResult = res.provider === 'mock' || isGenericVisitTranslationText(displayText);
+  visitTranslationState = {
+    sourceText: res.sourceText || visitTranslationState.sourceText,
+    inputType: visitTranslationState.inputType,
+    direction: res.direction || visitTranslationState.direction,
+    status: fallbackResult ? 'fallback' : 'success'
+  };
 
+  if (visitOutputCard) {
+    visitOutputCard.className = `visit-pair-card ${fallbackResult ? 'visit-result-state-fallback' : 'visit-result-state-success'}`;
+  }
   visitTranslationOutput.innerHTML = '';
-  appendTextElement(visitTranslationOutput, 'span', resultLabel, 'visit-output-kicker');
+  visitTranslationOutput.classList.toggle('is-fallback', fallbackResult);
+  appendTextElement(visitTranslationOutput, 'span', fallbackResult ? t('v2.translate.confirmLabel') : t('v2.translate.outputLabel'), 'visit-output-kicker');
+  appendTextElement(visitTranslationOutput, 'small', resultLabel, 'visit-result-meta');
+  if (res.autoRouted) {
+    appendTextElement(visitTranslationOutput, 'span', t('visitTranslate.autoRouted'), 'visit-route-note');
+  }
   appendTextElement(visitTranslationOutput, 'strong', displayText);
   if (romanizationText) {
     const guide = document.createElement('div');
@@ -620,15 +920,20 @@ function renderVisitTranslation(res) {
     visitTranslationOutput.appendChild(guide);
   }
   appendTextElement(visitTranslationOutput, 'small', `${t('visitTranslate.sourceLabel')}: ${res.sourceText || ''}`);
+  if (visitRetryBtn) {
+    visitRetryBtn.hidden = true;
+    visitRetryBtn.onclick = null;
+  }
 
   if (visitLargeText) {
     visitLargeText.innerHTML = '';
+    visitLargeText.classList.toggle('is-fallback', fallbackResult);
     appendTextElement(visitLargeText, 'strong', displayText);
     if (romanizationText) appendTextElement(visitLargeText, 'span', romanizationText);
     appendTextElement(visitLargeText, 'small', res.sourceText || '');
   }
 
-  const needsConfirmation = res.needsConfirmation || res.provider === 'mock' || Number(res.confidence || 0) < 0.7;
+  const needsConfirmation = res.needsConfirmation || fallbackResult || Number(res.confidence || 0) < 0.7;
   if (visitTranslationWarning) {
     visitTranslationWarning.hidden = !needsConfirmation;
     visitTranslationWarning.textContent = needsConfirmation
@@ -668,7 +973,7 @@ function getVisitSpeakerRole(direction = visitDirection?.value || DEFAULT_VISIT_
   return 'student';
 }
 
-async function translateVisitText(text, inputType = 'text') {
+async function translateVisitText(text, inputType = 'text', directionOverride) {
   const sourceText = String(text || '').trim();
   if (!sourceText) {
     setNotice(t('visitTranslate.notices.emptyInput'), 'info');
@@ -677,7 +982,9 @@ async function translateVisitText(text, inputType = 'text') {
 
   if (!sessionId) await startSession();
   selectUserMode('visit_translation', { fromStorage: true });
-  const direction = visitDirection?.value || DEFAULT_VISIT_DIRECTION;
+  const direction = directionOverride || visitDirection?.value || DEFAULT_VISIT_DIRECTION;
+  visitTranslationState = { sourceText, inputType, direction, status: 'pending' };
+  renderVisitInputCard(text, inputType, direction);
   setSystemState(STATES.PROCESSING);
   sendBtn.disabled = true;
   holdBtn.disabled = true;
@@ -703,6 +1010,9 @@ async function translateVisitText(text, inputType = 'text') {
       })
     });
 
+    if (res.autoRouted && res.direction) {
+      syncVisitDirectionControls(res.direction);
+    }
     renderVisitTranslation(res);
     renderMessage({ role: 'ai', text: res.displayText || res.translatedText, ttsAudio: res.ttsAudio, timestamp: Date.now() });
     textInput.value = '';
@@ -710,12 +1020,13 @@ async function translateVisitText(text, inputType = 'text') {
     if (res.ttsAudio) await playAudio(res.ttsAudio, getPlaybackRate());
   } catch (err) {
     console.error(err);
+    visitTranslationState = { ...visitTranslationState, status: 'error' };
+    renderVisitError(err, text);
     setNotice(t('visitTranslate.notices.failed'), 'error');
     setSystemState(STATES.ERROR);
     setTimeout(() => setSystemState(STATES.IDLE), 2000);
   } finally {
-    sendBtn.disabled = false;
-    holdBtn.disabled = false;
+    setControlsEnabled(true);
     visitTranslateBtn.disabled = false;
     setStatus(sessionId ? `對話進行中：${sessionId.slice(0, 8)}` : t('states.idle'));
     if (systemStateEl?.classList.contains('state-processing')) setSystemState(STATES.IDLE);
@@ -819,10 +1130,30 @@ function setNotice(text, kind = 'info') {
 }
 
 function setControlsEnabled(enabled) {
-  [sendBtn, holdBtn, newSessionBtn, scenarioSelect, textInput, replayBtn].forEach((el) => {
+  [sendBtn, newSessionBtn, scenarioSelect, textInput].forEach((el) => {
     if (el) el.disabled = !enabled;
   });
+  if (holdBtn) {
+    const holdDisabled = !enabled || !voiceInputEnabled;
+    holdBtn.disabled = holdDisabled;
+    holdBtn.setAttribute('aria-disabled', String(holdDisabled));
+    holdBtn.classList.toggle('is-unavailable', !voiceInputEnabled);
+  }
+  setVoiceUiState(voiceInputEnabled ? 'available' : 'unavailable');
+  updateReplayAvailability(enabled);
   if (voiceSelect) voiceSelect.disabled = !enabled || !voiceSelectionEnabled;
+}
+
+function updateVoiceInputAvailability(health = pilotHealthSnapshot) {
+  voiceInputEnabled = isVoiceInputAvailable(health);
+  updateInputLabelsForMode();
+  renderTodayView();
+  if (holdBtn) {
+    holdBtn.disabled = !voiceInputEnabled;
+    holdBtn.setAttribute('aria-disabled', String(!voiceInputEnabled));
+    holdBtn.classList.toggle('is-unavailable', !voiceInputEnabled);
+  }
+  setVoiceUiState(voiceInputEnabled ? 'available' : 'unavailable');
 }
 
 function setStatus(text) {
@@ -942,6 +1273,7 @@ async function playAudio(ttsAudio, rate = 1) {
     console.log('Audio playback started successfully');
 
     lastTtsAudio = ttsAudio;
+    updateReplayAvailability();
     audio.addEventListener('ended', () => {
       console.log('Audio playback ended');
       setSystemState(STATES.IDLE);
@@ -1040,6 +1372,7 @@ function blobToDataUrl(blob) {
 async function processAudioRecording(audioBlob) {
   try {
     setSystemState(STATES.PROCESSING);
+    setVoiceUiState('processing');
     setStatus(currentAsrProvider === 'azure' ? 'Azure Speech 轉換中...' : '轉換語音中...');
 
     console.log('Processing audio, blob size:', audioBlob.size, 'type:', audioBlob.type, 'provider:', currentAsrProvider);
@@ -1070,6 +1403,7 @@ async function processAudioRecording(audioBlob) {
     if (res.transcript.includes('(模擬)')) {
       setNotice('語音辨識服務未啟用，請使用打字模式', 'warning');
       setSystemState(STATES.IDLE);
+      setVoiceUiState(voiceInputEnabled ? 'available' : 'unavailable');
       return;
     }
 
@@ -1084,11 +1418,13 @@ async function processAudioRecording(audioBlob) {
     } else {
       await sendUtterance(res.transcript);
     }
+    setVoiceUiState(voiceInputEnabled ? 'available' : 'unavailable');
   } catch (err) {
     console.error('ASR error:', err);
-    setNotice('語音辨識失敗：' + (err.message || '請重試或使用打字'), 'error');
+    setNotice(createAsrErrorNotice(err), 'error');
     setSystemState(STATES.ERROR);
     setTimeout(() => setSystemState(STATES.IDLE), 2000);
+    setVoiceUiState(voiceInputEnabled ? 'available' : 'unavailable');
   }
 }
 
@@ -1199,6 +1535,7 @@ function renderImmediateFeedback() {
   card.className = 'coach-summary-card coach-translation-card';
 
   if (state.status === 'empty') {
+    updatePracticeCoachSummary(t('v2.practice.coachEmpty'));
     card.innerHTML = `
       <p class="coach-summary-kicker">${t('feedback.realtimeEnglish')}</p>
       <p class="feedback-empty">${t('feedback.empty')}</p>
@@ -1208,6 +1545,7 @@ function renderImmediateFeedback() {
   }
 
   if (state.status === 'loading') {
+    updatePracticeCoachSummary(t('feedback.translationLoading'));
     card.innerHTML = `
       <p class="coach-summary-kicker">${t('feedback.currentTutorReply')}</p>
       <div class="coach-loading inline-coach-loading">
@@ -1220,6 +1558,7 @@ function renderImmediateFeedback() {
   }
 
   if (state.status === 'error') {
+    updatePracticeCoachSummary(t('feedback.translationFailed'));
     card.innerHTML = `
       <p class="coach-summary-kicker">${t('feedback.currentTutorReply')}</p>
       <p class="coach-modal-warning">${t('feedback.translationFailed')}</p>
@@ -1232,6 +1571,7 @@ function renderImmediateFeedback() {
     <p class="coach-summary-kicker">${t('feedback.currentTutorReply')}</p>
     <p class="coach-summary-text">${state.englishText || t('feedback.translationSummaryFallback')}</p>
   `;
+  updatePracticeCoachSummary(state.englishText || t('feedback.translationSummaryFallback'));
   if (state.provider === 'mock' || state.needsConfirmation) {
     const warning = document.createElement('p');
     warning.className = 'coach-modal-warning';
@@ -1307,13 +1647,17 @@ async function fetchJSON(path, options) {
   });
   if (!res.ok) {
     let detail = `HTTP ${res.status}`;
+    let payload = null;
     try {
-      const payload = await res.json();
+      payload = await res.json();
       detail = payload.details || payload.message || payload.error || detail;
     } catch {
       // Keep the status fallback when the response body is not JSON.
     }
-    throw new Error(detail);
+    const error = new Error(detail);
+    error.status = res.status;
+    error.payload = payload;
+    throw error;
   }
   return res.json();
 }
@@ -1355,6 +1699,20 @@ function updateTtsPill(provider = currentTtsProvider) {
   }
 }
 
+function updatePilotVoiceStatus(health = pilotHealthSnapshot) {
+  if (!pilotVoiceStatus) return;
+  const provider = health?.ttsProvider || currentTtsProvider;
+  const minimaxReady = Boolean(health?.capabilities?.minimax || provider === 'minimax');
+  if (provider === 'minimax' && minimaxReady) {
+    pilotVoiceStatus.textContent = t('pilot.status.voice.ready');
+  } else if (provider === 'azure') {
+    pilotVoiceStatus.textContent = t('pilot.status.voice.azureFallback');
+  } else {
+    pilotVoiceStatus.textContent = t('pilot.status.voice.mock');
+  }
+  renderTodayView();
+}
+
 function renderVoiceOptions() {
   if (!voiceSelect) return;
   voiceSelect.innerHTML = '';
@@ -1392,6 +1750,8 @@ async function loadTtsVoices() {
   }
   renderVoiceOptions();
   updateTtsPill(currentTtsProvider);
+  updatePilotVoiceStatus();
+  renderTodayView();
   setControlsEnabled(true);
 }
 
@@ -1413,6 +1773,8 @@ async function startSession() {
   transcriptEl.innerHTML = '';
   if (feedbackEl) feedbackEl.textContent = '';
   resetCoachTranslation();
+  lastTtsAudio = null;
+  updateReplayAvailability();
   renderEmptyState();
 
   // P1: Mode-specific greeting
@@ -1460,8 +1822,7 @@ async function sendUtterance(text) {
         clearTimeout(longProcessTimeout);
         setStatus('已取消');
         setSystemState(STATES.IDLE);
-        sendBtn.disabled = false;
-        holdBtn.disabled = false;
+        setControlsEnabled(true);
         processingStartTime = null;
         statusEl.onclick = null;
         statusEl.style.cursor = 'default';
@@ -1508,6 +1869,8 @@ async function sendUtterance(text) {
     }
 
     renderMessage({ role: 'ai', text: res.aiText, ttsAudio: res.ttsAudio, timestamp: Date.now() });
+    markHabitPractised();
+    renderPracticeOutcomeMode();
     translateTutorFeedback(res.aiText);
 
     if (res.latencyMs) {
@@ -1529,8 +1892,7 @@ async function sendUtterance(text) {
     console.error(err);
     setTimeout(() => setSystemState(STATES.IDLE), 2000);
   } finally {
-    sendBtn.disabled = false;
-    holdBtn.disabled = false;
+    setControlsEnabled(true);
     setStatus(`對話進行中：${sessionId.slice(0, 8)}`);
   }
 }
@@ -1692,6 +2054,7 @@ async function startBackendSpeechRecording() {
     if (audioBlob.size === 0) {
       setNotice('未錄到聲音，請再試一次', 'error');
       setSystemState(STATES.IDLE);
+      setVoiceUiState(voiceInputEnabled ? 'available' : 'unavailable');
       return;
     }
 
@@ -1789,8 +2152,20 @@ async function startAzureSpeechSdkRecording() {
 }
 
 async function handleRecordStart() {
+  if (!voiceInputEnabled) {
+    setVoiceUiState('unavailable');
+    isRecording = false;
+    cleanupRecordingResources();
+    stopRecordingTimer();
+    updateInputLabelsForMode();
+    setSystemState(STATES.IDLE);
+    setNotice(t('input.voiceUnavailableHint'), 'warning');
+    return;
+  }
+
   const hasPermission = await requestMicPermission();
   if (!hasPermission) {
+    setVoiceUiState('unavailable');
     setNotice('需要麥克風權限，已切換至打字模式', 'info');
     return;
   }
@@ -1803,6 +2178,7 @@ async function handleRecordStart() {
 
   try {
     isRecording = true;
+    setVoiceUiState('recording');
     setSystemState(STATES.LISTENING);
     holdBtn.textContent = isVisitTranslationMode()
       ? t('visitTranslate.actions.recording')
@@ -1814,31 +2190,16 @@ async function handleRecordStart() {
     }
     return;
   } catch (err) {
-    console.warn(`${currentAsrProvider === 'azure' ? 'Azure Speech SDK' : 'Backend ASR'} recording failed, trying fallback:`, err);
+    console.warn(`${currentAsrProvider === 'azure' ? 'Azure Speech SDK' : 'Backend ASR'} recording failed:`, err);
     cleanupRecordingResources();
-  }
-
-  try {
-    isRecording = true;
-    setSystemState(STATES.LISTENING);
-    holdBtn.textContent = isVisitTranslationMode()
-      ? t('visitTranslate.actions.recording')
-      : '錄音中... 放開即發送';
-    if (currentAsrProvider === 'azure') {
-      await startBackendSpeechRecording();
-    } else {
-      await startAzureSpeechSdkRecording();
-    }
-    return;
-  } catch (err) {
-    console.error('Recording error:', err);
-    setNotice('無法啟動錄音：' + err.message, 'error');
+    setNotice(createAsrErrorNotice(err), 'error');
     setSystemState(STATES.ERROR);
     setTimeout(() => setSystemState(STATES.IDLE), 2000);
+    setVoiceUiState(voiceInputEnabled ? 'available' : 'unavailable');
     updateInputLabelsForMode();
     stopRecordingTimer();
     isRecording = false;
-    cleanupRecordingResources();
+    return;
   }
 }
 
@@ -1848,6 +2209,7 @@ function handleRecordStop() {
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     isRecording = false;
     stopRecordingTimer();
+    setVoiceUiState('processing');
     holdBtn.textContent = isVisitTranslationMode()
       ? t('visitTranslate.actions.processingSpeech')
       : '處理錄音中...';
@@ -1864,6 +2226,7 @@ function handleRecordStop() {
   if (speechRecognizer) {
     const recognizerRef = speechRecognizer;
     speechRecognizer = null; // Prevent double-stop
+    setVoiceUiState('processing');
     holdBtn.textContent = isVisitTranslationMode()
       ? t('visitTranslate.actions.processingSpeech')
       : '處理錄音中...';
@@ -1887,6 +2250,7 @@ function handleRecordStop() {
           if (!transcript) {
             setNotice('未能識別語音，請重試或使用打字', 'error');
             setSystemState(STATES.IDLE);
+            setVoiceUiState(voiceInputEnabled ? 'available' : 'unavailable');
             setStatus(sessionId ? `對話進行中：${sessionId.slice(0, 8)}` : '就緒');
             return;
           }
@@ -1897,15 +2261,17 @@ function handleRecordStop() {
           } else {
             await sendUtterance(transcript);
           }
+          setVoiceUiState(voiceInputEnabled ? 'available' : 'unavailable');
         })().catch((err) => {
           console.error('Azure Speech finalize error:', err);
           updateInputLabelsForMode();
           audioConfig = null;
           azureSdkTranscript = '';
           azureSdkError = null;
-          setNotice('語音辨識失敗：' + (err.message || '請重試或使用打字'), 'error');
+          setNotice(createAsrErrorNotice(err), 'error');
           setSystemState(STATES.ERROR);
           setTimeout(() => setSystemState(STATES.IDLE), 2000);
+          setVoiceUiState(voiceInputEnabled ? 'available' : 'unavailable');
         });
       },
       (err) => {
@@ -1915,14 +2281,16 @@ function handleRecordStop() {
         azureSdkTranscript = '';
         azureSdkError = null;
         updateInputLabelsForMode();
-        setNotice('語音識別停止失敗：' + (err?.message || err), 'error');
+        setNotice(createAsrErrorNotice(err), 'error');
         setSystemState(STATES.ERROR);
         setTimeout(() => setSystemState(STATES.IDLE), 2000);
+        setVoiceUiState(voiceInputEnabled ? 'available' : 'unavailable');
       }
     );
   } else {
     updateInputLabelsForMode();
     setSystemState(STATES.IDLE);
+    setVoiceUiState(voiceInputEnabled ? 'available' : 'unavailable');
   }
 }
 
@@ -1931,6 +2299,8 @@ clearChatBtn.addEventListener('click', () => {
   transcriptEl.innerHTML = '';
   if (feedbackEl) feedbackEl.textContent = '';
   resetCoachTranslation();
+  lastTtsAudio = null;
+  updateReplayAvailability();
   setNotice('已清除對話記錄', 'info');
   renderEmptyState();
 });
@@ -2139,6 +2509,7 @@ function setActiveMode(mode) {
   }
 
   updateModePill();
+  renderPracticeOutcomeMode();
 }
 
 async function switchMode(newMode) {
@@ -2291,10 +2662,53 @@ document.querySelectorAll('[data-dialog-open]').forEach((button) => {
   });
 });
 
+appViewButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    setAppView(button.dataset.appViewTarget || 'today');
+  });
+});
+
+todayQuickStart?.addEventListener('click', () => {
+  startPracticeFromToday().catch((err) => {
+    console.error(err);
+    setNotice(t('v2.practice.startFailed'), 'error');
+  });
+});
+
+todayTranslateShortcut?.addEventListener('click', () => {
+  setAppView('translate');
+});
+
+document.querySelectorAll('[data-pilot-action]').forEach((button) => {
+  button.addEventListener('click', async () => {
+    const action = button.dataset.pilotAction;
+    if (action === 'visit') {
+      selectUserMode('visit_translation');
+      syncVisitDirectionControls(DEFAULT_VISIT_DIRECTION);
+      resetVisitTranslationOutput();
+      setAppView('translate');
+      document.getElementById('visitTranslatePanel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      textInput?.focus();
+      setNotice(t('pilot.notices.visitReady'), 'info');
+      return;
+    }
+
+    if (action === 'practice') {
+      selectUserMode('international_student');
+      setAppView('practice');
+      document.getElementById('practice')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (!sessionId) await startSession();
+      textInput?.focus();
+      setNotice(t('pilot.notices.practiceReady'), 'info');
+    }
+  });
+});
+
 startVisitTranslationFromPlaybook?.addEventListener('click', () => {
   selectUserMode('visit_translation');
+  setAppView('translate');
   document.getElementById('playbookDialog')?.close();
-  document.getElementById('practice')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  document.getElementById('visitTranslatePanel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   setNotice(t('onboarding.notices.visitTranslationComingSoon'), 'info');
 });
 
@@ -2379,16 +2793,18 @@ function updateUILanguage() {
   const heroKicker = document.querySelector('.hero-kicker');
   const heroTitle = document.querySelector('.hero h2');
   const heroBody = document.querySelector('.hero-body');
-  if (heroKicker) heroKicker.textContent = t('hero.kicker');
-  if (heroTitle) heroTitle.textContent = t('hero.title');
-  if (heroBody) heroBody.textContent = t('hero.body');
+  if (heroKicker) heroKicker.textContent = t('pilot.kicker');
+  if (heroTitle) heroTitle.textContent = t('pilot.title');
+  if (heroBody) heroBody.textContent = t('pilot.body');
   renderRoleContext();
   renderScenarioGuide(scenarioSelect.value);
   renderElderlyVisitPlaybook();
+  renderPhrasebookView();
   syncVisitDirectionControls(visitDirection?.value || DEFAULT_VISIT_DIRECTION);
   resetVisitTranslationOutput();
   updateInputLabelsForMode();
   renderImmediateFeedback();
+  renderTodayView();
 
   // Update badges
   const badges = document.querySelectorAll('.badges .pill');
@@ -2412,6 +2828,7 @@ function updateUILanguage() {
   }
 
   updateTtsPill(currentTtsProvider);
+  updatePilotVoiceStatus();
   resetVisitPhrase();
 }
 
@@ -2429,21 +2846,31 @@ window.addEventListener('languageChanged', () => {
   updateUILanguage();
   renderImmediateFeedback();
   initUserMode();
+  setAppView('today');
   renderElderlyVisitPlaybook();
+  renderPhrasebookView();
   syncVisitDirectionControls();
 
   setSystemState(STATES.IDLE);
+  setVoiceUiState('unavailable');
+  updateReplayAvailability(false);
   setActiveMode(currentMode); // Initialize mode UI
 
   try {
     const health = await fetchJSON('/health');
+    pilotHealthSnapshot = health;
     setStatus(t('status.connected') || '連線成功');
     currentAsrProvider = health.asrProvider || currentAsrProvider;
     currentAsrLanguage = health.asrLanguage || currentAsrLanguage;
     currentTtsProvider = health.ttsProvider || currentTtsProvider;
     currentTtsVoice = health.ttsVoice || currentTtsVoice;
     updateTtsPill(currentTtsProvider);
+    updatePilotVoiceStatus(health);
+    updateVoiceInputAvailability(health);
     setNotice(`${t('status.connected')} API：${API_BASE}`, 'info');
+    if (!voiceInputEnabled) {
+      setNotice(t('input.voiceUnavailableHint'), 'warning');
+    }
     setControlsEnabled(true);
   } catch {
     setStatus(t('status.disconnected') || '後端未連線');

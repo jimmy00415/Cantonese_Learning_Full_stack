@@ -39,6 +39,108 @@ export const locales = {
       body: '練習飯堂、港鐵、小組功課、識新朋友同本地文化語感，由 AI 教練用廣東話即時回應。'
     },
 
+    pilot: {
+      kicker: 'External Pilot',
+      title: '一分鐘內開始廣東話探訪支援',
+      body: '揀角色、翻譯探訪對話，或者用 MiniMax 廣東話聲線練一句真正用得着嘅短句。',
+      actions: {
+        visit: '開始探訪翻譯',
+        practice: '開始廣東話練習',
+        privacy: '私隱同 AI 限制'
+      },
+      status: {
+        voice: {
+          label: '聲線',
+          pending: '檢查 MiniMax 中...',
+          ready: 'MiniMax 廣東話聲線已準備',
+          azureFallback: '使用 Azure 語音 fallback',
+          mock: '語音暫時使用模擬模式'
+        },
+        fallback: {
+          label: 'Fallback',
+          ready: '唔開咪都可以打字使用'
+        },
+        safety: {
+          label: '安全',
+          ready: '重要意思請同職員確認'
+        }
+      },
+      notices: {
+        visitReady: '探訪翻譯已準備好，可以打字或按住咪高峰。',
+        practiceReady: '廣東話練習已準備好，試講一句短句。'
+      }
+    },
+
+    v2: {
+      nav: {
+        today: 'Today',
+        practice: 'Practice',
+        translate: 'Translate',
+        phrasebook: 'Phrasebook',
+        privacy: 'Privacy'
+      },
+      today: {
+        eyebrow: 'Today',
+        title: '今日先練一句廣東話',
+        body: '先建立細小而穩定嘅每日習慣；需要即時幫助時再用翻譯。',
+        quickStart: '開始今日練習',
+        translateShortcut: '打開翻譯器',
+        habitLabel: '習慣',
+        habitEmpty: '今日未練習',
+        habitDone: '今日已練習',
+        taskLabel: '推薦',
+        taskDefault: '請對方講慢少少',
+        voiceLabel: '語音',
+        voiceChecking: '檢查語音中...',
+        voiceReady: '語音輸入已準備',
+        voiceTyping: '以打字為先'
+      },
+      practice: {
+        eyebrow: 'Practice',
+        taskTitle: "Today's Cantonese line",
+        taskBody: 'Practise asking someone to speak a little slower.',
+        coachEyebrow: 'Coach',
+        coachTitle: 'One useful note',
+        coachEmpty: 'Send one line to get a focused note.',
+        modeHabit: 'Daily practice',
+        modeTeaching: 'Correction practice',
+        modeFree: 'Free talk',
+        startFailed: 'Practice could not start. Please try again.'
+      },
+      translate: {
+        eyebrow: 'Translate',
+        title: '日常探訪翻譯器',
+        body: '當住戶、義工或學生需要快速理解意思時，用呢個功能。',
+        inputLabel: '輸入',
+        inputEmpty: '未有輸入內容',
+        inputHint: '輸入或錄低要翻譯嘅句子。',
+        inputSpeech: '語音',
+        inputTyped: '打字',
+        outputLabel: '輸出',
+        confirmLabel: '請同職員確認',
+        failedLabel: '翻譯失敗',
+        failedBody: '今次請求未完成，但你啱啱輸入嘅內容仲喺度。',
+        retryTranslation: '重新翻譯'
+      },
+      review: {
+        label: 'Review',
+        empty: 'Complete one line to unlock review.',
+        done: 'Today practised. Replay or save one phrase.'
+      },
+      phrasebook: {
+        eyebrow: 'Phrasebook',
+        title: 'Useful Cantonese lines',
+        body: 'Pick a safe line for practice or visit support.',
+        practiceAction: 'Practise this',
+        translateAction: 'Use in translator'
+      },
+      privacy: {
+        eyebrow: 'Privacy',
+        title: '私隱同 AI 限制',
+        body: '避免輸入敏感個人、醫療、法律或可識別學生身份嘅資料。'
+      }
+    },
+
     guide: {
       nav: {
         guide: '使用指引',
@@ -151,6 +253,7 @@ export const locales = {
       outputTitle: '先揀上面其中一個任務',
       outputEmpty: '然後喺下面打字，或者按住咪高峰即時翻譯。',
       sourceLabel: '原文',
+      autoRouted: '已偵測到英文義工句子，改用「義工英文 → 廣東話」。',
       romanizationLabel: '粵拼發音提示',
       romanizationHelper: '數字代表廣東話聲調，只作閱讀提示。',
       greeting: '探訪口譯台已準備好。先揀「長者講廣東話」或「義工講英文／普通話」，再打字或按住咪高峰。',
@@ -205,6 +308,7 @@ export const locales = {
         translateResidentShort: '翻譯長者',
         translateVolunteerShort: '翻譯義工',
         holdToTranslate: '按住即時翻譯',
+        voiceUnavailable: '語音暫不可用',
         recording: '錄音中… 放開即翻譯',
         processingSpeech: '處理語音中…',
         recognizing: '識別中',
@@ -329,6 +433,8 @@ export const locales = {
     // Input Panel
     input: {
       holdToSpeak: '按住說話',
+      voiceUnavailable: '語音暫不可用',
+      voiceUnavailableHint: '語音輸入暫時未能使用，請先用打字翻譯。',
       stopSpeaking: '停止播放',
       textPlaceholder: '試下：唔該，我想練習廣東話...',
       voice: '聲線',
@@ -440,6 +546,108 @@ export const locales = {
       kicker: 'Campus Cantonese Sprint',
       title: '学会真正用得到的香港生活粤语',
       body: '练习饭堂、港铁、小组作业、认识新朋友和本地文化语感，由 AI 教练用粤语即时回应。'
+    },
+
+    pilot: {
+      kicker: 'External Pilot',
+      title: '一分钟内开始粤语探访支援',
+      body: '选择角色、翻译探访对话，或者用 MiniMax 粤语声线练一句真正用得上的短句。',
+      actions: {
+        visit: '开始探访翻译',
+        practice: '开始粤语练习',
+        privacy: '隐私和 AI 限制'
+      },
+      status: {
+        voice: {
+          label: '声线',
+          pending: '正在检查 MiniMax...',
+          ready: 'MiniMax 粤语声线已准备',
+          azureFallback: '使用 Azure 语音 fallback',
+          mock: '语音暂时使用模拟模式'
+        },
+        fallback: {
+          label: 'Fallback',
+          ready: '不开麦也可以打字使用'
+        },
+        safety: {
+          label: '安全',
+          ready: '重要意思请和职员确认'
+        }
+      },
+      notices: {
+        visitReady: '探访翻译已准备好，可以打字或按住麦克风。',
+        practiceReady: '粤语练习已准备好，试讲一句短句。'
+      }
+    },
+
+    v2: {
+      nav: {
+        today: 'Today',
+        practice: 'Practice',
+        translate: 'Translate',
+        phrasebook: 'Phrasebook',
+        privacy: 'Privacy'
+      },
+      today: {
+        eyebrow: 'Today',
+        title: '今天先练一句粤语',
+        body: '先建立一个小而稳的每日习惯；需要即时帮助时再使用翻译。',
+        quickStart: '开始今天练习',
+        translateShortcut: '打开翻译器',
+        habitLabel: '习惯',
+        habitEmpty: '今天还没练习',
+        habitDone: '今天已练习',
+        taskLabel: '推荐',
+        taskDefault: '请对方说慢一点',
+        voiceLabel: '语音',
+        voiceChecking: '正在检查语音...',
+        voiceReady: '语音输入已就绪',
+        voiceTyping: '以打字为先'
+      },
+      practice: {
+        eyebrow: 'Practice',
+        taskTitle: "Today's Cantonese line",
+        taskBody: 'Practise asking someone to speak a little slower.',
+        coachEyebrow: 'Coach',
+        coachTitle: 'One useful note',
+        coachEmpty: 'Send one line to get a focused note.',
+        modeHabit: 'Daily practice',
+        modeTeaching: 'Correction practice',
+        modeFree: 'Free talk',
+        startFailed: 'Practice could not start. Please try again.'
+      },
+      translate: {
+        eyebrow: 'Translate',
+        title: '日常探访翻译器',
+        body: '当住户、义工或学生需要快速理解意思时，使用这个功能。',
+        inputLabel: '输入',
+        inputEmpty: '还没有输入内容',
+        inputHint: '输入或录下要翻译的句子。',
+        inputSpeech: '语音',
+        inputTyped: '打字',
+        outputLabel: '输出',
+        confirmLabel: '请和职员确认',
+        failedLabel: '翻译失败',
+        failedBody: '这次请求没有完成，但你刚才输入的内容还在这里。',
+        retryTranslation: '重新翻译'
+      },
+      review: {
+        label: 'Review',
+        empty: 'Complete one line to unlock review.',
+        done: 'Today practised. Replay or save one phrase.'
+      },
+      phrasebook: {
+        eyebrow: 'Phrasebook',
+        title: 'Useful Cantonese lines',
+        body: 'Pick a safe line for practice or visit support.',
+        practiceAction: 'Practise this',
+        translateAction: 'Use in translator'
+      },
+      privacy: {
+        eyebrow: 'Privacy',
+        title: '隐私和 AI 限制',
+        body: '避免输入敏感个人、医疗、法律或可识别学生身份的信息。'
+      }
     },
 
     guide: {
@@ -554,6 +762,7 @@ export const locales = {
       outputTitle: '先选择上面其中一个任务',
       outputEmpty: '然后在下面打字，或者按住麦克风实时翻译。',
       sourceLabel: '原文',
+      autoRouted: '已检测到英文义工句子，改用“义工英文 → 粤语”。',
       romanizationLabel: '粤拼发音提示',
       romanizationHelper: '数字代表粤语声调，只作阅读提示。',
       greeting: '探访口译台已准备好。先选“长者讲粤语”或“义工讲英文/普通话”，再打字或按住麦克风。',
@@ -608,6 +817,7 @@ export const locales = {
         translateResidentShort: '翻译长者',
         translateVolunteerShort: '翻译义工',
         holdToTranslate: '按住实时翻译',
+        voiceUnavailable: '语音暂不可用',
         recording: '录音中… 放开即翻译',
         processingSpeech: '处理语音中…',
         recognizing: '识别中',
@@ -732,6 +942,8 @@ export const locales = {
     // Input Panel
     input: {
       holdToSpeak: '按住说话',
+      voiceUnavailable: '语音暂不可用',
+      voiceUnavailableHint: '语音输入暂时不能使用，请先用打字翻译。',
       stopSpeaking: '停止播放',
       textPlaceholder: '试试：唔该，我想练习粤语...',
       voice: '声线',
@@ -843,6 +1055,108 @@ export const locales = {
       kicker: 'Campus Cantonese Sprint',
       title: 'Speak Cantonese for real Hong Kong student life',
       body: 'Practice restaurant orders, MTR moments, group-project small talk, and culture cues with an AI coach that answers in Cantonese voice.'
+    },
+
+    pilot: {
+      kicker: 'External Pilot',
+      title: 'Start a Cantonese visit in under one minute',
+      body: 'Choose a role, translate a visit exchange, or practise one useful Cantonese line with MiniMax voice support.',
+      actions: {
+        visit: 'Start visit translation',
+        practice: 'Start Cantonese practice',
+        privacy: 'Privacy and AI limits'
+      },
+      status: {
+        voice: {
+          label: 'Voice',
+          pending: 'Checking MiniMax...',
+          ready: 'MiniMax Cantonese voice ready',
+          azureFallback: 'Using Azure voice fallback',
+          mock: 'Voice is in mock mode'
+        },
+        fallback: {
+          label: 'Fallback',
+          ready: 'Typing works without microphone'
+        },
+        safety: {
+          label: 'Safety',
+          ready: 'Confirm important meaning with staff'
+        }
+      },
+      notices: {
+        visitReady: 'Visit Translation is ready. Type or hold the microphone.',
+        practiceReady: 'Cantonese Practice is ready. Try one short line.'
+      }
+    },
+
+    v2: {
+      nav: {
+        today: 'Today',
+        practice: 'Practice',
+        translate: 'Translate',
+        phrasebook: 'Phrasebook',
+        privacy: 'Privacy'
+      },
+      today: {
+        eyebrow: 'Today',
+        title: 'Practise one Cantonese line today',
+        body: 'Build a small daily habit first. Translate when you need real-life help.',
+        quickStart: "Start today's practice",
+        translateShortcut: 'Open translator',
+        habitLabel: 'Habit',
+        habitEmpty: 'Not practised yet',
+        habitDone: 'Practised today',
+        taskLabel: 'Recommended',
+        taskDefault: 'Ask someone to speak slower',
+        voiceLabel: 'Voice',
+        voiceChecking: 'Checking voice...',
+        voiceReady: 'Voice input ready',
+        voiceTyping: 'Typing-first mode'
+      },
+      practice: {
+        eyebrow: 'Practice',
+        taskTitle: "Today's Cantonese line",
+        taskBody: 'Practise asking someone to speak a little slower.',
+        coachEyebrow: 'Coach',
+        coachTitle: 'One useful note',
+        coachEmpty: 'Send one line to get a focused note.',
+        modeHabit: 'Daily practice',
+        modeTeaching: 'Correction practice',
+        modeFree: 'Free talk',
+        startFailed: 'Practice could not start. Please try again.'
+      },
+      translate: {
+        eyebrow: 'Translate',
+        title: 'Daily-life visit translator',
+        body: 'Use this when a resident, volunteer, or student needs fast meaning support.',
+        inputLabel: 'Input',
+        inputEmpty: 'No input yet',
+        inputHint: 'Type or record the sentence to translate.',
+        inputSpeech: 'Speech',
+        inputTyped: 'Typed',
+        outputLabel: 'Output',
+        confirmLabel: 'Confirm with staff',
+        failedLabel: 'Translation failed',
+        failedBody: 'The request did not complete. Your input is still here.',
+        retryTranslation: 'Retry translation'
+      },
+      review: {
+        label: 'Review',
+        empty: 'Complete one line to unlock review.',
+        done: 'Today practised. Replay or save one phrase.'
+      },
+      phrasebook: {
+        eyebrow: 'Phrasebook',
+        title: 'Useful Cantonese lines',
+        body: 'Pick a safe line for practice or visit support.',
+        practiceAction: 'Practise this',
+        translateAction: 'Use in translator'
+      },
+      privacy: {
+        eyebrow: 'Privacy',
+        title: 'Privacy and AI limits',
+        body: 'Avoid sensitive personal, medical, legal, or student-identifying information.'
+      }
     },
 
     guide: {
@@ -957,6 +1271,7 @@ export const locales = {
       outputTitle: 'Choose one task above',
       outputEmpty: 'Then type below or hold the microphone to translate.',
       sourceLabel: 'Source',
+      autoRouted: 'Detected an English volunteer line, switched to Volunteer English → Cantonese.',
       romanizationLabel: 'Jyutping pronunciation guide',
       romanizationHelper: 'Numbers show Cantonese tones and are for reading only.',
       greeting: 'The visit interpreter is ready. Choose “Resident speaks Cantonese” or “Volunteer speaks English or Mandarin”, then type or hold the microphone.',
@@ -1011,6 +1326,7 @@ export const locales = {
         translateResidentShort: 'Translate resident',
         translateVolunteerShort: 'Translate volunteer',
         holdToTranslate: 'Hold to translate live',
+        voiceUnavailable: 'Voice unavailable',
         recording: 'Recording… release to translate',
         processingSpeech: 'Processing speech…',
         recognizing: 'Recognizing',
@@ -1135,6 +1451,8 @@ export const locales = {
     // Input Panel
     input: {
       holdToSpeak: 'Hold to Speak',
+      voiceUnavailable: 'Voice unavailable',
+      voiceUnavailableHint: 'Voice input is temporarily unavailable. Please use typing for this pilot.',
       stopSpeaking: 'Stop Playing',
       textPlaceholder: 'Try: m4 goi1, ngo5 soeng2 lin6 zaap6 gwong2 dung1 waa2',
       voice: 'Voice',

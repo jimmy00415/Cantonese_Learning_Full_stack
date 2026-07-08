@@ -7,6 +7,7 @@ const checkOnly = process.argv.includes('--check');
 const files = [
   'index.html',
   'app.js',
+  'errors.js',
   'styles.css',
   'content/playbooks.js',
   'i18n/index.js'
