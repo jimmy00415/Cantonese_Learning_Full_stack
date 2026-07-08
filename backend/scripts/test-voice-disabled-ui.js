@@ -33,7 +33,7 @@ assert.match(
 );
 assert.match(
   markup,
-  /styles\.css\?v=20260704directionfix1/,
+  /styles\.css\?v=20260708v2uiux1/,
   'stylesheet cache-bust should change when unavailable voice styling changes'
 );
 

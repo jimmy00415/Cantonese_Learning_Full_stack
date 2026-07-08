@@ -17,6 +17,8 @@
     "test:visit-translation-quality": "node scripts/test-visit-translation-quality.js",
     "test:visit-layout-contract": "node scripts/test-visit-layout-contract.js",
     "test:voice-disabled-ui": "node scripts/test-voice-disabled-ui.js",
+    "test:v2": "node scripts/test-v2-regression-suite.js",
+    "test:regressions": "node scripts/test-v2-regression-suite.js",
     "eval:cantonese": "node scripts/evaluate-cantonese-quality.js",
     "eval:reliability": "node scripts/evaluate-reliability.js"
   },
