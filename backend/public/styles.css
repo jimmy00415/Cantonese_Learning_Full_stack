@@ -878,7 +878,6 @@ h1 {
 .practice-stage,
 .control-rail,
 .transcript,
-.feedback-panel,
 .input-panel,
 .visit-translate-panel,
 .visit-direction-btn,
@@ -886,8 +885,7 @@ h1 {
   min-width: 0;
 }
 
-.control-rail,
-.feedback-panel {
+.control-rail {
   position: sticky;
   top: 18px;
 }
@@ -1439,12 +1437,6 @@ body[data-user-mode="visit_translation"] .visit-translate-panel {
   color: var(--ink);
 }
 
-.feedback-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
 .feedback-immediate {
   padding: 16px;
 }
@@ -1716,12 +1708,6 @@ body[data-user-mode="visit_translation"] .visit-translate-panel {
   text-align: center;
 }
 
-.speed-presets {
-  display: flex;
-  gap: 5px;
-}
-
-.preset-btn,
 .audio-controls > button,
 .correct-btn {
   min-height: 36px;
@@ -1732,7 +1718,6 @@ body[data-user-mode="visit_translation"] .visit-translate-panel {
   box-shadow: 2px 2px 0 var(--line);
 }
 
-.preset-btn.active,
 .correct-btn:hover:not(:disabled) {
   background: #ecfccb;
 }
@@ -2066,13 +2051,6 @@ body[data-user-mode="visit_translation"] .visit-translate-panel {
     grid-template-columns: minmax(240px, 0.34fr) minmax(0, 1fr);
   }
 
-  .feedback-panel {
-    grid-column: 1 / -1;
-    position: static;
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-  }
-
   .input-panel {
     grid-template-columns: auto auto minmax(220px, 1fr) auto;
   }
@@ -2125,8 +2103,7 @@ body[data-user-mode="visit_translation"] .visit-translate-panel {
   .guide-info-grid,
   .visit-phrase-list,
   .practice-stage,
-  .info-grid,
-  .feedback-panel {
+  .info-grid {
     grid-template-columns: 1fr;
   }
 
@@ -2144,8 +2121,7 @@ body[data-user-mode="visit_translation"] .visit-translate-panel {
     justify-content: flex-start;
   }
 
-  .control-rail,
-  .feedback-panel {
+  .control-rail {
     position: static;
   }
 
@@ -2218,10 +2194,6 @@ body[data-user-mode="visit_translation"] .visit-translate-panel {
     grid-column: 1 / -1;
   }
 
-  .speed-presets {
-    grid-column: 1 / -1;
-  }
-
   .voice-select,
   .speed-control input[type="range"] {
     width: 100%;
@@ -2279,13 +2251,6 @@ body[data-user-mode="visit_translation"] .visit-translate-panel {
     font-size: 15px;
   }
 
-  .speed-presets {
-    grid-column: 1 / -1;
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-  }
-
-  .preset-btn,
   .audio-controls > button,
   .correct-btn {
     min-height: 38px;
@@ -2536,15 +2501,11 @@ button:hover:not(:disabled),
 }
 
 .practice-stage {
-  grid-template-columns: minmax(300px, 0.85fr) minmax(460px, 1.7fr) minmax(280px, 0.95fr);
-  gap: 16px;
-}
-
-.practice-stage {
   grid-template-columns: minmax(220px, 280px) minmax(420px, 1fr) minmax(320px, 0.9fr);
   grid-template-areas:
     "task setup history"
     "coach setup history";
+  gap: 16px;
   align-items: start;
 }
 
@@ -2560,6 +2521,14 @@ button:hover:not(:disabled),
 .practice-coach-panel {
   grid-area: coach;
   min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 12px;
+}
+
+.practice-coach-panel #topCorrections {
+  display: grid;
+  gap: 10px;
 }
 
 .practice-conversation-slot {
@@ -2639,6 +2608,19 @@ button:hover:not(:disabled),
   padding: 12px;
 }
 
+.practice-coach-panel .coach-summary-card {
+  padding: 10px 0 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.practice-coach-panel .coach-modal-warning {
+  margin: 0;
+}
+
 .coach-summary-text {
   max-height: min(44vh, 420px);
   overflow: auto;
@@ -2713,7 +2695,6 @@ body[data-user-mode="visit_translation"] .mode-section,
 body[data-user-mode="visit_translation"] .controls,
 body[data-user-mode="visit_translation"] .scenario-guide,
 body[data-user-mode="visit_translation"] .starter,
-body[data-user-mode="visit_translation"] .feedback-panel,
 body[data-user-mode="visit_translation"] #correctMeBtn,
 body[data-user-mode="visit_translation"] .voice-control {
   display: none;
@@ -3463,15 +3444,10 @@ body[data-user-mode="visit_translation"] .send-btn {
     grid-template-columns: 1fr;
   }
 
-  .control-rail,
-  .feedback-panel {
+  .control-rail {
     position: static;
     max-height: none;
     overflow: visible;
-  }
-
-  .feedback-panel {
-    grid-template-columns: 1fr;
   }
 
   .transcript-body {

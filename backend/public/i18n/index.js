@@ -96,12 +96,12 @@ export const locales = {
         voiceTyping: '以打字為先'
       },
       practice: {
-        eyebrow: 'Practice',
-        taskTitle: "Today's Cantonese line",
-        taskBody: 'Practise asking someone to speak a little slower.',
+        eyebrow: '練習',
+        taskTitle: '今日一句',
+        taskBody: '請對方講慢少少。',
         coachEyebrow: 'Coach',
-        coachTitle: 'One useful note',
-        coachEmpty: 'Send one line to get a focused note.',
+        coachTitle: 'Coach',
+        coachEmpty: '發送一句後顯示。',
         modeHabit: 'Daily practice',
         modeTeaching: 'Correction practice',
         modeFree: 'Free talk',
@@ -413,7 +413,7 @@ export const locales = {
     controls: {
       scenario: '情景：',
       newSession: '開始任務',
-      clearChat: '清除記錄'
+      clearChat: '清除'
     },
     
     // Starter Section
@@ -424,8 +424,8 @@ export const locales = {
     
     // Transcript
     transcript: {
-      eyebrow: '即時記錄',
-      title: '口譯歷史',
+      eyebrow: '記錄',
+      title: '歷史',
       scenarioPrefix: '情景：',
       freeChat: '自由對話',
       sessionNotStarted: '未開始',
@@ -607,12 +607,12 @@ export const locales = {
         voiceTyping: '以打字为先'
       },
       practice: {
-        eyebrow: 'Practice',
-        taskTitle: "Today's Cantonese line",
-        taskBody: 'Practise asking someone to speak a little slower.',
+        eyebrow: '练习',
+        taskTitle: '今日一句',
+        taskBody: '请对方说慢一点。',
         coachEyebrow: 'Coach',
-        coachTitle: 'One useful note',
-        coachEmpty: 'Send one line to get a focused note.',
+        coachTitle: 'Coach',
+        coachEmpty: '发送一句后显示。',
         modeHabit: 'Daily practice',
         modeTeaching: 'Correction practice',
         modeFree: 'Free talk',
@@ -924,7 +924,7 @@ export const locales = {
     controls: {
       scenario: '情景：',
       newSession: '开始任务',
-      clearChat: '清除记录'
+      clearChat: '清除'
     },
     
     // Starter Section
@@ -935,8 +935,8 @@ export const locales = {
     
     // Transcript
     transcript: {
-      eyebrow: '实时记录',
-      title: '口译历史',
+      eyebrow: '记录',
+      title: '历史',
       scenarioPrefix: '情景：',
       freeChat: '自由对话',
       sessionNotStarted: '未开始',
@@ -1119,11 +1119,11 @@ export const locales = {
       },
       practice: {
         eyebrow: 'Practice',
-        taskTitle: "Today's Cantonese line",
-        taskBody: 'Practise asking someone to speak a little slower.',
+        taskTitle: 'Daily line',
+        taskBody: 'Ask someone to speak slower.',
         coachEyebrow: 'Coach',
-        coachTitle: 'One useful note',
-        coachEmpty: 'Send one line to get a focused note.',
+        coachTitle: 'Coach',
+        coachEmpty: 'Feedback appears after one line.',
         modeHabit: 'Daily practice',
         modeTeaching: 'Correction practice',
         modeFree: 'Free talk',
@@ -1435,7 +1435,7 @@ export const locales = {
     controls: {
       scenario: 'Scenario:',
       newSession: 'Start Mission',
-      clearChat: 'Clear History'
+      clearChat: 'Clear'
     },
     
     // Starter Section
@@ -1446,8 +1446,8 @@ export const locales = {
     
     // Transcript
     transcript: {
-      eyebrow: 'Live log',
-      title: 'Interpreter history',
+      eyebrow: 'Log',
+      title: 'History',
       scenarioPrefix: 'Scenario: ',
       freeChat: 'Free Chat',
       sessionNotStarted: 'Not Started',

@@ -91,10 +91,9 @@ const correctMeBtn = document.getElementById('correctMeBtn');
 // P3-1: Language toggle
 const uiLangSelect = document.getElementById('uiLang');
 
-// P3-2: TTS Speed slider and presets
+// P3-2: TTS speed slider
 const ttsSpeedSlider = document.getElementById('ttsSpeed');
 const ttsSpeedValue = document.getElementById('ttsSpeedValue');
-const presetBtns = document.querySelectorAll('.preset-btn');
 
 // P3-3: Recording countdown timer
 const recordingIndicator = document.getElementById('recordingIndicator');
@@ -2352,26 +2351,13 @@ if (ttsSpeedSlider) {
   const savedSpeed = localStorage.getItem('ttsSpeed') || '1.0';
   ttsSpeedSlider.value = savedSpeed;
   if (ttsSpeedValue) ttsSpeedValue.textContent = `${parseFloat(savedSpeed).toFixed(2)}×`;
-  updatePresetButtonsActive(parseFloat(savedSpeed));
 
   ttsSpeedSlider.addEventListener('input', (e) => {
     const speed = parseFloat(e.target.value);
     if (ttsSpeedValue) ttsSpeedValue.textContent = `${speed.toFixed(2)}×`;
     localStorage.setItem('ttsSpeed', speed.toString());
-    updatePresetButtonsActive(speed);
   });
 }
-
-// P3-2: Preset buttons
-presetBtns.forEach(btn => {
-  btn.addEventListener('click', () => {
-    const speed = parseFloat(btn.dataset.speed);
-    if (ttsSpeedSlider) ttsSpeedSlider.value = speed.toString();
-    if (ttsSpeedValue) ttsSpeedValue.textContent = `${speed.toFixed(2)}×`;
-    localStorage.setItem('ttsSpeed', speed.toString());
-    updatePresetButtonsActive(speed);
-  });
-});
 
 if (voiceSelect) {
   voiceSelect.addEventListener('change', () => {
@@ -2379,13 +2365,6 @@ if (voiceSelect) {
     localStorage.setItem('ttsVoice', currentTtsVoice);
     updateTtsPill(currentTtsProvider);
     setNotice(`${voicePrefixLabel()}：${getVoiceLabel()}`, 'info');
-  });
-}
-
-function updatePresetButtonsActive(currentSpeed) {
-  presetBtns.forEach(btn => {
-    const presetSpeed = parseFloat(btn.dataset.speed);
-    btn.classList.toggle('active', Math.abs(presetSpeed - currentSpeed) < 0.01);
   });
 }
 
@@ -2480,7 +2459,6 @@ document.addEventListener('keydown', (e) => {
     ttsSpeedSlider.value = nextSpeed.toFixed(2);
     if (ttsSpeedValue) ttsSpeedValue.textContent = `${nextSpeed.toFixed(2)}×`;
     localStorage.setItem('ttsSpeed', nextSpeed.toString());
-    updatePresetButtonsActive(nextSpeed);
     setNotice(`播放速度：${nextSpeed.toFixed(2)}x`, 'info');
     return;
   }
