@@ -8,11 +8,12 @@ const META_API = document.querySelector('meta[name="api-base"]');
 // Speech SDK version tracking (P0-1)
 const SPEECH_SDK_VERSION = '1.38.0'; // Update when upgrading SDK
 
-// Auto-detect localhost for development, use same-origin backend in production
-const DEFAULT_API_BASE = window.location.hostname === 'localhost'
+// Vite dev runs on 5173 and talks to the backend dev port; backend-served pages use same-origin.
+const IS_VITE_DEV_SERVER = window.location.hostname === 'localhost' && window.location.port === '5173';
+const DEFAULT_API_BASE = IS_VITE_DEV_SERVER
   ? `${window.location.protocol}//${window.location.hostname}:4000/api`
   : `${window.location.origin}/api`;
-const API_BASE = window.__API_BASE__ || (window.location.hostname === 'localhost' ? DEFAULT_API_BASE : META_API?.content || DEFAULT_API_BASE);
+const API_BASE = window.__API_BASE__ || (IS_VITE_DEV_SERVER ? DEFAULT_API_BASE : META_API?.content || DEFAULT_API_BASE);
 
 const statusEl = document.getElementById('status');
 const transcriptEl = document.getElementById('transcript');
@@ -61,6 +62,8 @@ const visitDirectionButtons = document.querySelectorAll('[data-visit-direction]'
 const visitTaskButtons = document.querySelectorAll('[data-visit-task]');
 const visitOptionGroups = document.querySelectorAll('[data-visit-option-group]');
 const visitTranslateBtn = document.getElementById('visitTranslateBtn');
+const visitTextInput = document.getElementById('visitTextInput');
+const visitHoldToSpeak = document.getElementById('visitHoldToSpeak');
 const visitInputCard = document.getElementById('visitInputCard');
 const visitOutputCard = document.getElementById('visitOutputCard');
 const visitTranslationOutput = document.getElementById('visitTranslationOutput');
@@ -209,15 +212,24 @@ const VOICE_UI_STATES = {
 function setVoiceUiState(stateName) {
   const state = stateName || VOICE_UI_STATES.CHECKING;
   document.body.dataset.voiceState = state;
-  if (!holdBtn) return;
-  holdBtn.classList.toggle('voice-state-unavailable', state === VOICE_UI_STATES.UNAVAILABLE);
-  holdBtn.classList.toggle('voice-state-recording', state === VOICE_UI_STATES.RECORDING);
-  holdBtn.classList.toggle('voice-state-processing', state === VOICE_UI_STATES.PROCESSING);
+  const micButtons = [holdBtn, visitHoldToSpeak].filter(Boolean);
+  micButtons.forEach((button) => {
+    button.classList.toggle('voice-state-unavailable', state === VOICE_UI_STATES.UNAVAILABLE);
+    button.classList.toggle('voice-state-recording', state === VOICE_UI_STATES.RECORDING);
+    button.classList.toggle('voice-state-processing', state === VOICE_UI_STATES.PROCESSING);
+  });
   if (state === VOICE_UI_STATES.UNAVAILABLE) {
-    holdBtn.textContent = t('input.voiceUnavailable');
-    holdBtn.title = t('input.voiceUnavailableHint');
+    if (holdBtn) {
+      holdBtn.textContent = t('input.voiceUnavailable');
+      holdBtn.title = t('input.voiceUnavailableHint');
+    }
+    if (visitHoldToSpeak) {
+      visitHoldToSpeak.textContent = t('visitTranslate.actions.voiceUnavailable');
+      visitHoldToSpeak.title = t('input.voiceUnavailableHint');
+    }
   } else if (state === VOICE_UI_STATES.AVAILABLE) {
-    holdBtn.title = '';
+    if (holdBtn) holdBtn.title = '';
+    if (visitHoldToSpeak) visitHoldToSpeak.title = '';
   }
 }
 
@@ -508,8 +520,8 @@ function renderRoleContext() {
     });
   }
 
-  roleContextPanel.dataset.viewState = 'shown';
-  roleContextPanel.hidden = currentAppView !== 'translate';
+  roleContextPanel.dataset.viewState = 'hidden';
+  roleContextPanel.hidden = true;
 }
 
 function showRoleSelection() {
@@ -680,9 +692,9 @@ function usePhraseForPractice(phraseText) {
 function usePhraseForTranslation(phraseText) {
   setAppView('translate');
   selectUserMode('visit_translation');
-  if (textInput) {
-    textInput.value = phraseText || '';
-    textInput.focus();
+  if (visitTextInput) {
+    visitTextInput.value = phraseText || '';
+    visitTextInput.focus();
   }
 }
 
@@ -746,6 +758,9 @@ function resetVisitPhrase() {
   if (textInput.value && elderlyVisitPlaybook.phrases.some((phrase) => phrase.cantonese === textInput.value)) {
     textInput.value = '';
   }
+  if (visitTextInput?.value && elderlyVisitPlaybook.phrases.some((phrase) => phrase.cantonese === visitTextInput.value)) {
+    visitTextInput.value = '';
+  }
 }
 
 function resetVisitTranslationOutput() {
@@ -808,11 +823,22 @@ function updateInputLabelsForMode() {
     textInput.placeholder = placeholder && placeholder !== meta.placeholderKey
       ? placeholder
       : t('visitTranslate.outputEmpty');
+    if (visitTextInput) {
+      visitTextInput.placeholder = placeholder && placeholder !== meta.placeholderKey
+        ? placeholder
+        : t('visitTranslate.inputPlaceholder');
+    }
     sendBtn.textContent = t(meta.sendKey);
     holdBtn.textContent = voiceInputEnabled
       ? t('visitTranslate.actions.holdToTranslate')
       : t('visitTranslate.actions.voiceUnavailable');
     holdBtn.title = voiceInputEnabled ? '' : t('input.voiceUnavailableHint');
+    if (visitHoldToSpeak) {
+      visitHoldToSpeak.textContent = voiceInputEnabled
+        ? t('visitTranslate.actions.holdToTranslate')
+        : t('visitTranslate.actions.voiceUnavailable');
+      visitHoldToSpeak.title = voiceInputEnabled ? '' : t('input.voiceUnavailableHint');
+    }
     return;
   }
 
@@ -820,6 +846,11 @@ function updateInputLabelsForMode() {
   sendBtn.textContent = t('input.send');
   holdBtn.textContent = voiceInputEnabled ? t('input.holdToSpeak') : t('input.voiceUnavailable');
   holdBtn.title = voiceInputEnabled ? '' : t('input.voiceUnavailableHint');
+}
+
+function setMicButtonText(text) {
+  if (holdBtn) holdBtn.textContent = text;
+  if (isVisitTranslationMode() && visitHoldToSpeak) visitHoldToSpeak.textContent = text;
 }
 
 function getRomanizationText(romanization) {
@@ -1015,7 +1046,11 @@ async function translateVisitText(text, inputType = 'text', directionOverride) {
     }
     renderVisitTranslation(res);
     renderMessage({ role: 'ai', text: res.displayText || res.translatedText, ttsAudio: res.ttsAudio, timestamp: Date.now() });
-    textInput.value = '';
+    if (visitTextInput && isVisitTranslationMode()) {
+      visitTextInput.value = '';
+    } else {
+      textInput.value = '';
+    }
     setNotice(res.needsConfirmation ? t('visitTranslate.notices.confirmWithStaff') : t('visitTranslate.notices.done'), res.needsConfirmation ? 'warning' : 'success');
     if (res.ttsAudio) await playAudio(res.ttsAudio, getPlaybackRate());
   } catch (err) {
@@ -1139,6 +1174,12 @@ function setControlsEnabled(enabled) {
     holdBtn.setAttribute('aria-disabled', String(holdDisabled));
     holdBtn.classList.toggle('is-unavailable', !voiceInputEnabled);
   }
+  if (visitHoldToSpeak) {
+    const visitHoldDisabled = !enabled || !voiceInputEnabled;
+    visitHoldToSpeak.disabled = visitHoldDisabled;
+    visitHoldToSpeak.setAttribute('aria-disabled', String(visitHoldDisabled));
+    visitHoldToSpeak.classList.toggle('is-unavailable', !voiceInputEnabled);
+  }
   setVoiceUiState(voiceInputEnabled ? 'available' : 'unavailable');
   updateReplayAvailability(enabled);
   if (voiceSelect) voiceSelect.disabled = !enabled || !voiceSelectionEnabled;
@@ -1152,6 +1193,11 @@ function updateVoiceInputAvailability(health = pilotHealthSnapshot) {
     holdBtn.disabled = !voiceInputEnabled;
     holdBtn.setAttribute('aria-disabled', String(!voiceInputEnabled));
     holdBtn.classList.toggle('is-unavailable', !voiceInputEnabled);
+  }
+  if (visitHoldToSpeak) {
+    visitHoldToSpeak.disabled = !voiceInputEnabled;
+    visitHoldToSpeak.setAttribute('aria-disabled', String(!voiceInputEnabled));
+    visitHoldToSpeak.classList.toggle('is-unavailable', !voiceInputEnabled);
   }
   setVoiceUiState(voiceInputEnabled ? 'available' : 'unavailable');
 }
@@ -1919,6 +1965,11 @@ holdBtn.addEventListener('touchstart', (e) => {
   e.preventDefault();
   handleRecordStart();
 });
+visitHoldToSpeak?.addEventListener('mousedown', handleRecordStart);
+visitHoldToSpeak?.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  handleRecordStart();
+});
 
 // Azure Speech SDK recognizer (initialized on demand)
 let speechRecognizer = null;
@@ -2117,7 +2168,7 @@ async function startAzureSpeechSdkRecording() {
   speechRecognizer.recognizing = (_sender, event) => {
     clearPauseTimer();
     const partialText = event.result?.text || '';
-    if (partialText) holdBtn.textContent = `${t('visitTranslate.actions.recognizing')}: ${partialText.substring(0, 20)}...`;
+    if (partialText) setMicButtonText(`${t('visitTranslate.actions.recognizing')}: ${partialText.substring(0, 20)}...`);
     pauseTimer = setTimeout(() => setNotice('唔緊要，慢慢講...', 'info'), 2000);
   };
 
@@ -2127,7 +2178,7 @@ async function startAzureSpeechSdkRecording() {
       const transcript = (event.result.text || '').trim();
       if (transcript) {
         azureSdkTranscript = [azureSdkTranscript, transcript].filter(Boolean).join(' ');
-        holdBtn.textContent = `${t('visitTranslate.actions.recognized')}: ${transcript.substring(0, 20)}...`;
+        setMicButtonText(`${t('visitTranslate.actions.recognized')}: ${transcript.substring(0, 20)}...`);
         console.log(`Azure SDK recognized: ${transcript}`);
       }
     } else if (event.result.reason === SpeechSDK.ResultReason.NoMatch) {
@@ -2180,9 +2231,9 @@ async function handleRecordStart() {
     isRecording = true;
     setVoiceUiState('recording');
     setSystemState(STATES.LISTENING);
-    holdBtn.textContent = isVisitTranslationMode()
+    setMicButtonText(isVisitTranslationMode()
       ? t('visitTranslate.actions.recording')
-      : '錄音中... 放開即發送';
+      : '錄音中... 放開即發送');
     if (currentAsrProvider === 'azure') {
       await startAzureSpeechSdkRecording();
     } else {
@@ -2210,9 +2261,9 @@ function handleRecordStop() {
     isRecording = false;
     stopRecordingTimer();
     setVoiceUiState('processing');
-    holdBtn.textContent = isVisitTranslationMode()
+    setMicButtonText(isVisitTranslationMode()
       ? t('visitTranslate.actions.processingSpeech')
-      : '處理錄音中...';
+      : '處理錄音中...');
     mediaRecorder.stop();
     return;
   }
@@ -2227,9 +2278,9 @@ function handleRecordStop() {
     const recognizerRef = speechRecognizer;
     speechRecognizer = null; // Prevent double-stop
     setVoiceUiState('processing');
-    holdBtn.textContent = isVisitTranslationMode()
+    setMicButtonText(isVisitTranslationMode()
       ? t('visitTranslate.actions.processingSpeech')
-      : '處理錄音中...';
+      : '處理錄音中...');
     setSystemState(STATES.PROCESSING);
     setStatus('Azure Speech 轉換中...');
     recognizerRef.stopContinuousRecognitionAsync(
@@ -2737,7 +2788,10 @@ visitDirection?.addEventListener('change', () => {
 });
 
 clearVisitPhrase?.addEventListener('click', resetVisitPhrase);
-visitTranslateBtn?.addEventListener('click', () => translateVisitText(textInput.value, 'text'));
+visitTextInput?.addEventListener('keyup', (event) => {
+  if (event.key === 'Enter') visitTranslateBtn?.click();
+});
+visitTranslateBtn?.addEventListener('click', () => translateVisitText(visitTextInput?.value || '', 'text'));
 
 // P3-1: Update all UI text when language changes
 function updateUILanguage() {

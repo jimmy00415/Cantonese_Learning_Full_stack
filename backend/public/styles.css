@@ -2862,6 +2862,68 @@ body[data-user-mode="visit_translation"] .visit-direction-btn.active span {
   pointer-events: none;
 }
 
+.visit-entry-bar {
+  display: grid;
+  grid-template-columns: minmax(136px, auto) minmax(0, 1fr) minmax(180px, auto);
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(17, 24, 39, 0.12);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.visit-mic-btn {
+  min-height: 48px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 8px;
+  background: #111827;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.visit-mic-btn.is-unavailable,
+.visit-mic-btn.voice-state-unavailable {
+  background: #e5e7eb;
+  color: #4b5563;
+  cursor: not-allowed;
+}
+
+.visit-mic-btn.voice-state-recording {
+  background: #dc2626;
+}
+
+.visit-mic-btn.voice-state-processing {
+  background: #1d4ed8;
+}
+
+.visit-text-entry {
+  min-width: 0;
+}
+
+.visit-text-entry input {
+  width: 100%;
+  min-height: 48px;
+  min-width: 0;
+  padding: 0 14px;
+  border: 1px solid rgba(17, 24, 39, 0.16);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+  font-size: 16px;
+  outline: none;
+}
+
+.visit-text-entry input:focus {
+  border-color: #007aff;
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.14);
+}
+
 .visit-primary-action {
   min-height: 52px;
   border: 0;
@@ -3287,6 +3349,15 @@ body[data-user-mode="visit_translation"] .send-btn {
 
   .visit-pair-grid {
     grid-template-columns: 1fr;
+  }
+
+  .visit-entry-bar {
+    grid-template-columns: 1fr;
+  }
+
+  .visit-mic-btn,
+  .visit-primary-action {
+    width: 100%;
   }
 
   .practice-workspace-grid {

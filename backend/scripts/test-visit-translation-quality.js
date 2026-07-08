@@ -44,6 +44,25 @@ const practiceMandarin = createDailyLifeVisitTranslation(noisyCantonesePracticeR
 assert.ok(practiceMandarin, 'expected a Mandarin fallback for a noisy Cantonese request to speak/listen in Cantonese');
 assert.equal(practiceMandarin.displayText, '可以和我讲一会儿粤语，也听我说一下吗？');
 
+const waterEnglish = createDailyLifeVisitTranslation('唔該，我想飲水。', 'yue_to_en');
+assert.ok(waterEnglish, 'expected a first-person resident water request fallback');
+assert.equal(waterEnglish.displayText, 'I would like some water, please.');
+assert.equal(waterEnglish.needsConfirmation, false);
+
+const waterMandarin = createDailyLifeVisitTranslation('唔該，我想飲水。', 'yue_to_zh');
+assert.ok(waterMandarin, 'expected a Mandarin first-person resident water request fallback');
+assert.equal(waterMandarin.displayText, '我想喝点水，谢谢。');
+
+const originCantonese = createDailyLifeVisitTranslation('你喺邊度嚟㗎？', 'yue_to_en');
+assert.ok(originCantonese, 'expected a known resident origin question fallback');
+assert.equal(originCantonese.displayText, 'Where are you from?');
+
+const volunteerOrigin = createDailyLifeVisitTranslation('Where are you from?', 'en_to_yue');
+assert.ok(volunteerOrigin, 'expected a known English volunteer question fallback');
+assert.equal(volunteerOrigin.displayText, '你喺邊度嚟㗎？');
+assert.equal(volunteerOrigin.speakableText, '你喺邊度嚟㗎？');
+assert.equal(volunteerOrigin.romanization.text, 'nei5 hai2 bin1 dou6 lai4 gaa3?');
+
 assert.equal(
   isGenericVisitTranslation('The resident said something in Cantonese. Please ask staff to confirm the exact meaning.'),
   true

@@ -816,31 +816,7 @@ function volunteerLineToCantonese(sourceText) {
 }
 
 function buildRuleBasedVisitTranslation(sourceText, direction) {
-  if (direction === 'yue_to_en') {
-    const displayText = cantoneseQuestionToEnglish(sourceText);
-    if (displayText) return { translatedText: displayText, speakableText: '', romanization: null, displayText };
-    return createDailyLifeVisitTranslation(sourceText, direction);
-  }
-  if (direction === 'yue_to_zh') {
-    const displayText = cantoneseQuestionToMandarin(sourceText);
-    if (displayText) return { translatedText: displayText, speakableText: '', romanization: null, displayText };
-    return createDailyLifeVisitTranslation(sourceText, direction);
-  }
-  if (direction === 'en_to_yue' || direction === 'zh_to_yue') {
-    const displayText = volunteerLineToCantonese(sourceText);
-    if (displayText) {
-      return {
-        translatedText: displayText,
-        speakableText: displayText,
-        romanization: displayText.includes('水')
-          ? normalizeRomanization('nei5 soeng2 m4 soeng2 jam2 di1 seoi2?')
-          : null,
-        displayText
-      };
-    }
-    return createDailyLifeVisitTranslation(sourceText, direction);
-  }
-  return null;
+  return createDailyLifeVisitTranslation(sourceText, direction);
 }
 
 function completeRuleBasedVisitTranslation(sourceText, direction, ruleBased) {
@@ -880,8 +856,8 @@ function mockVisitTranslation(sourceText, direction) {
 }
 
 function buildBasicVisitEnglishTranslation(sourceText) {
-  return cantoneseQuestionToEnglish(sourceText)
-    || createDailyLifeVisitTranslation(sourceText, 'yue_to_en')?.displayText
+  return createDailyLifeVisitTranslation(sourceText, 'yue_to_en')?.displayText
+    || cantoneseQuestionToEnglish(sourceText)
     || 'The resident said something in Cantonese. Please ask staff to confirm the exact meaning.';
 }
 

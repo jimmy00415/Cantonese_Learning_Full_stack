@@ -26,6 +26,11 @@ assert.match(
   /translateVisitText\(\s*visitTranslationState\.sourceText\s*,\s*visitTranslationState\.inputType\s*\|\|\s*'text'\s*,\s*visitTranslationState\.direction\s*\|\|\s*DEFAULT_VISIT_DIRECTION\s*\)/,
   'Retry should use stored failed request direction instead of current selector state'
 );
+assert.match(
+  app,
+  /if\s*\(\s*visitTextInput\s*&&\s*isVisitTranslationMode\(\)\s*\)\s*{\s*visitTextInput\.value\s*=\s*'';/,
+  'Successful visit translation should clear the dedicated inline input'
+);
 assert.doesNotMatch(
   app,
   /visitRetryBtn\.onclick\s*=\s*\(\)\s*=>\s*translateVisitText\(sourceText,\s*visitTranslationState\.inputType\s*\|\|\s*'text'\)/,

@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Hong Kong Buddy</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23007aff'/%3E%3Ctext x='32' y='40' text-anchor='middle' font-family='Arial,sans-serif' font-size='24' font-weight='700' fill='white'%3EHK%3C/text%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+HK:wght@400;500;700;900&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
@@ -153,7 +154,14 @@
           <option value="yue_to_zh" data-i18n="visitTranslate.directions.yue_to_zh">Cantonese → Mandarin</option>
           <option value="zh_to_yue" data-i18n="visitTranslate.directions.zh_to_yue">Mandarin → Cantonese</option>
         </select>
-        <button type="button" id="visitTranslateBtn" class="visit-primary-action" data-i18n="visitTranslate.actions.translateResident">Translate resident speech</button>
+        <div class="visit-entry-bar" id="visitEntryBar">
+          <button type="button" id="visitHoldToSpeak" class="visit-mic-btn is-unavailable" data-i18n="visitTranslate.actions.voiceUnavailable" disabled aria-disabled="true">Voice unavailable</button>
+          <div class="visit-text-entry">
+            <label for="visitTextInput" class="sr-only" data-i18n="visitTranslate.inputLabel">Visit sentence</label>
+            <input id="visitTextInput" type="text" inputmode="text" autocomplete="off" data-i18n-placeholder="visitTranslate.inputPlaceholder" placeholder="Type what the resident said in Cantonese" />
+          </div>
+          <button type="button" id="visitTranslateBtn" class="visit-primary-action" data-i18n="visitTranslate.actions.translateResident">Translate resident speech</button>
+        </div>
         <div class="visit-pair-grid" aria-label="Visit translation result">
           <article class="visit-pair-card" id="visitInputCard">
             <span class="visit-output-kicker" data-i18n="v2.translate.inputLabel">Input</span>
@@ -173,7 +181,7 @@
       </section>
     </section>
 
-    <section class="hero app-view" data-app-view="translate" aria-labelledby="heroTitle" hidden>
+    <section class="hero app-view" data-app-view="legacy" aria-labelledby="heroTitle" hidden>
       <div class="hero-copy">
         <p class="hero-kicker" data-i18n="pilot.kicker">External Pilot</p>
         <h2 id="heroTitle" data-i18n="pilot.title">Start a Cantonese visit in under one minute</h2>
@@ -214,7 +222,7 @@
       </div>
     </section>
 
-    <section class="role-onboarding app-view" id="roleOnboarding" data-app-view="translate" aria-labelledby="roleOnboardingTitle" hidden>
+    <section class="role-onboarding app-view" id="roleOnboarding" data-app-view="legacy" aria-labelledby="roleOnboardingTitle" hidden>
       <div class="role-onboarding-copy">
         <p class="section-eyebrow" data-i18n="onboarding.eyebrow">Start here</p>
         <h2 id="roleOnboardingTitle" data-i18n="onboarding.title">What do you need today?</h2>
@@ -248,7 +256,7 @@
       </div>
     </section>
 
-    <section class="role-context-panel app-view" id="roleContextPanel" data-app-view="translate" data-view-state="hidden" aria-live="polite" hidden>
+    <section class="role-context-panel app-view" id="roleContextPanel" data-app-view="legacy" data-view-state="hidden" aria-live="polite" hidden>
       <div>
         <p class="section-eyebrow" id="roleContextEyebrow">Selected mode</p>
         <h2 id="roleContextTitle">International Student Mode</h2>
@@ -257,7 +265,7 @@
       <div class="role-context-actions" id="roleContextActions"></div>
     </section>
 
-    <section class="guide-panel action-hub app-view" id="guidePanel" data-app-view="translate" aria-labelledby="guideTitle" hidden>
+    <section class="guide-panel action-hub app-view" id="guidePanel" data-app-view="legacy" aria-labelledby="guideTitle" hidden>
       <div class="guide-copy">
         <p class="section-eyebrow" data-i18n="guide.eyebrow">User guide</p>
         <h2 id="guideTitle" data-i18n="guide.title">How to use Hong Kong Buddy in an activity</h2>
@@ -377,7 +385,7 @@
       </aside>
     </section>
 
-    <section class="input-panel practice-input-dock app-view" id="practiceInputDock" data-app-view="practice translate" aria-label="Practice input" hidden>
+    <section class="input-panel practice-input-dock app-view" id="practiceInputDock" data-app-view="practice" aria-label="Practice input" hidden>
       <button id="holdToSpeak" class="mic is-unavailable" data-i18n="input.holdToSpeak" disabled aria-disabled="true">按住說話</button>
       <button id="stopSpeaking" class="stop-btn" data-i18n="input.stopSpeaking" hidden>停止播放</button>
       <div class="recording-indicator" id="recordingIndicator" hidden>
