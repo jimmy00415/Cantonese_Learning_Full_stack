@@ -93,6 +93,70 @@
         <h2 id="translateViewTitle" data-i18n="v2.translate.title">Daily-life visit translator</h2>
         <p data-i18n="v2.translate.body">Use this when a resident, volunteer, or student needs fast meaning support.</p>
       </div>
+
+      <section class="visit-translate-panel" id="visitTranslatePanel" aria-labelledby="visitTranslateTitle">
+        <div class="visit-console-hero">
+          <span class="visit-live-badge" data-i18n="visitTranslate.liveBadge">Live visit interpreter</span>
+          <h3 id="visitTranslateTitle" data-i18n="visitTranslate.consoleTitle">Community visit interpreter</h3>
+          <p class="visit-mode-helper" data-i18n="visitTranslate.helper">Choose one of two live translation jobs for an elderly visit. Use the microphone for speech or type when the room is noisy.</p>
+        </div>
+
+        <div class="visit-task-grid" role="group" aria-labelledby="visitTranslateTitle">
+          <button type="button" class="visit-task-card active" data-visit-task="resident">
+            <span class="visit-task-code">01</span>
+            <strong data-i18n="visitTranslate.tasks.resident.title">Resident speaks Cantonese</strong>
+            <span data-i18n="visitTranslate.tasks.resident.body">Translate the resident’s Cantonese into English or Mandarin.</span>
+          </button>
+          <button type="button" class="visit-task-card" data-visit-task="volunteer">
+            <span class="visit-task-code">02</span>
+            <strong data-i18n="visitTranslate.tasks.volunteer.title">Volunteer speaks English or Mandarin</strong>
+            <span data-i18n="visitTranslate.tasks.volunteer.body">Translate the volunteer’s line into polite Cantonese.</span>
+          </button>
+        </div>
+
+        <div class="visit-direction-panel" data-visit-option-group="resident">
+          <span class="visit-speaker-prompt" data-i18n="visitTranslate.groups.resident">Translate resident answer to</span>
+          <div class="visit-direction-quick" role="group" aria-label="Resident output language">
+            <button type="button" class="visit-direction-btn active" data-visit-direction="yue_to_en">
+              <strong data-i18n="visitTranslate.quickDirections.residentEnglish.title">English</strong>
+              <span data-i18n="visitTranslate.quickDirections.residentEnglish.body">For international volunteers</span>
+            </button>
+            <button type="button" class="visit-direction-btn" data-visit-direction="yue_to_zh">
+              <strong data-i18n="visitTranslate.quickDirections.residentMandarin.title">Mandarin</strong>
+              <span data-i18n="visitTranslate.quickDirections.residentMandarin.body">For Mandarin-speaking volunteers</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="visit-direction-panel" data-visit-option-group="volunteer" hidden>
+          <span class="visit-speaker-prompt" data-i18n="visitTranslate.groups.volunteer">Translate volunteer line from</span>
+          <div class="visit-direction-quick" role="group" aria-label="Volunteer input language">
+            <button type="button" class="visit-direction-btn" data-visit-direction="en_to_yue">
+              <strong data-i18n="visitTranslate.quickDirections.volunteerEnglish.title">English</strong>
+              <span data-i18n="visitTranslate.quickDirections.volunteerEnglish.body">English question to Cantonese</span>
+            </button>
+            <button type="button" class="visit-direction-btn" data-visit-direction="zh_to_yue">
+              <strong data-i18n="visitTranslate.quickDirections.volunteerMandarin.title">Mandarin</strong>
+              <span data-i18n="visitTranslate.quickDirections.volunteerMandarin.body">Mandarin question to Cantonese</span>
+            </button>
+          </div>
+        </div>
+
+        <label class="sr-only" for="visitDirection" data-i18n="visitTranslate.directionLabel">Direction</label>
+        <select id="visitDirection" class="visit-direction-select" aria-label="Visit translation direction">
+          <option value="en_to_yue" data-i18n="visitTranslate.directions.en_to_yue">English → Cantonese</option>
+          <option value="yue_to_en" data-i18n="visitTranslate.directions.yue_to_en" selected>Cantonese → English</option>
+          <option value="yue_to_zh" data-i18n="visitTranslate.directions.yue_to_zh">Cantonese → Mandarin</option>
+          <option value="zh_to_yue" data-i18n="visitTranslate.directions.zh_to_yue">Mandarin → Cantonese</option>
+        </select>
+        <button type="button" id="visitTranslateBtn" class="visit-primary-action" data-i18n="visitTranslate.actions.translateResident">Translate resident speech</button>
+        <div class="visit-translation-output" id="visitTranslationOutput" aria-live="polite">
+          <span class="visit-output-kicker" data-i18n="visitTranslate.outputReady">Ready</span>
+          <strong data-i18n="visitTranslate.outputTitle">Choose a task above</strong>
+          <span data-i18n="visitTranslate.outputEmpty">Then type or hold the microphone to translate.</span>
+        </div>
+        <div class="visit-translation-warning" id="visitTranslationWarning" hidden></div>
+      </section>
     </section>
 
     <section class="hero app-view" data-app-view="translate" aria-labelledby="heroTitle">
@@ -239,70 +303,6 @@
           <button id="newSession" data-i18n="controls.newSession">開始任務</button>
         </section>
 
-        <section class="visit-translate-panel" id="visitTranslatePanel" aria-labelledby="visitTranslateTitle">
-          <div class="visit-console-hero">
-            <span class="visit-live-badge" data-i18n="visitTranslate.liveBadge">Live visit interpreter</span>
-            <h3 id="visitTranslateTitle" data-i18n="visitTranslate.consoleTitle">Community visit interpreter</h3>
-            <p class="visit-mode-helper" data-i18n="visitTranslate.helper">Choose one of two live translation jobs for an elderly visit. Use the microphone for speech or type when the room is noisy.</p>
-          </div>
-
-          <div class="visit-task-grid" role="group" aria-labelledby="visitTranslateTitle">
-            <button type="button" class="visit-task-card active" data-visit-task="resident">
-              <span class="visit-task-code">01</span>
-              <strong data-i18n="visitTranslate.tasks.resident.title">Resident speaks Cantonese</strong>
-              <span data-i18n="visitTranslate.tasks.resident.body">Translate the resident’s Cantonese into English or Mandarin.</span>
-            </button>
-            <button type="button" class="visit-task-card" data-visit-task="volunteer">
-              <span class="visit-task-code">02</span>
-              <strong data-i18n="visitTranslate.tasks.volunteer.title">Volunteer speaks English or Mandarin</strong>
-              <span data-i18n="visitTranslate.tasks.volunteer.body">Translate the volunteer’s line into polite Cantonese.</span>
-            </button>
-          </div>
-
-          <div class="visit-direction-panel" data-visit-option-group="resident">
-            <span class="visit-speaker-prompt" data-i18n="visitTranslate.groups.resident">Translate resident answer to</span>
-            <div class="visit-direction-quick" role="group" aria-label="Resident output language">
-              <button type="button" class="visit-direction-btn active" data-visit-direction="yue_to_en">
-                <strong data-i18n="visitTranslate.quickDirections.residentEnglish.title">English</strong>
-                <span data-i18n="visitTranslate.quickDirections.residentEnglish.body">For international volunteers</span>
-              </button>
-              <button type="button" class="visit-direction-btn" data-visit-direction="yue_to_zh">
-                <strong data-i18n="visitTranslate.quickDirections.residentMandarin.title">Mandarin</strong>
-                <span data-i18n="visitTranslate.quickDirections.residentMandarin.body">For Mandarin-speaking volunteers</span>
-              </button>
-            </div>
-          </div>
-
-          <div class="visit-direction-panel" data-visit-option-group="volunteer" hidden>
-            <span class="visit-speaker-prompt" data-i18n="visitTranslate.groups.volunteer">Translate volunteer line from</span>
-            <div class="visit-direction-quick" role="group" aria-label="Volunteer input language">
-              <button type="button" class="visit-direction-btn" data-visit-direction="en_to_yue">
-                <strong data-i18n="visitTranslate.quickDirections.volunteerEnglish.title">English</strong>
-                <span data-i18n="visitTranslate.quickDirections.volunteerEnglish.body">English question to Cantonese</span>
-              </button>
-              <button type="button" class="visit-direction-btn" data-visit-direction="zh_to_yue">
-                <strong data-i18n="visitTranslate.quickDirections.volunteerMandarin.title">Mandarin</strong>
-                <span data-i18n="visitTranslate.quickDirections.volunteerMandarin.body">Mandarin question to Cantonese</span>
-              </button>
-            </div>
-          </div>
-
-          <label class="sr-only" for="visitDirection" data-i18n="visitTranslate.directionLabel">Direction</label>
-          <select id="visitDirection" class="visit-direction-select" aria-label="Visit translation direction">
-            <option value="en_to_yue" data-i18n="visitTranslate.directions.en_to_yue">English → Cantonese</option>
-            <option value="yue_to_en" data-i18n="visitTranslate.directions.yue_to_en" selected>Cantonese → English</option>
-            <option value="yue_to_zh" data-i18n="visitTranslate.directions.yue_to_zh">Cantonese → Mandarin</option>
-            <option value="zh_to_yue" data-i18n="visitTranslate.directions.zh_to_yue">Mandarin → Cantonese</option>
-          </select>
-          <button type="button" id="visitTranslateBtn" class="visit-primary-action" data-i18n="visitTranslate.actions.translateResident">Translate resident speech</button>
-          <div class="visit-translation-output" id="visitTranslationOutput" aria-live="polite">
-            <span class="visit-output-kicker" data-i18n="visitTranslate.outputReady">Ready</span>
-            <strong data-i18n="visitTranslate.outputTitle">Choose a task above</strong>
-            <span data-i18n="visitTranslate.outputEmpty">Then type or hold the microphone to translate.</span>
-          </div>
-          <div class="visit-translation-warning" id="visitTranslationWarning" hidden></div>
-        </section>
-
         <section class="scenario-guide basic-prompts" id="scenarioGuide" aria-labelledby="scenarioGuideTitle">
           <div class="starter-header">
             <span id="scenarioGuideTitle">Scenario prompts</span>
@@ -349,7 +349,7 @@
       </aside>
     </section>
 
-    <section class="input-panel app-view" data-app-view="practice" aria-label="Practice input">
+    <section class="input-panel app-view" data-app-view="practice translate" aria-label="Practice input">
       <button id="holdToSpeak" class="mic is-unavailable" data-i18n="input.holdToSpeak" disabled aria-disabled="true">按住說話</button>
       <button id="stopSpeaking" class="stop-btn" data-i18n="input.stopSpeaking" hidden>停止播放</button>
       <div class="recording-indicator" id="recordingIndicator" hidden>

@@ -360,7 +360,8 @@ function setAppView(viewName) {
   currentAppView = viewName || 'today';
   document.body.dataset.appView = currentAppView;
   appViews.forEach((view) => {
-    const active = view.dataset.appView === currentAppView;
+    const activeViews = (view.dataset.appView || '').split(/\s+/).filter(Boolean);
+    const active = activeViews.includes(currentAppView);
     const managedHidden = view.dataset.viewState === 'hidden';
     view.classList.toggle('active', active);
     view.hidden = !active || managedHidden;
@@ -387,7 +388,7 @@ function handleRoleAction(action) {
     resetVisitTranslationOutput();
     updateInputLabelsForMode();
     setAppView('translate');
-    document.getElementById('translateView')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    document.getElementById('visitTranslatePanel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     const notice = createVisitModeStartNotice({
       voiceInputEnabled,
       readyMessage: t('onboarding.notices.visitTranslationComingSoon'),
@@ -2453,7 +2454,7 @@ document.querySelectorAll('[data-pilot-action]').forEach((button) => {
       syncVisitDirectionControls(DEFAULT_VISIT_DIRECTION);
       resetVisitTranslationOutput();
       setAppView('translate');
-      document.getElementById('translateView')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      document.getElementById('visitTranslatePanel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       textInput?.focus();
       setNotice(t('pilot.notices.visitReady'), 'info');
       return;
@@ -2474,7 +2475,7 @@ startVisitTranslationFromPlaybook?.addEventListener('click', () => {
   selectUserMode('visit_translation');
   setAppView('translate');
   document.getElementById('playbookDialog')?.close();
-  document.getElementById('translateView')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  document.getElementById('visitTranslatePanel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   setNotice(t('onboarding.notices.visitTranslationComingSoon'), 'info');
 });
 

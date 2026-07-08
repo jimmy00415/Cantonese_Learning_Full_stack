@@ -9,6 +9,9 @@ const app = readFileSync(join(__dirname, '..', 'public', 'app.js'), 'utf8');
 const css = readFileSync(join(__dirname, '..', 'public', 'styles.css'), 'utf8');
 const i18n = readFileSync(join(__dirname, '..', 'public', 'i18n', 'index.js'), 'utf8');
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8'));
+const translateViewIndex = html.indexOf('id="translateView"');
+const visitTranslatePanelIndex = html.indexOf('id="visitTranslatePanel"');
+const practiceViewIndex = html.indexOf('id="practiceView"');
 const roleVisitEntryBlock = app.match(/if\s*\(action\s*===\s*'startVisitTranslation'\)\s*{[\s\S]*?return;\s*}/)?.[0] || '';
 const pilotVisitEntryBlock = app.match(/if\s*\(action\s*===\s*'visit'\)\s*{[\s\S]*?return;\s*}/)?.[0] || '';
 const playbookVisitEntryBlock =
@@ -26,6 +29,13 @@ assert.match(html, /data-default-view="today"/, 'app shell should default to Tod
 assert.match(html, /id="todayQuickStart"/, 'Today view should expose a quick-start action');
 assert.match(html, /id="todayHabitState"/, 'Today view should expose habit state');
 assert.match(html, /id="todayVoiceState"/, 'Today view should expose voice readiness');
+assert.notEqual(translateViewIndex, -1, 'Translate workspace should exist');
+assert.notEqual(visitTranslatePanelIndex, -1, 'Visit translation panel should exist');
+assert.notEqual(practiceViewIndex, -1, 'Practice workspace should exist');
+assert.ok(
+  translateViewIndex < visitTranslatePanelIndex && visitTranslatePanelIndex < practiceViewIndex,
+  'Visit translation panel should live inside the Translate workspace before Practice markup'
+);
 assert.match(
   html,
   /<a class="action-card primary-action"[^>]*data-app-view-target="practice"[\s\S]*?href="#practice"[\s\S]*?Start practice<\/strong>/,
@@ -42,6 +52,11 @@ assert.match(
   /setAppView\('translate'\)/,
   'Role-action visit entry should route to the Translate workspace'
 );
+assert.match(
+  roleVisitEntryBlock,
+  /document\.getElementById\('visitTranslatePanel'\)\?\.scrollIntoView/,
+  'Role-action visit entry should scroll to the live visit translation console'
+);
 assert.doesNotMatch(
   roleVisitEntryBlock,
   /setAppView\('practice'\)/,
@@ -53,6 +68,11 @@ assert.match(
   /setAppView\('translate'\)/,
   'Pilot visit entry should route to the Translate workspace'
 );
+assert.match(
+  pilotVisitEntryBlock,
+  /document\.getElementById\('visitTranslatePanel'\)\?\.scrollIntoView/,
+  'Pilot visit entry should scroll to the live visit translation console'
+);
 assert.doesNotMatch(
   pilotVisitEntryBlock,
   /setAppView\('practice'\)/,
@@ -63,6 +83,11 @@ assert.match(
   playbookVisitEntryBlock,
   /setAppView\('translate'\)/,
   'Playbook visit entry should route to the Translate workspace'
+);
+assert.match(
+  playbookVisitEntryBlock,
+  /document\.getElementById\('visitTranslatePanel'\)\?\.scrollIntoView/,
+  'Playbook visit entry should scroll to the live visit translation console'
 );
 assert.doesNotMatch(
   playbookVisitEntryBlock,
