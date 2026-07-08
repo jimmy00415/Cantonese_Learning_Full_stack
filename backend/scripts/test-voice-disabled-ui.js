@@ -36,6 +36,11 @@ assert.match(
   /styles\.css\?v=20260708v2uiux1/,
   'stylesheet cache-bust should change when unavailable voice styling changes'
 );
+assert.doesNotMatch(
+  source,
+  /holdBtn\.disabled\s*=\s*false/,
+  'request completion should not bypass voiceInputEnabled by directly re-enabling hold-to-speak'
+);
 
 const handleRecordStart = extractFunction('handleRecordStart');
 const guardIndex = handleRecordStart.indexOf('if (!voiceInputEnabled)');

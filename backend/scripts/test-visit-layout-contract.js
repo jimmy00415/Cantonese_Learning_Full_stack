@@ -9,6 +9,7 @@ const expectedAssetVersion = '20260708v2uiux1';
 
 assert.match(indexHtml, new RegExp(`styles\\.css\\?v=${expectedAssetVersion}`));
 assert.match(indexHtml, new RegExp(`app\\.js\\?v=${expectedAssetVersion}`));
+assert.match(appJs, new RegExp(`\\.\\/i18n\\/index\\.js\\?v=${expectedAssetVersion}`));
 
 assert.match(appJs, /isGenericVisitTranslationText/);
 assert.match(appJs, /classList\.toggle\('is-fallback', fallbackResult\)/);

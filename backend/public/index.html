@@ -91,7 +91,7 @@
       </aside>
     </section>
 
-    <section class="translate-workspace app-view active" id="translateView" data-app-view="translate" aria-labelledby="translateViewTitle">
+    <section class="translate-workspace app-view" id="translateView" data-app-view="translate" aria-labelledby="translateViewTitle" hidden>
       <div class="translate-view-copy">
         <p class="section-eyebrow" data-i18n="v2.translate.eyebrow">Translate</p>
         <h2 id="translateViewTitle" data-i18n="v2.translate.title">Daily-life visit translator</h2>
@@ -173,7 +173,7 @@
       </section>
     </section>
 
-    <section class="hero app-view" data-app-view="translate" aria-labelledby="heroTitle">
+    <section class="hero app-view" data-app-view="translate" aria-labelledby="heroTitle" hidden>
       <div class="hero-copy">
         <p class="hero-kicker" data-i18n="pilot.kicker">External Pilot</p>
         <h2 id="heroTitle" data-i18n="pilot.title">Start a Cantonese visit in under one minute</h2>
@@ -214,7 +214,7 @@
       </div>
     </section>
 
-    <section class="role-onboarding app-view" id="roleOnboarding" data-app-view="translate" aria-labelledby="roleOnboardingTitle">
+    <section class="role-onboarding app-view" id="roleOnboarding" data-app-view="translate" aria-labelledby="roleOnboardingTitle" hidden>
       <div class="role-onboarding-copy">
         <p class="section-eyebrow" data-i18n="onboarding.eyebrow">Start here</p>
         <h2 id="roleOnboardingTitle" data-i18n="onboarding.title">What do you need today?</h2>
@@ -248,7 +248,7 @@
       </div>
     </section>
 
-    <section class="role-context-panel app-view" id="roleContextPanel" data-app-view="translate" aria-live="polite" hidden>
+    <section class="role-context-panel app-view" id="roleContextPanel" data-app-view="translate" data-view-state="hidden" aria-live="polite" hidden>
       <div>
         <p class="section-eyebrow" id="roleContextEyebrow">Selected mode</p>
         <h2 id="roleContextTitle">International Student Mode</h2>
@@ -257,7 +257,7 @@
       <div class="role-context-actions" id="roleContextActions"></div>
     </section>
 
-    <section class="guide-panel action-hub app-view" id="guidePanel" data-app-view="translate" aria-labelledby="guideTitle">
+    <section class="guide-panel action-hub app-view" id="guidePanel" data-app-view="translate" aria-labelledby="guideTitle" hidden>
       <div class="guide-copy">
         <p class="section-eyebrow" data-i18n="guide.eyebrow">User guide</p>
         <h2 id="guideTitle" data-i18n="guide.title">How to use Hong Kong Buddy in an activity</h2>
@@ -288,7 +288,7 @@
       </div>
     </section>
 
-    <section class="practice-stage app-view" id="practiceView" data-app-view="practice" aria-label="Cantonese practice workspace">
+    <section class="practice-stage app-view" id="practiceView" data-app-view="practice" aria-label="Cantonese practice workspace" hidden>
       <div class="practice-workspace-grid" data-practice-mode="habit">
         <aside class="practice-task-card" id="practiceTaskCard" aria-labelledby="practiceTaskTitle">
           <p class="section-eyebrow" data-i18n="v2.practice.eyebrow">Practice</p>
@@ -377,7 +377,7 @@
       </aside>
     </section>
 
-    <section class="input-panel practice-input-dock app-view" id="practiceInputDock" data-app-view="practice translate" aria-label="Practice input">
+    <section class="input-panel practice-input-dock app-view" id="practiceInputDock" data-app-view="practice translate" aria-label="Practice input" hidden>
       <button id="holdToSpeak" class="mic is-unavailable" data-i18n="input.holdToSpeak" disabled aria-disabled="true">按住說話</button>
       <button id="stopSpeaking" class="stop-btn" data-i18n="input.stopSpeaking" hidden>停止播放</button>
       <div class="recording-indicator" id="recordingIndicator" hidden>
@@ -444,14 +444,14 @@
       </div>
     </dialog>
 
-    <section class="phrasebook-workspace app-view" id="phrasebookView" data-app-view="phrasebook" aria-labelledby="phrasebookViewTitle">
+    <section class="phrasebook-workspace app-view" id="phrasebookView" data-app-view="phrasebook" aria-labelledby="phrasebookViewTitle" hidden>
       <p class="section-eyebrow" data-i18n="v2.phrasebook.eyebrow">Phrasebook</p>
       <h2 id="phrasebookViewTitle" data-i18n="v2.phrasebook.title">Useful Cantonese lines</h2>
       <p data-i18n="v2.phrasebook.body">Pick a safe line for practice or visit support.</p>
       <div class="phrasebook-grid" id="phrasebookList" aria-label="Phrasebook actions"></div>
     </section>
 
-    <section class="privacy-workspace app-view" id="privacyView" data-app-view="privacy" aria-labelledby="privacyViewTitle">
+    <section class="privacy-workspace app-view" id="privacyView" data-app-view="privacy" aria-labelledby="privacyViewTitle" hidden>
       <p class="section-eyebrow" data-i18n="v2.privacy.eyebrow">Privacy</p>
       <h2 id="privacyViewTitle" data-i18n="v2.privacy.title">Privacy and AI limits</h2>
       <p data-i18n="v2.privacy.body">Avoid sensitive personal, medical, legal, or student-identifying information.</p>

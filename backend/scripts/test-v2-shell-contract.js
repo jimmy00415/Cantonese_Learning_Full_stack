@@ -16,6 +16,7 @@ const roleVisitEntryBlock = app.match(/if\s*\(action\s*===\s*'startVisitTranslat
 const pilotVisitEntryBlock = app.match(/if\s*\(action\s*===\s*'visit'\)\s*{[\s\S]*?return;\s*}/)?.[0] || '';
 const playbookVisitEntryBlock =
   app.match(/startVisitTranslationFromPlaybook\?\.addEventListener\('click',\s*\(\)\s*=>\s*{[\s\S]*?}\);/)?.[0] || '';
+const appViewSections = [...html.matchAll(/<section\b[^>]*\bclass="[^"]*\bapp-view\b[^"]*"[^>]*>/g)].map((match) => match[0]);
 
 for (const id of ['todayView', 'practiceView', 'translateView', 'phrasebookView', 'privacyView']) {
   assert.match(html, new RegExp(`id="${id}"`), `${id} should exist in V2 app shell`);
@@ -29,6 +30,16 @@ assert.match(html, /data-default-view="today"/, 'app shell should default to Tod
 assert.match(html, /id="todayQuickStart"/, 'Today view should expose a quick-start action');
 assert.match(html, /id="todayHabitState"/, 'Today view should expose habit state');
 assert.match(html, /id="todayVoiceState"/, 'Today view should expose voice readiness');
+assert.ok(appViewSections.length > 0, 'V2 app shell should declare app-view sections');
+for (const sectionTag of appViewSections) {
+  const viewNames = sectionTag.match(/\bdata-app-view="([^"]+)"/)?.[1].split(/\s+/).filter(Boolean) || [];
+  const sectionName = sectionTag.match(/\bid="([^"]+)"/)?.[1] || sectionTag.match(/\bdata-app-view="([^"]+)"/)?.[1] || sectionTag;
+  if (viewNames.includes('today')) {
+    assert.doesNotMatch(sectionTag, /\shidden(?:\s|>|=)/, `${sectionName} should be visible in the static Today-first shell`);
+  } else {
+    assert.match(sectionTag, /\shidden(?:\s|>|=)/, `${sectionName} should be hidden before JS selects a non-default view`);
+  }
+}
 assert.notEqual(translateViewIndex, -1, 'Translate workspace should exist');
 assert.notEqual(visitTranslatePanelIndex, -1, 'Visit translation panel should exist');
 assert.notEqual(practiceViewIndex, -1, 'Practice workspace should exist');

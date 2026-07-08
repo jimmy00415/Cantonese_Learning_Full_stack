@@ -1,5 +1,5 @@
 // P3-1: Import i18n module
-import { t, setLanguage, getLanguage, initI18n, getAvailableLanguages, locales } from './i18n/index.js?v=20260704directionfix1';
+import { t, setLanguage, getLanguage, initI18n, getAvailableLanguages, locales } from './i18n/index.js?v=20260708v2uiux1';
 import { elderlyVisitPlaybook } from './content/playbooks.js?v=20260522visit1';
 import { createAsrErrorNotice, createVisitModeStartNotice, isVoiceInputAvailable } from './errors.js?v=20260630asrlayout1';
 
@@ -1026,8 +1026,7 @@ async function translateVisitText(text, inputType = 'text', directionOverride) {
     setSystemState(STATES.ERROR);
     setTimeout(() => setSystemState(STATES.IDLE), 2000);
   } finally {
-    sendBtn.disabled = false;
-    holdBtn.disabled = false;
+    setControlsEnabled(true);
     visitTranslateBtn.disabled = false;
     setStatus(sessionId ? `對話進行中：${sessionId.slice(0, 8)}` : t('states.idle'));
     if (systemStateEl?.classList.contains('state-processing')) setSystemState(STATES.IDLE);
@@ -1823,8 +1822,7 @@ async function sendUtterance(text) {
         clearTimeout(longProcessTimeout);
         setStatus('已取消');
         setSystemState(STATES.IDLE);
-        sendBtn.disabled = false;
-        holdBtn.disabled = false;
+        setControlsEnabled(true);
         processingStartTime = null;
         statusEl.onclick = null;
         statusEl.style.cursor = 'default';
@@ -1894,8 +1892,7 @@ async function sendUtterance(text) {
     console.error(err);
     setTimeout(() => setSystemState(STATES.IDLE), 2000);
   } finally {
-    sendBtn.disabled = false;
-    holdBtn.disabled = false;
+    setControlsEnabled(true);
     setStatus(`對話進行中：${sessionId.slice(0, 8)}`);
   }
 }
