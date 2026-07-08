@@ -20,7 +20,7 @@
       console.log('Speech SDK loaded from: local (v1.38.0)');
     }
   </script>
-  <link rel="stylesheet" href="styles.css?v=20260708practice1" />
+  <link rel="stylesheet" href="styles.css?v=20260709simple1" />
 </head>
 <body>
   <main class="app">
@@ -310,6 +310,7 @@
           <p class="section-eyebrow" data-i18n="v2.practice.coachEyebrow">Coach</p>
           <h3 data-i18n="v2.practice.coachTitle">One useful note</h3>
           <p id="practiceCoachSummary" data-i18n="v2.practice.coachEmpty">Send one line to get a focused note.</p>
+          <div id="topCorrections" class="corrections-list" aria-live="polite"></div>
         </aside>
       </div>
       <aside class="control-rail" aria-label="Practice setup">
@@ -368,21 +369,11 @@
           </div>
           <div class="transcript-meta">
             <div class="pill" id="scenarioPill">情景：自由對話</div>
-            <div class="pill pill-secondary" id="sessionPill">未開始</div>
-            <div class="pill pill-secondary" id="ttsPill">語音：偵測中</div>
             <button id="clearChat" class="ghost" data-i18n="controls.clearChat">清除記錄</button>
           </div>
         </div>
         <div id="transcript" class="transcript-body"></div>
       </section>
-
-      <aside class="feedback-panel" aria-label="Learning feedback">
-        <div class="feedback-immediate coach-translation-panel" id="feedbackImmediate">
-          <div class="section-eyebrow">Coach Notes</div>
-          <h3 data-i18n="feedback.immediate">Coach Notes</h3>
-          <div id="topCorrections" class="corrections-list"></div>
-        </div>
-      </aside>
     </section>
 
     <section class="input-panel practice-input-dock app-view" id="practiceInputDock" data-app-view="practice" aria-label="Practice input" hidden>
@@ -412,11 +403,6 @@
           <label for="ttsSpeed" data-i18n="input.speed">速度</label>
           <input type="range" id="ttsSpeed" min="0.5" max="1.5" step="0.05" value="1.0" />
           <span id="ttsSpeedValue" class="speed-value">1.00×</span>
-          <div class="speed-presets">
-            <button type="button" class="preset-btn" data-speed="0.8" data-i18n="settings.speedPresets.slow">慢</button>
-            <button type="button" class="preset-btn active" data-speed="1.0" data-i18n="settings.speedPresets.normal">正常</button>
-            <button type="button" class="preset-btn" data-speed="1.2" data-i18n="settings.speedPresets.fast">快</button>
-          </div>
         </div>
         <button id="replay" data-i18n="input.replay">重播</button>
         <button id="correctMeBtn" class="correct-btn ghost" title="分析上一句並提供糾正" data-i18n="input.correctMe">糾正我</button>
@@ -593,6 +579,6 @@
     </footer>
   </main>
 
-  <script type="module" src="app.js?v=20260708practice1"></script>
+  <script type="module" src="app.js?v=20260709simple1"></script>
 </body>
 </html>

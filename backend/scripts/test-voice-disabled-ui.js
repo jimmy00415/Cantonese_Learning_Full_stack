@@ -33,12 +33,12 @@ assert.match(
 );
 assert.match(
   markup,
-  /styles\.css\?v=20260708practice1/,
+  /styles\.css\?v=20260709simple1/,
   'stylesheet cache-bust should change when unavailable voice styling changes'
 );
 assert.match(
   source,
-  /\.\/errors\.js\?v=20260708practice1/,
+  /\.\/errors\.js\?v=20260709simple1/,
   'voice availability helper import should be cache-busted with the V2 asset version'
 );
 assert.doesNotMatch(

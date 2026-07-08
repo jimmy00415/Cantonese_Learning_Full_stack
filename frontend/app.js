@@ -1,7 +1,7 @@
 // P3-1: Import i18n module
-import { t, setLanguage, getLanguage, initI18n, getAvailableLanguages, locales } from './i18n/index.js?v=20260708practice1';
+import { t, setLanguage, getLanguage, initI18n, getAvailableLanguages, locales } from './i18n/index.js?v=20260709simple1';
 import { elderlyVisitPlaybook } from './content/playbooks.js?v=20260522visit1';
-import { createAsrErrorNotice, createVisitModeStartNotice, isVoiceInputAvailable } from './errors.js?v=20260708practice1';
+import { createAsrErrorNotice, createVisitModeStartNotice, isVoiceInputAvailable } from './errors.js?v=20260709simple1';
 
 const META_API = document.querySelector('meta[name="api-base"]');
 
@@ -1257,23 +1257,7 @@ function renderMessage({ role, text, ttsAudio, timestamp }) {
       }
     });
 
-    const replay = document.createElement('button');
-    replay.className = 'play-btn';
-    replay.type = 'button';
-    replay.textContent = '重播';
-    replay.setAttribute('aria-label', '重播導師回應');
-    replay.addEventListener('click', () => {
-      const audioData = div.dataset.ttsAudio;
-      console.log('Replay button clicked, audio data exists:', !!audioData);
-      if (audioData) {
-        playAudioWithButton(audioData, getPlaybackRate(), replay);
-      } else {
-        setNotice('音頻數據不存在', 'error');
-      }
-    });
-
     controls.appendChild(play);
-    controls.appendChild(replay);
     meta.appendChild(controls);
   }
 
@@ -1582,11 +1566,6 @@ function renderImmediateFeedback() {
 
   if (state.status === 'empty') {
     updatePracticeCoachSummary(t('v2.practice.coachEmpty'));
-    card.innerHTML = `
-      <p class="coach-summary-kicker">${t('feedback.realtimeEnglish')}</p>
-      <p class="feedback-empty">${t('feedback.empty')}</p>
-    `;
-    topCorrectionsEl.appendChild(card);
     return;
   }
 
@@ -1613,18 +1592,15 @@ function renderImmediateFeedback() {
     return;
   }
 
-  card.innerHTML = `
-    <p class="coach-summary-kicker">${t('feedback.currentTutorReply')}</p>
-    <p class="coach-summary-text">${state.englishText || t('feedback.translationSummaryFallback')}</p>
-  `;
   updatePracticeCoachSummary(state.englishText || t('feedback.translationSummaryFallback'));
   if (state.provider === 'mock' || state.needsConfirmation) {
+    card.innerHTML = `<p class="coach-summary-kicker">${t('feedback.currentTutorReply')}</p>`;
     const warning = document.createElement('p');
     warning.className = 'coach-modal-warning';
     warning.textContent = t('feedback.translationWarning');
     card.appendChild(warning);
+    topCorrectionsEl.appendChild(card);
   }
-  topCorrectionsEl.appendChild(card);
 }
 
 function showDialog(dialog) {
@@ -1832,7 +1808,7 @@ async function startSession() {
   renderMessage({ role: 'ai', text: greeting, timestamp: Date.now() });
 
   setStatus(`已建立對話：${sessionId.slice(0, 8)}`);
-  sessionPill.textContent = `會話 ${sessionId.slice(0, 8)}`;
+  if (sessionPill) sessionPill.textContent = `會話 ${sessionId.slice(0, 8)}`;
   updateModePill();
   if (isVisitTranslationMode()) syncVisitDirectionControls(visitDirection?.value || DEFAULT_VISIT_DIRECTION);
 }
@@ -2526,24 +2502,9 @@ document.addEventListener('keydown', (e) => {
 
 // P1: Mode toggle handlers
 function updateModePill() {
-  const modePill = document.querySelector('.pill.mode-teaching, .pill.mode-freeChat, .pill.mode-visit');
-  const modeClass = isVisitTranslationMode() ? 'mode-visit' : `mode-${currentMode}`;
-  const modeText = isVisitTranslationMode()
-    ? t('visitTranslate.hint')
-    : currentMode === 'teaching'
-      ? 'Teaching Lab'
-      : 'Free Talk';
-  if (!modePill) {
-    // Create mode pill if it doesn't exist
-    const newPill = document.createElement('div');
-    newPill.className = `pill ${modeClass}`;
-    newPill.id = 'modePill';
-    newPill.textContent = modeText;
-    sessionPill?.parentNode?.insertBefore(newPill, sessionPill.nextSibling);
-  } else {
-    modePill.className = `pill ${modeClass}`;
-    modePill.textContent = modeText;
-  }
+  document
+    .querySelectorAll('.pill.mode-teaching, .pill.mode-freeChat, .pill.mode-visit, #modePill')
+    .forEach((pill) => pill.remove());
 }
 
 function setActiveMode(mode) {

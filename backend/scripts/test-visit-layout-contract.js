@@ -5,7 +5,7 @@ const indexHtml = readFileSync(new URL('../public/index.html', import.meta.url),
 const appJs = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
 const stylesCss = readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
 
-const expectedAssetVersion = '20260708practice1';
+const expectedAssetVersion = '20260709simple1';
 
 assert.match(indexHtml, new RegExp(`styles\\.css\\?v=${expectedAssetVersion}`));
 assert.match(indexHtml, new RegExp(`app\\.js\\?v=${expectedAssetVersion}`));

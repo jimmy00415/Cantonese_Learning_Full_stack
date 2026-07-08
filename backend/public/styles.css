@@ -2544,8 +2544,7 @@ button:hover:not(:disabled),
   grid-template-columns: minmax(220px, 280px) minmax(420px, 1fr) minmax(320px, 0.9fr);
   grid-template-areas:
     "task setup history"
-    "coach setup history"
-    "feedback setup history";
+    "coach setup history";
   align-items: start;
 }
 
@@ -2630,14 +2629,6 @@ button:hover:not(:disabled),
 
 .transcript-meta .ghost {
   flex: 0 0 auto;
-}
-
-.feedback-panel {
-  grid-area: feedback;
-  min-width: 0;
-  max-height: calc(100vh - 44px);
-  overflow: auto;
-  scrollbar-width: thin;
 }
 
 .feedback-immediate {
@@ -3375,14 +3366,7 @@ body[data-user-mode="visit_translation"] .send-btn {
     grid-template-areas:
       "task setup"
       "coach setup"
-      "history history"
-      "feedback feedback";
-  }
-
-  .feedback-panel {
-    position: static;
-    max-height: none;
-    display: block;
+      "history history";
   }
 
   .transcript {
@@ -3424,12 +3408,10 @@ body[data-user-mode="visit_translation"] .send-btn {
       "task"
       "setup"
       "history"
-      "coach"
-      "feedback";
+      "coach";
   }
 
-  .control-rail,
-  .feedback-panel {
+  .control-rail {
     position: static;
     max-height: none;
     overflow: visible;

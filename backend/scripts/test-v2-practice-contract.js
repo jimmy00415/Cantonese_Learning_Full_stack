@@ -12,6 +12,12 @@ const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8
 
 assert.match(html, /id="practiceTaskCard"/, 'Practice should show the current task card');
 assert.match(html, /id="practiceCoachPanel"/, 'Practice should show coach notes panel');
+assert.match(html, /id="practiceCoachPanel"[\s\S]*id="topCorrections"/, 'Practice should keep coach feedback in one coach panel');
+assert.doesNotMatch(html, /class="feedback-panel"/, 'Practice should not render a second coach notes panel');
+assert.doesNotMatch(html, /id="feedbackImmediate"/, 'Practice should not render duplicate feedback content');
+assert.doesNotMatch(html, /id="sessionPill"/, 'Practice history should not expose internal session IDs');
+assert.doesNotMatch(html, /id="ttsPill"/, 'Practice history should not expose voice provider metadata');
+assert.doesNotMatch(html, /class="speed-presets"/, 'Practice input dock should not render redundant speed preset buttons');
 assert.match(html, /id="practiceInputDock"/, 'Practice input dock should wrap input and audio controls');
 assert.match(html, /data-practice-mode="habit"/, 'Practice should expose a habit-first mode');
 assert.match(app, /function\s+startPracticeFromToday\s*\(/, 'startPracticeFromToday should exist');
@@ -20,21 +26,23 @@ assert.match(app, /function\s+renderPracticeOutcomeMode\s*\(/, 'practice mode re
 assert.match(app, /function\s+updatePracticeCoachSummary\s*\(/, 'practice coach summary helper should exist');
 assert.match(app, /renderImmediateFeedback[\s\S]*updatePracticeCoachSummary\(/, 'practice coach summary should be updated from the feedback rendering path');
 assert.doesNotMatch(app, /scenarioPill\.textContent\s*=\s*label/, 'practice mode rendering should not overwrite the scenario pill with mode text');
+assert.doesNotMatch(app, /const\s+replay\s*=\s*document\.createElement\('button'\)/, 'AI messages should show one play action, not play plus replay');
 assert.match(app, /markHabitPractised\(\)/, 'successful user exchange should mark habit practised');
 assert.match(css, /\.practice-workspace-grid\b/, 'practice workspace grid styling should exist');
 assert.match(css, /\.practice-input-dock\b/, 'practice input dock styling should exist');
 assert.match(css, /\.practice-stage\s*{[\s\S]*grid-template-areas:/, 'Practice desktop layout should use named grid areas instead of implicit placement');
-assert.match(css, /"task setup history"\s*"coach setup history"\s*"feedback setup history"/, 'Practice desktop layout should keep task, setup, coach, feedback, and history in stable columns');
+assert.match(css, /"task setup history"\s*"coach setup history"/, 'Practice desktop layout should keep task, setup, coach, and history in stable columns');
+assert.doesNotMatch(css, /"feedback setup history"/, 'Practice desktop layout should not reserve a second feedback row');
 assert.match(css, /\.practice-workspace-grid\s*{[\s\S]*display:\s*contents;/, 'Practice workspace wrapper should not create a nested overflowing grid');
 assert.match(css, /\.practice-task-card\s*{[\s\S]*grid-area:\s*task;/, 'Practice task card should occupy the task area');
 assert.match(css, /\.practice-coach-panel\s*{[\s\S]*grid-area:\s*coach;/, 'Practice coach panel should occupy the coach area');
 assert.match(css, /\.control-rail\s*{[\s\S]*grid-area:\s*setup;/, 'Practice setup controls should occupy the setup area');
 assert.match(css, /\.transcript\s*{[\s\S]*grid-area:\s*history;/, 'Practice transcript should occupy the history area');
-assert.match(css, /\.feedback-panel\s*{[\s\S]*grid-area:\s*feedback;/, 'Practice feedback panel should occupy the feedback area');
 assert.match(css, /\.practice-conversation-slot\s*{[\s\S]*position:\s*absolute;[\s\S]*pointer-events:\s*none;/, 'Legacy #practice scroll anchor should not take visible layout space');
 assert.match(css, /\.transcript-meta\s*{[\s\S]*min-width:\s*0;/, 'Transcript metadata should be allowed to shrink inside the history column');
 assert.match(css, /\.transcript-meta\s+\.pill[\s\S]*text-overflow:\s*ellipsis;/, 'Transcript pills should truncate instead of overflowing the history panel');
-assert.match(css, /@media \(max-width:\s*1100px\)[\s\S]*\.practice-stage\s*{[\s\S]*grid-template-areas:\s*"task"\s*"setup"\s*"history"\s*"coach"\s*"feedback";/, 'Practice layout should collapse to one column before columns become cramped');
+assert.match(css, /@media \(max-width:\s*1100px\)[\s\S]*\.practice-stage\s*{[\s\S]*grid-template-areas:\s*"task"\s*"setup"\s*"history"\s*"coach";/, 'Practice layout should collapse to one column before columns become cramped');
+assert.doesNotMatch(css, /@media \(max-width:\s*1100px\)[\s\S]*grid-template-areas:\s*"task"\s*"setup"\s*"history"\s*"coach"\s*"feedback";/, 'Practice mobile layout should not include duplicate feedback panel');
 assert.match(i18n, /practice:\s*{/, 'V2 practice copy should exist');
 assert.equal(pkg.scripts['test:v2-practice'], 'node scripts/test-v2-practice-contract.js');
 
