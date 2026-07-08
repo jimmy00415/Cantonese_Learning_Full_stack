@@ -150,10 +150,20 @@
           <option value="zh_to_yue" data-i18n="visitTranslate.directions.zh_to_yue">Mandarin → Cantonese</option>
         </select>
         <button type="button" id="visitTranslateBtn" class="visit-primary-action" data-i18n="visitTranslate.actions.translateResident">Translate resident speech</button>
-        <div class="visit-translation-output" id="visitTranslationOutput" aria-live="polite">
-          <span class="visit-output-kicker" data-i18n="visitTranslate.outputReady">Ready</span>
-          <strong data-i18n="visitTranslate.outputTitle">Choose a task above</strong>
-          <span data-i18n="visitTranslate.outputEmpty">Then type or hold the microphone to translate.</span>
+        <div class="visit-pair-grid" aria-label="Visit translation result">
+          <article class="visit-pair-card" id="visitInputCard">
+            <span class="visit-output-kicker" data-i18n="v2.translate.inputLabel">Input</span>
+            <strong data-i18n="v2.translate.inputEmpty">No input yet</strong>
+            <p data-i18n="v2.translate.inputHint">Type or record the sentence to translate.</p>
+          </article>
+          <article class="visit-pair-card" id="visitOutputCard">
+            <div class="visit-translation-output" id="visitTranslationOutput" aria-live="polite">
+              <span class="visit-output-kicker" data-i18n="v2.translate.outputLabel">Output</span>
+              <strong data-i18n="visitTranslate.outputTitle">Choose a task above</strong>
+              <p data-i18n="visitTranslate.outputEmpty">Then type or hold the microphone to translate.</p>
+            </div>
+            <button type="button" id="visitRetryBtn" class="visit-retry-btn" hidden data-i18n="v2.translate.retryTranslation">Retry translation</button>
+          </article>
         </div>
         <div class="visit-translation-warning" id="visitTranslationWarning" hidden></div>
       </section>

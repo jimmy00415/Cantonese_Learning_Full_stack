@@ -9,6 +9,7 @@
     "dev": "nodemon server.js",
     "test:v2-shell": "node scripts/test-v2-shell-contract.js",
     "test:v2-practice": "node scripts/test-v2-practice-contract.js",
+    "test:v2-translation": "node scripts/test-v2-translation-contract.js",
     "test:visit-direction-routing": "node scripts/test-visit-direction-routing.js",
     "test:visit-http-routing": "node scripts/test-visit-http-routing.js",
     "test:visit-translation-quality": "node scripts/test-visit-translation-quality.js",

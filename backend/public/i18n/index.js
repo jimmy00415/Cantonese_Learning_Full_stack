@@ -110,7 +110,17 @@ export const locales = {
       translate: {
         eyebrow: 'Translate',
         title: '日常探訪翻譯器',
-        body: '當住戶、義工或學生需要快速理解意思時，用呢個功能。'
+        body: '當住戶、義工或學生需要快速理解意思時，用呢個功能。',
+        inputLabel: '輸入',
+        inputEmpty: '未有輸入內容',
+        inputHint: '輸入或錄低要翻譯嘅句子。',
+        inputSpeech: '語音',
+        inputTyped: '打字',
+        outputLabel: '輸出',
+        confirmLabel: '請同職員確認',
+        failedLabel: '翻譯失敗',
+        failedBody: '今次請求未完成，但你啱啱輸入嘅內容仲喺度。',
+        retryTranslation: '重新翻譯'
       },
       phrasebook: {
         eyebrow: 'Phrasebook',
@@ -602,7 +612,17 @@ export const locales = {
       translate: {
         eyebrow: 'Translate',
         title: '日常探访翻译器',
-        body: '当住户、义工或学生需要快速理解意思时，使用这个功能。'
+        body: '当住户、义工或学生需要快速理解意思时，使用这个功能。',
+        inputLabel: '输入',
+        inputEmpty: '还没有输入内容',
+        inputHint: '输入或录下要翻译的句子。',
+        inputSpeech: '语音',
+        inputTyped: '打字',
+        outputLabel: '输出',
+        confirmLabel: '请和职员确认',
+        failedLabel: '翻译失败',
+        failedBody: '这次请求没有完成，但你刚才输入的内容还在这里。',
+        retryTranslation: '重新翻译'
       },
       phrasebook: {
         eyebrow: 'Phrasebook',
@@ -1094,7 +1114,17 @@ export const locales = {
       translate: {
         eyebrow: 'Translate',
         title: 'Daily-life visit translator',
-        body: 'Use this when a resident, volunteer, or student needs fast meaning support.'
+        body: 'Use this when a resident, volunteer, or student needs fast meaning support.',
+        inputLabel: 'Input',
+        inputEmpty: 'No input yet',
+        inputHint: 'Type or record the sentence to translate.',
+        inputSpeech: 'Speech',
+        inputTyped: 'Typed',
+        outputLabel: 'Output',
+        confirmLabel: 'Confirm with staff',
+        failedLabel: 'Translation failed',
+        failedBody: 'The request did not complete. Your input is still here.',
+        retryTranslation: 'Retry translation'
       },
       phrasebook: {
         eyebrow: 'Phrasebook',

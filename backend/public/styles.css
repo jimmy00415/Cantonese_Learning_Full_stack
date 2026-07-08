@@ -2726,6 +2726,66 @@ body[data-user-mode="visit_translation"] .visit-mode-helper {
   gap: 10px;
 }
 
+.visit-pair-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+}
+
+.visit-pair-card {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-height: 148px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.visit-pair-card strong {
+  display: block;
+  margin: 0;
+  color: var(--ink);
+  font-size: clamp(20px, 2vw, 28px);
+  line-height: 1.18;
+  overflow-wrap: anywhere;
+}
+
+.visit-pair-card p,
+.visit-pair-card small {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 780;
+  line-height: 1.45;
+}
+
+.visit-result-state-success {
+  border-color: rgba(22, 163, 74, 0.28);
+  background: #f0fdf4;
+}
+
+.visit-result-state-fallback {
+  border-color: rgba(180, 83, 9, 0.32);
+  background: #fffbeb;
+}
+
+.visit-result-state-error {
+  border-color: rgba(185, 28, 28, 0.32);
+  background: #fef2f2;
+}
+
+.visit-retry-btn {
+  min-height: 40px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 8px;
+  background: #111827;
+  color: #fff;
+  box-shadow: none;
+}
+
 .visit-task-card {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -2818,6 +2878,29 @@ body[data-user-mode="visit_translation"] .visit-translation-output {
   border-radius: 8px;
   border-color: rgba(17, 24, 39, 0.12);
   background: linear-gradient(180deg, #fff, #f8fafc);
+}
+
+body[data-user-mode="visit_translation"] #visitOutputCard .visit-translation-output {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
+}
+
+body[data-user-mode="visit_translation"] #visitOutputCard .visit-translation-output strong {
+  font-size: clamp(24px, 2.2vw, 34px);
+  line-height: 1.08;
+}
+
+body[data-user-mode="visit_translation"] #visitOutputCard .visit-translation-output.is-fallback strong {
+  font-size: clamp(18px, 1.8vw, 24px);
+  line-height: 1.2;
+}
+
+body[data-user-mode="visit_translation"] .visit-result-meta {
+  text-transform: uppercase;
 }
 
 body[data-user-mode="visit_translation"] .visit-translation-output strong {
@@ -3157,6 +3240,10 @@ body[data-user-mode="visit_translation"] .send-btn {
   .guide-panel,
   .role-onboarding,
   .practice-stage {
+    grid-template-columns: 1fr;
+  }
+
+  .visit-pair-grid {
     grid-template-columns: 1fr;
   }
 

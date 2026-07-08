@@ -61,8 +61,11 @@ const visitDirectionButtons = document.querySelectorAll('[data-visit-direction]'
 const visitTaskButtons = document.querySelectorAll('[data-visit-task]');
 const visitOptionGroups = document.querySelectorAll('[data-visit-option-group]');
 const visitTranslateBtn = document.getElementById('visitTranslateBtn');
+const visitInputCard = document.getElementById('visitInputCard');
+const visitOutputCard = document.getElementById('visitOutputCard');
 const visitTranslationOutput = document.getElementById('visitTranslationOutput');
 const visitTranslationWarning = document.getElementById('visitTranslationWarning');
+const visitRetryBtn = document.getElementById('visitRetryBtn');
 const pilotVoiceStatus = document.getElementById('pilotVoiceStatus');
 const appViewButtons = document.querySelectorAll('[data-app-view-target]');
 const appViews = document.querySelectorAll('[data-app-view]');
@@ -175,6 +178,12 @@ let coachTranslationState = { status: 'empty' };
 let coachTranslationRequestId = 0;
 let pilotHealthSnapshot = null;
 let currentAppView = 'today';
+let visitTranslationState = {
+  sourceText: '',
+  inputType: 'text',
+  direction: 'yue_to_en',
+  status: 'empty'
+};
 
 // System states: idle, listening, processing, speaking, error
 const STATES = {
@@ -653,12 +662,26 @@ function resetVisitTranslationOutput() {
   const meta = getVisitDirectionMeta();
   const title = isVisitTranslationMode() ? t(meta.resultKey) : t('visitTranslate.outputTitle');
   const body = isVisitTranslationMode() ? t(meta.placeholderKey) : t('visitTranslate.outputEmpty');
+  visitTranslationState = {
+    sourceText: '',
+    inputType: 'text',
+    direction: visitDirection?.value || DEFAULT_VISIT_DIRECTION,
+    status: 'empty'
+  };
+  renderVisitInputCard('', 'text', visitTranslationState.direction);
+  if (visitOutputCard) {
+    visitOutputCard.className = 'visit-pair-card';
+  }
   visitTranslationOutput.classList.remove('is-fallback');
   visitTranslationOutput.innerHTML = `
-    <span class="visit-output-kicker">${t('visitTranslate.outputReady')}</span>
+    <span class="visit-output-kicker">${t('v2.translate.outputLabel')}</span>
     <strong>${title}</strong>
-    <span>${body}</span>
+    <p>${body}</p>
   `;
+  if (visitRetryBtn) {
+    visitRetryBtn.hidden = true;
+    visitRetryBtn.onclick = null;
+  }
   if (visitTranslationWarning) {
     visitTranslationWarning.hidden = true;
     visitTranslationWarning.textContent = '';
@@ -728,6 +751,37 @@ function appendTextElement(parent, tagName, text, className = '') {
   return el;
 }
 
+function renderVisitInputCard(sourceText, inputType, direction) {
+  if (!visitInputCard) return;
+  const meta = getVisitDirectionMeta(direction);
+  visitInputCard.innerHTML = '';
+  appendTextElement(visitInputCard, 'span', t('v2.translate.inputLabel'), 'visit-output-kicker');
+  appendTextElement(visitInputCard, 'strong', sourceText || t('v2.translate.inputEmpty'));
+  appendTextElement(
+    visitInputCard,
+    'p',
+    sourceText
+      ? `${t(meta.routeKey)} · ${inputType === 'speech' ? t('v2.translate.inputSpeech') : t('v2.translate.inputTyped')}`
+      : t('v2.translate.inputHint')
+  );
+}
+
+function renderVisitError(error, sourceText) {
+  if (!visitOutputCard || !visitTranslationOutput) return;
+  visitOutputCard.className = 'visit-pair-card visit-result-state-error';
+  visitTranslationOutput.classList.remove('is-fallback');
+  visitTranslationOutput.innerHTML = '';
+  appendTextElement(visitTranslationOutput, 'span', t('v2.translate.failedLabel'), 'visit-output-kicker');
+  appendTextElement(visitTranslationOutput, 'strong', t('visitTranslate.notices.failed'));
+  appendTextElement(visitTranslationOutput, 'p', error?.message || t('v2.translate.failedBody'));
+  appendTextElement(visitTranslationOutput, 'p', `${t('visitTranslate.sourceLabel')}: ${sourceText || ''}`);
+  if (visitRetryBtn) {
+    visitRetryBtn.hidden = false;
+    visitRetryBtn.textContent = t('v2.translate.retryTranslation');
+    visitRetryBtn.onclick = () => translateVisitText(sourceText, visitTranslationState.inputType || 'text');
+  }
+}
+
 function renderVisitTranslation(res) {
   if (!visitTranslationOutput) return;
   const displayText = res.displayText || res.translatedText || '';
@@ -736,10 +790,20 @@ function renderVisitTranslation(res) {
   const meta = getVisitDirectionMeta(res.direction || visitDirection?.value || DEFAULT_VISIT_DIRECTION);
   const resultLabel = t(meta.resultKey);
   const fallbackResult = res.provider === 'mock' || isGenericVisitTranslationText(displayText);
+  visitTranslationState = {
+    sourceText: res.sourceText || visitTranslationState.sourceText,
+    inputType: visitTranslationState.inputType,
+    direction: res.direction || visitTranslationState.direction,
+    status: fallbackResult ? 'fallback' : 'success'
+  };
 
+  if (visitOutputCard) {
+    visitOutputCard.className = `visit-pair-card ${fallbackResult ? 'visit-result-state-fallback' : 'visit-result-state-success'}`;
+  }
   visitTranslationOutput.innerHTML = '';
   visitTranslationOutput.classList.toggle('is-fallback', fallbackResult);
-  appendTextElement(visitTranslationOutput, 'span', resultLabel, 'visit-output-kicker');
+  appendTextElement(visitTranslationOutput, 'span', fallbackResult ? t('v2.translate.confirmLabel') : t('v2.translate.outputLabel'), 'visit-output-kicker');
+  appendTextElement(visitTranslationOutput, 'small', resultLabel, 'visit-result-meta');
   if (res.autoRouted) {
     appendTextElement(visitTranslationOutput, 'span', t('visitTranslate.autoRouted'), 'visit-route-note');
   }
@@ -753,6 +817,10 @@ function renderVisitTranslation(res) {
     visitTranslationOutput.appendChild(guide);
   }
   appendTextElement(visitTranslationOutput, 'small', `${t('visitTranslate.sourceLabel')}: ${res.sourceText || ''}`);
+  if (visitRetryBtn) {
+    visitRetryBtn.hidden = true;
+    visitRetryBtn.onclick = null;
+  }
 
   if (visitLargeText) {
     visitLargeText.innerHTML = '';
@@ -812,6 +880,8 @@ async function translateVisitText(text, inputType = 'text') {
   if (!sessionId) await startSession();
   selectUserMode('visit_translation', { fromStorage: true });
   const direction = visitDirection?.value || DEFAULT_VISIT_DIRECTION;
+  visitTranslationState = { sourceText, inputType, direction, status: 'pending' };
+  renderVisitInputCard(text, inputType, direction);
   setSystemState(STATES.PROCESSING);
   sendBtn.disabled = true;
   holdBtn.disabled = true;
@@ -847,6 +917,8 @@ async function translateVisitText(text, inputType = 'text') {
     if (res.ttsAudio) await playAudio(res.ttsAudio, getPlaybackRate());
   } catch (err) {
     console.error(err);
+    visitTranslationState = { ...visitTranslationState, status: 'error' };
+    renderVisitError(err, text);
     setNotice(t('visitTranslate.notices.failed'), 'error');
     setSystemState(STATES.ERROR);
     setTimeout(() => setSystemState(STATES.IDLE), 2000);
