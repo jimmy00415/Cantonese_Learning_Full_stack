@@ -78,6 +78,7 @@ const minimaxTtsPitch = Number(process.env.MINIMAX_TTS_PITCH || 0);
 const minimaxAsrModel = process.env.MINIMAX_ASR_MODEL || 'speech-01';
 const minimaxAsrLanguage = process.env.MINIMAX_ASR_LANGUAGE || 'zh-HK';
 const minimaxAsrEndpoint = process.env.MINIMAX_ASR_ENDPOINT || `${minimaxBaseUrl}/v1/audio/transcriptions`;
+const minimaxAsrEnabled = String(process.env.MINIMAX_ASR_ENABLED || '').toLowerCase() === 'true';
 
 const defaultMiniMaxCantoneseVoices = [
   {
@@ -1471,21 +1472,44 @@ function generateMockTtsDataUri() {
 }
 
 app.get('/api/health', (_req, res) => {
-  const activeAsrProvider = asrProvider === 'azure' && azureTtsKey
+  const minimaxReady = Boolean(minimaxApiKey);
+  const minimaxAsrReady = Boolean(minimaxReady && minimaxAsrEnabled);
+  const azureSpeechReady = Boolean(azureTtsKey && azureTtsRegion);
+  const azureOpenAIReady = Boolean(azureOpenAIKey && azureOpenAIEndpoint);
+  const hkbuReady = Boolean(hkbuApiKey);
+  const activeAsrProvider = asrProvider === 'azure' && azureSpeechReady
     ? 'azure'
-    : asrProvider === 'minimax' && minimaxApiKey
+    : asrProvider === 'minimax' && minimaxAsrReady
       ? 'minimax'
+      : 'mock';
+  const asrInputReady = activeAsrProvider === 'azure' || activeAsrProvider === 'minimax';
+  const activeTtsProvider = ttsProvider === 'minimax' && minimaxReady
+    ? 'minimax'
+    : ttsProvider === 'azure' && azureSpeechReady
+      ? 'azure'
       : 'mock';
 
   res.json({
     status: 'ok',
     timestamp: Date.now(),
     version: appVersion,
-    llmProvider: minimaxApiKey && llmProvider === 'minimax' ? 'minimax' : llmProvider,
+    appVersion,
+    readyForPilot: Boolean((minimaxReady || azureOpenAIReady || hkbuReady) && activeTtsProvider !== 'mock'),
+    llmProvider: minimaxReady && llmProvider === 'minimax' ? 'minimax' : llmProvider,
     asrProvider: activeAsrProvider,
+    asrFallbackProvider: asrFallbackProvider || null,
     asrLanguage: activeAsrProvider === 'azure' ? azureAsrLanguage : minimaxAsrLanguage,
-    ttsProvider: ttsProvider === 'minimax' && minimaxApiKey ? 'minimax' : ttsProvider === 'azure' && azureTtsKey ? 'azure' : 'mock',
-    ttsVoice: ttsProvider === 'minimax' ? minimaxTtsVoice : azureVoice
+    asrInputReady,
+    asrStatus: asrInputReady ? 'ready' : 'unavailable',
+    ttsProvider: activeTtsProvider,
+    ttsVoice: activeTtsProvider === 'minimax' ? minimaxTtsVoice : azureVoice,
+    capabilities: {
+      minimax: minimaxReady,
+      minimaxAsr: minimaxAsrReady,
+      azureSpeech: azureSpeechReady,
+      azureOpenAI: azureOpenAIReady,
+      hkbu: hkbuReady
+    }
   });
 });
 
@@ -1761,8 +1785,8 @@ app.post('/api/speech-to-text', async (req, res) => {
       providerOrder.push(asrFallbackProvider);
     }
     const providers = providerOrder.filter((provider) => {
-      if (provider === 'azure') return Boolean(azureTtsKey);
-      if (provider === 'minimax') return Boolean(minimaxApiKey);
+      if (provider === 'azure') return Boolean(azureTtsKey && azureTtsRegion);
+      if (provider === 'minimax') return Boolean(minimaxApiKey && minimaxAsrEnabled);
       return false;
     });
 

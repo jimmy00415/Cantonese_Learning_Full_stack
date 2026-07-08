@@ -12,7 +12,7 @@ async function waitForHealth() {
   for (let attempt = 0; attempt < 20; attempt += 1) {
     try {
       const response = await fetch(`${baseUrl}/api/health`);
-      if (response.ok) return;
+      if (response.ok) return response.json();
     } catch {
       // Server is still starting.
     }
@@ -23,7 +23,18 @@ async function waitForHealth() {
 
 const child = spawn(process.execPath, ['server.js'], {
   cwd: new URL('..', import.meta.url),
-  env: { ...process.env, PORT: port },
+  env: {
+    ...process.env,
+    PORT: port,
+    APP_VERSION: 'test-health-contract',
+    LLM_PROVIDER: 'minimax',
+    TTS_PROVIDER: 'minimax',
+    ASR_PROVIDER: 'azure',
+    AZURE_SPEECH_KEY: 'test-azure-speech-key',
+    AZURE_SPEECH_REGION: 'eastasia',
+    MINIMAX_API_KEY: 'Minimax-test-minimax-key',
+    MINIMAX_ASR_ENABLED: 'false'
+  },
   stdio: ['ignore', 'pipe', 'pipe']
 });
 
@@ -33,7 +44,17 @@ child.stderr.on('data', (chunk) => {
 });
 
 try {
-  await waitForHealth();
+  const health = await waitForHealth();
+  assert.equal(health.status, 'ok');
+  assert.equal(health.appVersion, 'test-health-contract');
+  assert.equal(health.readyForPilot, true);
+  assert.equal(health.asrProvider, 'azure');
+  assert.equal(health.asrInputReady, true);
+  assert.equal(health.asrStatus, 'ready');
+  assert.equal(health.capabilities.minimax, true);
+  assert.equal(health.capabilities.minimaxAsr, false);
+  assert.equal(health.capabilities.azureSpeech, true);
+
   const response = await fetch(`${baseUrl}/api/visit-translate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
