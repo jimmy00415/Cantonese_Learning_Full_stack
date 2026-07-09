@@ -126,19 +126,23 @@ try {
   assert.equal(sessionResponse.status, 200);
   const session = await sessionResponse.json();
 
-  const response = await fetch(`${baseUrl}/api/recognize-and-respond`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      sessionId: session.sessionId,
-      userText: '我想同你聽下呢，香港嘅羅馬洲有咩嘢好玩？',
-      scenario: '自由對話 (Free Conversation)',
-      mode: 'teaching',
-      userMode: 'cantonese_learning',
-      uiLanguage: 'zh-TW',
-      responseLanguage: 'auto'
-    })
-  });
+  async function sendTeachingLine(userText) {
+    return fetch(`${baseUrl}/api/recognize-and-respond`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: session.sessionId,
+        userText,
+        scenario: '自由對話 (Free Conversation)',
+        mode: 'teaching',
+        userMode: 'cantonese_learning',
+        uiLanguage: 'zh-TW',
+        responseLanguage: 'auto'
+      })
+    });
+  }
+
+  const response = await sendTeachingLine('我想同你聽下呢，香港嘅羅馬洲有咩嘢好玩？');
 
   assert.equal(response.status, 200);
   const payload = await response.json();
@@ -149,6 +153,28 @@ try {
   assert.equal(payload.confidence >= 0.7, true, 'safe local tutor coaching fallback should clear the low-confidence warning threshold');
   assert.doesNotMatch(payload.aiText, /正啊！\s*你啱啱講.*不如講下你嘅日常/, 'template tutor reply should not be accepted');
   assert.match(payload.aiText, /可以試下講|可以咁講|應該講/, 'fallback should still give a useful Cantonese learning action');
+
+  const restaurantResponse = await sendTeachingLine('哦，那都幾好呀。你可唔可以同我講緊講？該點在餐廳度等買嘢？');
+
+  assert.equal(restaurantResponse.status, 200);
+  const restaurantPayload = await restaurantResponse.json();
+  assert.equal(restaurantPayload.aiFallback, true, 'low-quality topic-learning output should still be locally recoverable');
+  assert.equal(restaurantPayload.needsConfirmation, false, 'safe topic-learning fallback should not show a warning');
+  assert.doesNotMatch(
+    restaurantPayload.aiText,
+    /我明你想練呢句|講得短啲|先講重點/,
+    'topic-learning request must not be handled as generic sentence correction'
+  );
+  assert.match(
+    restaurantPayload.aiText,
+    /點餐|落單|侍應|唔該|我想要/,
+    'restaurant learning request should teach restaurant ordering language'
+  );
+  assert.match(
+    restaurantPayload.aiText,
+    /試下|你可以|而家/,
+    'restaurant learning reply should include a next practice step'
+  );
 } finally {
   await stopChild(child);
   await new Promise((resolve) => fakeMiniMax.close(resolve));

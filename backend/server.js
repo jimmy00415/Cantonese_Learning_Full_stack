@@ -362,15 +362,22 @@ Next try: [one short action]
 
 ## 指引：
 1. **任何時候都要用廣東話回覆**：即使學生用英文、普通話或英文介面提問，主對話都必須用自然廣東話（繁體中文）回答；英文解釋只可以出現在 Coach Notes 或翻譯功能
-2. **必須糾正錯誤**：每當學生有發音、文法、用詞錯誤，一定要指出並解釋
-3. **提供正確示範**：講出正確嘅講法
-4. **語氣專業但鼓勵**：像老師咁教導，但要有耐心
-5. **使用繁體中文**書寫
-6. **保持簡潔**：糾正後繼續對話，回應1-3句
-7. **認識文化背景**：如果學生用咗俚語或潮語，解釋佢哋嘅適當用法
-8. 如果提供粵拼，只可以作為標示清楚嘅閱讀提示；唔可以只輸出粵拼或羅馬字母，必須同時有廣東話中文句子
+2. **先分辨學生意圖**：如果學生問「可唔可以教我／點樣講／想學」某個場景，要直接教嗰個場景；唔好只當成一句錯句去糾正
+3. **需要糾正先糾正**：如果學生明顯係練一句話，指出最影響理解嘅錯誤，然後提供更自然講法
+4. **提供正確示範**：教學請畀一個短例句；糾正請講出正確嘅講法
+5. **語氣專業但鼓勵**：像老師咁教導，但要有耐心
+6. **使用繁體中文**書寫
+7. **保持簡潔**：回應2-4句，先答學生真正想學嘅嘢，再畀下一步練習
+8. **認識文化背景**：如果學生用咗俚語或潮語，解釋佢哋嘅適當用法
+9. 如果提供粵拼，只可以作為標示清楚嘅閱讀提示；唔可以只輸出粵拼或羅馬字母，必須同時有廣東話中文句子
 
-## 糾正格式：
+## 回覆格式：
+如果學生係想學一個場景：
+[直接確認學習主題]
+[一個自然短例句]
+[叫學生即刻試一句]
+
+如果學生係練一句話：
 「[學生講嘅話]」→ 應該講「[正確講法]」
 [簡短解釋原因]
 [繼續對話]
@@ -518,6 +525,58 @@ function isIncompleteTutorReply(text) {
     || /有啲問題[，,]?\s*我幫你糾正一下[:：]?$/.test(value);
 }
 
+function normalizeIntentText(...parts) {
+  return parts
+    .map(part => String(part || ''))
+    .join(' ')
+    .replace(/\s+/g, '')
+    .toLowerCase();
+}
+
+function detectTeachingTopic(userText, scenario = '') {
+  const value = normalizeIntentText(userText, scenario);
+  if (!value) return null;
+
+  if (/餐廳|茶餐廳|點餐|落單|買嘢|買野|叫嘢食|叫野食|叫餐|餐牌|侍應|伙記|外賣|買飯|買水|飲嘢|飲野|食嘢|食野/.test(value)) {
+    return {
+      key: 'restaurant_ordering',
+      label: '餐廳點餐'
+    };
+  }
+
+  if (/打招呼|問候|sayhi|hello|你好|早晨|午安|開場白/.test(value)) {
+    return {
+      key: 'greeting',
+      label: '日常打招呼'
+    };
+  }
+
+  if (/意見|同意|唔同意|不同意|表達睇法|我覺得|我認為|建議/.test(value)) {
+    return {
+      key: 'opinion',
+      label: '表達意見'
+    };
+  }
+
+  if (/俗語|俚語|潮語|口語|地道講法|localphrase|slang/.test(value)) {
+    return {
+      key: 'slang',
+      label: '地道口語'
+    };
+  }
+
+  return null;
+}
+
+function detectTeachingTopicRequest(userText, scenario = '') {
+  const value = normalizeIntentText(userText, scenario);
+  const topic = detectTeachingTopic(userText, scenario);
+  if (!topic) return null;
+
+  const asksForLesson = /可唔可以|可以.*(?:教|講|介紹|話我知|幫)|想(?:學|知|問|聽|了解)|教(?:我|下|吓)?|學(?:下|吓)?|點(?:樣)?(?:講|問|叫|買|表達|做)|應該點|該點|請你|幫我/.test(value);
+  return asksForLesson ? topic : null;
+}
+
 function hasTeachingSubstance(text) {
   const value = String(text || '').trim();
   const hasCorrection = /→|應該講|可以(?:咁|試下)?講|改做|更自然|唔太自然|正確|糾正/.test(value);
@@ -526,14 +585,52 @@ function hasTeachingSubstance(text) {
   return hasCorrection && (hasReason || hasNextStep);
 }
 
+function hasTeachingLessonSubstance(text, topic = null) {
+  const value = String(text || '').trim();
+  const hasExample = /「[^」]{2,}」|可以(?:講|問|用)|例句|例如|第一句|下一句/.test(value);
+  const hasPracticeStep = /試下|而家|你可以|下一步|跟住|換成|講一句|練/.test(value);
+  const matchesTopic = !topic
+    || topic.key !== 'restaurant_ordering'
+    || /餐廳|點餐|落單|侍應|伙記|餐牌|唔該|我想要|凍檸茶|叉燒飯|買嘢|買野/.test(value);
+  return hasExample && hasPracticeStep && matchesTopic;
+}
+
 function isUsableTutorReply(text, mode, userText = '') {
   const value = String(text || '').trim();
   if (mode === 'coachNotes') return Boolean(value);
   if (!isCantoneseTutorReply(value)) return false;
   if (isTemplateTutorReply(value)) return false;
   if (isIncompleteTutorReply(value)) return false;
-  if (mode === 'teaching') return hasTeachingSubstance(value);
+  if (mode === 'teaching') {
+    const topicRequest = detectTeachingTopicRequest(userText);
+    return topicRequest
+      ? hasTeachingLessonSubstance(value, topicRequest) || hasTeachingSubstance(value)
+      : hasTeachingSubstance(value);
+  }
   return value.length >= 18 && !/你啱啱講/.test(value);
+}
+
+function buildTopicTeachingFallback(topic, userText) {
+  if (topic?.key === 'restaurant_ordering') {
+    return '可以，我哋先練餐廳點餐。你可以講：「唔該，我想要一杯凍檸茶同一份叉燒飯。」如果想問價錢，可以加：「幾多錢呀？」而家試下用「我想要……」講一樣你想買嘅嘢。';
+  }
+
+  if (topic?.key === 'greeting') {
+    return '可以，我哋先練日常打招呼。你可以講：「你好，我係新同學，好高興識你。」語氣自然啲就得，而家試下用一句簡短問候開始。';
+  }
+
+  if (topic?.key === 'opinion') {
+    return '可以，我哋練點樣表達意見。你可以講：「我覺得呢個方法幾好，因為簡單啲。」先講立場，再講一個原因；而家試下用「我覺得……因為……」講一句。';
+  }
+
+  if (topic?.key === 'slang') {
+    return '可以，我哋學一句地道口語。你可以講：「冇問題，慢慢嚟。」呢句自然又禮貌；而家試下講一個你想用嘅情景，我幫你揀更地道講法。';
+  }
+
+  const source = String(userText || '').trim();
+  return source
+    ? `可以，我哋就圍住你想學嘅內容練。你可以先講：「我想學點樣講呢個情景。」我會畀你一個短例句，再請你試講一次。`
+    : '可以，我哋先揀一個生活情景練。你可以講：「我想學餐廳點餐。」我會畀你一個短例句，再請你試講一次。';
 }
 
 function buildLocalQualityTutorFallback(userText, scenario, mode = 'freeChat') {
@@ -541,6 +638,11 @@ function buildLocalQualityTutorFallback(userText, scenario, mode = 'freeChat') {
   const normalized = source.replace(/\s+/g, '');
 
   if (mode === 'teaching') {
+    const topicRequest = detectTeachingTopicRequest(source, scenario);
+    if (topicRequest) {
+      return buildTopicTeachingFallback(topicRequest, source);
+    }
+
     if (/羅馬洲|落馬洲|羅湖|羅湖洲/.test(normalized)) {
       return '我聽到你想問香港邊度好玩，不過「羅馬洲」可能係想講「落馬洲」或者「羅湖」。可以試下講：「我想聽下香港落馬洲附近有咩好玩？」咁樣地方名同問題會清楚啲。';
     }
@@ -578,7 +680,7 @@ async function repairTutorReplyWithProvider(provider, userText, scenario, mode, 
 硬性要求：
 1. 只用自然繁體中文廣東話。
 2. 唔好講「正啊！你啱啱講」呢類模板句。
-3. 如果係教學模式，必須包含：一個更自然講法、一句簡短原因、一個下一步練習/追問。
+3. 如果學生係問點樣學/講某個場景，先直接教嗰個場景，包含一個短例句同一個下一步練習；如果學生係練一句話，先至包含更自然講法、一句簡短原因、一個下一步練習/追問。
 4. 2 至 4 句，唔好喺冒號、「但」、「例如」之後突然停止。
 5. 場景：${scenario || '自由對話'}；模式：${mode || 'freeChat'}`
     },
@@ -612,7 +714,8 @@ async function enforceCantoneseTutorReply(text, provider, userText, scenario, mo
 1. 只可以輸出改寫後嘅廣東話回覆，唔好解釋。
 2. 唔好用英文句子；除咗 HKBU、App 呢類必要專名，其他英文要改成廣東話，例如 club 要寫做「社團」或「學會」。
 3. 保留原本意思：如果原文係糾正、建議或活動指引，都要用廣東話講返。
-4. 保持簡潔清楚，適合國際生跟住做。`
+4. 保留學生意圖：如果學生係想學某個生活場景，唔好改成單句糾正。
+5. 保持簡潔清楚，適合國際生跟住做。`
     },
     {
       role: 'user',
