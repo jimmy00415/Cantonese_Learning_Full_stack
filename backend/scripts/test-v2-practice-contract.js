@@ -28,8 +28,20 @@ assert.match(app, /renderImmediateFeedback[\s\S]*updatePracticeCoachSummary\(/, 
 assert.doesNotMatch(app, /scenarioPill\.textContent\s*=\s*label/, 'practice mode rendering should not overwrite the scenario pill with mode text');
 assert.doesNotMatch(app, /const\s+replay\s*=\s*document\.createElement\('button'\)/, 'AI messages should show one play action, not play plus replay');
 assert.match(app, /markHabitPractised\(\)/, 'successful user exchange should mark habit practised');
+assert.match(app, /t\('input\.recording'\)/, 'Practice recording state should use compact i18n copy');
+assert.match(app, /t\('input\.processingSpeech'\)/, 'Practice processing state should use compact i18n copy');
 assert.match(css, /\.practice-workspace-grid\b/, 'practice workspace grid styling should exist');
 assert.match(css, /\.practice-input-dock\b/, 'practice input dock styling should exist');
+assert.match(css, /\.practice-input-dock\s*{[\s\S]*--dock-control-height:\s*48px;/, 'Practice dock should define stable control height');
+assert.match(css, /\.practice-input-dock\s*{[\s\S]*grid-template-areas:\s*"voice input send"\s*"timer audio audio";/, 'Practice dock should use explicit voice/input/send and timer/audio areas');
+assert.match(css, /\.practice-input-dock\s*>\s*\*\s*{[\s\S]*min-width:\s*0;/, 'Practice dock children should be allowed to shrink');
+assert.match(css, /\.practice-input-dock\s+\.audio-control-dock\s*{[\s\S]*overflow:\s*hidden;/, 'Practice audio controls should be contained inside the dock');
+assert.match(css, /@media \(max-width:\s*860px\)[\s\S]*\.practice-input-dock\s*{[\s\S]*grid-template-areas:\s*"voice send"\s*"input input"\s*"timer audio";/, 'Practice dock should collapse before tablet widths overflow');
+assert.match(css, /@media \(max-width:\s*560px\)[\s\S]*\.practice-input-dock\s*{[\s\S]*grid-template-areas:\s*"voice"\s*"input"\s*"send"\s*"timer"\s*"audio";/, 'Practice dock should become a single-column mobile composer');
+assert.match(css, /@media \(max-width:\s*560px\)[\s\S]*\.practice-input-dock\s+\.voice-control,[\s\S]*grid-column:\s*1\s*\/\s*-1;/, 'Practice mobile audio controls should reset old two-column placement');
+assert.match(css, /Practice page design pass from the provided Together\.ai DESIGN\.md/, 'Practice page should document the applied design pass');
+assert.match(css, /\.practice-stage\s+\.mode-btn\.active\s*{[\s\S]*background:\s*#000;/, 'Practice active mode should use the restrained black selected state');
+assert.match(css, /\.practice-stage\s+\.controls button\s*{[\s\S]*border-radius:\s*4px;[\s\S]*background:\s*#000;/, 'Practice mission CTA should use Together-style black 4px button chrome');
 assert.match(css, /\.practice-stage\s*{[\s\S]*grid-template-areas:/, 'Practice desktop layout should use named grid areas instead of implicit placement');
 assert.match(css, /"task setup history"\s*"coach setup history"/, 'Practice desktop layout should keep task, setup, coach, and history in stable columns');
 assert.doesNotMatch(css, /"feedback setup history"/, 'Practice desktop layout should not reserve a second feedback row');
@@ -44,6 +56,8 @@ assert.match(css, /\.transcript-meta\s+\.pill[\s\S]*text-overflow:\s*ellipsis;/,
 assert.match(css, /@media \(max-width:\s*1100px\)[\s\S]*\.practice-stage\s*{[\s\S]*grid-template-areas:\s*"task"\s*"setup"\s*"history"\s*"coach";/, 'Practice layout should collapse to one column before columns become cramped');
 assert.doesNotMatch(css, /@media \(max-width:\s*1100px\)[\s\S]*grid-template-areas:\s*"task"\s*"setup"\s*"history"\s*"coach"\s*"feedback";/, 'Practice mobile layout should not include duplicate feedback panel');
 assert.match(i18n, /practice:\s*{/, 'V2 practice copy should exist');
+assert.match(i18n, /recording:\s*'錄音中'/, 'Traditional Chinese input recording copy should stay compact');
+assert.match(i18n, /processingSpeech:\s*'處理中'/, 'Traditional Chinese input processing copy should stay compact');
 assert.equal(pkg.scripts['test:v2-practice'], 'node scripts/test-v2-practice-contract.js');
 
 console.log('V2 practice contract passed');

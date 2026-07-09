@@ -443,6 +443,8 @@ export const locales = {
       speed: '速度',
       replay: '重播',
       correctMe: 'Correct Me',
+      recording: '錄音中',
+      processingSpeech: '處理中',
       send: '發送'
     },
     
@@ -954,6 +956,8 @@ export const locales = {
       speed: '速度',
       replay: '重播',
       correctMe: 'Correct Me',
+      recording: '录音中',
+      processingSpeech: '处理中',
       send: '发送'
     },
     
@@ -1465,6 +1469,8 @@ export const locales = {
       speed: 'Speed',
       replay: 'Replay',
       correctMe: 'Correct Me',
+      recording: 'Recording',
+      processingSpeech: 'Processing',
       send: 'Send'
     },
     

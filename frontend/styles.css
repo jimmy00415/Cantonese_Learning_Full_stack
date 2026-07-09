@@ -3575,3 +3575,355 @@ body[data-user-mode="visit_translation"] .audio-control-dock {
     width: 100%;
   }
 }
+
+/* Together.ai-inspired V2 composer: explicit regions, hairline chrome, no horizontal spill. */
+.practice-input-dock {
+  --dock-control-height: 48px;
+  --dock-radius: 4px;
+  --dock-hairline: rgba(0, 0, 0, 0.1);
+  grid-template-columns: minmax(148px, 180px) minmax(0, 1fr) minmax(104px, 128px);
+  grid-template-areas:
+    "voice input send"
+    "timer audio audio";
+  gap: 8px;
+  align-items: stretch;
+  padding: 12px;
+  border: 1px solid var(--dock-hairline);
+  border-radius: var(--dock-radius);
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 4px 10px rgba(1, 1, 32, 0.1);
+  overflow: hidden;
+}
+
+.practice-input-dock > * {
+  min-width: 0;
+}
+
+.practice-input-dock .mic,
+.practice-input-dock .stop-btn,
+.practice-input-dock .send-btn,
+.practice-input-dock .audio-controls > button,
+.practice-input-dock .correct-btn {
+  border: 1px solid var(--dock-hairline);
+  border-radius: var(--dock-radius);
+  box-shadow: none;
+  font-family: ui-monospace, "SFMono-Regular", "SF Mono", Consolas, "Liberation Mono", monospace;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.practice-input-dock .mic,
+.practice-input-dock .stop-btn {
+  grid-area: voice;
+  width: 100%;
+  min-width: 0;
+  min-height: var(--dock-control-height);
+  padding: 8px 10px;
+  background: #010120;
+  border-color: #010120;
+  color: #fff;
+  line-height: 1.15;
+  white-space: normal;
+}
+
+.practice-input-dock .stop-btn {
+  animation: none;
+  background: #000;
+}
+
+.practice-input-dock .recording-indicator {
+  grid-area: timer;
+  align-self: center;
+  justify-self: start;
+  width: var(--dock-control-height);
+  height: var(--dock-control-height);
+  border: 1px solid var(--dock-hairline);
+  border-radius: var(--dock-radius);
+  box-shadow: none;
+}
+
+.practice-input-dock .text-entry {
+  grid-area: input;
+  min-width: 0;
+}
+
+.practice-input-dock .text-entry input {
+  min-height: var(--dock-control-height);
+  padding: 0 16px;
+  border: 1px solid var(--dock-hairline);
+  border-radius: var(--dock-radius);
+  box-shadow: none;
+  font-size: 16px;
+  text-overflow: ellipsis;
+}
+
+.practice-input-dock .audio-control-dock {
+  grid-area: audio;
+  display: grid;
+  grid-template-columns: minmax(170px, 220px) minmax(220px, 1fr) minmax(84px, auto) minmax(104px, auto);
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--dock-hairline);
+  border-radius: var(--dock-radius);
+  background: #fff;
+  box-shadow: none;
+  overflow: hidden;
+}
+
+.practice-input-dock .voice-control,
+.practice-input-dock .speed-control {
+  display: grid;
+  align-items: center;
+  min-width: 0;
+  gap: 4px 8px;
+}
+
+.practice-input-dock .voice-control {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.practice-input-dock .speed-control {
+  grid-template-columns: auto minmax(96px, 1fr) auto;
+  flex-wrap: nowrap;
+}
+
+.practice-input-dock .voice-control label,
+.practice-input-dock .speed-control label {
+  color: #959494;
+  font-family: ui-monospace, "SFMono-Regular", "SF Mono", Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.practice-input-dock .voice-select {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  padding-left: 10px;
+  border: 1px solid var(--dock-hairline);
+  border-radius: var(--dock-radius);
+  box-shadow: none;
+}
+
+.practice-input-dock .speed-control input[type="range"] {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  box-shadow: none;
+  accent-color: #000;
+}
+
+.practice-input-dock .speed-value {
+  min-width: 52px;
+  color: #000;
+  font-weight: 800;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.practice-input-dock .audio-controls > button,
+.practice-input-dock .correct-btn {
+  min-height: 36px;
+  padding: 0 12px;
+  background: #fff;
+  color: #000;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.practice-input-dock .send-btn {
+  grid-area: send;
+  width: 100%;
+  min-width: 0;
+  min-height: var(--dock-control-height);
+  padding: 0 14px;
+  background: #000;
+  border-color: #000;
+  color: #fff;
+}
+
+.practice-input-dock .mic:hover:not(:disabled),
+.practice-input-dock .stop-btn:hover:not(:disabled),
+.practice-input-dock .send-btn:hover:not(:disabled),
+.practice-input-dock .audio-controls > button:hover:not(:disabled),
+.practice-input-dock .correct-btn:hover:not(:disabled) {
+  transform: none;
+  box-shadow: none;
+}
+
+.practice-input-dock .mic.voice-state-recording {
+  background: #b91c1c;
+  border-color: #b91c1c;
+  color: #fff;
+}
+
+.practice-input-dock .mic.voice-state-processing {
+  background: #313641;
+  border-color: #313641;
+  color: #fff;
+}
+
+.practice-input-dock .mic.voice-state-unavailable {
+  background: #ebebeb;
+  border-color: #d6d6d6;
+  color: #525252;
+}
+
+@media (max-width: 1180px) {
+  .practice-input-dock {
+    grid-template-columns: minmax(132px, 168px) minmax(0, 1fr) minmax(96px, 112px);
+  }
+
+  .practice-input-dock .audio-control-dock {
+    grid-template-columns: minmax(150px, 0.8fr) minmax(190px, 1.2fr) repeat(2, minmax(78px, auto));
+  }
+}
+
+@media (max-width: 860px) {
+  .practice-input-dock {
+    grid-template-columns: minmax(0, 1fr) minmax(96px, auto);
+    grid-template-areas:
+      "voice send"
+      "input input"
+      "timer audio";
+  }
+
+  .practice-input-dock .audio-control-dock {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .practice-input-dock .voice-control,
+  .practice-input-dock .speed-control,
+  .practice-input-dock .audio-controls > button,
+  .practice-input-dock .correct-btn {
+    min-width: 0;
+  }
+}
+
+@media (max-width: 560px) {
+  .practice-input-dock {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "voice"
+      "input"
+      "send"
+      "timer"
+      "audio";
+  }
+
+  .practice-input-dock .audio-control-dock {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .practice-input-dock .voice-control,
+  .practice-input-dock .speed-control,
+  .practice-input-dock .audio-controls > button,
+  .practice-input-dock .correct-btn {
+    grid-column: 1 / -1;
+  }
+
+  .practice-input-dock .recording-indicator {
+    justify-self: stretch;
+  }
+
+  .practice-input-dock .speed-control {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+}
+
+/* Practice page design pass from the provided Together.ai DESIGN.md. */
+.practice-stage .practice-task-card,
+.practice-stage .practice-coach-panel,
+.practice-stage .control-rail,
+.practice-stage .transcript,
+.practice-stage .scenario-guide {
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 4px;
+  background: #fff;
+  box-shadow: none;
+}
+
+.practice-stage .section-eyebrow,
+.practice-stage .coach-summary-kicker,
+.practice-stage .controls label,
+.practice-stage .voice-control label,
+.practice-stage .speed-control label {
+  color: #000;
+  font-family: ui-monospace, "SFMono-Regular", "SF Mono", Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.practice-stage .practice-task-card h2,
+.practice-stage .practice-coach-panel h3,
+.practice-stage .transcript-titleblock h3 {
+  font-family: Inter, "Noto Sans HK", Arial, sans-serif;
+  font-weight: 650;
+  letter-spacing: 0;
+}
+
+.practice-stage .mode-btn,
+.practice-stage .scenario-phrase,
+.practice-stage .coach-summary-card,
+.practice-stage .message {
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 4px;
+  box-shadow: none;
+}
+
+.practice-stage .mode-btn {
+  min-height: 64px;
+  background: #fff;
+}
+
+.practice-stage .mode-btn.active {
+  background: #000;
+  color: #fff;
+  box-shadow: none;
+}
+
+.practice-stage .mode-icon {
+  border-width: 1px;
+  border-radius: 4px;
+}
+
+.practice-stage .controls button {
+  border: 1px solid #000;
+  border-radius: 4px;
+  background: #000;
+  box-shadow: none;
+  color: #fff;
+  font-family: ui-monospace, "SFMono-Regular", "SF Mono", Consolas, "Liberation Mono", monospace;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.practice-stage select {
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 4px;
+  box-shadow: none;
+}
+
+.practice-stage .transcript-header {
+  border-bottom-color: rgba(0, 0, 0, 0.1);
+}
+
+.practice-stage .transcript-meta .pill,
+.practice-stage .transcript-meta .ghost {
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 4px;
+  box-shadow: none;
+  background: #fff;
+}

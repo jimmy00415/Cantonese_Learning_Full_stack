@@ -1,7 +1,7 @@
 // P3-1: Import i18n module
-import { t, setLanguage, getLanguage, initI18n, getAvailableLanguages, locales } from './i18n/index.js?v=20260709simple1';
+import { t, setLanguage, getLanguage, initI18n, getAvailableLanguages, locales } from './i18n/index.js?v=20260709dock1';
 import { elderlyVisitPlaybook } from './content/playbooks.js?v=20260522visit1';
-import { createAsrErrorNotice, createVisitModeStartNotice, isVoiceInputAvailable } from './errors.js?v=20260709simple1';
+import { createAsrErrorNotice, createVisitModeStartNotice, isVoiceInputAvailable } from './errors.js?v=20260709dock1';
 
 const META_API = document.querySelector('meta[name="api-base"]');
 
@@ -2208,7 +2208,7 @@ async function handleRecordStart() {
     setSystemState(STATES.LISTENING);
     setMicButtonText(isVisitTranslationMode()
       ? t('visitTranslate.actions.recording')
-      : '錄音中... 放開即發送');
+      : t('input.recording'));
     if (currentAsrProvider === 'azure') {
       await startAzureSpeechSdkRecording();
     } else {
@@ -2238,7 +2238,7 @@ function handleRecordStop() {
     setVoiceUiState('processing');
     setMicButtonText(isVisitTranslationMode()
       ? t('visitTranslate.actions.processingSpeech')
-      : '處理錄音中...');
+      : t('input.processingSpeech'));
     mediaRecorder.stop();
     return;
   }
@@ -2255,7 +2255,7 @@ function handleRecordStop() {
     setVoiceUiState('processing');
     setMicButtonText(isVisitTranslationMode()
       ? t('visitTranslate.actions.processingSpeech')
-      : '處理錄音中...');
+      : t('input.processingSpeech'));
     setSystemState(STATES.PROCESSING);
     setStatus('Azure Speech 轉換中...');
     recognizerRef.stopContinuousRecognitionAsync(
