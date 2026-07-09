@@ -370,6 +370,7 @@ Next try: [one short action]
 7. **保持簡潔**：回應2-4句，先答學生真正想學嘅嘢，再畀下一步練習
 8. **認識文化背景**：如果學生用咗俚語或潮語，解釋佢哋嘅適當用法
 9. 如果提供粵拼，只可以作為標示清楚嘅閱讀提示；唔可以只輸出粵拼或羅馬字母，必須同時有廣東話中文句子
+10. **像聊天訊息咁輸出**：唔好用 Markdown 標題、清單、引用線、分隔線或 emoji
 
 ## 回覆格式：
 如果學生係想學一個場景：
@@ -525,6 +526,15 @@ function isIncompleteTutorReply(text) {
     || /有啲問題[，,]?\s*我幫你糾正一下[:：]?$/.test(value);
 }
 
+function isOverFormattedTutorReply(text) {
+  const value = String(text || '').trim();
+  if (!value) return true;
+  const hasMarkdownBlock = /(?:^|\n)\s*(?:#{1,6}\s+|>\s+|[-*]\s+\S|\d+\.\s+\S)|(?:^|\n)\s*---+\s*(?:\n|$)/m.test(value);
+  const hasEmoji = /[\u{1f300}-\u{1faff}\u{2600}-\u{27bf}]/u.test(value);
+  const sentenceCount = (value.match(/[。！？!?]/g) || []).length;
+  return hasMarkdownBlock || hasEmoji || value.length > 260 || sentenceCount > 5;
+}
+
 function normalizeIntentText(...parts) {
   return parts
     .map(part => String(part || ''))
@@ -601,6 +611,7 @@ function isUsableTutorReply(text, mode, userText = '') {
   if (!isCantoneseTutorReply(value)) return false;
   if (isTemplateTutorReply(value)) return false;
   if (isIncompleteTutorReply(value)) return false;
+  if (isOverFormattedTutorReply(value)) return false;
   if (mode === 'teaching') {
     const topicRequest = detectTeachingTopicRequest(userText);
     return topicRequest
@@ -682,7 +693,8 @@ async function repairTutorReplyWithProvider(provider, userText, scenario, mode, 
 2. 唔好講「正啊！你啱啱講」呢類模板句。
 3. 如果學生係問點樣學/講某個場景，先直接教嗰個場景，包含一個短例句同一個下一步練習；如果學生係練一句話，先至包含更自然講法、一句簡短原因、一個下一步練習/追問。
 4. 2 至 4 句，唔好喺冒號、「但」、「例如」之後突然停止。
-5. 場景：${scenario || '自由對話'}；模式：${mode || 'freeChat'}`
+5. 唔好用 Markdown 標題、清單、引用線、分隔線或 emoji。
+6. 場景：${scenario || '自由對話'}；模式：${mode || 'freeChat'}`
     },
     {
       role: 'user',
@@ -715,7 +727,8 @@ async function enforceCantoneseTutorReply(text, provider, userText, scenario, mo
 2. 唔好用英文句子；除咗 HKBU、App 呢類必要專名，其他英文要改成廣東話，例如 club 要寫做「社團」或「學會」。
 3. 保留原本意思：如果原文係糾正、建議或活動指引，都要用廣東話講返。
 4. 保留學生意圖：如果學生係想學某個生活場景，唔好改成單句糾正。
-5. 保持簡潔清楚，適合國際生跟住做。`
+5. 唔好用 Markdown 標題、清單、引用線、分隔線或 emoji。
+6. 保持簡潔清楚，適合國際生跟住做。`
     },
     {
       role: 'user',

@@ -52,11 +52,21 @@ const fakeMiniMax = http.createServer(async (req, res) => {
   const body = JSON.parse(await readRequestBody(req));
   const system = String(body.system || '');
   const userContent = body.messages?.map((message) => message.content).join('\n') || '';
-  if (/餐廳|買嘢|買野/.test(userContent)) {
+  if (/該點在餐廳度等買嘢/.test(userContent)) {
     await wait(650);
   }
 
-  const text = system.includes('語言守門員')
+  const text = /我想學餐廳點餐/.test(userContent) && system.includes('嚴謹但友善')
+    ? `好呀！你想學喺餐廳排隊或者等位嘅情況對話。
+
+## 餐廳等位/排隊常用句
+
+> 「唔該，我想問下幾耐會有位？」
+
+---
+
+試下跟住讀一次，我聽聽你發音正唔正確！😊`
+    : system.includes('語言守門員')
     ? '正啊！ 你啱啱講：「我想同你聽下呢，香港嘅羅馬洲有咩嘢好玩？」  不如講下你嘅日常？'
     : system.includes('嚴謹但友善')
       ? 'Great, the student is asking about places to visit in Hong Kong.'
@@ -178,6 +188,44 @@ try {
     restaurantPayload.aiText,
     /試下|你可以|而家/,
     'restaurant learning reply should include a next practice step'
+  );
+
+  const cleanSessionResponse = await fetch(`${baseUrl}/api/session`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      mode: 'teaching',
+      userMode: 'cantonese_learning',
+      uiLanguage: 'zh-TW',
+      responseLanguage: 'auto'
+    })
+  });
+  assert.equal(cleanSessionResponse.status, 200);
+  const cleanSession = await cleanSessionResponse.json();
+  const formattedResponse = await fetch(`${baseUrl}/api/recognize-and-respond`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: cleanSession.sessionId,
+      userText: '我想學餐廳點餐',
+      scenario: '自由對話 (Free Conversation)',
+      mode: 'teaching',
+      userMode: 'cantonese_learning',
+      uiLanguage: 'zh-TW',
+      responseLanguage: 'auto'
+    })
+  });
+  assert.equal(formattedResponse.status, 200);
+  const formattedPayload = await formattedResponse.json();
+  assert.doesNotMatch(
+    formattedPayload.aiText,
+    /##|^>|---|😊/m,
+    'tutor replies should be compact chat bubbles, not markdown-formatted lessons'
+  );
+  assert.equal(
+    formattedPayload.aiText.length < 220,
+    true,
+    'topic-learning tutor replies should stay short enough for the chat layout'
   );
 } finally {
   await stopChild(child);
