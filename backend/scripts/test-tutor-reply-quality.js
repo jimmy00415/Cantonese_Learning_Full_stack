@@ -52,6 +52,9 @@ const fakeMiniMax = http.createServer(async (req, res) => {
   const body = JSON.parse(await readRequestBody(req));
   const system = String(body.system || '');
   const userContent = body.messages?.map((message) => message.content).join('\n') || '';
+  if (/餐廳|買嘢|買野/.test(userContent)) {
+    await wait(650);
+  }
 
   const text = system.includes('語言守門員')
     ? '正啊！ 你啱啱講：「我想同你聽下呢，香港嘅羅馬洲有咩嘢好玩？」  不如講下你嘅日常？'
@@ -90,6 +93,7 @@ const child = spawn(process.execPath, ['server.js'], {
     PORT: appPort,
     APP_VERSION: 'test-tutor-reply-quality',
     LLM_PROVIDER: 'minimax',
+    LLM_PROVIDER_TIMEOUT_MS: '40',
     MINIMAX_API_KEY: 'Minimax-test-minimax-key',
     MINIMAX_ANTHROPIC_BASE_URL: `http://127.0.0.1:${minimaxPort}`,
     TTS_PROVIDER: 'mock',

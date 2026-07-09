@@ -842,14 +842,16 @@ async function generateAIResponse(userText, scenario, history, mode = 'freeChat'
   }
 
   console.log('⚠️ All LLM providers failed, falling back to mock response');
+  const fallbackText = mode === 'coachNotes'
+    ? buildEnglishCoachCorrection(userText, culturalContext)
+    : buildLocalQualityTutorFallback(userText, scenario, mode);
+  const safeLocalTutorFallback = mode !== 'coachNotes' && isUsableTutorReply(fallbackText, mode, userText);
   return {
-    text: mode === 'coachNotes'
-      ? buildEnglishCoachCorrection(userText, culturalContext)
-      : buildLocalQualityTutorFallback(userText, scenario, mode),
-    aiProvider: mode === 'coachNotes' ? 'mock' : 'local_quality_fallback',
+    text: fallbackText,
+    aiProvider: safeLocalTutorFallback ? 'local_quality_fallback' : 'mock',
     aiFallback: true,
-    confidence: mode === 'coachNotes' ? 0.5 : 0.58,
-    uncertaintyReason: 'all_providers_failed'
+    confidence: safeLocalTutorFallback ? 0.72 : 0.58,
+    uncertaintyReason: safeLocalTutorFallback ? 'local_quality_fallback' : 'all_providers_failed'
   };
 }
 
