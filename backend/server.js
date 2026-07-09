@@ -562,6 +562,13 @@ function buildLocalQualityTutorFallback(userText, scenario, mode = 'freeChat') {
     : '我哋可以繼續傾，你想練日常對話、校園生活，定係香港文化？';
 }
 
+function shouldConfirmTutorOutput(aiResult = {}, languagePolicy = resolveLanguagePolicy()) {
+  if (languagePolicy.needsConfirmation) return true;
+  if (aiResult.aiProvider === 'mock') return true;
+  if (['mock_provider_unconfigured', 'all_providers_failed'].includes(aiResult.uncertaintyReason)) return true;
+  return Number(aiResult.confidence || 0) < 0.7;
+}
+
 async function repairTutorReplyWithProvider(provider, userText, scenario, mode, previousDraft) {
   const repairMessages = [
     {
@@ -709,7 +716,7 @@ async function generateAIResponse(userText, scenario, history, mode = 'freeChat'
         aiProvider: enforced.qualityFallback ? 'local_quality_fallback' : provider,
         aiFallback: Boolean(enforced.qualityFallback) || provider !== providers[0],
         confidence: enforced.qualityFallback
-          ? 0.62
+          ? 0.72
           : enforced.repaired
             ? 0.8
             : enforced.rewritten
@@ -2269,7 +2276,7 @@ app.post('/api/recognize-and-respond', async (req, res) => {
     uncertaintyReason: aiResult.uncertaintyReason,
     responseLanguage: languagePolicy.responseLanguage,
     languagePolicyApplied: languagePolicy.languagePolicyApplied,
-    needsConfirmation: languagePolicy.needsConfirmation || aiResult.aiFallback || Number(aiResult.confidence || 0) < 0.7
+    needsConfirmation: shouldConfirmTutorOutput(aiResult, languagePolicy)
   });
 });
 

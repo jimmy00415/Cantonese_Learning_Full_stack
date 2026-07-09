@@ -145,7 +145,8 @@ try {
   assert.equal(llmCallCount >= 2, true, 'expected server to attempt LLM generation and rewrite');
   assert.equal(payload.aiFallback, true, 'low-quality LLM output should be marked as fallback');
   assert.equal(payload.uncertaintyReason, 'local_quality_fallback');
-  assert.equal(payload.needsConfirmation, true);
+  assert.equal(payload.needsConfirmation, false, 'safe local tutor coaching fallback should not trigger the mock/lower-confidence warning');
+  assert.equal(payload.confidence >= 0.7, true, 'safe local tutor coaching fallback should clear the low-confidence warning threshold');
   assert.doesNotMatch(payload.aiText, /正啊！\s*你啱啱講.*不如講下你嘅日常/, 'template tutor reply should not be accepted');
   assert.match(payload.aiText, /可以試下講|可以咁講|應該講/, 'fallback should still give a useful Cantonese learning action');
 } finally {
