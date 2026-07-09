@@ -157,6 +157,19 @@ const tutorFeedbackTranslationCache = new Map();
 const tutorFeedbackTranslationInflight = new Map();
 const MAX_TUTOR_FEEDBACK_TRANSLATION_CACHE = 80;
 
+function azureDeploymentUsesDefaultTemperatureOnly(deploymentName) {
+  const normalized = String(deploymentName || '').toLowerCase();
+  return normalized.includes('gpt-5') || /\bo\d/.test(normalized);
+}
+
+function resolveAzureOpenAIMaxCompletionTokens(options = {}) {
+  const requested = Number(options.maxTokens || 150);
+  if (azureDeploymentUsesDefaultTemperatureOnly(azureOpenAIDeployment)) {
+    return Math.max(requested, 800);
+  }
+  return requested;
+}
+
 function readPositiveInt(value, fallback, { min = 1, max = 60000 } = {}) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
@@ -369,7 +382,7 @@ Next try: [one short action]
 6. **使用繁體中文**書寫
 7. **保持簡潔**：回應2-4句，先答學生真正想學嘅嘢，再畀下一步練習
 8. **認識文化背景**：如果學生用咗俚語或潮語，解釋佢哋嘅適當用法
-9. 如果提供粵拼，只可以作為標示清楚嘅閱讀提示；唔可以只輸出粵拼或羅馬字母，必須同時有廣東話中文句子
+9. **唔好輸出粵拼或羅馬字母**：主導師回覆只可以用自然繁體中文廣東話；粵拼只可以出現在專門嘅發音/翻譯功能
 10. **像聊天訊息咁輸出**：唔好用 Markdown 標題、清單、引用線、分隔線或 emoji
 
 ## 回覆格式：
@@ -396,7 +409,7 @@ Next try: [one short action]
 5. **推動對話**：問問題，分享睇法
 6. **用繁體中文**書寫
 7. **回應長度保持 1-3 句**
-8. 如果提供粵拼，只可以作為標示清楚嘅閱讀提示；唔可以只輸出粵拼或羅馬字母，必須同時有廣東話中文句子
+8. **唔好輸出粵拼或羅馬字母**：主導師回覆只可以用自然繁體中文廣東話；粵拼只可以出現在專門嘅發音/翻譯功能
 
 ## 場景：${scenario || '自由傾計'}${culturalNote}`;
   }
@@ -444,9 +457,11 @@ async function callLLMProvider(provider, messages, options = {}) {
     };
     body = {
       messages: messages,
-      temperature: options.temperature ?? 0.7,
-      max_completion_tokens: options.maxTokens || 150
+      max_completion_tokens: resolveAzureOpenAIMaxCompletionTokens(options)
     };
+    if (!azureDeploymentUsesDefaultTemperatureOnly(azureOpenAIDeployment)) {
+      body.temperature = options.temperature ?? 0.7;
+    }
     console.log('📡 Calling Azure OpenAI:', url);
   } else if (provider === 'hkbu' && hasHKBU) {
     url = `${hkbuBaseUrl}/deployments/${hkbuModel}/chat/completions?api-version=${hkbuApiVersion}`;
@@ -803,10 +818,8 @@ async function generateAIResponse(userText, scenario, history, mode = 'freeChat'
     providers.push('minimax');
     if (hasAzureOpenAI) providers.push('azure-openai');
     if (hasHKBU) providers.push('hkbu');
-  } else if (llmProvider === 'azure-openai' && hasAzureOpenAI) {
-    providers.push('azure-openai');
-    if (hasMiniMax) providers.push('minimax');
-    if (hasHKBU) providers.push('hkbu');
+  } else if (llmProvider === 'azure-openai') {
+    if (hasAzureOpenAI) providers.push('azure-openai');
   } else if (llmProvider === 'hkbu' && hasHKBU) {
     providers.push('hkbu');
     if (hasMiniMax) providers.push('minimax');
@@ -948,8 +961,8 @@ function getConfiguredLlmProviders() {
   if (llmProvider === 'minimax' && hasMiniMax) {
     return ['minimax', ...(hasAzureOpenAI ? ['azure-openai'] : []), ...(hasHKBU ? ['hkbu'] : [])];
   }
-  if (llmProvider === 'azure-openai' && hasAzureOpenAI) {
-    return ['azure-openai', ...(hasMiniMax ? ['minimax'] : []), ...(hasHKBU ? ['hkbu'] : [])];
+  if (llmProvider === 'azure-openai') {
+    return hasAzureOpenAI ? ['azure-openai'] : [];
   }
   if (llmProvider === 'hkbu' && hasHKBU) {
     return ['hkbu', ...(hasMiniMax ? ['minimax'] : []), ...(hasAzureOpenAI ? ['azure-openai'] : [])];
@@ -1722,6 +1735,13 @@ function parseJsonObject(rawText, depth = 0) {
   return null;
 }
 
+function normalizeModelConfidence(value, fallback = 0.8) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return fallback;
+  if (numeric > 1 && numeric <= 100) return Math.max(0.01, Math.min(1, numeric / 100));
+  return Math.max(0.01, Math.min(1, numeric));
+}
+
 function extractLooseJsonField(rawText, fieldName) {
   const text = String(rawText || '');
   const fieldIndex = text.indexOf(`"${fieldName}"`);
@@ -1795,6 +1815,7 @@ function parseConversationTranslation(rawText, turns, provider) {
     const parsed = parseJsonObject(cleaned);
     if (!parsed) throw new Error('No JSON object found');
     const translatedTurns = Array.isArray(parsed.turns) ? parsed.turns : [];
+    const needsConfirmation = Boolean(parsed.needsConfirmation);
     return {
       summary: unwrapEnglishTranslation(parsed.summary || ''),
       turns: turns.map((sourceTurn, index) => {
@@ -1807,8 +1828,8 @@ function parseConversationTranslation(rawText, turns, provider) {
         };
       }),
       provider,
-      confidence: Number.isFinite(Number(parsed.confidence)) ? Number(parsed.confidence) : 0.8,
-      needsConfirmation: Boolean(parsed.needsConfirmation)
+      confidence: normalizeModelConfidence(parsed.confidence, needsConfirmation ? 0.62 : 0.82),
+      needsConfirmation
     };
   } catch {
     const fallbackText = unwrapEnglishTranslation(cleaned, 0);
@@ -1829,7 +1850,7 @@ async function translateConversationToEnglish(turns) {
   const messages = [
     {
       role: 'system',
-      content: 'Translate a Cantonese learning conversation for an English-first international student. Return ONLY JSON: {"summary":"one short English summary","turns":[{"role":"tutor|learner","englishText":"English translation"}],"confidence":0.0,"needsConfirmation":false}. Keep translations concise, plain, and culturally clear. Do not add extra teaching content.'
+      content: 'Translate a Cantonese learning conversation for an English-first international student. Return ONLY JSON: {"summary":"one short English summary","turns":[{"role":"tutor|learner","englishText":"English translation"}],"confidence":0.85,"needsConfirmation":false}. Keep translations concise, plain, and culturally clear. Do not add extra teaching content.'
     },
     {
       role: 'user',

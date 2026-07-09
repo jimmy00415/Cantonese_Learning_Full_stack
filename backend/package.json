@@ -16,6 +16,7 @@
     "test:visit-http-routing": "node scripts/test-visit-http-routing.js",
     "test:visit-resilience": "node scripts/test-visit-resilience-contract.js",
     "test:visit-azure-translator": "node scripts/test-visit-azure-translator-provider.js",
+    "test:azure-openai-gpt5": "node scripts/test-azure-openai-gpt5-contract.js",
     "test:visit-translation-quality": "node scripts/test-visit-translation-quality.js",
     "test:visit-layout-contract": "node scripts/test-visit-layout-contract.js",
     "test:tutor-reply-quality": "node scripts/test-tutor-reply-quality.js",
