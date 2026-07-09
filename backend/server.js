@@ -529,7 +529,7 @@ function isIncompleteTutorReply(text) {
 function isOverFormattedTutorReply(text) {
   const value = String(text || '').trim();
   if (!value) return true;
-  const hasMarkdownBlock = /(?:^|\n)\s*(?:#{1,6}\s+|>\s+|[-*]\s+\S|\d+\.\s+\S)|(?:^|\n)\s*---+\s*(?:\n|$)/m.test(value);
+  const hasMarkdownBlock = /(?:^|\n)\s*(?:#{1,6}\s+|>\s+|[-*]\s+\S|\d+\.\s+\S)|(?:^|\n)\s*---+\s*(?:\n|$)|\*\*[^*]+\*\*|__[^_]+__|`[^`]+`/m.test(value);
   const hasEmoji = /[\u{1f300}-\u{1faff}\u{2600}-\u{27bf}]/u.test(value);
   const sentenceCount = (value.match(/[。！？!?]/g) || []).length;
   return hasMarkdownBlock || hasEmoji || value.length > 260 || sentenceCount > 5;

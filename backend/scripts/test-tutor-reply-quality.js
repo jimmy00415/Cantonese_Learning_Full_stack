@@ -56,7 +56,13 @@ const fakeMiniMax = http.createServer(async (req, res) => {
     await wait(650);
   }
 
-  const text = /我想學餐廳點餐/.test(userContent) && system.includes('嚴謹但友善')
+  const text = /我想學茶餐廳點餐/.test(userContent) && system.includes('嚴謹但友善')
+    ? `好，我哋學餐廳點餐！
+
+**「我想叫一碟叉燒飯，唔該。」**
+
+你試下用呢個句式，自己創作一句你想點嘅嘢。`
+    : /我想學餐廳點餐/.test(userContent) && system.includes('嚴謹但友善')
     ? `好呀！你想學喺餐廳排隊或者等位嘅情況對話。
 
 ## 餐廳等位/排隊常用句
@@ -226,6 +232,39 @@ try {
     formattedPayload.aiText.length < 220,
     true,
     'topic-learning tutor replies should stay short enough for the chat layout'
+  );
+
+  const boldSessionResponse = await fetch(`${baseUrl}/api/session`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      mode: 'teaching',
+      userMode: 'cantonese_learning',
+      uiLanguage: 'zh-TW',
+      responseLanguage: 'auto'
+    })
+  });
+  assert.equal(boldSessionResponse.status, 200);
+  const boldSession = await boldSessionResponse.json();
+  const boldResponse = await fetch(`${baseUrl}/api/recognize-and-respond`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: boldSession.sessionId,
+      userText: '我想學茶餐廳點餐',
+      scenario: '自由對話 (Free Conversation)',
+      mode: 'teaching',
+      userMode: 'cantonese_learning',
+      uiLanguage: 'zh-TW',
+      responseLanguage: 'auto'
+    })
+  });
+  assert.equal(boldResponse.status, 200);
+  const boldPayload = await boldResponse.json();
+  assert.doesNotMatch(
+    boldPayload.aiText,
+    /\*\*/,
+    'tutor replies should not use markdown bold inside chat bubbles'
   );
 } finally {
   await stopChild(child);
