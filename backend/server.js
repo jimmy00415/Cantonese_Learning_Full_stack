@@ -165,7 +165,7 @@ function azureDeploymentUsesDefaultTemperatureOnly(deploymentName) {
 function resolveAzureOpenAIMaxCompletionTokens(options = {}) {
   const requested = Number(options.maxTokens || 150);
   if (azureDeploymentUsesDefaultTemperatureOnly(azureOpenAIDeployment)) {
-    return Math.max(requested, 800);
+    return Math.max(requested, AZURE_OPENAI_MIN_COMPLETION_TOKENS);
   }
   return requested;
 }
@@ -177,6 +177,8 @@ function readPositiveInt(value, fallback, { min = 1, max = 60000 } = {}) {
 }
 
 const DEFAULT_LLM_REQUEST_TIMEOUT_MS = readPositiveInt(process.env.LLM_PROVIDER_TIMEOUT_MS, 12000, { min: 500, max: 60000 });
+const AZURE_OPENAI_MIN_COMPLETION_TOKENS = readPositiveInt(process.env.AZURE_OPENAI_MIN_COMPLETION_TOKENS, 1600, { min: 800, max: 6000 });
+const COACH_FEEDBACK_LLM_TIMEOUT_MS = readPositiveInt(process.env.COACH_FEEDBACK_LLM_TIMEOUT_MS, 25000, { min: 1000, max: 60000 });
 const VISIT_TRANSLATION_PROVIDER_TIMEOUT_MS = readPositiveInt(process.env.VISIT_TRANSLATION_PROVIDER_TIMEOUT_MS, 4500, { min: 250, max: 15000 });
 const AZURE_TRANSLATOR_TIMEOUT_MS = readPositiveInt(process.env.AZURE_TRANSLATOR_TIMEOUT_MS, 3500, { min: 250, max: 15000 });
 const DEFAULT_TTS_REQUEST_TIMEOUT_MS = readPositiveInt(process.env.TTS_PROVIDER_TIMEOUT_MS, 10000, { min: 500, max: 60000 });
@@ -498,13 +500,19 @@ async function callLLMProvider(provider, messages, options = {}) {
   const data = await response.json();
   console.log(`📦 ${provider} API response received`);
 
+  const firstChoice = data.choices?.[0];
   const aiResponse = provider === 'minimax'
     ? (data.content || [])
       .filter(part => part.type === 'text' && part.text)
       .map(part => part.text)
       .join('')
-    : data.choices?.[0]?.message?.content || '';
+    : firstChoice?.message?.content || '';
   if (!aiResponse) {
+    console.error(`❌ No content in ${provider} response metadata:`, JSON.stringify({
+      finishReason: firstChoice?.finish_reason,
+      usage: data.usage,
+      model: data.model
+    }).slice(0, 600));
     throw new Error(`No content in ${provider} response`);
   }
 
@@ -604,9 +612,9 @@ function detectTeachingTopicRequest(userText, scenario = '') {
 
 function hasTeachingSubstance(text) {
   const value = String(text || '').trim();
-  const hasCorrection = /→|應該講|可以(?:咁|試下)?講|改做|更自然|唔太自然|正確|糾正/.test(value);
+  const hasCorrection = /→|應該講|可以(?:咁|試下)?講|改做|改成|換做|代替|唔係|更自然|唔太自然|正確|糾正/.test(value);
   const hasReason = /因為|原因|意思|語氣|用詞|文法|發音|自然|清楚|地道|口語/.test(value);
-  const hasNextStep = /試下|可以問|你可以|下次|不如|再講|繼續/.test(value);
+  const hasNextStep = /試下|試講|講一次|讀一次|可以問|你可以|而家|下次|不如|再講|繼續|跟住/.test(value);
   return hasCorrection && (hasReason || hasNextStep);
 }
 
@@ -726,6 +734,36 @@ async function repairTutorReplyWithProvider(provider, userText, scenario, mode, 
   });
 }
 
+async function finalTutorQualityRepairWithProvider(provider, userText, scenario, mode, drafts = []) {
+  const repairMessages = [
+    {
+      role: 'system',
+      content: `You are Hong Kong Buddy's final quality repair Cantonese tutor.
+
+Final quality repair rules:
+1. Output only natural Traditional Chinese Cantonese.
+2. Do not output English, Markdown, bullets, romanization, or labels.
+3. Do not use generic template phrasing like "我明你想練呢句" unless you also give a concrete better sentence.
+4. If the learner sentence is unclear, say so briefly, then give one likely natural sentence they can say.
+5. Include a concrete corrected/example sentence, one short reason, and one next practice step.
+6. Keep the reply 2 to 4 short chat sentences.
+Scenario: ${scenario || '自由對話'}; mode: ${mode || 'freeChat'}`
+    },
+    {
+      role: 'user',
+      content: JSON.stringify({
+        learnerText: userText,
+        rejectedDrafts: drafts.filter(Boolean).slice(-3)
+      })
+    }
+  ];
+
+  return callLLMProvider(provider, repairMessages, {
+    maxTokens: mode === 'teaching' ? 650 : 420,
+    temperature: mode === 'teaching' ? 0.2 : 0.5
+  });
+}
+
 async function enforceCantoneseTutorReply(text, provider, userText, scenario, mode) {
   if (mode === 'coachNotes' || isUsableTutorReply(text, mode, userText)) {
     return { text, rewritten: false, qualityFallback: false };
@@ -769,6 +807,12 @@ async function enforceCantoneseTutorReply(text, provider, userText, scenario, mo
     const repaired = await repairTutorReplyWithProvider(provider, userText, scenario, mode, rewritten);
     if (isUsableTutorReply(repaired, mode, userText)) {
       return { text: repaired, rewritten: true, repaired: true, qualityFallback: false };
+    }
+
+    console.warn('⚠️ Tutor repair still failed quality gate; asking provider for final quality repair.');
+    const finalRepaired = await finalTutorQualityRepairWithProvider(provider, userText, scenario, mode, [text, rewritten, repaired]);
+    if (isUsableTutorReply(finalRepaired, mode, userText)) {
+      return { text: finalRepaired, rewritten: true, repaired: true, finalRepaired: true, qualityFallback: false };
     }
   } catch (err) {
     console.error(`❌ ${provider} Cantonese repair error:`, err.message);
@@ -878,6 +922,115 @@ async function generateAIResponse(userText, scenario, history, mode = 'freeChat'
     aiFallback: true,
     confidence: safeLocalTutorFallback ? 0.72 : 0.58,
     uncertaintyReason: safeLocalTutorFallback ? 'local_quality_fallback' : 'all_providers_failed'
+  };
+}
+
+function getCoachFeedbackProviders() {
+  const hasAzureOpenAI = azureOpenAIKey && azureOpenAIEndpoint;
+  const hasHKBU = hkbuApiKey;
+  const hasMiniMax = !!minimaxApiKey;
+  const providers = [];
+
+  if (llmProvider === 'azure-openai' && hasAzureOpenAI) {
+    providers.push('azure-openai');
+  } else if (llmProvider === 'hkbu' && hasHKBU) {
+    providers.push('hkbu');
+    if (hasAzureOpenAI) providers.push('azure-openai');
+  } else if (llmProvider === 'minimax' && hasMiniMax) {
+    providers.push('minimax');
+    if (hasAzureOpenAI) providers.push('azure-openai');
+    if (hasHKBU) providers.push('hkbu');
+  } else if (hasAzureOpenAI) {
+    providers.push('azure-openai');
+  } else if (hasHKBU) {
+    providers.push('hkbu');
+  } else if (hasMiniMax) {
+    providers.push('minimax');
+  }
+
+  return providers;
+}
+
+function buildCoachFeedbackMessages(utterance, scenario, culturalContext = null) {
+  const culturalNote = culturalContext?.hasContent
+    ? `\n\nCultural context noticed by the app:\n${culturalContext.summary}`
+    : '';
+
+  return [
+    {
+      role: 'system',
+      content: `You are a friendly Cantonese learning coach for international students living or studying in Hong Kong.
+
+Generate fresh feedback from the learner's exact line. Do not use a generic template.
+Reply only in clear, natural English.
+Keep Cantonese examples short and useful.
+Avoid long grammar lectures, Markdown bullets, and filler.
+
+Format exactly:
+Your line: [brief reference or corrected version]
+Coach note: [one practical note]
+Why it helps: [short reason]
+Next try: [one short action]
+
+Scenario: ${scenario || 'Hong Kong student life'}${culturalNote}`
+    },
+    {
+      role: 'user',
+      content: utterance
+    }
+  ];
+}
+
+function isUsableCoachFeedback(text) {
+  const value = String(text || '').trim();
+  if (value.length < 40) return false;
+  return /Coach note:/i.test(value) && /Next try:/i.test(value);
+}
+
+async function generateCoachFeedback(utterance, scenario = 'Coach feedback', culturalContext = null) {
+  const trimmedUtterance = String(utterance || '').trim();
+  if (!trimmedUtterance) {
+    return {
+      text: '',
+      provider: 'none',
+      fallback: false,
+      confidence: 0,
+      uncertaintyReason: null
+    };
+  }
+
+  const messages = buildCoachFeedbackMessages(trimmedUtterance, scenario, culturalContext);
+  const providers = getCoachFeedbackProviders();
+  for (const provider of providers) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const text = await callLLMProvider(provider, messages, {
+          maxTokens: attempt === 0 ? 2400 : 3200,
+          temperature: 0.2,
+          timeoutMs: COACH_FEEDBACK_LLM_TIMEOUT_MS
+        });
+        if (isUsableCoachFeedback(text)) {
+          return {
+            text,
+            provider,
+            fallback: provider !== providers[0],
+            confidence: attempt > 0 ? 0.8 : 0.86,
+            uncertaintyReason: attempt > 0 ? 'retried_empty_feedback_generation' : null
+          };
+        }
+        console.warn('Coach feedback LLM response did not match feedback format; retrying if possible.');
+      } catch (err) {
+        console.warn(`Coach feedback ${provider} generation attempt ${attempt + 1} failed:`, err.message);
+      }
+    }
+  }
+
+  return {
+    text: buildEnglishCoachCorrection(trimmedUtterance, culturalContext),
+    provider: 'local-fallback',
+    fallback: true,
+    confidence: 0.45,
+    uncertaintyReason: 'coach_feedback_llm_unavailable'
   };
 }
 
@@ -2000,7 +2153,7 @@ app.post('/api/correct', async (req, res) => {
     // Get cultural context for enhanced correction
     const culturalContext = getCulturalContext(trimmedUtterance);
 
-    const correction = buildEnglishCoachCorrection(trimmedUtterance, culturalContext);
+    const correctionResult = await generateCoachFeedback(trimmedUtterance, 'Correct Me feedback', culturalContext);
 
     // Extract any cultural insights
     const culturalInsights = culturalContext.hasContent ? {
@@ -2012,7 +2165,11 @@ app.post('/api/correct', async (req, res) => {
     res.json({
       success: true,
       originalUtterance: trimmedUtterance,
-      correction,
+      correction: correctionResult.text,
+      correctionProvider: correctionResult.provider,
+      correctionFallback: correctionResult.fallback,
+      confidence: correctionResult.confidence,
+      uncertaintyReason: correctionResult.uncertaintyReason,
       culturalInsights,
       timestamp: Date.now()
     });
@@ -2317,19 +2474,27 @@ app.post('/api/recognize-and-respond', async (req, res) => {
   const aiText = aiResult.text;
 
   // Generate intelligent feedback using LLM (only in teaching mode)
-  let feedback = '';
+  let feedbackResult = {
+    text: '',
+    provider: 'none',
+    fallback: false,
+    confidence: 0,
+    uncertaintyReason: null
+  };
   if (mode === 'teaching' && trimmedUserText) {
-    try {
-      feedback = buildEnglishCoachCorrection(trimmedUserText, culturalContext);
-    } catch (err) {
-      feedback = 'Coach note: Keep going. Make the sentence short, clear, and connected to one real Hong Kong student-life situation.';
-    }
+    feedbackResult = await generateCoachFeedback(trimmedUserText, scenarioText || 'Teaching feedback', culturalContext);
   } else if (mode === 'freeChat') {
-    feedback = ''; // No feedback in free chat mode
+    feedbackResult.text = ''; // No feedback in free chat mode
   } else {
-    feedback = trimmedUserText
-      ? 'Coach note: Keep going. Make the sentence short, clear, and connected to one real Hong Kong student-life situation.'
-      : 'Try one Cantonese sentence you might actually use on campus.';
+    feedbackResult = trimmedUserText
+      ? await generateCoachFeedback(trimmedUserText, scenarioText || 'Practice feedback', culturalContext)
+      : {
+          text: 'Try one Cantonese sentence you might actually use on campus.',
+          provider: 'local-fallback',
+          fallback: true,
+          confidence: 0.45,
+          uncertaintyReason: 'empty_feedback_input'
+        };
   }
 
   session.history.push({ role: 'user', text: trimmedUserText, timestamp: Date.now() });
@@ -2398,7 +2563,11 @@ app.post('/api/recognize-and-respond', async (req, res) => {
 
   res.json({
     aiText,
-    feedback,
+    feedback: feedbackResult.text,
+    feedbackProvider: feedbackResult.provider,
+    feedbackFallback: feedbackResult.fallback,
+    feedbackConfidence: feedbackResult.confidence,
+    feedbackUncertaintyReason: feedbackResult.uncertaintyReason,
     ttsAudio,
     history,
     latencyMs: totalLatency,
