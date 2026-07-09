@@ -2501,10 +2501,10 @@ button:hover:not(:disabled),
 }
 
 .practice-stage {
-  grid-template-columns: minmax(220px, 280px) minmax(420px, 1fr) minmax(320px, 0.9fr);
+  grid-template-columns: minmax(220px, 280px) minmax(520px, 1.15fr) minmax(300px, 360px);
   grid-template-areas:
-    "task setup history"
-    "coach setup history";
+    "task history setup"
+    "coach history setup";
   gap: 16px;
   align-items: start;
 }
@@ -3343,11 +3343,11 @@ body[data-user-mode="visit_translation"] .send-btn {
 
 @media (max-width: 1180px) {
   .practice-stage {
-    grid-template-columns: minmax(240px, 0.76fr) minmax(420px, 1fr);
+    grid-template-columns: minmax(0, 1fr) minmax(300px, 360px);
     grid-template-areas:
+      "history setup"
       "task setup"
-      "coach setup"
-      "history history";
+      "coach setup";
   }
 
   .transcript {
@@ -3387,8 +3387,8 @@ body[data-user-mode="visit_translation"] .send-btn {
     grid-template-columns: 1fr;
     grid-template-areas:
       "task"
-      "setup"
       "history"
+      "setup"
       "coach";
   }
 

@@ -43,7 +43,7 @@ assert.match(css, /Practice page design pass from the provided Together\.ai DESI
 assert.match(css, /\.practice-stage\s+\.mode-btn\.active\s*{[\s\S]*background:\s*#000;/, 'Practice active mode should use the restrained black selected state');
 assert.match(css, /\.practice-stage\s+\.controls button\s*{[\s\S]*border-radius:\s*4px;[\s\S]*background:\s*#000;/, 'Practice mission CTA should use Together-style black 4px button chrome');
 assert.match(css, /\.practice-stage\s*{[\s\S]*grid-template-areas:/, 'Practice desktop layout should use named grid areas instead of implicit placement');
-assert.match(css, /"task setup history"\s*"coach setup history"/, 'Practice desktop layout should keep task, setup, coach, and history in stable columns');
+assert.match(css, /"task history setup"\s*"coach history setup"/, 'Practice desktop layout should center conversation history and keep mode/setup on the right');
 assert.doesNotMatch(css, /"feedback setup history"/, 'Practice desktop layout should not reserve a second feedback row');
 assert.match(css, /\.practice-workspace-grid\s*{[\s\S]*display:\s*contents;/, 'Practice workspace wrapper should not create a nested overflowing grid');
 assert.match(css, /\.practice-task-card\s*{[\s\S]*grid-area:\s*task;/, 'Practice task card should occupy the task area');
@@ -53,8 +53,8 @@ assert.match(css, /\.transcript\s*{[\s\S]*grid-area:\s*history;/, 'Practice tran
 assert.match(css, /\.practice-conversation-slot\s*{[\s\S]*position:\s*absolute;[\s\S]*pointer-events:\s*none;/, 'Legacy #practice scroll anchor should not take visible layout space');
 assert.match(css, /\.transcript-meta\s*{[\s\S]*min-width:\s*0;/, 'Transcript metadata should be allowed to shrink inside the history column');
 assert.match(css, /\.transcript-meta\s+\.pill[\s\S]*text-overflow:\s*ellipsis;/, 'Transcript pills should truncate instead of overflowing the history panel');
-assert.match(css, /@media \(max-width:\s*1100px\)[\s\S]*\.practice-stage\s*{[\s\S]*grid-template-areas:\s*"task"\s*"setup"\s*"history"\s*"coach";/, 'Practice layout should collapse to one column before columns become cramped');
-assert.doesNotMatch(css, /@media \(max-width:\s*1100px\)[\s\S]*grid-template-areas:\s*"task"\s*"setup"\s*"history"\s*"coach"\s*"feedback";/, 'Practice mobile layout should not include duplicate feedback panel');
+assert.match(css, /@media \(max-width:\s*1100px\)[\s\S]*\.practice-stage\s*{[\s\S]*grid-template-areas:\s*"task"\s*"history"\s*"setup"\s*"coach";/, 'Practice layout should collapse to one column with conversation before mode/setup controls');
+assert.doesNotMatch(css, /@media \(max-width:\s*1100px\)[\s\S]*grid-template-areas:\s*"task"\s*"history"\s*"setup"\s*"coach"\s*"feedback";/, 'Practice mobile layout should not include duplicate feedback panel');
 assert.match(i18n, /practice:\s*{/, 'V2 practice copy should exist');
 assert.match(i18n, /recording:\s*'錄音中'/, 'Traditional Chinese input recording copy should stay compact');
 assert.match(i18n, /processingSpeech:\s*'處理中'/, 'Traditional Chinese input processing copy should stay compact');

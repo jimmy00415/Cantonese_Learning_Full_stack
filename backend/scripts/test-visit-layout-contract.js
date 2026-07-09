@@ -5,7 +5,7 @@ const indexHtml = readFileSync(new URL('../public/index.html', import.meta.url),
 const appJs = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
 const stylesCss = readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
 
-const expectedAssetVersion = '20260709dock1';
+const expectedAssetVersion = '20260709layout2';
 
 assert.match(indexHtml, new RegExp(`styles\\.css\\?v=${expectedAssetVersion}`));
 assert.match(indexHtml, new RegExp(`app\\.js\\?v=${expectedAssetVersion}`));
@@ -26,6 +26,21 @@ assert.match(stylesCss, /\.visit-large-text\.is-fallback/);
 assert.match(stylesCss, /\.visit-route-note/);
 assert.match(stylesCss, /body\[data-user-mode="visit_translation"\]\s+\.input-panel/);
 assert.match(stylesCss, /grid-template-columns:[^;]*minmax\(0,\s*1fr\)/);
+assert.match(
+  stylesCss,
+  /grid-template-areas:\s*"task history setup"\s*"coach history setup"/,
+  'Practice desktop layout should center the conversation history and move mode/setup to the right rail'
+);
+assert.match(
+  stylesCss,
+  /@media \(max-width: 1180px\)[\s\S]*grid-template-areas:\s*"history setup"\s*"task setup"\s*"coach setup"/,
+  'Practice tablet layout should keep the conversation beside the right-side setup rail'
+);
+assert.match(
+  stylesCss,
+  /@media \(max-width: 1100px\)[\s\S]*grid-template-areas:\s*"task"\s*"history"\s*"setup"\s*"coach"/,
+  'Practice single-column layout should show the conversation before setup controls'
+);
 
 const translateViewMatches = [...indexHtml.matchAll(/<section\b[^>]*class="[^"]*\bapp-view\b[^"]*"[^>]*data-app-view="([^"]*)"[^>]*>/g)]
   .filter((match) => match[1].split(/\s+/).includes('translate'));
