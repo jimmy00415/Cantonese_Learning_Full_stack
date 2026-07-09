@@ -12,6 +12,7 @@ const commands = [
   ['node', ['scripts/test-visit-azure-translator-provider.js']],
   ['node', ['scripts/test-visit-translation-quality.js']],
   ['node', ['scripts/test-visit-layout-contract.js']],
+  ['node', ['scripts/test-tutor-reply-quality.js']],
   ['node', ['scripts/test-voice-disabled-ui.js']],
   ['node', ['--check', 'server.js']],
   ['node', ['--check', 'public/app.js']],

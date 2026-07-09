@@ -501,12 +501,101 @@ function isCantoneseTutorReply(text) {
   return cjkCount >= 12 && !englishLead && latinWords.length === 0;
 }
 
-async function enforceCantoneseTutorReply(text, provider, userText, scenario, mode) {
-  if (mode === 'coachNotes' || isCantoneseTutorReply(text)) {
-    return { text, rewritten: false };
+function isTemplateTutorReply(text) {
+  const value = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!value) return true;
+  return /正啊！?\s*你啱啱講[：:「"][\s\S]{0,160}(不如講下你嘅日常|可以再講詳細啲|轉去另一個話題)/.test(value)
+    || /你啱啱講[：:「"][\s\S]{0,160}(不如講下|轉去另一個話題)/.test(value)
+    || /我明你想問點樣用廣東話表達同長者互動、幫手或者參加活動/.test(value);
+}
+
+function isIncompleteTutorReply(text) {
+  const value = String(text || '').trim();
+  if (!value) return true;
+  if (value.length < 24) return true;
+  return /(?:[:：]|，|、|但|不過|因為|所以|例如|包括|可以|應該|「|『)$/.test(value)
+    || /我幫你糾正一下[:：]?$/.test(value)
+    || /有啲問題[，,]?\s*我幫你糾正一下[:：]?$/.test(value);
+}
+
+function hasTeachingSubstance(text) {
+  const value = String(text || '').trim();
+  const hasCorrection = /→|應該講|可以(?:咁|試下)?講|改做|更自然|唔太自然|正確|糾正/.test(value);
+  const hasReason = /因為|原因|意思|語氣|用詞|文法|發音|自然|清楚|地道|口語/.test(value);
+  const hasNextStep = /試下|可以問|你可以|下次|不如|再講|繼續/.test(value);
+  return hasCorrection && (hasReason || hasNextStep);
+}
+
+function isUsableTutorReply(text, mode, userText = '') {
+  const value = String(text || '').trim();
+  if (mode === 'coachNotes') return Boolean(value);
+  if (!isCantoneseTutorReply(value)) return false;
+  if (isTemplateTutorReply(value)) return false;
+  if (isIncompleteTutorReply(value)) return false;
+  if (mode === 'teaching') return hasTeachingSubstance(value);
+  return value.length >= 18 && !/你啱啱講/.test(value);
+}
+
+function buildLocalQualityTutorFallback(userText, scenario, mode = 'freeChat') {
+  const source = String(userText || '').trim().slice(0, 160);
+  const normalized = source.replace(/\s+/g, '');
+
+  if (mode === 'teaching') {
+    if (/羅馬洲|落馬洲|羅湖|羅湖洲/.test(normalized)) {
+      return '我聽到你想問香港邊度好玩，不過「羅馬洲」可能係想講「落馬洲」或者「羅湖」。可以試下講：「我想聽下香港落馬洲附近有咩好玩？」咁樣地方名同問題會清楚啲。';
+    }
+    if (/咩事唱|乜事唱|唔同行|唔同意|唔明/.test(normalized)) {
+      return '「咩事唱啊，我都唔同行嘅」唔太自然，意思會有啲唔清楚。可以試下講：「咩事呀？我都唔係好明。」如果你想表達唔同意，可以講：「我唔係好同意。」';
+    }
+    if (/聽下|聽吓|想同你|好玩|香港/.test(normalized)) {
+      return '呢句意思大概係想請人介紹香港有咩好玩，但「同你聽下」唔太自然。可以試下講：「我想聽下你介紹香港有咩地方好玩。」咁樣主語同動作會清楚好多。';
+    }
+    return `我明你想練呢句：「${source || '呢句廣東話'}」。可以試下講得短啲同清楚啲，例如先講重點，再加一個問題；因為廣東話日常對話通常越直接越自然。`;
   }
 
-  console.warn('⚠️ Tutor reply was not Cantonese-dominant; rewriting to Cantonese.');
+  if (/好玩|香港|地方|旅行/.test(normalized)) {
+    return '香港好玩嘅地方好多，可以睇你鍾意熱鬧定舒服啲。你想搵食嘢、影相，定係想去啲少遊客嘅地方？';
+  }
+
+  return source
+    ? `我聽到你講：「${source}」。我哋可以沿住呢句傾落去，你想講多啲背景，定係想我幫你改到更自然？`
+    : '我哋可以繼續傾，你想練日常對話、校園生活，定係香港文化？';
+}
+
+async function repairTutorReplyWithProvider(provider, userText, scenario, mode, previousDraft) {
+  const repairMessages = [
+    {
+      role: 'system',
+      content: `你係 Hong Kong Buddy 嘅資深廣東話老師。上一個導師回覆太空泛、似模板或者未完成。請直接根據學生原句重新寫一個完整回覆。
+
+硬性要求：
+1. 只用自然繁體中文廣東話。
+2. 唔好講「正啊！你啱啱講」呢類模板句。
+3. 如果係教學模式，必須包含：一個更自然講法、一句簡短原因、一個下一步練習/追問。
+4. 2 至 4 句，唔好喺冒號、「但」、「例如」之後突然停止。
+5. 場景：${scenario || '自由對話'}；模式：${mode || 'freeChat'}`
+    },
+    {
+      role: 'user',
+      content: JSON.stringify({
+        learnerText: userText,
+        previousDraft
+      })
+    }
+  ];
+
+  return callLLMProvider(provider, repairMessages, {
+    maxTokens: mode === 'teaching' ? 650 : 420,
+    temperature: mode === 'teaching' ? 0.25 : 0.55
+  });
+}
+
+async function enforceCantoneseTutorReply(text, provider, userText, scenario, mode) {
+  if (mode === 'coachNotes' || isUsableTutorReply(text, mode, userText)) {
+    return { text, rewritten: false, qualityFallback: false };
+  }
+
+  console.warn('⚠️ Tutor reply was not usable; rewriting to Cantonese.');
   const rewriteMessages = [
     {
       role: 'system',
@@ -530,15 +619,28 @@ async function enforceCantoneseTutorReply(text, provider, userText, scenario, mo
   ];
 
   try {
-    const rewritten = await callLLMProvider(provider, rewriteMessages);
-    return {
-      text: isCantoneseTutorReply(rewritten) ? rewritten : mockAiReply(userText, scenario),
-      rewritten: true
-    };
+    const rewritten = await callLLMProvider(provider, rewriteMessages, {
+      maxTokens: mode === 'teaching' ? 560 : 420,
+      temperature: mode === 'teaching' ? 0.25 : 0.55
+    });
+    if (isUsableTutorReply(rewritten, mode, userText)) {
+      return { text: rewritten, rewritten: true, qualityFallback: false };
+    }
+
+    console.warn('⚠️ Tutor rewrite was still low-value; asking provider for a direct repair.');
+    const repaired = await repairTutorReplyWithProvider(provider, userText, scenario, mode, rewritten);
+    if (isUsableTutorReply(repaired, mode, userText)) {
+      return { text: repaired, rewritten: true, repaired: true, qualityFallback: false };
+    }
   } catch (err) {
-    console.error(`❌ ${provider} Cantonese rewrite error:`, err.message);
-    return { text: mockAiReply(userText, scenario), rewritten: true };
+    console.error(`❌ ${provider} Cantonese repair error:`, err.message);
   }
+
+  return {
+    text: buildLocalQualityTutorFallback(userText, scenario, mode),
+    rewritten: true,
+    qualityFallback: true
+  };
 }
 
 async function generateAIResponse(userText, scenario, history, mode = 'freeChat', culturalContext = null, languagePolicy = resolveLanguagePolicy()) {
@@ -552,8 +654,8 @@ async function generateAIResponse(userText, scenario, history, mode = 'freeChat'
   if (!hasAzureOpenAI && !hasHKBU && !hasMiniMax) {
     console.warn('⚠️ No LLM API key configured, using mock');
     return {
-      text: mockAiReply(userText, scenario, languagePolicy),
-      aiProvider: 'mock',
+      text: buildLocalQualityTutorFallback(userText, scenario, mode),
+      aiProvider: 'local_quality_fallback',
       aiFallback: true,
       confidence: 0.55,
       uncertaintyReason: 'mock_provider_unconfigured'
@@ -597,16 +699,29 @@ async function generateAIResponse(userText, scenario, history, mode = 'freeChat'
   // Try each provider in order, fall back on failure
   for (const provider of providers) {
     try {
-      const rawText = await callLLMProvider(provider, messages);
+      const rawText = await callLLMProvider(provider, messages, {
+        maxTokens: mode === 'teaching' ? 700 : 420,
+        temperature: mode === 'teaching' ? 0.35 : 0.7
+      });
       const enforced = await enforceCantoneseTutorReply(rawText, provider, userText, scenario, mode);
       return {
         text: enforced.text,
-        aiProvider: provider,
-        aiFallback: provider !== providers[0],
-        confidence: enforced.rewritten ? 0.78 : provider === providers[0] ? 0.84 : 0.74,
-        uncertaintyReason: enforced.rewritten
-          ? 'rewritten_to_cantonese'
-          : provider === providers[0] ? null : 'fallback_provider_used'
+        aiProvider: enforced.qualityFallback ? 'local_quality_fallback' : provider,
+        aiFallback: Boolean(enforced.qualityFallback) || provider !== providers[0],
+        confidence: enforced.qualityFallback
+          ? 0.62
+          : enforced.repaired
+            ? 0.8
+            : enforced.rewritten
+              ? 0.78
+              : provider === providers[0] ? 0.84 : 0.74,
+        uncertaintyReason: enforced.qualityFallback
+          ? 'local_quality_fallback'
+          : enforced.repaired
+            ? 'repaired_tutor_reply'
+            : enforced.rewritten
+              ? 'rewritten_to_cantonese'
+              : provider === providers[0] ? null : 'fallback_provider_used'
       };
     } catch (err) {
       console.error(`❌ ${provider} error:`, err.message);
@@ -620,10 +735,10 @@ async function generateAIResponse(userText, scenario, history, mode = 'freeChat'
   return {
     text: mode === 'coachNotes'
       ? buildEnglishCoachCorrection(userText, culturalContext)
-      : mockAiReply(userText, scenario, languagePolicy),
-    aiProvider: 'mock',
+      : buildLocalQualityTutorFallback(userText, scenario, mode),
+    aiProvider: mode === 'coachNotes' ? 'mock' : 'local_quality_fallback',
     aiFallback: true,
-    confidence: 0.5,
+    confidence: mode === 'coachNotes' ? 0.5 : 0.58,
     uncertaintyReason: 'all_providers_failed'
   };
 }

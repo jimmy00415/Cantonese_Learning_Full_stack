@@ -18,6 +18,7 @@
     "test:visit-azure-translator": "node scripts/test-visit-azure-translator-provider.js",
     "test:visit-translation-quality": "node scripts/test-visit-translation-quality.js",
     "test:visit-layout-contract": "node scripts/test-visit-layout-contract.js",
+    "test:tutor-reply-quality": "node scripts/test-tutor-reply-quality.js",
     "test:voice-disabled-ui": "node scripts/test-voice-disabled-ui.js",
     "test:v2": "node scripts/test-v2-regression-suite.js",
     "test:regressions": "node scripts/test-v2-regression-suite.js",
