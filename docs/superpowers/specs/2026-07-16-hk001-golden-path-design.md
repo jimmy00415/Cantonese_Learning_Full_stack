@@ -60,6 +60,8 @@ VISIT_TRANSLATION_PROVIDER=azure
 
 Production readiness rejects missing, different, mock, or fallback selector values. The visit translation selector is an explicit application contract added by this work so credentials alone cannot make readiness pass while user traffic follows another translation path.
 
+Golden Path readiness also requires raw `NODE_ENV=production` and requires `PILOT_AUTH_DISABLED` to be absent or exactly `false`; a fully credentialed development or auth-disabled process is not production-ready.
+
 The single-instance limit is a declared compatibility constraint, not an assertion of horizontal scalability. Durable conversations, distributed rate limiting, and multi-instance session state are deferred.
 
 ## Shared Pilot Access
@@ -129,7 +131,7 @@ trusted proxy and request metadata
 
 Production accepts mutating browser requests only when `Origin` exactly matches `PUBLIC_APP_ORIGIN`, an HTTPS origin injected from Flash's Cloud Run `status.uri` readback. The application never derives this origin from `Host`, `X-Forwarded-Host`, or `X-Forwarded-Proto`. There are no hard-coded Azure, localhost, or GitHub origins in the production allowlist. Missing or foreign origins fail closed where the route is browser-mutating; Cloud Run internal smoke uses its separate machine-authenticated boundary.
 
-Express trusts exactly one proxy hop in Cloud Run production (`trust proxy = 1`). Rate-limit identity is the nearest untrusted address from the right of the forwarded chain after that one trusted hop; attacker-supplied addresses farther left are ignored. Production readiness rejects a boolean trust-all setting or any other hop count. `X-Forwarded-Host` is ignored, and spoofed host, forwarded-protocol, or left-side forwarded-for values cannot change the canonical origin or quota key. Non-Cloud-Run development defaults to no trusted proxy unless an explicit test fixture configures the parser.
+Express trusts exactly one proxy hop in Cloud Run production (`TRUST_PROXY_HOPS=1` and `trust proxy = 1`). Rate-limit identity is the nearest untrusted address from the right of the forwarded chain after that one trusted hop; attacker-supplied addresses farther left are ignored. Production readiness rejects a boolean trust-all setting or any other hop count. `X-Forwarded-Host` is ignored, and spoofed host, forwarded-protocol, or left-side forwarded-for values cannot change the canonical origin or quota key. Non-Cloud-Run development defaults to no trusted proxy unless an explicit test fixture configures the parser.
 
 Request body limits are route-specific:
 
@@ -187,7 +189,7 @@ The existing authenticated `/api/health` becomes a strict logical AND of require
 
 `POST /api/internal/provider-smoke` requires all of:
 
-- an `Authorization` bearer token whose Google signature, issuer, expiry, service-URI audience, and caller identity the application verifies; Cloud Run IAM independently enforces invocation when the service is private;
+- an `X-Serverless-Authorization` bearer token for Cloud Run IAM plus an `Authorization` bearer token whose Google signature, issuer, expiry, service-URI audience, and caller identity the application verifies; both carry the same audience-bound token;
 - `X-Flash-Smoke-Token` matching the deployment-scoped secret in constant time;
 - `X-Flash-Deployment-Id` matching the configured deployment id;
 - a valid `Idempotency-Key` identifying the smoke attempt.
@@ -203,18 +205,22 @@ The token and deployment id are candidate-specific; caller and origin are provid
 
 The endpoint never accepts the pilot session cookie as machine authentication. It rejects missing, malformed, reused-with-conflicting-input, or expired attempt identifiers.
 
+The `Idempotency-Key` format is `fl-smoke-v1.<issuedAtUnixSeconds>.<uuid>`. It is ASCII, at most 128 characters, valid for 15 minutes, and may be at most 60 seconds in the future to tolerate clock skew.
+
+The attempt cache key binds `attemptId`, deployment id, verified caller, and audience. Reusing one attempt id with different binding fails; an explicit retry with a new attempt id is a distinct run.
+
 The application stores only a bounded in-memory attempt result cache because Flash owns the durable attempt record and the pilot is constrained to one instance. A duplicate completed attempt returns the same aggregate result without repeating provider calls. An attempt that may have crossed a paid-call boundary but lacks a complete result returns an inconclusive state rather than silently repeating work.
 
 ### Provider sequence
 
-Each provider is called exactly once with minimal synthetic input and no automatic retry or fallback:
+On the successful path, each provider is called exactly once with minimal synthetic input and no automatic retry or fallback. On a failed path, each reached provider is called at most once and dependency-blocked later providers are reported as skipped:
 
 1. Azure OpenAI receives a minimal deterministic Cantonese tutor prompt and must return a non-empty bounded text result.
 2. Azure Translator is called directly with a short synthetic phrase; no `Promise.any`, secondary translator, or mock path is allowed.
 3. MiniMax TTS synthesizes a short Cantonese phrase; the response must have an allowed audio MIME type and bounded non-zero size.
 4. Azure Speech recognizes that synthetic MiniMax audio; the response must contain a non-empty transcript.
 
-Using the MiniMax output as the Azure Speech input verifies the actual TTS-to-ASR integration without shipping a repository audio fixture. Provider response content and audio are discarded after validation.
+For smoke, the shared low-level MiniMax primitive requests non-streaming 16-kHz mono WAV so Azure short-audio ASR can accept the exact returned buffer. The existing browser TTS adapter retains its MP3 data-URI response. Using the MiniMax output as the Azure Speech input verifies the actual TTS-to-ASR integration without shipping a repository audio fixture. Provider response content and audio are discarded after validation.
 
 ### Smoke response and logging
 
@@ -226,6 +232,8 @@ The response includes only:
 - latency;
 - bounded usage counters such as input/output characters or audio bytes/duration;
 - stable redacted error code.
+
+Successful wire JSON is strict and has no extra fields: `{"status":"passed","providers":[...]}` with exactly four unique passed provider ids. Provider failure is HTTP 502 with `status="failed"`, `code="PROVIDER_SMOKE_FAILED"`, and bounded provider results. A prior ambiguous paid boundary is HTTP 409 with exactly `status="inconclusive"` and `code="SMOKE_ATTEMPT_INCONCLUSIVE"`.
 
 Prompts, completions, translated text, transcripts, audio, access code, cookies, tokens, upstream response bodies, and raw provider errors are never logged or persisted.
 
@@ -241,7 +249,7 @@ The dialog:
 - clears the field after success and on close/reset;
 - presents generic invalid-code and throttled states.
 
-All application fetches send same-origin credentials. When an authenticated request receives 401, clients join one shared reauthentication promise, show the dialog once, and retry the original request at most once after successful login. Independent recursive retries are forbidden.
+All application fetches send same-origin credentials. Pilot status/login/logout use a raw non-retrying client boundary. When any other authenticated request receives 401, clients join one shared reauthentication promise, show the dialog once, and retry the original request at most once after successful login. Independent recursive retries and pilot-endpoint re-entry into the reauthentication promise are forbidden.
 
 Frontend source is changed first and then synchronized to `backend/public`; generated assets are not hand-edited.
 
@@ -290,7 +298,7 @@ Implementation proceeds in test-driven slices. Required automated coverage inclu
 - login and weighted provider budgets enforce limits and evict stale entries;
 - smoke rejects invalid Google/Flash/deployment/idempotency boundaries;
 - duplicate completed smoke attempts do not call providers again;
-- each smoke provider is called exactly once and fallback/mock paths are impossible;
+- a successful smoke calls each provider exactly once; a failed smoke calls each reached provider at most once, marks dependency-blocked later providers skipped, and makes fallback/mock paths impossible;
 - MiniMax audio is the exact payload validated by Azure Speech;
 - response and captured logs contain no synthetic content, audio, key, token, or upstream body;
 - one 401 across concurrent browser calls creates one access dialog and one reauthentication flow;
