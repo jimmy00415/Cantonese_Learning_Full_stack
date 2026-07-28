@@ -1,5 +1,6 @@
 node_modules/
 .superpowers/
+.worktrees/
 frontend/node_modules/
 backend/node_modules/
 .env
