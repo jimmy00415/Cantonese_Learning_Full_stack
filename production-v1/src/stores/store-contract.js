@@ -1,4 +1,4 @@
-export const STORE_SCHEMA_VERSION = 1;
+export const STORE_SCHEMA_VERSION = 2;
 export { contextLimits } from '../context-budget.js';
 
 export const TURN_TERMINAL_STATES = new Set(['delivered', 'failed']);

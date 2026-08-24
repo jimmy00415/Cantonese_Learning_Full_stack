@@ -39,6 +39,7 @@ function publicMessage(message) {
     failureCode: message.failureCode ?? null,
     text: message.text,
     voiceDraftId: message.voiceDraftId ?? null,
+    mediaId: message.mediaId ?? null,
     citations: message.citations ?? [],
     cards: message.cards ?? [],
     suggestedReplies: message.suggestedReplies ?? [],
@@ -60,7 +61,7 @@ export function createSessionResolver({ store }) {
   };
 }
 
-export function createSessionRouter({ config, store, eventHub, dispatcher }) {
+export function createSessionRouter({ config, store, eventHub, dispatcher, cleanupService, now = () => new Date() }) {
   const router = express.Router();
   const limiter = createRateLimiter({ store, secret: config.sessionSecret ?? 'local-development-session-secret' });
   const limits = config.rateLimits ?? { bootstrap: 20, message5m: 30, messageDaily: 300 };
@@ -77,7 +78,7 @@ export function createSessionRouter({ config, store, eventHub, dispatcher }) {
           const conversation = await store.getConversationForSession({ sessionId: resumed.id });
           if (!conversation) throw httpError(401, 'SESSION_NOT_FOUND');
           const messages = await store.listMessages({ sessionId: resumed.id, conversationId: conversation.id, after: 0 });
-          return response.json({ data: { session: { id: resumed.id }, conversation, messages: messages.map(publicMessage), capabilities: config.publicStatus, knowledgeSnapshotDate: config.knowledgeSnapshotDate ?? null }, error: null, requestId: response.locals.requestId });
+          return response.json({ data: { session: { id: resumed.id }, clientSessionScope: resumed.clientScopeId, conversation, messages: messages.map(publicMessage), capabilities: config.publicStatus, knowledgeSnapshotDate: config.knowledgeSnapshotDate ?? null }, error: null, requestId: response.locals.requestId });
         }
       }
       const bootstrap = await limiter.consume({ subject: request.ip, quota: 'session-bootstrap', limit: limits.bootstrap, durationMs: 10 * 60 * 1000 });
@@ -85,7 +86,7 @@ export function createSessionRouter({ config, store, eventHub, dispatcher }) {
       const token = randomBytes(32).toString('base64url');
       const sessionData = await store.createOrResumeSession({ tokenHash: tokenHash(token) });
       response.cookie(COOKIE_NAME, token, cookieOptions(config));
-      return response.status(201).json({ data: { session: { id: sessionData.session.id }, conversation: sessionData.conversation, messages: [], capabilities: config.publicStatus, knowledgeSnapshotDate: config.knowledgeSnapshotDate ?? null }, error: null, requestId: response.locals.requestId });
+      return response.status(201).json({ data: { session: { id: sessionData.session.id }, clientSessionScope: sessionData.session.clientScopeId, conversation: sessionData.conversation, messages: [], capabilities: config.publicStatus, knowledgeSnapshotDate: config.knowledgeSnapshotDate ?? null }, error: null, requestId: response.locals.requestId });
     } catch (error) { return sendError(response, error); }
   });
 
@@ -132,8 +133,13 @@ export function createSessionRouter({ config, store, eventHub, dispatcher }) {
   router.delete('/session', async (request, response) => {
     try {
       const sessionData = await sessionFromRequest(request);
-      await store.deleteSession({ sessionId: sessionData.session.id });
+      await store.revokeSessionAndEnqueueMedia({
+        sessionId: sessionData.session.id,
+        now: now(),
+        cleanupNotBefore: now(),
+      });
       eventHub?.closeConversation(sessionData.conversation.id);
+      await cleanupService?.drainOnce?.().catch(() => undefined);
       response.clearCookie(COOKIE_NAME, { httpOnly: true, sameSite: 'lax', secure: config.nodeEnv === 'production', path: '/' });
       return response.json({ data: { deleted: true }, error: null, requestId: response.locals.requestId });
     } catch (error) { return sendError(response, error); }

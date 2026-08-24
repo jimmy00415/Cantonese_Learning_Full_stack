@@ -11,21 +11,27 @@ import {
   storeError,
 } from './store-contract.js';
 
-const COLLECTIONS = ['sessions', 'conversations', 'messages', 'turns', 'events', 'mediaAssets', 'rateLimitBuckets', 'serviceState'];
+const LEGACY_COLLECTIONS = ['sessions', 'conversations', 'messages', 'turns', 'events', 'mediaAssets', 'rateLimitBuckets', 'serviceState'];
+const COLLECTIONS = [...LEGACY_COLLECTIONS, 'voiceUploads', 'mediaGenerations', 'mediaDeletionJobs'];
 const NO_CHANGE = Symbol('atomic-store-no-change');
 const NONTERMINAL_TRANSITIONS = Object.freeze({ accepted: 'retrieving', retrieving: 'generating' });
 
 function noChange(value) { return { [NO_CHANGE]: true, value }; }
 
 function emptySnapshot() {
-  return { schemaVersion: STORE_SCHEMA_VERSION, sessions: [], conversations: [], messages: [], turns: [], events: [], mediaAssets: [], rateLimitBuckets: [], serviceState: {} };
+  return {
+    schemaVersion: STORE_SCHEMA_VERSION,
+    sessions: [], conversations: [], messages: [], turns: [], events: [], mediaAssets: [],
+    voiceUploads: [], mediaGenerations: [], mediaDeletionJobs: [],
+    rateLimitBuckets: [], serviceState: {},
+  };
 }
 
-function validateSnapshot(snapshot) {
-  if (!snapshot || typeof snapshot !== 'object' || snapshot.schemaVersion !== STORE_SCHEMA_VERSION) {
+function validateSnapshotShape(snapshot, collections) {
+  if (!snapshot || typeof snapshot !== 'object') {
     throw new Error('Atomic store state is corrupt or uses an unsupported schema version');
   }
-  for (const collection of COLLECTIONS) {
+  for (const collection of collections) {
     if (!(collection in snapshot) || (collection !== 'serviceState' && !Array.isArray(snapshot[collection]))) {
       throw new Error('Atomic store state is corrupt');
     }
@@ -38,6 +44,39 @@ function validateSnapshot(snapshot) {
     throw new Error('Atomic store state is corrupt');
   }
   return snapshot;
+}
+
+function validateSnapshot(snapshot) {
+  if (snapshot?.schemaVersion !== STORE_SCHEMA_VERSION) {
+    throw new Error('Atomic store state is corrupt or uses an unsupported schema version');
+  }
+  validateSnapshotShape(snapshot, COLLECTIONS);
+  const scopeIds = snapshot.sessions.map((session) => session.clientScopeId);
+  if (scopeIds.some((scopeId) => typeof scopeId !== 'string' || !scopeId)
+    || new Set(scopeIds).size !== scopeIds.length) {
+    throw new Error('Atomic store state is corrupt');
+  }
+  return snapshot;
+}
+
+function migrateSchemaOne(snapshot) {
+  if (snapshot?.schemaVersion !== 1) {
+    throw new Error('Atomic store state is corrupt or uses an unsupported schema version');
+  }
+  validateSnapshotShape(snapshot, LEGACY_COLLECTIONS);
+  const migrated = clone(snapshot);
+  const assigned = new Set();
+  for (const session of migrated.sessions) {
+    let clientScopeId;
+    do { clientScopeId = randomUUID(); } while (assigned.has(clientScopeId));
+    assigned.add(clientScopeId);
+    session.clientScopeId = clientScopeId;
+  }
+  migrated.voiceUploads = [];
+  migrated.mediaGenerations = [];
+  migrated.mediaDeletionJobs = [];
+  migrated.schemaVersion = STORE_SCHEMA_VERSION;
+  return validateSnapshot(migrated);
 }
 
 function clone(value) { return structuredClone(value); }
@@ -75,6 +114,92 @@ function inboundSequence(snapshot, turn) {
   return snapshot.messages.find((message) => message.id === turn.userMessageId)?.sequence ?? Number.MAX_SAFE_INTEGER;
 }
 
+function latestInstant(...values) {
+  const finite = values.filter((value) => value !== null && value !== undefined).map((value) => instant(value));
+  return finite.length > 0 ? Math.max(...finite) : 0;
+}
+
+function liveAttempt(row, now) {
+  const nowMs = instant(now);
+  return Boolean(row?.leaseToken && row.leaseExpiresAt && row.attemptDeadlineAt
+    && instant(row.leaseExpiresAt) > nowMs && instant(row.attemptDeadlineAt) > nowMs);
+}
+
+function rateLimitState(snapshot, requests = []) {
+  const resolved = requests.map((request) => ({
+    request,
+    bucket: snapshot.rateLimitBuckets.find((bucket) => (
+      bucket.subjectHash === request.subjectHash
+      && bucket.quota === request.quota
+      && bucket.windowStart === request.windowStart
+    )),
+  }));
+  const exhausted = resolved.filter(({ request, bucket }) => bucket && bucket.count >= request.limit);
+  const blockingExpiresAt = exhausted.length > 0
+    ? exhausted.reduce((latest, { bucket }) => (
+      !latest || instant(bucket.expiresAt) > instant(latest) ? bucket.expiresAt : latest
+    ), null)
+    : null;
+  return { resolved, blockingExpiresAt };
+}
+
+function consumeRateLimits(snapshot, requests = []) {
+  for (const request of requests) {
+    let bucket = snapshot.rateLimitBuckets.find((item) => (
+      item.subjectHash === request.subjectHash
+      && item.quota === request.quota
+      && item.windowStart === request.windowStart
+    ));
+    if (!bucket) {
+      bucket = {
+        id: randomUUID(), subjectHash: request.subjectHash, quota: request.quota,
+        windowStart: request.windowStart, count: 0, expiresAt: request.expiresAt,
+      };
+      snapshot.rateLimitBuckets.push(bucket);
+    }
+    bucket.count += 1;
+  }
+}
+
+function enqueueDeletion(snapshot, {
+  storageKey, reason, notBefore, now, rearm = false,
+}) {
+  if (typeof storageKey !== 'string' || !storageKey) throw new Error('storageKey is required');
+  const timestamp = nowIso(now);
+  const safeNotBefore = nowIso(notBefore ?? now);
+  let job = snapshot.mediaDeletionJobs.find((item) => item.storageKey === storageKey);
+  if (!job) {
+    job = {
+      id: randomUUID(), storageKey, reason, notBefore: safeNotBefore,
+      state: 'pending', attempt: 0, generation: 1,
+      leaseToken: null, leaseExpiresAt: null, workerId: null, lastErrorCode: null,
+      createdAt: timestamp, updatedAt: timestamp, completedAt: null,
+    };
+    snapshot.mediaDeletionJobs.push(job);
+    return job;
+  }
+  if (rearm) {
+    job.generation = Number(job.generation || 0) + 1;
+    job.state = 'pending';
+    job.attempt = 0;
+    job.reason = reason;
+    job.notBefore = safeNotBefore;
+    job.leaseToken = null;
+    job.leaseExpiresAt = null;
+    job.workerId = null;
+    job.lastErrorCode = null;
+    job.completedAt = null;
+    job.updatedAt = timestamp;
+    return job;
+  }
+  if (job.state !== 'completed') {
+    if (instant(safeNotBefore) > instant(job.notBefore)) job.notBefore = safeNotBefore;
+    job.reason = reason;
+    job.updatedAt = timestamp;
+  }
+  return job;
+}
+
 export class AtomicFileStore {
   constructor({ filePath }) {
     if (!filePath) throw new Error('AtomicFileStore requires filePath');
@@ -85,7 +210,14 @@ export class AtomicFileStore {
 
   async init() {
     try {
-      this.snapshot = validateSnapshot(JSON.parse(await readFile(this.filePath, 'utf8')));
+      const parsed = JSON.parse(await readFile(this.filePath, 'utf8'));
+      if (parsed?.schemaVersion === 1) {
+        const migrated = migrateSchemaOne(parsed);
+        await this.#persist(migrated);
+        this.snapshot = migrated;
+      } else {
+        this.snapshot = validateSnapshot(parsed);
+      }
     } catch (error) {
       if (error?.code === 'ENOENT') {
         this.snapshot = emptySnapshot();
@@ -140,6 +272,43 @@ export class AtomicFileStore {
     return conversation;
   }
 
+  #activeSession(snapshot, sessionId) {
+    const session = snapshot.sessions.find((item) => item.id === sessionId);
+    if (!session) throw storeError('SESSION_NOT_FOUND', 'A valid session is required.');
+    return session;
+  }
+
+  #assertAttemptStorageKeyAvailable(snapshot, storageKey, { uploadId, generationId } = {}) {
+    if (typeof storageKey !== 'string' || !storageKey) throw new Error('attemptStorageKey is required');
+    const used = snapshot.mediaAssets.some((asset) => asset.storageKey === storageKey)
+      || snapshot.voiceUploads.some((upload) => upload.id !== uploadId && upload.attemptStorageKey === storageKey)
+      || snapshot.mediaGenerations.some((generation) => generation.id !== generationId && generation.attemptStorageKey === storageKey);
+    if (used) throw storeError('STORAGE_KEY_CONFLICT', 'The media storage key is already in use.');
+  }
+
+  #liveVoiceLease(snapshot, { uploadId, leaseToken, now }) {
+    const upload = snapshot.voiceUploads.find((item) => item.id === uploadId);
+    if (!upload || !['uploading', 'transcribing'].includes(upload.state)
+      || upload.leaseToken !== leaseToken || !liveAttempt(upload, now)
+      || !snapshot.sessions.some((session) => session.id === upload.sessionId)) {
+      throw storeError('LEASE_LOST', 'The worker no longer owns this voice upload.');
+    }
+    return upload;
+  }
+
+  #liveGenerationLease(snapshot, { generationId, leaseToken, now }) {
+    const generation = snapshot.mediaGenerations.find((item) => item.id === generationId);
+    if (!generation || generation.state !== 'generating'
+      || generation.leaseToken !== leaseToken || !liveAttempt(generation, now)) {
+      throw storeError('LEASE_LOST', 'The worker no longer owns this media generation.');
+    }
+    const message = snapshot.messages.find((item) => item.id === generation.ownerMessageId);
+    if (!message || !snapshot.sessions.some((session) => session.id === message.sessionId)) {
+      throw storeError('LEASE_LOST', 'The worker no longer owns this media generation.');
+    }
+    return generation;
+  }
+
   #turn(snapshot, turnId) {
     const turn = snapshot.turns.find((item) => item.id === turnId);
     if (!turn) throw storeError('LEASE_LOST', 'The worker no longer owns this turn.');
@@ -171,7 +340,10 @@ export class AtomicFileStore {
         if (!conversation) throw new Error('Atomic store state is corrupt');
         return { created: false, session: existing, conversation };
       }
-      const session = { id: randomUUID(), tokenHash, createdAt: timestamp, updatedAt: timestamp };
+      const session = {
+        id: randomUUID(), tokenHash, clientScopeId: randomUUID(),
+        createdAt: timestamp, updatedAt: timestamp,
+      };
       const conversation = { id: randomUUID(), sessionId: session.id, eventHighWater: 0, createdAt: timestamp, updatedAt: timestamp };
       snapshot.sessions.push(session);
       snapshot.conversations.push(conversation);
@@ -214,21 +386,13 @@ export class AtomicFileStore {
         if (duplicate.turn.requestHash !== messageInput.requestHash) throw storeError('IDEMPOTENCY_CONFLICT', 'This client message ID was already used with different content.');
         return { idempotent: true, ...duplicate };
       }
-      const exhausted = rateLimits.map((request) => ({ request, bucket: snapshot.rateLimitBuckets.find((bucket) => bucket.subjectHash === request.subjectHash && bucket.quota === request.quota && bucket.windowStart === request.windowStart) }))
-        .find(({ request, bucket }) => bucket && bucket.count >= request.limit);
-      if (exhausted) {
+      const { blockingExpiresAt } = rateLimitState(snapshot, rateLimits);
+      if (blockingExpiresAt) {
         const error = storeError('RATE_LIMITED', 'Rate limit exceeded.');
-        error.expiresAt = exhausted.bucket.expiresAt;
+        error.expiresAt = blockingExpiresAt;
         throw error;
       }
-      for (const request of rateLimits) {
-        let bucket = snapshot.rateLimitBuckets.find((item) => item.subjectHash === request.subjectHash && item.quota === request.quota && item.windowStart === request.windowStart);
-        if (!bucket) {
-          bucket = { id: randomUUID(), subjectHash: request.subjectHash, quota: request.quota, windowStart: request.windowStart, count: 0, expiresAt: request.expiresAt };
-          snapshot.rateLimitBuckets.push(bucket);
-        }
-        bucket.count += 1;
-      }
+      consumeRateLimits(snapshot, rateLimits);
       return this.#acceptMessage(snapshot, messageInput);
     });
   }
@@ -249,8 +413,9 @@ export class AtomicFileStore {
       if (duplicate.turn.requestHash !== requestHash) throw storeError('IDEMPOTENCY_CONFLICT', 'This client message ID was already used with different content.');
       return { idempotent: true, ...duplicate };
     }
+    let voiceDraft = null;
     if (voiceDraftId) {
-      const voiceDraft = snapshot.mediaAssets.find((asset) => asset.id === voiceDraftId && asset.sessionId === sessionId && asset.kind === 'user_voice' && asset.status === 'draft');
+      voiceDraft = snapshot.mediaAssets.find((asset) => asset.id === voiceDraftId && asset.sessionId === sessionId && asset.kind === 'user_voice' && asset.status === 'draft');
       if (!voiceDraft) throw storeError('INVALID_VOICE_DRAFT', 'The voice draft is unavailable.');
     }
     const timestamp = nowIso(now);
@@ -259,7 +424,7 @@ export class AtomicFileStore {
     const message = {
       id: randomUUID(), sessionId, conversationId, turnId, clientMessageId, sequence,
       role: 'user', kind: voiceDraftId ? 'voice' : 'text', status: 'accepted',
-      failureCode: null, text, voiceDraftId, createdAt: timestamp,
+      failureCode: null, text, voiceDraftId, mediaId: voiceDraft?.id ?? null, createdAt: timestamp,
     };
     const turn = {
       id: turnId, sessionId, conversationId, userMessageId: message.id, requestHash,
@@ -272,6 +437,11 @@ export class AtomicFileStore {
     });
     snapshot.messages.push(message);
     snapshot.turns.push(turn);
+    if (voiceDraft) {
+      voiceDraft.status = 'attached';
+      voiceDraft.ownerMessageId = message.id;
+      voiceDraft.updatedAt = timestamp;
+    }
     return { idempotent: false, message, turn, event };
   }
 
@@ -444,19 +614,534 @@ export class AtomicFileStore {
     });
   }
 
-  async deleteSession({ sessionId }) {
+  async claimVoiceUploadWithRateLimits({
+    sessionId, clientUploadId, requestSha256, mimeType, rateLimits = [],
+    leaseToken, attemptStorageKey, leaseExpiresAt, attemptDeadlineAt, now,
+  }) {
     return this.#mutate((snapshot) => {
-      const session = snapshot.sessions.find((item) => item.id === sessionId);
-      if (!session) throw storeError('NOT_FOUND', 'The requested session was not found.');
-      const conversationIds = new Set(snapshot.conversations.filter((item) => item.sessionId === sessionId).map((item) => item.id));
-      snapshot.sessions = snapshot.sessions.filter((item) => item.id !== sessionId);
-      snapshot.conversations = snapshot.conversations.filter((item) => item.sessionId !== sessionId);
-      snapshot.messages = snapshot.messages.filter((item) => item.sessionId !== sessionId);
-      snapshot.turns = snapshot.turns.filter((item) => item.sessionId !== sessionId);
-      snapshot.events = snapshot.events.filter((item) => !conversationIds.has(item.conversationId));
-      snapshot.mediaAssets = snapshot.mediaAssets.filter((item) => item.sessionId !== sessionId);
-      return { deleted: true };
+      this.#activeSession(snapshot, sessionId);
+      const timestamp = nowIso(now);
+      const nowMs = instant(now);
+      const deadlineMs = instant(attemptDeadlineAt);
+      const requestedLeaseMs = instant(leaseExpiresAt);
+      if (!leaseToken || requestedLeaseMs <= nowMs || deadlineMs <= nowMs) {
+        throw new Error('A live lease token, expiry, and hard deadline are required');
+      }
+      let upload = snapshot.voiceUploads.find((item) => (
+        item.sessionId === sessionId && item.clientUploadId === clientUploadId
+      ));
+      if (upload) {
+        if (upload.requestSha256 !== requestSha256 || upload.mimeType !== mimeType) {
+          return noChange({ status: 'conflict', upload });
+        }
+        if (upload.state === 'ready') {
+          const mediaAsset = snapshot.mediaAssets.find((asset) => asset.id === upload.mediaAssetId);
+          if (!mediaAsset) throw new Error('Atomic store state is corrupt');
+          return noChange({ status: 'ready', upload, mediaAsset });
+        }
+        if (upload.state === 'failed' && !upload.retryable) {
+          return noChange({
+            status: 'permanent_failure', upload,
+            failureCode: upload.failureCode,
+            failureHttpStatus: upload.failureHttpStatus,
+            retryable: false,
+          });
+        }
+        if (['uploading', 'transcribing'].includes(upload.state) && liveAttempt(upload, nowMs)) {
+          return noChange({ status: 'live', upload });
+        }
+      }
+
+      const { blockingExpiresAt } = rateLimitState(snapshot, rateLimits);
+      if (blockingExpiresAt) return noChange({ status: 'rate_limited', blockingExpiresAt });
+      this.#assertAttemptStorageKeyAvailable(snapshot, attemptStorageKey, { uploadId: upload?.id });
+
+      if (upload?.attemptStorageKey) {
+        const safeHorizon = latestInstant(upload.leaseExpiresAt, upload.attemptDeadlineAt, nowMs) + 60_000;
+        enqueueDeletion(snapshot, {
+          storageKey: upload.attemptStorageKey,
+          reason: 'voice-attempt-displaced',
+          notBefore: safeHorizon,
+          now: timestamp,
+          rearm: true,
+        });
+      }
+      consumeRateLimits(snapshot, rateLimits);
+      if (!upload) {
+        upload = {
+          id: randomUUID(), sessionId, clientUploadId, requestSha256, mimeType,
+          createdAt: timestamp,
+        };
+        snapshot.voiceUploads.push(upload);
+      }
+      upload.state = 'uploading';
+      upload.attempt = Number(upload.attempt || 0) + 1;
+      upload.leaseToken = leaseToken;
+      upload.leaseExpiresAt = new Date(Math.min(requestedLeaseMs, deadlineMs)).toISOString();
+      upload.attemptStorageKey = attemptStorageKey;
+      upload.attemptStartedAt = timestamp;
+      upload.attemptDeadlineAt = new Date(deadlineMs).toISOString();
+      upload.mediaAssetId = null;
+      upload.transcript = null;
+      upload.failureCode = null;
+      upload.failureHttpStatus = null;
+      upload.retryable = null;
+      upload.updatedAt = timestamp;
+      return { status: 'claimed', upload };
     });
+  }
+
+  async renewVoiceUploadLease({ uploadId, leaseToken, leaseExpiresAt, now }) {
+    return this.#mutate((snapshot) => {
+      const upload = this.#liveVoiceLease(snapshot, { uploadId, leaseToken, now });
+      const requested = instant(leaseExpiresAt);
+      const nowMs = instant(now);
+      if (requested <= nowMs) throw storeError('LEASE_LOST', 'The worker no longer owns this voice upload.');
+      upload.leaseExpiresAt = new Date(Math.min(requested, instant(upload.attemptDeadlineAt))).toISOString();
+      upload.updatedAt = nowIso(now);
+      return upload;
+    });
+  }
+
+  async setVoiceUploadTranscribing({ uploadId, leaseToken, now }) {
+    return this.#mutate((snapshot) => {
+      const upload = this.#liveVoiceLease(snapshot, { uploadId, leaseToken, now });
+      if (upload.state === 'transcribing') return noChange(upload);
+      if (upload.state !== 'uploading') throw storeError('LEASE_LOST', 'The worker no longer owns this voice upload.');
+      upload.state = 'transcribing';
+      upload.updatedAt = nowIso(now);
+      return upload;
+    });
+  }
+
+  async getVoiceUploadStatus({ sessionId, clientUploadId }) {
+    return this.#read((snapshot) => {
+      this.#activeSession(snapshot, sessionId);
+      const upload = snapshot.voiceUploads.find((item) => item.sessionId === sessionId && item.clientUploadId === clientUploadId);
+      if (!upload) throw storeError('NOT_FOUND', 'The requested voice upload was not found.');
+      const mediaAsset = upload.mediaAssetId
+        ? snapshot.mediaAssets.find((asset) => asset.id === upload.mediaAssetId && asset.sessionId === sessionId) ?? null
+        : null;
+      return clone({ ...upload, mediaAsset });
+    });
+  }
+
+  async completeVoiceUpload({ uploadId, leaseToken, mediaAsset, transcript, now }) {
+    return this.#mutate((snapshot) => {
+      const upload = this.#liveVoiceLease(snapshot, { uploadId, leaseToken, now });
+      if (upload.state !== 'transcribing' || typeof transcript !== 'string' || !transcript.trim()
+        || mediaAsset?.storageKey !== upload.attemptStorageKey) {
+        throw storeError('LEASE_LOST', 'The worker no longer owns this voice upload.');
+      }
+      if (snapshot.mediaAssets.some((asset) => asset.storageKey === mediaAsset.storageKey)) {
+        throw storeError('LEASE_LOST', 'The worker no longer owns this voice upload.');
+      }
+      const timestamp = nowIso(now);
+      const asset = {
+        id: randomUUID(), sessionId: upload.sessionId, ownerMessageId: null,
+        kind: 'user_voice', storageKey: mediaAsset.storageKey,
+        mimeType: mediaAsset.mimeType, byteLength: mediaAsset.byteLength,
+        durationMs: mediaAsset.durationMs ?? null, sha256: mediaAsset.sha256,
+        status: 'draft', createdAt: timestamp, updatedAt: timestamp,
+        expiresAt: mediaAsset.expiresAt ?? null,
+      };
+      snapshot.mediaAssets.push(asset);
+      upload.state = 'ready';
+      upload.mediaAssetId = asset.id;
+      upload.transcript = transcript.trim();
+      upload.failureCode = null;
+      upload.failureHttpStatus = null;
+      upload.retryable = false;
+      upload.leaseToken = null;
+      upload.leaseExpiresAt = null;
+      upload.updatedAt = timestamp;
+      return { upload, mediaAsset: asset };
+    });
+  }
+
+  async failVoiceUpload({
+    uploadId, leaseToken, failureCode, failureHttpStatus, retryable,
+    cleanupNotBefore, now,
+  }) {
+    return this.#mutate((snapshot) => {
+      const upload = this.#liveVoiceLease(snapshot, { uploadId, leaseToken, now });
+      const timestamp = nowIso(now);
+      if (upload.attemptStorageKey) {
+        enqueueDeletion(snapshot, {
+          storageKey: upload.attemptStorageKey,
+          reason: 'voice-attempt-failed',
+          notBefore: cleanupNotBefore ?? now,
+          now,
+        });
+      }
+      upload.state = 'failed';
+      upload.failureCode = String(failureCode || 'VOICE_TRANSCRIPTION_FAILED');
+      upload.failureHttpStatus = Number(failureHttpStatus) || 502;
+      upload.retryable = Boolean(retryable);
+      upload.leaseToken = null;
+      upload.leaseExpiresAt = null;
+      upload.attemptStorageKey = null;
+      upload.updatedAt = timestamp;
+      return upload;
+    });
+  }
+
+  async claimAssistantAudioWithRateLimits({
+    sessionId, messageId, kind, rateLimits = [], leaseToken, attemptStorageKey,
+    configVersion, leaseExpiresAt, attemptDeadlineAt, now,
+  }) {
+    return this.#mutate((snapshot) => {
+      this.#activeSession(snapshot, sessionId);
+      const message = snapshot.messages.find((item) => (
+        item.id === messageId && item.sessionId === sessionId
+        && item.role === 'assistant' && item.status === 'delivered'
+      ));
+      if (!message || kind !== 'assistant_voice') return noChange({ status: 'conflict' });
+      const timestamp = nowIso(now);
+      const nowMs = instant(now);
+      const deadlineMs = instant(attemptDeadlineAt);
+      const requestedLeaseMs = instant(leaseExpiresAt);
+      if (!leaseToken || requestedLeaseMs <= nowMs || deadlineMs <= nowMs) {
+        throw new Error('A live lease token, expiry, and hard deadline are required');
+      }
+      let generation = snapshot.mediaGenerations.find((item) => (
+        item.ownerMessageId === messageId && item.kind === kind
+      ));
+      if (generation) {
+        if (generation.state === 'attached') {
+          const mediaAsset = snapshot.mediaAssets.find((asset) => asset.id === generation.mediaAssetId);
+          if (!mediaAsset) throw new Error('Atomic store state is corrupt');
+          return noChange({ status: 'ready', generation, mediaAsset });
+        }
+        if (generation.state === 'failed' && !generation.retryable) {
+          return noChange({
+            status: 'permanent_failure', generation,
+            failureCode: generation.failureCode,
+            failureHttpStatus: generation.failureHttpStatus,
+            retryable: false,
+          });
+        }
+        if (generation.state === 'generating' && liveAttempt(generation, nowMs)) {
+          return noChange({ status: 'live', generation });
+        }
+      }
+      const { blockingExpiresAt } = rateLimitState(snapshot, rateLimits);
+      if (blockingExpiresAt) return noChange({ status: 'rate_limited', blockingExpiresAt });
+      this.#assertAttemptStorageKeyAvailable(snapshot, attemptStorageKey, { generationId: generation?.id });
+      if (generation?.attemptStorageKey) {
+        const safeHorizon = latestInstant(generation.leaseExpiresAt, generation.attemptDeadlineAt, nowMs) + 60_000;
+        enqueueDeletion(snapshot, {
+          storageKey: generation.attemptStorageKey,
+          reason: 'tts-attempt-displaced',
+          notBefore: safeHorizon,
+          now: timestamp,
+          rearm: true,
+        });
+      }
+      consumeRateLimits(snapshot, rateLimits);
+      if (!generation) {
+        generation = {
+          id: randomUUID(), ownerMessageId: messageId, kind, createdAt: timestamp,
+        };
+        snapshot.mediaGenerations.push(generation);
+      }
+      generation.state = 'generating';
+      generation.attempt = Number(generation.attempt || 0) + 1;
+      generation.leaseToken = leaseToken;
+      generation.leaseExpiresAt = new Date(Math.min(requestedLeaseMs, deadlineMs)).toISOString();
+      generation.attemptStorageKey = attemptStorageKey;
+      generation.attemptStartedAt = timestamp;
+      generation.attemptDeadlineAt = new Date(deadlineMs).toISOString();
+      generation.mediaAssetId = null;
+      generation.failureCode = null;
+      generation.failureHttpStatus = null;
+      generation.retryable = null;
+      generation.configVersion = String(configVersion ?? 'unversioned');
+      generation.updatedAt = timestamp;
+      return { status: 'claimed', generation, message };
+    });
+  }
+
+  async renewMediaGenerationLease({ generationId, leaseToken, leaseExpiresAt, now }) {
+    return this.#mutate((snapshot) => {
+      const generation = this.#liveGenerationLease(snapshot, { generationId, leaseToken, now });
+      const requested = instant(leaseExpiresAt);
+      const nowMs = instant(now);
+      if (requested <= nowMs) throw storeError('LEASE_LOST', 'The worker no longer owns this media generation.');
+      generation.leaseExpiresAt = new Date(Math.min(requested, instant(generation.attemptDeadlineAt))).toISOString();
+      generation.updatedAt = nowIso(now);
+      return generation;
+    });
+  }
+
+  async getAssistantAudioStatus({ sessionId, messageId, kind }) {
+    return this.#read((snapshot) => {
+      this.#activeSession(snapshot, sessionId);
+      const message = snapshot.messages.find((item) => (
+        item.id === messageId && item.sessionId === sessionId
+        && item.role === 'assistant' && item.status === 'delivered'
+      ));
+      if (!message) throw storeError('NOT_FOUND', 'The requested assistant message was not found.');
+      const generation = snapshot.mediaGenerations.find((item) => item.ownerMessageId === messageId && item.kind === kind);
+      if (!generation) throw storeError('NOT_FOUND', 'The requested assistant audio was not found.');
+      const mediaAsset = generation.mediaAssetId
+        ? snapshot.mediaAssets.find((asset) => asset.id === generation.mediaAssetId && asset.sessionId === sessionId) ?? null
+        : null;
+      return clone({ ...generation, mediaAsset });
+    });
+  }
+
+  async getOwnedAssistantMessage({ sessionId, messageId }) {
+    return this.#read((snapshot) => {
+      this.#activeSession(snapshot, sessionId);
+      const message = snapshot.messages.find((item) => (
+        item.id === messageId && item.sessionId === sessionId
+        && item.role === 'assistant' && item.status === 'delivered'
+      ));
+      if (!message) throw storeError('NOT_FOUND', 'The requested assistant message was not found.');
+      return clone(message);
+    });
+  }
+
+  async completeMediaGeneration({ generationId, leaseToken, mediaAsset, now }) {
+    return this.#mutate((snapshot) => {
+      const generation = this.#liveGenerationLease(snapshot, { generationId, leaseToken, now });
+      if (mediaAsset?.storageKey !== generation.attemptStorageKey
+        || snapshot.mediaAssets.some((asset) => asset.storageKey === mediaAsset.storageKey)) {
+        throw storeError('LEASE_LOST', 'The worker no longer owns this media generation.');
+      }
+      const message = snapshot.messages.find((item) => item.id === generation.ownerMessageId);
+      if (!message) throw new Error('Atomic store state is corrupt');
+      const timestamp = nowIso(now);
+      const asset = {
+        id: randomUUID(), sessionId: message.sessionId, ownerMessageId: message.id,
+        kind: 'assistant_voice', storageKey: mediaAsset.storageKey,
+        mimeType: mediaAsset.mimeType, byteLength: mediaAsset.byteLength,
+        durationMs: mediaAsset.durationMs ?? null, sha256: mediaAsset.sha256,
+        status: 'attached', createdAt: timestamp, updatedAt: timestamp,
+        expiresAt: mediaAsset.expiresAt ?? null,
+      };
+      snapshot.mediaAssets.push(asset);
+      message.mediaId = asset.id;
+      generation.state = 'attached';
+      generation.mediaAssetId = asset.id;
+      generation.failureCode = null;
+      generation.failureHttpStatus = null;
+      generation.retryable = false;
+      generation.leaseToken = null;
+      generation.leaseExpiresAt = null;
+      generation.updatedAt = timestamp;
+      const event = appendEvent(snapshot, {
+        sessionId: message.sessionId,
+        conversationId: message.conversationId,
+        type: 'audio.ready',
+        messageId: message.id,
+        turnId: message.turnId,
+        payloadJson: { messageId: message.id, mediaId: asset.id },
+        now,
+      });
+      return { generation, mediaAsset: asset, message, event };
+    });
+  }
+
+  async failMediaGeneration({
+    generationId, leaseToken, failureCode, failureHttpStatus, retryable,
+    cleanupNotBefore, now,
+  }) {
+    return this.#mutate((snapshot) => {
+      const generation = this.#liveGenerationLease(snapshot, { generationId, leaseToken, now });
+      if (generation.attemptStorageKey) {
+        enqueueDeletion(snapshot, {
+          storageKey: generation.attemptStorageKey,
+          reason: 'tts-attempt-failed',
+          notBefore: cleanupNotBefore ?? now,
+          now,
+        });
+      }
+      generation.state = 'failed';
+      generation.failureCode = String(failureCode || 'VOICE_SYNTHESIS_FAILED');
+      generation.failureHttpStatus = Number(failureHttpStatus) || 502;
+      generation.retryable = Boolean(retryable);
+      generation.leaseToken = null;
+      generation.leaseExpiresAt = null;
+      generation.attemptStorageKey = null;
+      generation.updatedAt = nowIso(now);
+      return generation;
+    });
+  }
+
+  async getMediaAsset({ sessionId, mediaId }) {
+    return this.#read((snapshot) => {
+      this.#activeSession(snapshot, sessionId);
+      const asset = snapshot.mediaAssets.find((item) => item.id === mediaId && item.sessionId === sessionId);
+      if (!asset) throw storeError('NOT_FOUND', 'The requested media asset was not found.');
+      return clone(asset);
+    });
+  }
+
+  async revokeVoiceDraft({ sessionId, draftId, now, cleanupNotBefore }) {
+    return this.#mutate((snapshot) => {
+      this.#activeSession(snapshot, sessionId);
+      const index = snapshot.mediaAssets.findIndex((asset) => (
+        asset.id === draftId && asset.sessionId === sessionId
+        && asset.kind === 'user_voice' && asset.status === 'draft'
+      ));
+      if (index < 0) throw storeError('NOT_FOUND', 'The requested voice draft was not found.');
+      const asset = snapshot.mediaAssets[index];
+      enqueueDeletion(snapshot, {
+        storageKey: asset.storageKey,
+        reason: 'voice-draft-revoked',
+        notBefore: cleanupNotBefore ?? now,
+        now,
+      });
+      snapshot.mediaAssets.splice(index, 1);
+      const upload = snapshot.voiceUploads.find((item) => item.mediaAssetId === draftId);
+      if (upload) {
+        upload.state = 'failed';
+        upload.mediaAssetId = null;
+        upload.transcript = null;
+        upload.failureCode = 'VOICE_DRAFT_DELETED';
+        upload.failureHttpStatus = 404;
+        upload.retryable = false;
+        upload.attemptStorageKey = null;
+        upload.updatedAt = nowIso(now);
+      }
+      return { revoked: true, draftId };
+    });
+  }
+
+  async enqueueMediaDeletion({ storageKey, reason, notBefore, now }) {
+    return this.#mutate((snapshot) => enqueueDeletion(snapshot, {
+      storageKey, reason, notBefore, now, rearm: false,
+    }));
+  }
+
+  async rearmMediaDeletionAfterWrite({ storageKey, reason, notBefore, now }) {
+    return this.#mutate((snapshot) => enqueueDeletion(snapshot, {
+      storageKey, reason, notBefore, now, rearm: true,
+    }));
+  }
+
+  async claimNextMediaDeletion({ workerId, leaseToken, leaseExpiresAt, now }) {
+    return this.#mutate((snapshot) => {
+      if (!workerId || !leaseToken || instant(leaseExpiresAt) <= instant(now)) {
+        throw new Error('A worker, token, and live lease are required');
+      }
+      const nowMs = instant(now);
+      const eligible = snapshot.mediaDeletionJobs.filter((job) => (
+        (job.state === 'pending' && instant(job.notBefore) <= nowMs)
+        || (job.state === 'deleting' && job.leaseExpiresAt && instant(job.leaseExpiresAt) <= nowMs)
+      )).sort((left, right) => (
+        instant(left.notBefore) - instant(right.notBefore)
+        || instant(left.createdAt) - instant(right.createdAt)
+        || left.id.localeCompare(right.id)
+      ));
+      const job = eligible[0];
+      if (!job) return noChange(null);
+      job.state = 'deleting';
+      job.attempt = Number(job.attempt || 0) + 1;
+      job.workerId = workerId;
+      job.leaseToken = leaseToken;
+      job.leaseExpiresAt = nowIso(leaseExpiresAt);
+      job.updatedAt = nowIso(now);
+      return job;
+    });
+  }
+
+  async completeMediaDeletion({ jobId, generation, leaseToken, now }) {
+    return this.#mutate((snapshot) => {
+      const job = snapshot.mediaDeletionJobs.find((item) => item.id === jobId);
+      if (!job || job.state !== 'deleting' || job.generation !== generation
+        || job.leaseToken !== leaseToken || instant(job.leaseExpiresAt) <= instant(now)) {
+        throw storeError('LEASE_LOST', 'The cleanup worker no longer owns this job.');
+      }
+      job.state = 'completed';
+      job.leaseToken = null;
+      job.leaseExpiresAt = null;
+      job.workerId = null;
+      job.lastErrorCode = null;
+      job.completedAt = nowIso(now);
+      job.updatedAt = nowIso(now);
+      return job;
+    });
+  }
+
+  async failMediaDeletion({ jobId, generation, leaseToken, failureCode, retryAt, now }) {
+    return this.#mutate((snapshot) => {
+      const job = snapshot.mediaDeletionJobs.find((item) => item.id === jobId);
+      if (!job || job.state !== 'deleting' || job.generation !== generation
+        || job.leaseToken !== leaseToken || instant(job.leaseExpiresAt) <= instant(now)) {
+        throw storeError('LEASE_LOST', 'The cleanup worker no longer owns this job.');
+      }
+      job.state = 'pending';
+      job.notBefore = nowIso(retryAt);
+      job.leaseToken = null;
+      job.leaseExpiresAt = null;
+      job.workerId = null;
+      job.lastErrorCode = String(failureCode || 'MEDIA_DELETE_FAILED').slice(0, 128);
+      job.updatedAt = nowIso(now);
+      return job;
+    });
+  }
+
+  async isStorageKeyLive({ storageKey }) {
+    return this.#read((snapshot) => (
+      snapshot.mediaAssets.some((asset) => asset.storageKey === storageKey)
+      || snapshot.voiceUploads.some((upload) => upload.attemptStorageKey === storageKey)
+      || snapshot.mediaGenerations.some((generation) => generation.attemptStorageKey === storageKey)
+    ));
+  }
+
+  #revokeSessionSnapshot(snapshot, { sessionId, now, cleanupNotBefore }) {
+    this.#activeSession(snapshot, sessionId);
+    const baseNotBefore = instant(cleanupNotBefore ?? now);
+    const ownedMessages = snapshot.messages.filter((message) => message.sessionId === sessionId);
+    const messageIds = new Set(ownedMessages.map((message) => message.id));
+    const uploads = snapshot.voiceUploads.filter((upload) => upload.sessionId === sessionId);
+    const generations = snapshot.mediaGenerations.filter((generation) => messageIds.has(generation.ownerMessageId));
+    const assets = snapshot.mediaAssets.filter((asset) => asset.sessionId === sessionId);
+
+    for (const asset of assets) {
+      enqueueDeletion(snapshot, {
+        storageKey: asset.storageKey,
+        reason: 'session-revoked-asset',
+        notBefore: baseNotBefore,
+        now,
+      });
+    }
+    for (const operation of [...uploads, ...generations]) {
+      if (!operation.attemptStorageKey) continue;
+      const horizon = latestInstant(baseNotBefore, operation.leaseExpiresAt, operation.attemptDeadlineAt) + 60_000;
+      enqueueDeletion(snapshot, {
+        storageKey: operation.attemptStorageKey,
+        reason: 'session-revoked-attempt',
+        notBefore: horizon,
+        now,
+      });
+    }
+
+    const conversationIds = new Set(snapshot.conversations.filter((item) => item.sessionId === sessionId).map((item) => item.id));
+    snapshot.mediaGenerations = snapshot.mediaGenerations.filter((item) => !messageIds.has(item.ownerMessageId));
+    snapshot.voiceUploads = snapshot.voiceUploads.filter((item) => item.sessionId !== sessionId);
+    snapshot.mediaAssets = snapshot.mediaAssets.filter((item) => item.sessionId !== sessionId);
+    snapshot.sessions = snapshot.sessions.filter((item) => item.id !== sessionId);
+    snapshot.conversations = snapshot.conversations.filter((item) => item.sessionId !== sessionId);
+    snapshot.messages = snapshot.messages.filter((item) => item.sessionId !== sessionId);
+    snapshot.turns = snapshot.turns.filter((item) => item.sessionId !== sessionId);
+    snapshot.events = snapshot.events.filter((item) => !conversationIds.has(item.conversationId));
+    return { deleted: true, queuedKeys: new Set([...assets, ...uploads, ...generations].map((item) => item.storageKey ?? item.attemptStorageKey).filter(Boolean)).size };
+  }
+
+  async revokeSessionAndEnqueueMedia({ sessionId, now, cleanupNotBefore }) {
+    return this.#mutate((snapshot) => this.#revokeSessionSnapshot(snapshot, {
+      sessionId, now, cleanupNotBefore,
+    }));
+  }
+
+  async deleteSession({ sessionId }) {
+    return this.#mutate((snapshot) => this.#revokeSessionSnapshot(snapshot, {
+      sessionId, now: Date.now(), cleanupNotBefore: Date.now(),
+    }));
   }
 
   async listRecoverableTurns() {

@@ -35,7 +35,15 @@ test('config defaults to a local atomic-file runtime outside production', () => 
 
   assert.equal(config.storeDriver, 'atomic-file');
   assert.equal(config.productionReady, false);
-  assert.deepEqual(config.rateLimits, { bootstrap: 20, message5m: 30, messageDaily: 300 });
+  assert.deepEqual(config.rateLimits, {
+    bootstrap: 20,
+    message5m: 30,
+    messageDaily: 300,
+    asr10m: 10,
+    asrDaily: 60,
+    tts10m: 5,
+    ttsDaily: 20,
+  });
 });
 
 test('config rejects production without a public origin', () => {
@@ -118,7 +126,7 @@ test('config requires every explicit selected LLM provider member', () => {
 
   assert.equal(azureVoice.asr.available, true);
   assert.equal(azureVoice.tts.available, true);
-  assert.equal(minimaxVoice.asr.available, true);
+  assert.equal(minimaxVoice.asr.available, false);
   assert.equal(minimaxVoice.tts.available, true);
 });
 
@@ -228,8 +236,18 @@ test('config public status contains capability booleans rather than secret value
   assert.deepEqual(config.publicStatus, {
     productionReady: false,
     llmAvailable: true,
-    asrAvailable: false,
-    ttsAvailable: false,
+    asrConfigured: false,
+    ttsConfigured: false,
+    voiceInputPreview: false,
+    voiceOutputPreview: false,
+    voiceInput: false,
+    voiceOutput: false,
+    asrEvidenceVersion: null,
+    ttsEvidenceVersion: null,
+    iosVoiceAcceptanceVersion: null,
+    privacyNoticeVersion: null,
+    releaseCommitSha: null,
+    normalizerContractVersion: 'canonical-wav-v1',
   });
   assert.equal(JSON.stringify(config.publicStatus).includes('very-secret-value'), false);
 });

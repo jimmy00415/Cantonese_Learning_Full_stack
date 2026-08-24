@@ -825,6 +825,7 @@ test('turn api real server shutdown is idempotent and closes SSE while aborting 
     V1_PUBLIC_ORIGIN: ORIGIN,
     V1_SESSION_SECRET: 's'.repeat(32),
     V1_ATOMIC_FILE_PATH: join(directory, 'store.json'),
+    V1_LOCAL_MEDIA_PATH: join(directory, 'media'),
     V1_LLM_PROVIDER: 'deterministic',
     V1_SSE_HEARTBEAT_MS: '1000',
   };
@@ -844,6 +845,17 @@ test('turn api real server shutdown is idempotent and closes SSE while aborting 
       throw Object.assign(new Error('aborted'), { code: 'PROVIDER_TIMEOUT' });
     },
   };
+  const voiceRuntimeLifecycle = [];
+  const mediaStore = {
+    init: async () => { voiceRuntimeLifecycle.push('media:init'); },
+    close: async () => { voiceRuntimeLifecycle.push('media:close'); },
+    createAttemptKey: () => 'attempts/voice/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+  };
+  const cleanupService = {
+    start: () => { voiceRuntimeLifecycle.push('cleanup:start'); },
+    stop: async () => { voiceRuntimeLifecycle.push('cleanup:stop'); },
+    drainOnce: async () => ({ idle: true }),
+  };
   let server;
   try {
     server = await startServer({
@@ -851,6 +863,8 @@ test('turn api real server shutdown is idempotent and closes SSE while aborting 
       port: 0,
       host: '127.0.0.1',
       llmProvider: blockedProvider,
+      mediaStore,
+      cleanupService,
       now: () => new Date('2026-08-25T12:00:00+08:00'),
       dispatcherOptions: { concurrency: 2, pollIntervalMs: 5, leaseDurationMs: 1_000, renewalIntervalMs: 100 },
     });
@@ -873,6 +887,9 @@ test('turn api real server shutdown is idempotent and closes SSE while aborting 
   });
 
   assert.equal(typeof server.shutdown, 'function');
+  assert.deepEqual(voiceRuntimeLifecycle, ['media:init', 'cleanup:start']);
+  assert.equal(server.runtime.mediaStore, mediaStore);
+  assert.equal(server.runtime.cleanupService, cleanupService);
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
   const createdResponse = await fetch(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: ORIGIN } });
   const created = await createdResponse.json();
@@ -899,6 +916,7 @@ test('turn api real server shutdown is idempotent and closes SSE while aborting 
   ]);
   assert.equal(providerAborted, true);
   assert.equal(server.listening, false);
+  assert.deepEqual(voiceRuntimeLifecycle, ['media:init', 'cleanup:start', 'cleanup:stop', 'media:close']);
   assert.equal(server.runtime.eventHub.listenerCount(created.data.conversation.id), 0);
   await eventsResponse.body.cancel().catch(() => undefined);
 });

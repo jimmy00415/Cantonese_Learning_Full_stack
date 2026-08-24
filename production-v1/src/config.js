@@ -2,8 +2,19 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse } from 'dotenv';
 
+import {
+  providerConfigDigest,
+  readEvidenceRecord,
+  validateIosVoiceEvidence,
+  validateSpeechEvidence,
+  voiceEvidenceContracts,
+} from './services/voice-evidence.js';
+
 const TRUE = 'true';
 const AZURE_REQUEST_PROFILES = new Set(['standard', 'reasoning']);
+export const NORMALIZER_CONTRACT_VERSION = 'canonical-wav-v1';
+const RELEASE_SHA = /^[0-9a-f]{40}$/i;
+const AZURE_SPEECH_REGION = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 function firstDefined(env, ...names) {
   for (const name of names) {
@@ -72,21 +83,42 @@ function configuredLlm(provider, settings) {
   return provider === 'deterministic';
 }
 
-function configuredAsr(env, provider) {
-  if (provider === 'azure') return Boolean(env.AZURE_SPEECH_KEY) && Boolean(env.AZURE_SPEECH_REGION);
-  if (provider === 'minimax') {
-    return asBoolean(env.MINIMAX_ASR_ENABLED) && Boolean(env.MINIMAX_API_KEY)
-      && Boolean(env.MINIMAX_ASR_ENDPOINT) && Boolean(env.MINIMAX_ASR_MODEL);
-  }
-  return false;
+function selectedAsrSettings(env, provider) {
+  if (provider !== 'azure') return {};
+  return {
+    apiKey: firstDefined(env, 'V1_AZURE_SPEECH_KEY', 'AZURE_SPEECH_KEY'),
+    region: firstDefined(env, 'V1_AZURE_SPEECH_REGION', 'AZURE_SPEECH_REGION'),
+    credentialVersion: env.V1_AZURE_SPEECH_CREDENTIAL_VERSION,
+  };
 }
 
-function configuredTts(env, provider) {
-  if (provider === 'azure') return Boolean(env.AZURE_SPEECH_KEY) && Boolean(env.AZURE_SPEECH_REGION);
+function selectedTtsSettings(env, provider) {
+  if (provider === 'azure') return selectedAsrSettings(env, provider);
   if (provider === 'minimax') {
-    return Boolean(env.MINIMAX_API_KEY) && Boolean(env.MINIMAX_BASE_URL)
-      && Boolean(env.MINIMAX_TTS_MODEL) && Boolean(env.MINIMAX_TTS_VOICE);
+    return {
+      apiKey: normalizeMiniMaxKey(firstDefined(env, 'V1_MINIMAX_API_KEY', 'MINIMAX_API_KEY')),
+      baseUrl: firstDefined(env, 'V1_MINIMAX_BASE_URL', 'MINIMAX_BASE_URL'),
+      model: firstDefined(env, 'V1_MINIMAX_TTS_MODEL', 'MINIMAX_TTS_MODEL'),
+      voice: firstDefined(env, 'V1_MINIMAX_TTS_VOICE', 'MINIMAX_TTS_VOICE'),
+      credentialVersion: env.V1_MINIMAX_CREDENTIAL_VERSION,
+    };
   }
+  return {};
+}
+
+function validateSpeechSettings(provider, settings) {
+  if (provider === 'azure' && settings.region && !AZURE_SPEECH_REGION.test(settings.region)) {
+    throw new Error('Azure Speech region is invalid');
+  }
+}
+
+function configuredAsr(provider, settings) {
+  return provider === 'azure' && Boolean(settings.apiKey && settings.region);
+}
+
+function configuredTts(provider, settings) {
+  if (provider === 'azure') return Boolean(settings.apiKey && settings.region);
+  if (provider === 'minimax') return Boolean(settings.apiKey && settings.baseUrl && settings.model && settings.voice);
   return false;
 }
 
@@ -146,7 +178,63 @@ function assertProductionReady(config) {
   if (!config.retentionWorkerEnabled) throw new Error('V1_RETENTION_WORKER_ENABLED=true is required in production');
 }
 
-export function loadConfig(environment = process.env) {
+function publicStatusFor(config, speechEvidence, at) {
+  const isProduction = config.nodeEnv === 'production';
+  let asrValid = false;
+  let ttsValid = false;
+  let iosValid = false;
+  if (isProduction && config.releaseCommitSha) {
+    if (config.asr.available && config.asr.settings.credentialVersion) {
+      asrValid = validateSpeechEvidence(speechEvidence.asr.record, {
+        expectedVersion: speechEvidence.asr.version,
+        commitSha: config.releaseCommitSha,
+        capability: 'asr',
+        provider: config.asr.provider,
+        contractVersion: voiceEvidenceContracts.asr,
+        configDigest: providerConfigDigest(config.asr, 'asr'),
+        now: at,
+      });
+    }
+    if (config.tts.available && config.tts.settings.credentialVersion) {
+      const contractVersion = config.tts.provider === 'azure'
+        ? voiceEvidenceContracts.azureTts
+        : voiceEvidenceContracts.minimaxTts;
+      ttsValid = validateSpeechEvidence(speechEvidence.tts.record, {
+        expectedVersion: speechEvidence.tts.version,
+        commitSha: config.releaseCommitSha,
+        capability: 'tts',
+        provider: config.tts.provider,
+        contractVersion,
+        configDigest: providerConfigDigest(config.tts, 'tts'),
+        now: at,
+      });
+    }
+    iosValid = validateIosVoiceEvidence(speechEvidence.ios.record, {
+      expectedVersion: speechEvidence.ios.version,
+      commitSha: config.releaseCommitSha,
+      normalizerContractVersion: NORMALIZER_CONTRACT_VERSION,
+      now: at,
+    });
+  }
+  return {
+    productionReady: config.productionReady,
+    llmAvailable: config.llm.available,
+    asrConfigured: config.asr.available,
+    ttsConfigured: config.tts.available,
+    voiceInputPreview: !isProduction && config.asr.available,
+    voiceOutputPreview: !isProduction && config.tts.available,
+    voiceInput: isProduction && asrValid && iosValid,
+    voiceOutput: isProduction && ttsValid,
+    asrEvidenceVersion: asrValid ? speechEvidence.asr.version : null,
+    ttsEvidenceVersion: ttsValid ? speechEvidence.tts.version : null,
+    iosVoiceAcceptanceVersion: iosValid ? speechEvidence.ios.version : null,
+    privacyNoticeVersion: config.privacyNoticeVersion ?? null,
+    releaseCommitSha: config.releaseCommitSha,
+    normalizerContractVersion: NORMALIZER_CONTRACT_VERSION,
+  };
+}
+
+export function loadConfig(environment = process.env, { now = () => new Date() } = {}) {
   const env = loadEnvironmentFile(environment);
   const nodeEnv = env.NODE_ENV ?? 'development';
   const isProduction = nodeEnv === 'production';
@@ -158,16 +246,27 @@ export function loadConfig(environment = process.env) {
   }
   const asrProvider = asProvider(firstDefined(env, 'V1_ASR_PROVIDER', 'ASR_PROVIDER'));
   const ttsProvider = asProvider(firstDefined(env, 'V1_TTS_PROVIDER', 'TTS_PROVIDER'));
+  const asrSettings = selectedAsrSettings(env, asrProvider);
+  const ttsSettings = selectedTtsSettings(env, ttsProvider);
+  validateSpeechSettings(asrProvider, asrSettings);
+  validateSpeechSettings(ttsProvider, ttsSettings);
   const trustedProxyValue = isProduction
     ? env.V1_TRUST_PROXY_HOPS
     : firstDefined(env, 'V1_TRUST_PROXY_HOPS', 'TRUST_PROXY_HOPS');
-  const mediaCredential = firstDefined(
-    env,
-    'V1_AZURE_STORAGE_CONNECTION_STRING',
-    'AZURE_STORAGE_CONNECTION_STRING',
-    'V1_AZURE_BLOB_ACCOUNT_URL',
-    'AZURE_BLOB_ACCOUNT_URL',
-  );
+  const mediaConnectionString = isProduction
+    ? env.V1_AZURE_STORAGE_CONNECTION_STRING
+    : firstDefined(env, 'V1_AZURE_STORAGE_CONNECTION_STRING', 'AZURE_STORAGE_CONNECTION_STRING');
+  const mediaAccountUrl = isProduction
+    ? env.V1_AZURE_BLOB_ACCOUNT_URL
+    : firstDefined(env, 'V1_AZURE_BLOB_ACCOUNT_URL', 'AZURE_BLOB_ACCOUNT_URL');
+  if (mediaConnectionString && mediaAccountUrl) {
+    throw new Error('Configure exactly one Azure Blob authentication mode');
+  }
+  const mediaCredential = mediaConnectionString ?? mediaAccountUrl;
+  const releaseCommitSha = env.V1_RELEASE_COMMIT_SHA?.trim() || null;
+  if (releaseCommitSha && !RELEASE_SHA.test(releaseCommitSha)) {
+    throw new Error('V1_RELEASE_COMMIT_SHA must be a 40-hex commit SHA');
+  }
 
   const config = {
     nodeEnv,
@@ -179,16 +278,26 @@ export function loadConfig(environment = process.env) {
     atomicFilePath: resolve(firstDefined(env, 'V1_ATOMIC_FILE_PATH', 'ATOMIC_FILE_PATH') ?? 'data/store.json'),
     databaseUrl: env.DATABASE_URL,
     mediaDriver: firstDefined(env, 'V1_MEDIA_DRIVER', 'MEDIA_DRIVER') ?? 'local',
+    localMediaPath: resolve(firstDefined(env, 'V1_LOCAL_MEDIA_PATH', 'LOCAL_MEDIA_PATH') ?? 'media'),
     mediaContainer: firstDefined(env, 'V1_AZURE_BLOB_CONTAINER', 'AZURE_BLOB_CONTAINER', 'AZURE_STORAGE_CONTAINER'),
+    mediaConnectionString,
+    mediaAccountUrl,
+    mediaAuthMode: mediaConnectionString ? 'connection-string' : mediaAccountUrl ? 'managed-identity' : null,
     mediaCredential,
     instancePolicy: env.V1_INSTANCE_POLICY,
     privacyNoticeVersion: env.V1_PRIVACY_NOTICE_VERSION,
     privacyNoticeApproved: asBoolean(env.V1_PRIVACY_NOTICE_APPROVED),
     retentionWorkerEnabled: asBoolean(env.V1_RETENTION_WORKER_ENABLED),
+    releaseCommitSha,
+    normalizerContractVersion: NORMALIZER_CONTRACT_VERSION,
     rateLimits: {
       bootstrap: rateLimit(env.V1_SESSION_BOOTSTRAP_LIMIT_10M, 20),
       message5m: rateLimit(env.V1_MESSAGE_LIMIT_5M, 30),
       messageDaily: rateLimit(env.V1_MESSAGE_LIMIT_DAY, 300),
+      asr10m: rateLimit(env.V1_ASR_LIMIT_10M, 10),
+      asrDaily: rateLimit(env.V1_ASR_LIMIT_DAY, 60),
+      tts10m: rateLimit(env.V1_TTS_LIMIT_10M, 5),
+      ttsDaily: rateLimit(env.V1_TTS_LIMIT_DAY, 20),
     },
     llm: {
       provider: llmProvider,
@@ -196,8 +305,8 @@ export function loadConfig(environment = process.env) {
       settings: llmSettings,
       timeoutMs: boundedInteger(firstDefined(env, 'V1_LLM_PROVIDER_TIMEOUT_MS', 'LLM_PROVIDER_TIMEOUT_MS'), 12_000, 1_000, 12_000),
     },
-    asr: { provider: asrProvider, available: configuredAsr(env, asrProvider) },
-    tts: { provider: ttsProvider, available: configuredTts(env, ttsProvider) },
+    asr: { provider: asrProvider, available: configuredAsr(asrProvider, asrSettings), settings: asrSettings },
+    tts: { provider: ttsProvider, available: configuredTts(ttsProvider, ttsSettings), settings: ttsSettings },
     sse: {
       pageSize: boundedInteger(env.V1_SSE_PAGE_SIZE, 100, 1, 100),
       bufferSize: boundedInteger(env.V1_SSE_BUFFER_SIZE, 256, 1, 1024),
@@ -210,16 +319,17 @@ export function loadConfig(environment = process.env) {
   }
   if (isProduction) assertProductionReady(config);
 
-  return {
+  const runtime = {
     ...config,
     productionReady: isProduction && config.storeDriver === 'postgres' && config.mediaDriver === 'azure-blob'
       && config.llm.available && config.llm.provider !== 'deterministic',
-    publicStatus: {
-      productionReady: isProduction && config.storeDriver === 'postgres' && config.mediaDriver === 'azure-blob'
-        && config.llm.available && config.llm.provider !== 'deterministic',
-      llmAvailable: config.llm.available,
-      asrAvailable: config.asr.available,
-      ttsAvailable: config.tts.available,
-    },
   };
+  const speechEvidence = {
+    asr: { record: readEvidenceRecord(env.V1_ASR_SMOKE_EVIDENCE_FILE), version: env.V1_ASR_SMOKE_EVIDENCE_VERSION ?? null },
+    tts: { record: readEvidenceRecord(env.V1_TTS_SMOKE_EVIDENCE_FILE), version: env.V1_TTS_SMOKE_EVIDENCE_VERSION ?? null },
+    ios: { record: readEvidenceRecord(env.V1_IOS_VOICE_ACCEPTANCE_FILE), version: env.V1_IOS_VOICE_ACCEPTANCE_VERSION ?? null },
+  };
+  runtime.getPublicStatus = (at = now()) => publicStatusFor(runtime, speechEvidence, at);
+  runtime.publicStatus = runtime.getPublicStatus(now());
+  return runtime;
 }
