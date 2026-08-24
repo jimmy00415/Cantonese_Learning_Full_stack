@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -821,6 +821,63 @@ test('voice release evidence is artifact/config/commit bound and expires dynamic
   assert.equal(rejected.publicStatus.voiceOutput, false);
 });
 
+test('speech evidence requires exact ASR fixture facts and keeps TTS free of ASR fixture fields', async () => {
+  const { finalizeEvidenceRecord, validateSpeechEvidence } = await import('../src/services/voice-evidence.js');
+  const commitSha = '9'.repeat(40);
+  const configDigest = '8'.repeat(64);
+  const now = new Date('2026-08-25T00:00:00.000Z');
+  const base = {
+    schemaVersion: 1,
+    commitSha,
+    provider: 'azure',
+    providerConfigDigest: configDigest,
+    occurredAt: now.toISOString(),
+    result: 'pass',
+    latencyMs: 10,
+  };
+  const validate = (record, capability, contractVersion) => validateSpeechEvidence(record, {
+    expectedVersion: record.artifactSha256,
+    commitSha,
+    capability,
+    provider: 'azure',
+    contractVersion,
+    configDigest,
+    now,
+  });
+  const validAsrPayload = {
+    ...base,
+    capability: 'asr',
+    contractVersion: 'azure-asr-v1',
+    fixtureSha256: '7'.repeat(64),
+    fixtureDurationMs: 1_000,
+  };
+  assert.equal(validate(finalizeEvidenceRecord(validAsrPayload), 'asr', 'azure-asr-v1'), true);
+
+  const invalidAsrMutations = [
+    (value) => { delete value.fixtureSha256; },
+    (value) => { value.fixtureSha256 = '7'.repeat(63); },
+    (value) => { delete value.fixtureDurationMs; },
+    (value) => { value.fixtureDurationMs = 0; },
+    (value) => { value.fixtureDurationMs = -1; },
+    (value) => { value.fixtureDurationMs = Number.POSITIVE_INFINITY; },
+    (value) => { value.fixtureDurationMs = '1000'; },
+  ];
+  for (const mutate of invalidAsrMutations) {
+    const payload = { ...validAsrPayload };
+    mutate(payload);
+    const record = finalizeEvidenceRecord(payload);
+    assert.equal(validate(record, 'asr', 'azure-asr-v1'), false);
+  }
+
+  const ttsPayload = { ...base, capability: 'tts', contractVersion: 'azure-tts-v1' };
+  assert.equal(validate(finalizeEvidenceRecord(ttsPayload), 'tts', 'azure-tts-v1'), true);
+  assert.equal(validate(finalizeEvidenceRecord({
+    ...ttsPayload,
+    fixtureSha256: '7'.repeat(64),
+    fixtureDurationMs: 1_000,
+  }), 'tts', 'azure-tts-v1'), false);
+});
+
 test('voice provider smoke is inert without exact confirmations and invokes only the selected fake capability once', async () => {
   const { runVoiceProviderSmoke } = await import('../scripts/voice-provider-smoke.js');
   const environment = {
@@ -970,6 +1027,114 @@ test('voice ingress idle and absolute deadlines release the source with the stab
     ));
     assert.equal(released, true);
   }
+});
+
+test('active ingress is spooled under its own idle and absolute clocks before the media-write deadline starts', async (t) => {
+  const { createVoiceService } = await import('../src/services/voice.js');
+  const { directory, store } = await createStore(t, 'hb-v1-ingress-spool-');
+  const owner = await store.createOrResumeSession({ tokenHash: 'ingress-spool-owner', now: '2026-08-25T02:15:00.000Z' });
+  const config = loadConfig({
+    NODE_ENV: 'test',
+    V1_SESSION_SECRET: 'i'.repeat(32),
+    V1_ASR_PROVIDER: 'azure',
+    AZURE_SPEECH_KEY: 'fake-only',
+    AZURE_SPEECH_REGION: 'eastasia',
+  });
+  const keys = [
+    'attempts/voice/cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd',
+    'attempts/voice/efefefef-efef-4fef-8fef-efefefefefef',
+  ];
+  const objects = new Map();
+  let keyIndex = 0;
+  let putCalls = 0;
+  const mediaStore = {
+    createAttemptKey: () => keys[keyIndex++],
+    putAttempt: async ({ storageKey, readable, signal }) => {
+      putCalls += 1;
+      const chunks = [];
+      for await (const chunk of readable) {
+        if (signal.aborted) throw signal.reason;
+        chunks.push(Buffer.from(chunk));
+      }
+      const bytes = Buffer.concat(chunks);
+      objects.set(storageKey, bytes);
+      return {
+        storageKey,
+        byteLength: bytes.length,
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+      };
+    },
+    open: async ({ storageKey }) => {
+      const bytes = objects.get(storageKey);
+      return { readable: Readable.from([bytes]), size: bytes.length, contentLength: bytes.length };
+    },
+  };
+  let asrCalls = 0;
+  const service = createVoiceService({
+    config,
+    store,
+    mediaStore,
+    asrProvider: {
+      transcribe: async (bytes) => {
+        asrCalls += 1;
+        assert.deepEqual(bytes, canonicalWav(100));
+        return { transcript: '慢速但有效', provider: 'azure', latencyMs: 1 };
+      },
+    },
+    now: () => new Date('2026-08-25T02:15:00.000Z'),
+    mediaDeadlineMs: 15,
+    spoolParentDirectory: directory,
+  });
+
+  const audio = canonicalWav(100);
+  let finiteReleased = false;
+  async function* slowFiniteBody() {
+    try {
+      for (let index = 0; index < 8; index += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 6));
+        const start = Math.floor((audio.length * index) / 8);
+        const end = Math.floor((audio.length * (index + 1)) / 8);
+        yield audio.subarray(start, end);
+      }
+    } finally { finiteReleased = true; }
+  }
+  const completed = await service.transcribe({
+    sessionId: owner.session.id,
+    clientUploadId: 'cdcdcdcd-0000-4000-8000-000000000000',
+    requestSha256: createHash('sha256').update(audio).digest('hex'),
+    mimeType: 'audio/wav',
+    readable: slowFiniteBody(),
+    idleMs: 50,
+    absoluteMs: 300,
+  });
+  assert.equal(completed.httpStatus, 201);
+  assert.equal(completed.data.transcript, '慢速但有效');
+  assert.equal(finiteReleased, true);
+  assert.equal(asrCalls, 1);
+  assert.equal(putCalls, 1);
+
+  let activeReleased = false;
+  async function* activeUntilAbsoluteDeadline() {
+    try {
+      while (true) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        yield Buffer.from([0, 0]);
+      }
+    } finally { activeReleased = true; }
+  }
+  await assert.rejects(service.transcribe({
+    sessionId: owner.session.id,
+    clientUploadId: 'efefefef-0000-4000-8000-000000000000',
+    requestSha256: '0'.repeat(64),
+    mimeType: 'audio/wav',
+    readable: activeUntilAbsoluteDeadline(),
+    idleMs: 15,
+    absoluteMs: 40,
+  }), (error) => error.code === 'VOICE_UPLOAD_TIMEOUT' && error.status === 408 && error.retryable === true);
+  assert.equal(activeReleased, true);
+  assert.equal(asrCalls, 1);
+  assert.equal(putCalls, 1, 'absolute ingress failure occurs before media-store work');
+  assert.deepEqual((await readdir(directory)).filter((name) => name.startsWith('voice-ingress-')), []);
 });
 
 test('voice media writes have an independent deadline and persist retryable 503 without calling ASR', async (t) => {

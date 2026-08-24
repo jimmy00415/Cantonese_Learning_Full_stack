@@ -101,6 +101,17 @@ function timeValid(record, now, maximumAgeMs) {
     && nowMs - occurredAt <= maximumAgeMs;
 }
 
+function speechFixtureValid(record, capability) {
+  if (capability === 'asr') {
+    return DIGEST.test(String(record?.fixtureSha256 ?? ''))
+      && Number.isFinite(record?.fixtureDurationMs)
+      && record.fixtureDurationMs > 0;
+  }
+  return capability === 'tts'
+    && record?.fixtureSha256 === undefined
+    && record?.fixtureDurationMs === undefined;
+}
+
 export function validateSpeechEvidence(record, {
   expectedVersion, commitSha, capability, provider, contractVersion,
   configDigest, now,
@@ -116,6 +127,7 @@ export function validateSpeechEvidence(record, {
     && record.providerConfigDigest === configDigest
     && record.result === 'pass'
     && Number.isFinite(record.latencyMs) && record.latencyMs >= 0
+    && speechFixtureValid(record, capability)
     && timeValid(record, now, 30 * DAY_MS),
   );
 }

@@ -1,4 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { mkdtemp, open, readFile, rmdir, unlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { validateCanonicalWav } from '../media/canonical-wav.js';
 import { providerConfigDigest } from './voice-evidence.js';
@@ -86,6 +89,7 @@ export async function* withIngressDeadlines(source, {
   idleMs = voiceLimits.ingressIdleMs,
   absoluteMs = voiceLimits.ingressAbsoluteMs,
   now = Date.now,
+  signal,
 } = {}) {
   const iterator = source?.[Symbol.asyncIterator]?.();
   if (!iterator) throw new Error('Voice body must be an async iterable');
@@ -101,8 +105,21 @@ export async function* withIngressDeadlines(source, {
         timer = setTimeout(() => reject(workError('VOICE_UPLOAD_TIMEOUT', 408, true)), waitMs);
         timer.unref?.();
       });
+      let removeAbortListener = () => undefined;
+      const aborted = signal?.aborted
+        ? Promise.reject(signal.reason ?? workError('VOICE_UPLOAD_ABORTED', 408, true))
+        : new Promise((resolve, reject) => {
+          void resolve;
+          if (!signal) return;
+          const onAbort = () => reject(signal.reason ?? workError('VOICE_UPLOAD_ABORTED', 408, true));
+          signal.addEventListener('abort', onAbort, { once: true });
+          removeAbortListener = () => signal.removeEventListener('abort', onAbort);
+        });
       let result;
-      try { result = await Promise.race([iterator.next(), timed]); } finally { clearTimeout(timer); }
+      try { result = await Promise.race([iterator.next(), timed, aborted]); } finally {
+        clearTimeout(timer);
+        removeAbortListener();
+      }
       if (result.done) return;
       yield result.value;
     }
@@ -111,20 +128,60 @@ export async function* withIngressDeadlines(source, {
   }
 }
 
-async function readMediaBuffer(mediaStore, storageKey, byteLength, signal) {
-  if (!Number.isSafeInteger(byteLength) || byteLength < 1 || byteLength > voiceLimits.uploadBytes) {
-    throw workError('VOICE_INVALID_WAV', 422, false);
+async function spoolIngress({
+  readable,
+  maxBytes,
+  idleMs,
+  absoluteMs,
+  signal,
+  parentDirectory,
+}) {
+  let directory = null;
+  let filePath = null;
+  let handle = null;
+  let closed = false;
+  try {
+    directory = await mkdtemp(join(parentDirectory, 'voice-ingress-'));
+    filePath = join(directory, 'body.wav');
+    handle = await open(filePath, 'wx', 0o600);
+    const hash = createHash('sha256');
+    let byteLength = 0;
+    const bounded = withIngressDeadlines(readable, { idleMs, absoluteMs, signal });
+    for await (const value of bounded) {
+      if (signal?.aborted) throw signal.reason ?? workError('VOICE_UPLOAD_ABORTED', 408, true);
+      const chunk = Buffer.from(value);
+      if (byteLength + chunk.length > maxBytes) throw workError('VOICE_UPLOAD_TOO_LARGE', 413, false);
+      let offset = 0;
+      while (offset < chunk.length) {
+        const { bytesWritten } = await handle.write(chunk, offset, chunk.length - offset, null);
+        if (bytesWritten < 1) throw workError('VOICE_MEDIA_UNAVAILABLE', 503, true);
+        offset += bytesWritten;
+      }
+      hash.update(chunk);
+      byteLength += chunk.length;
+    }
+    await handle.sync();
+    await handle.close();
+    closed = true;
+    const buffer = await readFile(filePath);
+    const sha256 = hash.digest('hex');
+    if (buffer.length !== byteLength
+      || createHash('sha256').update(buffer).digest('hex') !== sha256) {
+      throw workError('VOICE_MEDIA_UNAVAILABLE', 503, true);
+    }
+    return { buffer, byteLength, sha256 };
+  } catch (error) {
+    if (typeof error?.code === 'string' && (error.code === 'LEASE_LOST' || /^VOICE_/.test(error.code))) throw error;
+    throw workError('VOICE_MEDIA_UNAVAILABLE', 503, true);
+  } finally {
+    if (handle && !closed) await handle.close().catch(() => undefined);
+    if (filePath) await unlink(filePath).catch((error) => {
+      if (error?.code !== 'ENOENT') throw error;
+    });
+    if (directory) await rmdir(directory).catch((error) => {
+      if (error?.code !== 'ENOENT') throw error;
+    });
   }
-  const opened = await mediaStore.open({ storageKey, start: 0, end: byteLength - 1, signal });
-  const chunks = [];
-  let total = 0;
-  for await (const value of opened.readable) {
-    const chunk = Buffer.from(value);
-    total += chunk.length;
-    if (total > voiceLimits.uploadBytes) throw workError('VOICE_INVALID_WAV', 422, false);
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks, total);
 }
 
 function uploadPublic(upload) {
@@ -197,6 +254,7 @@ export function createVoiceService({
   eventHub,
   now = () => new Date(),
   mediaDeadlineMs = voiceLimits.mediaDeadlineMs,
+  spoolParentDirectory = tmpdir(),
 } = {}) {
   if (!config || !store || !mediaStore) throw new Error('Voice service requires config, store, and mediaStore');
   const secret = config.sessionSecret ?? 'local-development-session-secret';
@@ -250,28 +308,33 @@ export function createVoiceService({
     });
     let objectWritten = false;
     try {
+      const spooled = await spoolIngress({
+        readable,
+        maxBytes: voiceLimits.uploadBytes,
+        idleMs,
+        absoluteMs,
+        signal: heartbeat.signal,
+        parentDirectory: spoolParentDirectory,
+      });
+      const wav = validateCanonicalWav(spooled.buffer, { expectedSha256: requestSha256 });
       const stored = await withOperationDeadline({
         signal: heartbeat.signal,
         deadlineMs: mediaDeadlineMs,
         timeoutError: workError('VOICE_MEDIA_UNAVAILABLE', 503, true),
         operation: (mediaSignal) => mediaStore.putAttempt({
           storageKey: attemptStorageKey,
-          readable: withIngressDeadlines(readable, { idleMs, absoluteMs }),
+          readable: [spooled.buffer],
           maxBytes: voiceLimits.uploadBytes,
           signal: mediaSignal,
           contentType: 'audio/wav',
         }),
       });
       objectWritten = true;
-      const buffer = await withOperationDeadline({
-        signal: heartbeat.signal,
-        deadlineMs: mediaDeadlineMs,
-        timeoutError: workError('VOICE_MEDIA_UNAVAILABLE', 503, true),
-        operation: (mediaSignal) => readMediaBuffer(mediaStore, attemptStorageKey, stored.byteLength, mediaSignal),
-      });
-      const wav = validateCanonicalWav(buffer, { expectedSha256: requestSha256 });
+      if (stored.byteLength !== wav.byteLength || stored.sha256 !== wav.sha256) {
+        throw workError('VOICE_MEDIA_UNAVAILABLE', 503, true);
+      }
       await store.setVoiceUploadTranscribing({ uploadId: claim.upload.id, leaseToken, now: currentDate(now) });
-      const transcript = await asrProvider.transcribe(buffer, { signal: heartbeat.signal });
+      const transcript = await asrProvider.transcribe(spooled.buffer, { signal: heartbeat.signal });
       const completed = await store.completeVoiceUpload({
         uploadId: claim.upload.id,
         leaseToken,
