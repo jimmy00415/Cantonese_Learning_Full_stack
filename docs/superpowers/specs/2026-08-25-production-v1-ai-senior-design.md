@@ -96,16 +96,23 @@ not contain a tutorial carousel.
 
 Text is canonical and always available.
 
+- The browser may record MP4/AAC on Safari, WebM/Opus, Ogg/Opus, or WAV, but raw
+  container bytes never leave the device. After recording, the client decodes
+  the complete blob, resamples/downmixes it, and encodes one canonical 16 kHz,
+  mono, PCM16LE WAV for upload. Decode/normalization failure returns to text.
 - Holding the microphone starts a short recording; release stops it and starts
-  transcription. Pointer cancellation and a visible cancel action discard it.
+  normalization/transcription. Pointer cancellation and a visible cancel action
+  discard it. The client auto-stops at 55 seconds; the server independently
+  enforces 60 seconds.
 - A recording timer and `Release to transcribe` state replace the normal
   composer while recording.
 - The resulting transcript is editable before send. Sending it creates a normal
-  student message marked as voice-originated and keeps the original audio for
+  student message marked as voice-originated and keeps the normalized WAV for
   playback where configured.
 - Microphone denial or unsupported recording never blocks text input.
-- Assistant voice never autoplays. A `Play voice` control generates or reuses a
-  voice-message attachment after the text answer exists.
+- Assistant voice never autoplays. The first explicit action is `Generate
+  voice`; completion only changes the control to ready. A second explicit user
+  action plays the generated/reused attachment after the text answer exists.
 - Voice playback always has pause/stop, duration where available, a visible
   transcript, and an `AI-generated voice` disclosure.
 - TTS failure never changes or removes the text answer.
@@ -183,8 +190,13 @@ When `NODE_ENV=production`, startup fails closed unless all of these are set:
 
 - `V1_PUBLIC_ORIGIN`
 - `V1_SESSION_SECRET` with at least 32 bytes of entropy
-- `V1_STORE_DRIVER=postgres` and `DATABASE_URL`
-- `V1_MEDIA_DRIVER=azure-blob` with its container configuration
+- `V1_STORE_DRIVER=postgres`, `V1_DATABASE_URL`, and the non-secret
+  `V1_POSTGRES_RESOURCE_ID`
+- `V1_MEDIA_DRIVER=azure-blob`, V1-prefixed container credentials/settings, and
+  the non-secret `V1_BLOB_RESOURCE_ID`
+- a digest-bound, product/operations-owner-approved legacy resource inventory
+  through `V1_LEGACY_RESOURCE_INVENTORY_FILE` and
+  `V1_LEGACY_RESOURCE_INVENTORY_VERSION`
 - at least one real LLM provider
 - `V1_INSTANCE_POLICY=single`
 - explicit `V1_TRUST_PROXY_HOPS`
@@ -195,12 +207,79 @@ Development may use a generated local secret, atomic file/local media paths, and
 a deterministic provider fallback, but health reports `productionReady: false`
 in any of those states.
 
+Session capabilities expose the privacy notice version and separate speech
+states, never keys/settings: `asrConfigured`, `ttsConfigured`, local
+`voiceInputPreview`/`voiceOutputPreview`, release `voiceInput`/`voiceOutput`, and
+non-secret evidence versions. They also expose server-owned build metadata:
+`releaseCommitSha` (a configured 40-hex SHA, otherwise `null` outside a frozen
+candidate) and the exact `normalizerContractVersion`. Neither field may be
+supplied or overridden by a query parameter or client payload. In production,
+`voiceInput` requires Azure ASR
+configuration, a successful bound ASR smoke version, and a bound real-iOS Safari
+acceptance version; `voiceOutput` requires selected TTS configuration and a
+successful bound TTS smoke version. Missing/failed evidence forces the
+corresponding release capability false while text remains usable. Development
+may expose the clearly labeled preview flags for fake/local verification, but a
+configured provider is never described as verified or release-available.
+
+Speech evidence is executable configuration, not a status label. The guarded
+smoke command runs exactly one selected capability per process:
+`--capability tts --confirm-real-voice-provider`, or `--capability asr
+--asr-file <absolute-canonical-wav> --confirm-real-voice-provider
+--confirm-asr-audio-nonsensitive`. It makes one call with no provider fallback
+or retry; ASR mode cannot call TTS and TTS mode cannot call ASR.
+
+Each successful record contains `schemaVersion`, `commitSha`, `capability`,
+`provider`, `contractVersion`, `providerConfigDigest`, ASR-only
+`fixtureSha256`/`fixtureDurationMs`, `occurredAt`, `result`, `latencyMs`, and
+`artifactSha256`, where the artifact digest hashes the canonical record without
+that field. The config digest hashes the exact selected non-secret provider,
+normalized endpoint origin/path, region, model, voice, output settings, and a
+required non-secret credential-rotation ID
+(`V1_AZURE_SPEECH_CREDENTIAL_VERSION` or
+`V1_MINIMAX_CREDENTIAL_VERSION`)—never a key, audio, transcript, prompt, header,
+or raw body. ASR and TTS use independent files
+`V1_ASR_SMOKE_EVIDENCE_FILE` and `V1_TTS_SMOKE_EVIDENCE_FILE`, so both can be
+enabled deterministically. `V1_RELEASE_COMMIT_SHA` and the applicable
+`V1_ASR_SMOKE_EVIDENCE_VERSION`/`V1_TTS_SMOKE_EVIDENCE_VERSION` must match each
+record's commit and artifact digest. Startup recomputes the selected config
+digest and rejects malformed, failed, mismatched, older-than-30-days, or more
+than five-minutes-future evidence.
+
+Real-iOS input evidence is a separate safe record loaded from
+`V1_IOS_VOICE_ACCEPTANCE_FILE`; `V1_IOS_VOICE_ACCEPTANCE_VERSION` is its
+artifact digest. It binds commit, client normalizer/contract version, device
+model class, iOS/Safari versions, capture MIME, fixture SHA/duration,
+permission/cancel/55-second-stop/no-raw-upload assertions, result, time, and
+artifact digest. It expires after 90 days or immediately when commit,
+normalizer/contract, or configured input path changes, and timestamps more than
+five minutes in the future are invalid. Every production voice POST re-evaluates
+the loaded records against an injected current clock, including the 30/90-day
+age and future-skew rules; expiry after startup therefore fails closed without a
+restart. Missing or invalid speech/iOS evidence makes the corresponding
+production POST fail 503 before claim, quota, body read, or provider transport;
+development preview remains a separate non-production capability.
+
+The iOS record is produced only by the opt-in real-app diagnostic on an isolated
+HTTPS candidate plus the guarded local `acceptance:ios-voice` validator. The
+diagnostic reads `releaseCommitSha` and `normalizerContractVersion` only from
+the authenticated session bootstrap response and fails closed if either is
+missing or malformed. It exports a content-free receipt of instrumented MP4/AAC normalization,
+55-second stop, permission/cancel cleanup, one canonical idempotent upload,
+editable transcript, text fallback, and zero raw-container network requests.
+The validator requires a clean current HEAD matching `V1_RELEASE_COMMIT_SHA`,
+explicit real-device/non-sensitive confirmations, exact receipt schema/origin/
+versions/assertions, two-hour receipt age and five-minute future skew, refuses
+the legacy origin, makes no network call, and writes only the ignored canonical
+`reports/ios/<commit>-<artifact>.json` file.
+
 ## Data Model
 
 ### `sessions`
 
 - `id`
 - `token_hash` (unique; raw token only exists in the HttpOnly cookie)
+- `client_scope_id` (opaque, non-secret, stable only for this session)
 - `created_at`
 - `last_seen_at`
 
@@ -266,15 +345,107 @@ replay, not an ephemeral source of truth.
 - `session_id`
 - `owner_message_id` (nullable until a voice draft is sent)
 - `kind`: `user_voice | assistant_voice`
-- `relative_path`
+- `storage_key` (opaque per asset; never caller supplied or globally
+  content-addressed across sessions)
 - `mime_type`
 - `byte_length`
 - `duration_ms` (nullable)
 - `sha256`
 - `status`: `draft | attached | failed`
 - `created_at`
+- `updated_at`, `expires_at` (nullable)
 
-Media IDs are opaque and access is limited to the current session.
+Media IDs are opaque and access is limited to the current session. SHA-256 is
+used for integrity and idempotency, not as a cross-session storage key.
+`storage_key` is globally unique and never reused.
+
+### `voice_uploads`
+
+- `id`, `session_id`, `client_upload_id`
+- `request_sha256`, `mime_type`
+- `state`: `uploading | transcribing | ready | failed`
+- `attempt`, `lease_token`, `lease_expires_at`
+- `attempt_storage_key`, `attempt_started_at`, `attempt_deadline_at`, `created_at`,
+  `updated_at`
+- `media_asset_id`, `transcript`, `failure_code`, `failure_http_status`,
+  `retryable`
+
+`(session_id, client_upload_id)` is unique. Same-ID/same-hash retries return the
+existing ready draft or current live state without a second ASR call; same-ID
+with a different hash or MIME is an idempotency conflict. After an expired or
+failed claim, upstream ASR is explicitly at-least-once: a reclaim may call it
+again, while fencing guarantees only one durable ready result/media attachment.
+Claims, reclaims, completion, and failure are fenced.
+`session_id` references sessions with cascade; `media_asset_id` is nullable and
+uses set-null until fenced completion. A unique nullable attempt key and an index
+on `(state, lease_expires_at, updated_at)` support reclaim and cleanup.
+
+### `media_generations`
+
+- `id`, `owner_message_id`, `kind`
+- `state`: `generating | attached | failed`
+- `attempt`, `lease_token`, `lease_expires_at`
+- `attempt_storage_key`, `attempt_started_at`, `attempt_deadline_at`, `created_at`,
+  `updated_at`
+- `media_asset_id`, `failure_code`, `failure_http_status`, `retryable`,
+  `config_version`
+
+`(owner_message_id, kind)` is unique. V1 uses `kind=assistant_voice`. Only a live
+lease may attach an object, persist `audio.ready`, or record terminal failure;
+an expired attempt may be reclaimed without allowing the stale worker to win.
+`owner_message_id` references messages with cascade; `media_asset_id` is nullable
+and uses set-null until fenced attachment. A unique nullable attempt key and an
+index on `(state, lease_expires_at, updated_at)` support reclaim.
+
+### `media_deletion_jobs`
+
+- `id`, `storage_key`, `reason`, `not_before`
+- `state`: `pending | deleting | completed`, `attempt`, `generation`
+- `lease_token`, `lease_expires_at`, `last_error_code`
+- `created_at`, `updated_at`, `completed_at` (nullable)
+
+Session/draft deletion revokes access and copies every attached, draft, and
+in-flight `attempt_storage_key` into this outbox in the same database mutation
+before owned rows are removed. The outbox does not foreign-key back to the
+session/asset rows and therefore survives their cascade. Its unique
+`storage_key` deduplicates cleanup. Physical object deletion is retryable and
+fenced; object-not-found counts as success.
+The claim index is `(state, not_before, lease_expires_at)`; a completed job keeps
+its terminal timestamp, and no owner-row cascade can remove it.
+
+Ordinary `enqueueMediaDeletion(storage_key, ...)` is a generation-aware atomic
+upsert: a new key creates generation 1 and repeated pre-delete enqueue coalesces
+the safe `not_before`. A distinct
+`rearmMediaDeletionAfterWrite(storage_key, ...)` is mandatory after any write
+whose fence is lost. It increments generation and resets the job to pending from
+*every* prior state, including pending, deleting, or completed; it clears
+terminal/lease fields and applies the new `not_before`. Cleanup claim/complete/
+fail require both generation and fencing token, so the previous delete worker
+cannot complete after a concurrent late write. This closes both
+object-not-found-then-write and delete-returned-before-DB-complete windows.
+
+Every upload/generation claim allocates and persists its opaque attempt key and
+non-extendable `attempt_deadline_at` in the same mutation as
+attempt/lease/quota before any body/provider work. Voice ingress has a 30-second
+absolute/10-second idle body deadline; provider and media writes each have a
+15-second deadline. A voice-upload attempt therefore has a hard 60-second total
+horizon from claim, and a TTS attempt a hard 30-second horizon. Lease renewal can
+never extend that horizon. Session deletion revokes those leases and sets each
+job's `not_before` no earlier than `max(lease_expires_at, attempt_deadline_at)`
+plus a 60-second late-write/clock-skew grace. Workers recheck the session and lease immediately
+before and after every object write. A post-write lost fence must enqueue the
+already-known key. A bounded prefix sweeper may delete only keys older than the
+same lease/deadline/grace horizon with no live row reference; it never deletes a
+key merely because it is absent from the current process memory.
+
+An expired/retryable reclaim never overwrites the only reference to the previous
+attempt key. In the same atomic claim/quota mutation it generation-rearms a
+deletion-outbox job for that displaced key with
+`not_before >= max(old lease expiry, old hard deadline, reclaim time) + 60s`, and
+only then stores the new unique attempt key. A crash before commit leaves the old
+row reference; a crash after commit leaves durable old-key cleanup plus the new
+row. If the stale worker writes afterward, its post-write rearm increments the
+job generation again and fences any prior cleanup worker.
 
 ### `rate_limit_buckets` and `service_state`
 
@@ -293,7 +464,9 @@ and safe user messages, not provider payloads, stack traces, or secrets.
 - `POST /api/v1/session`
   - Creates or resumes the opaque-cookie session and its conversation.
   - Returns conversation metadata, capability flags, initial messages, and
-    knowledge snapshot date.
+    knowledge snapshot date. It also returns `clientSessionScope` from the
+    session's non-authorizing opaque scope ID so private client-side pending
+    uploads can be purged rather than attached after cookie/session replacement.
 - `GET /api/v1/messages?after=<sequence>`
   - Returns ordered canonical messages and active turn state.
 - `GET /api/v1/events?afterCursor=<cursor>`
@@ -325,21 +498,144 @@ and safe user messages, not provider payloads, stack traces, or secrets.
 
 ### Voice
 
+In production, transcription writes require release `voiceInput=true` and new
+TTS generation requires `voiceOutput=true`. After Origin/session/ownership but
+before idempotency claim, quota, body, or provider transport, a false capability
+returns 503 `VOICE_NOT_RELEASE_VERIFIED` with zero state/cost side effect. Local
+development may use the separately labeled preview capability; status/media GET
+and deletion remain available for already-owned records.
+
 - `POST /api/v1/voice/transcriptions`
-  - Accepts a raw allowlisted audio body from a supported browser recording.
-  - Streams no more than 8 MiB into a private temporary object, validates MIME
-    plus detected file signature, and uses a server-side media parser to reject
-    unknown or greater-than-60-second duration. Client duration is advisory only.
+  - Requires `X-Client-Upload-Id` (UUID) and `X-Content-SHA256` (64 lowercase
+    hex) and accepts only canonical `audio/wav` PCM from the client normalizer.
+  - Performs Origin, session, headers/declared length, and one atomic durable
+    quota-plus-upload-attempt claim before reading body bytes. The new/reclaim
+    branches atomically consume quota, increment attempt, and persist lease token,
+    expiry, and attempt storage key in truthful `uploading` state. Only a fenced
+    transition after actual SHA and canonical-WAV validation changes it to
+    `transcribing`. Ready/live/permanent-failure/conflict branches do not consume
+    quota; 429 creates or changes no claim. Same-ID/same-hash
+    ready retries reuse the result without quota or ASR; a changed hash/MIME is
+    HTTP 409.
+  - Streams no more than 8 MiB into a private temporary object with a 30-second
+    absolute and 10-second idle body deadline and verifies the
+    actual SHA. It then requires an exact 44-byte RIFF/WAVE header, PCM format 1,
+    mono, 16 kHz, 16-bit, byte rate 32000, block alignment 2, even data length,
+    internally consistent RIFF/data lengths, no trailing chunks, and no more
+    than 1,920,000 PCM bytes/60 seconds. Browser duration is never trusted.
   - Stores an owned draft, calls the configured ASR provider, and returns an
     editable transcript plus draft metadata.
   - Validation or ASR failure deletes the temporary object; no failed transcript
     or orphaned upload is retained.
+  - A newly completed upload returns 201, ready idempotent reuse returns 200, an
+    already-active same-hash lease returns 202 with truthful
+    `uploading|transcribing`, `Location`, and `Retry-After: 1`, and hash/MIME
+    conflict returns 409. Only retryable failed or expired work is reclaimed,
+    always with a new fenced provider-attempt quota claim.
+- `GET /api/v1/voice/uploads/:clientUploadId`
+  - Same-session operation status. A live `uploading`/`transcribing` attempt is
+    202 only while both lease and hard deadline are current. Ready returns 200.
+    Failed returns 200 with stable `failureCode` and `retryable`; an expired live
+    row is projected as 200 `{ state:"failed", retryable:true,
+    failureCode:"VOICE_ATTEMPT_EXPIRED" }`. Missing/cross-session IDs are the
+    same 404. A ready response contains the same editable transcript/draft as the
+    original 201.
+  - Pre-claim malformed-header 400, declared-size 413, and media-type 415 create
+    no operation and are re-evaluated on a later request. Post-claim streamed-size
+    413 and SHA/WAV/duration 422 persist `retryable:false` plus their safe HTTP
+    status; a same-ID/hash POST returns that result without quota/body/provider.
+    Only outcomes explicitly marked retryable in the exact taxonomy below, plus
+    expiry, may acquire a new quota-bearing fenced attempt; non-retryable 5xx
+    provider-contract/config results also reuse their stored result.
+    Conflict/authorization are not stored as retryable operations.
+- `DELETE /api/v1/voice/drafts/:draftId`
+  - Revokes the current session's unattached draft and durably enqueues physical
+    deletion. Missing and cross-session IDs both return 404.
 - `POST /api/v1/messages/:messageId/audio`
-  - Assistant messages only. Reuses existing audio or calls configured TTS,
-    stores the result, associates it with the message, and returns the media URL.
-- `GET /api/v1/media/:mediaId`
-  - Streams only media owned by the current session with `nosniff`, private
-    caching, range support where practical, and an allowlisted MIME type.
+  - Delivered assistant messages only. It takes no client text/voice parameters,
+    reuses an attached result, or atomically claims one fenced TTS generation.
+    Only a live claim may attach media and emit `audio.ready`; ready reuse/poll
+    does not consume generation quota.
+  - New/reclaim generation claim and TTS quota consumption are one store
+    mutation. It increments attempt and persists token, expiry, attempt key, and
+    config version; ready/live/conflict branches do not consume quota, and 429
+    creates or changes no claim.
+  - Ready reuse returns 200; another live claim returns 202 `generating` with
+    `Location` and `Retry-After: 1`; the
+    request that acquires a claim performs one bounded call and returns 201 only
+    after fenced attachment. Only retryable failed or expired work can be
+    reclaimed idempotently.
+- `GET /api/v1/messages/:messageId/audio/status`
+  - Same-session generation status. A generation is live 202 only while lease
+    and hard deadline are current. Attached returns 200. Failed returns 200 with
+    stable `failureCode`/`retryable`; an expired row is projected as retryable
+    `VOICE_ATTEMPT_EXPIRED`. Missing, cross-session, and non-assistant IDs are
+    indistinguishable 404s. Only retryable failure/expiry permits another POST;
+    permanent failure is reused without new quota/provider work.
+- `GET|HEAD /api/v1/media/:mediaId`
+  - Streams only media owned by the current session; missing and cross-session
+    IDs are indistinguishable 404s and never open Blob content.
+  - GET without Range returns 200. One valid `bytes=start-end`, `start-`, or
+    `-suffix` range returns 206. Invalid, multiple, overflowing, or unsatisfiable
+    ranges return 416 with `Content-Range: bytes */<size>`. HEAD returns 200,
+    ignores Range, and has no body.
+  - Authorized 200/206/416 responses set private `no-store`, `nosniff`,
+    `Accept-Ranges: bytes`, and exact length/range metadata. A 200/HEAD length is
+    the full asset; a 206 length is the selected range; a 416 has
+    `Content-Range: bytes */<size>` and a length for its safe error body. A 404
+    sets only generic no-store/nosniff response headers and never reveals size,
+    range support, or Blob existence. The server never returns a Blob/SAS URL.
+
+Voice errors use phase-specific precedence rather than one impossible global
+ordering. Before any durable claim/body read: Origin 403; session/ownership
+401/404; production release capability 503 `VOICE_NOT_RELEASE_VERIFIED`;
+malformed UUID/hash/header 400; declared length over a hard cap 413; wrong media
+type 415; existing idempotency/state conflict or permanent stored failure
+409/original safe status; atomic claim/quota 429. Therefore a request combining
+a disabled release capability with malformed/oversized/wrong-MIME input returns
+the capability 503 and reads no body. These failures create no new attempt or
+quota side effect except a previously stored result.
+
+After a claim, the stream decides by actual first event: each received chunk
+checks size before processing bytes, so a cap-crossing chunk produces 413; if
+the idle/absolute timer fires first it produces 408. Either persists the attempt
+with its defined retryability and cleans/enqueues its key; quota is not rolled
+back. SHA/WAV/duration validation is 422; media/store unavailable is 503;
+provider invalid/unavailable is 502; provider deadline is 504. Stable public
+error codes accompany every status without exposing provider/media content.
+
+The persisted outcome taxonomy is exact; only transient rows may consume quota
+on a same-identity retry:
+
+| Outcome after claim | Public status/code | Retryable |
+|---|---|---|
+| client disconnect before completion | no current response; stored 408 `VOICE_UPLOAD_ABORTED` | true |
+| ingress idle/absolute timeout | 408 `VOICE_UPLOAD_TIMEOUT` | true |
+| streamed cap crossing | 413 `VOICE_UPLOAD_TOO_LARGE` | false |
+| SHA mismatch | 422 `VOICE_HASH_MISMATCH` | false |
+| malformed/noncanonical/over-duration WAV | 422 `VOICE_INVALID_WAV` | false |
+| Azure `NoMatch`, initial-silence/babble timeout, or fixed-input rejection | 422 `VOICE_SPEECH_NOT_RECOGNIZED` | false |
+| provider authentication/configuration rejection | 503 `VOICE_PROVIDER_MISCONFIGURED` | false |
+| provider 2xx malformed/oversized/wrong-content successful response | 502 `VOICE_PROVIDER_INVALID_RESPONSE` | false |
+| other non-rate-limit provider 4xx/refusal | 502 `VOICE_TRANSCRIPTION_REJECTED` or `VOICE_SYNTHESIS_REJECTED` | false |
+| network, upstream 408/429/5xx | 502 `VOICE_TRANSCRIPTION_FAILED` or `VOICE_SYNTHESIS_FAILED` | true |
+| total provider deadline | 504 `VOICE_PROVIDER_TIMEOUT` | true |
+| media write unavailable/timeout | 503 `VOICE_MEDIA_UNAVAILABLE` | true |
+| expired live lease/hard horizon | status 200 `VOICE_ATTEMPT_EXPIRED` | true |
+
+The ASR/TTS adapters normalize provider responses into these categories rather
+than one generic 502. The same ID/hash or message/kind POST reuses a
+non-retryable stored code/status with no claim, quota, body, or provider work.
+Regression tests cover each fake-provider category and prove only rows explicitly
+marked retryable plus expiry can acquire another fenced attempt.
+
+Session deletion and claim use the same active-session serialization boundary.
+If a claim commits first, deletion must capture its attempt key, revoke the
+lease, and enqueue cleanup before cascading owner rows. If deletion commits
+first, a stale-auth claim returns indistinguishable 401/404 with no quota,
+upload/generation row, key, object, or foreign-key error. A worker that writes
+after losing either race must call the generation-incrementing post-write rearm
+operation before returning.
 
 ### Operations
 
@@ -384,8 +680,10 @@ Provider transport returns bounded raw text and metadata; the answer service is
 the only layer that parses and validates model output. LLM retries are limited
 to one retry for transient failures and use the same serialized request,
 evidence snapshot, turn, and 12-second total deadline across both attempts. The
-deadline covers response-body reading and the body is capped. TTS has an
-independent retry path and never changes turn delivery.
+deadline covers response-body reading and the body is capped. ASR/TTS do not
+retry automatically inside one request; a later user retry reuses or safely
+reclaims the same durable upload/generation contract and never changes text-turn
+delivery.
 
 ## Knowledge and Grounding
 
@@ -458,8 +756,8 @@ URLs/actions, and `verified` without a valid current claim are rejected.
 Production V1 reuses existing working configuration without exposing it:
 
 - LLM: configured HKBU, Azure OpenAI, or MiniMax chat-completion endpoint.
-- ASR: Azure Speech REST first where configured; MiniMax may be a configured
-  fallback.
+- ASR: Azure Speech short-audio REST is the only V1 ASR adapter. There is no
+  silent provider fallback, and Fast Transcription/MiniMax ASR are deferred.
 - TTS: configured Azure Speech or MiniMax provider.
 
 `V1_LLM_PROVIDER`, `V1_ASR_PROVIDER`, and `V1_TTS_PROVIDER` override the legacy
@@ -481,18 +779,51 @@ Provider configuration precedence and required pairs are explicit:
   and API version settings.
 - MiniMax LLM/TTS: `MINIMAX_API_KEY`, base URL, Anthropic base URL, selected LLM
   model, and selected TTS model/voice.
-- ASR selector: `V1_ASR_PROVIDER`, then `ASR_PROVIDER`; Azure requires
-  `AZURE_SPEECH_KEY` and region. MiniMax ASR is enabled only by its explicit
-  enable flag and endpoint/model settings.
+- ASR selector: `V1_ASR_PROVIDER`, then `ASR_PROVIDER`; V1 supports only `azure`,
+  requiring `AZURE_SPEECH_KEY` and a validated region. An inherited `minimax`
+  selector is reported configured/available false and never routed. Azure calls
+  exactly `https://{region}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=zh-HK&format=simple`
+  with `Ocp-Apim-Subscription-Key`, `Content-Type: audio/wav;
+  codecs=audio/pcm; samplerate=16000`, and `Accept: application/json`.
+  The bounded 256 KiB JSON response must have `RecognitionStatus=Success` and a
+  non-empty `DisplayText`; confidence is included only when the provider actually
+  supplies a finite value.
 - TTS selector: `V1_TTS_PROVIDER`, then `TTS_PROVIDER`; unsupported or incomplete
   voice configuration disables that capability rather than affecting text.
+  Azure calls exactly
+  `https://{region}.tts.speech.microsoft.com/cognitiveservices/v1` with
+  `Ocp-Apim-Subscription-Key`, `Content-Type: application/ssml+xml`, fixed
+  `zh-HK-HiuMaanNeural`, `X-Microsoft-OutputFormat:
+  audio-24khz-48kbitrate-mono-mp3`, and `User-Agent:
+  HongKongBuddy-ProductionV1/0.1`. Its UTF-8 request body has no optional prosody
+  or client fields and is serialized exactly as
+  `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="zh-HK"><voice name="zh-HK-HiuMaanNeural">${escapeXml(text)}</voice></speak>`.
+  `escapeXml` replaces `&`, `<`, `>`, `"`, and `'` in an order-safe text-node
+  encoding and never accepts prebuilt SSML. The response must be `audio/mpeg`, no
+  more than 4 MiB, and have a valid MP3 ID3/frame signature.
+  MiniMax uses the configured fixed
+  model/voice, `language_boost=Chinese,Yue`, `stream=false`, and
+  `output_format=hex`, with fixed `audio_setting` of mono MP3, 32 kHz, and 128
+  kbps. It requires `base_resp.status_code === 0`, `data.status === 2`, a
+  non-empty even-length hex-only `data.audio` of at most 8 MiB characters, and
+  (when present) exact `extra_info.audio_size`. The raw JSON is capped at 9 MiB;
+  decoded audio is capped at 4 MiB and must pass MP3 signature validation before
+  acceptance. MiniMax calls exactly `{MINIMAX_BASE_URL}/v1/t2a_v2` with
+  `Authorization: Bearer <key>` and `Content-Type: application/json`. Its body is
+  exactly the configured fixed `model`, server-owned `text`, `stream:false`,
+  `output_format:"hex"`, `language_boost:"Chinese,Yue"`,
+  `voice_setting:{voice_id,speed:1,vol:1,pitch:0}`, and
+  `audio_setting:{sample_rate:32000,bitrate:128000,format:"mp3",channel:1}`; no
+  client field can override it.
 
 LLM work has one 12-second total deadline across the initial request, bounded
 response read, retry delay, and at most one retry for network failure, timeout,
 408, 429, or 5xx. Authentication, refusal/content filter, and invalid successful
 output are not retried.
-ASR and TTS default to 15 seconds with no automatic retry inside the request;
-the user can retry the same owned draft/message action idempotently.
+ASR and TTS each have one 15-second total deadline including body read, HTTPS-only
+transport, `redirect: 'error'`, bounded provider responses, and no automatic
+retry inside the request. The user can retry the same owned upload/message action
+idempotently.
 
 ## Security and Privacy
 
@@ -500,19 +831,24 @@ the user can retry the same owned draft/message action idempotently.
   through a stored token hash, and `Secure` in production.
 - Session lookup is constant-shape and media/conversation access is always
   ownership-checked.
-- JSON body limits, text limits, binary audio limits, MIME allowlists, path
-  canonicalization, timeout/abort control, write-request Origin validation, and
-  per-session rate limits are
-  mandatory.
+- JSON body limits, text limits, streaming binary limits, strict canonical-WAV
+  validation, opaque storage keys, timeout/abort control, write-request Origin
+  validation, and per-session rate limits are mandatory.
 - Every state-changing request requires an `Origin` exactly matching the
   configured origin; missing or cross-origin writes fail with
   `ORIGIN_NOT_ALLOWED`. Production explicitly configures numeric trusted-proxy
   hops before deriving a bootstrap IP hash.
 - Durable default quotas are: 20 session bootstraps per 10 minutes per HMACed
   client-IP key, 30 messages per 5 minutes and 300 per day per session, 10 voice
-  uploads per 10 minutes and 60 per day, and 20 TTS generations per day. A 429
+  uploads per 10 minutes and 60 per day, and 5 TTS generations per 10 minutes
+  plus 20 per day. A 429
   response includes `RATE_LIMITED` and `Retry-After`; deployments may lower but
   not silently remove these limits.
+- Multi-window claims evaluate every applicable bucket atomically. If several
+  buckets are exhausted, the store returns the latest `blocking_expires_at`
+  regardless of bucket order and HTTP derives `Retry-After` as the positive
+  ceiling of its remaining seconds; no rate counter, claim, or operation row is
+  changed. This rule applies equally to chat, ASR, and TTS.
 - CORS is same-origin by default. Production accepts only `V1_PUBLIC_ORIGIN`.
 - Security headers include CSP, frame denial, referrer policy, content-type
   protection, and permissions policy for microphone use.
@@ -528,13 +864,19 @@ the user can retry the same owned draft/message action idempotently.
   product/legal owner. Implementation can ship a clearly labeled draft notice
   locally, but no campus deployment may claim ready until the approval flag and
   notice version are configured.
-- `DELETE /api/v1/session` deletes the session, conversation, messages, turns,
-  and owned media, then clears the cookie.
+- `DELETE /api/v1/session` atomically revokes all upload/generation leases,
+  records every owned asset and in-flight attempt key in the durable deletion
+  outbox with a safe late-write `not_before`, removes the session/conversation rows, and
+  clears the cookie. `deleted: true` means access is revoked and physical deletion
+  is reliably queued; it never falsely claims a cross-database/Blob transaction.
 - Default retention is 30 days for anonymous text/events and 7 days for voice
   media unless a deployment selects a stricter policy. A real scheduled cleanup
-  worker must use the same ownership-aware deletion contract, record its last
-  successful run, retry failed object deletion, and make readiness fail when the
-  worker is stopped or stale.
+  worker first revokes access and enqueues keys transactionally, then performs
+  physical deletion. It must use the same lifecycle core as explicit deletion,
+  record its last successful run, retry failed object deletion, and make
+  readiness fail when the worker is stopped or stale. It never deletes Blob
+  first while leaving readable metadata, or drops metadata without a durable
+  outbox key.
 
 ## Failure Experience
 
@@ -542,8 +884,9 @@ the user can retry the same owned draft/message action idempotently.
   and never create a duplicate retry.
 - Weak or expired evidence: state that the fact could not be confirmed and show
   the official page/contact.
-- ASR failure: keep the recording draft only for the current attempt, offer retry
-  and `Type instead`, and never invent a transcript.
+- Recording normalization or ASR failure: never upload a raw fallback container
+  or invent a transcript; offer retry and `Type instead`, and clean private
+  temporary objects through the durable deletion path.
 - TTS failure: retain the text answer and show `Voice unavailable — retry`.
 - SSE disconnect: reconnect with the persisted cursor, replay missed events,
   fetch canonical messages after the last sequence, and continue without loss.
@@ -580,7 +923,8 @@ campus promotion but does not invalidate local feature verification.
 
 ## Testing Strategy
 
-Tests use Node's built-in test runner and browser automation where available.
+Tests use Node's built-in test runner. The defined Playwright browser matrix is
+required for Task 6; real-device iOS acceptance remains a separate release gate.
 
 - Unit: config readiness, tokenizer/retriever, source expiry, provider parsing,
   citation/action validation, cookie/token helpers, MIME/path validation.
@@ -595,15 +939,23 @@ Tests use Node's built-in test runner and browser automation where available.
   parent-brand attribution.
 - Browser: 390x844 mobile, desktop, keyboard flow, reload/reconnect, voice
   unsupported fallback, information sheet, clear conversation, and no horizontal
-  overflow.
+  overflow. The real-container matrix requires WebM/Opus in bundled Chromium,
+  Ogg/Opus in Playwright Firefox, MP4/AAC in installed branded Chrome, and WAV
+  in all; WebKit exercises WAV plus explicit unsupported fallback, while real
+  iOS Safari separately gates MP4/AAC capture. Success checks canonical WAV
+  structure and fixture-specific duration/RMS/frequency or PCM fingerprint;
+  unsupported decode must make no upload.
 - Security: secret scan, CSP/header contract, traversal attempts, unauthorized
   media, Origin/CSRF, durable quotas, oversized or over-duration input, privacy
   notice gates, retention cleanup, and production config fail-closed checks.
-- Real dependency acceptance: apply the migration to an isolated PostgreSQL
-  database and exercise lease/fencing/concurrency/cascade behavior; exercise a
-  private Blob test container for write/read/delete. These are required for a
-  green production readiness report and may be skipped only with the result
-  labeled local-preview-only.
+- Real dependency acceptance: the atomic and PostgreSQL stores run the same
+  displaced-key reclaim, claim/delete ordering, stale-write rearm, zero-orphan,
+  and maximum-window quota contract. Apply the migration to a fresh schema in
+  the intended isolated V1 PostgreSQL resource and run that exact matrix across
+  two store instances while exercising a unique prefix in the intended private
+  V1 Blob container for write/read/delete. These are required for a green
+  production readiness report and may be skipped only with the result labeled
+  local-preview-only.
 - Legacy regression: the original V2 suite and frontend sync check remain green
   because legacy code is untouched.
 
@@ -628,6 +980,31 @@ Release evidence must bind:
 - privacy notice approval/version and retention-worker freshness;
 - exact one-replica deployment configuration.
 
+Real dependency evidence is executed against the intended new V1 production
+PostgreSQL database and Blob container while isolating every mutation inside a
+fresh guarded schema/blob prefix. The new V1 resources must have independent
+resource IDs and canonical identity hashes from every legacy resource; sharing
+either physical resource with the legacy app is a production blocker. The
+authoritative legacy inventory is never inferred from whichever environment
+variables happen to be present. It is an owner-reviewed, frozen-commit-bound,
+artifact-hashed record listing every legacy PostgreSQL/Blob resource ID and
+canonical identity digest, or an explicit reviewed `none` declaration for each
+resource class. Missing, malformed, unapproved, stale, incomplete, or
+digest/commit-mismatched inventory blocks startup before any V1 production
+storage connection. The
+record binds the exact current `V1_POSTGRES_RESOURCE_ID` and
+`V1_BLOB_RESOURCE_ID`, SHA-256 hashes of those V1 canonical actual identities,
+the validated legacy-inventory digest, the validated unique schema/blob prefix,
+named checks, cleanup success, result, time, frozen commit, and artifact hash.
+Production loads it only from
+`V1_DEPENDENCY_ACCEPTANCE_EVIDENCE_FILE` with the matching
+`V1_DEPENDENCY_ACCEPTANCE_EVIDENCE_VERSION`; every readiness evaluation rejects
+a digest/commit/current-V1-resource mismatch, any legacy-resource equality,
+failed cleanup, records older than seven days, or timestamps more than five
+minutes in the future. Evidence from a separate acceptance-only database or
+container may validate an adapter but cannot make V1 production readiness
+green. It cannot be synthesized by unit/fake-pool tests.
+
 No merge, push, live deployment, DNS change, or old-app configuration change is
 part of the automatic local execution.
 
@@ -651,8 +1028,8 @@ part of the automatic local execution.
   session deletion pass automated tests.
 - Relevant campus answers display supporting official source titles, freshness,
   and links; unknown/expired evidence produces an honest limitation.
-- Voice input uploads raw audio, produces an editable transcript, and degrades
-  cleanly to text.
+- Voice input keeps the raw browser container on-device, uploads only normalized
+  canonical WAV, produces an editable transcript, and degrades cleanly to text.
 - Voice output is opt-in, never autoplays, and cannot block text delivery.
 - Mobile 390x844 keeps the header, timeline, truthful state, and composer usable
   above the keyboard with no horizontal overflow.
