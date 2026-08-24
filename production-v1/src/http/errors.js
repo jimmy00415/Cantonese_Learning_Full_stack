@@ -16,6 +16,7 @@ function normalizeError(error = {}) {
   const known = {
     SESSION_NOT_FOUND: 401, NOT_FOUND: 404, IDEMPOTENCY_CONFLICT: 409,
     INVALID_VOICE_DRAFT: 400, RATE_LIMITED: 429, ORIGIN_NOT_ALLOWED: 403,
+    INVALID_EVENT_CURSOR: 400,
   };
   return error.code in known ? { status: known[error.code], code: error.code } : { status: 500, code: 'INTERNAL_ERROR' };
 }
@@ -29,6 +30,7 @@ function safeMessage(code) {
     IDEMPOTENCY_CONFLICT: 'This client message ID was already used with different content.',
     RATE_LIMITED: 'Too many requests. Please try again later.',
     NOT_FOUND: 'The requested resource was not found.',
+    INVALID_EVENT_CURSOR: 'The event cursor is invalid.',
   };
   return messages[code] ?? 'The service could not process this request.';
 }

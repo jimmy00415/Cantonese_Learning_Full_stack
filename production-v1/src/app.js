@@ -6,6 +6,7 @@ import helmet from 'helmet';
 import { requireSameOrigin } from './http/security.js';
 import { sendError } from './http/errors.js';
 import { createSessionRouter } from './http/session.js';
+import { EventHub } from './services/events.js';
 
 const publicDirectory = fileURLToPath(new URL('../public/', import.meta.url));
 
@@ -13,10 +14,9 @@ function envelope(response, data, error = null) {
   return { data, error, requestId: response.locals.requestId };
 }
 
-export function createApp({ config, store, mediaStore, answerService, eventHub } = {}) {
+export function createApp({ config, store, mediaStore, answerService, eventHub, dispatcher } = {}) {
   void mediaStore;
   void answerService;
-  void eventHub;
 
   if (!config) throw new Error('createApp requires config');
 
@@ -36,7 +36,11 @@ export function createApp({ config, store, mediaStore, answerService, eventHub }
   app.get('/api/health/live', (request, response) => {
     response.json(envelope(response, { status: 'ok', version: config.version ?? '0.1.0' }));
   });
-  if (store) app.use('/api/v1', createSessionRouter({ config, store }));
+  if (store) {
+    const selectedEventHub = eventHub ?? new EventHub();
+    app.locals.eventHub = selectedEventHub;
+    app.use('/api/v1', createSessionRouter({ config, store, eventHub: selectedEventHub, dispatcher }));
+  }
   app.use('/api', (request, response) => {
     response.status(404).json(envelope(response, null, { code: 'NOT_FOUND', message: 'The requested API route does not exist.' }));
   });

@@ -27,20 +27,43 @@ function asProvider(value, fallback = 'none') {
   return (value ?? fallback).trim().toLowerCase();
 }
 
-function configuredLlm(env, provider) {
+function normalizeMiniMaxKey(value) {
+  return String(value ?? '').trim().replace(/^Minimax-/, '');
+}
+
+function selectedLlmSettings(env, provider) {
   if (provider === 'hkbu') {
-    return Boolean(env.HKBU_API_KEY) && Boolean(env.HKBU_BASE_URL)
-      && Boolean(env.HKBU_MODEL) && Boolean(env.HKBU_API_VERSION);
+    return {
+      apiKey: firstDefined(env, 'V1_HKBU_API_KEY', 'HKBU_API_KEY'),
+      baseUrl: firstDefined(env, 'V1_HKBU_BASE_URL', 'HKBU_BASE_URL'),
+      model: firstDefined(env, 'V1_HKBU_MODEL', 'HKBU_MODEL'),
+      apiVersion: firstDefined(env, 'V1_HKBU_API_VERSION', 'HKBU_API_VERSION'),
+    };
   }
   if (provider === 'azure-openai') {
-    return Boolean(env.AZURE_OPENAI_KEY) && Boolean(env.AZURE_OPENAI_ENDPOINT)
-      && Boolean(env.AZURE_OPENAI_DEPLOYMENT)
-      && Boolean(env.AZURE_OPENAI_API_VERSION);
+    return {
+      apiKey: firstDefined(env, 'V1_AZURE_OPENAI_KEY', 'AZURE_OPENAI_KEY'),
+      endpoint: firstDefined(env, 'V1_AZURE_OPENAI_ENDPOINT', 'AZURE_OPENAI_ENDPOINT'),
+      deployment: firstDefined(env, 'V1_AZURE_OPENAI_DEPLOYMENT', 'AZURE_OPENAI_DEPLOYMENT'),
+      apiVersion: firstDefined(env, 'V1_AZURE_OPENAI_API_VERSION', 'AZURE_OPENAI_API_VERSION'),
+      minCompletionTokens: boundedInteger(firstDefined(env, 'V1_AZURE_OPENAI_MIN_COMPLETION_TOKENS', 'AZURE_OPENAI_MIN_COMPLETION_TOKENS'), 1600, 800, 6000),
+    };
   }
   if (provider === 'minimax') {
-    return Boolean(env.MINIMAX_API_KEY) && Boolean(env.MINIMAX_BASE_URL)
-      && Boolean(env.MINIMAX_ANTHROPIC_BASE_URL) && Boolean(env.MINIMAX_LLM_MODEL);
+    return {
+      apiKey: normalizeMiniMaxKey(firstDefined(env, 'V1_MINIMAX_API_KEY', 'MINIMAX_API_KEY')),
+      baseUrl: firstDefined(env, 'V1_MINIMAX_BASE_URL', 'MINIMAX_BASE_URL'),
+      anthropicBaseUrl: firstDefined(env, 'V1_MINIMAX_ANTHROPIC_BASE_URL', 'MINIMAX_ANTHROPIC_BASE_URL'),
+      model: firstDefined(env, 'V1_MINIMAX_LLM_MODEL', 'MINIMAX_LLM_MODEL'),
+    };
   }
+  return {};
+}
+
+function configuredLlm(provider, settings) {
+  if (provider === 'hkbu') return Boolean(settings.apiKey && settings.baseUrl && settings.model && settings.apiVersion);
+  if (provider === 'azure-openai') return Boolean(settings.apiKey && settings.endpoint && settings.deployment && settings.apiVersion);
+  if (provider === 'minimax') return Boolean(settings.apiKey && settings.baseUrl && settings.anthropicBaseUrl && settings.model);
   return provider === 'deterministic';
 }
 
@@ -74,6 +97,14 @@ function rateLimit(value, fallback) {
   return Math.min(Number(value), fallback);
 }
 
+function boundedInteger(value, fallback, minimum, maximum) {
+  if (value === undefined || value === '') return fallback;
+  if (!/^\d+$/.test(String(value))) throw new Error('Numeric configuration must be an integer');
+  const parsed = Number(value);
+  if (parsed < minimum || parsed > maximum) throw new Error(`Numeric configuration must be between ${minimum} and ${maximum}`);
+  return parsed;
+}
+
 function assertProductionReady(config) {
   if (!config.publicOrigin) throw new Error('V1_PUBLIC_ORIGIN is required in production');
   if (Buffer.byteLength(config.sessionSecret ?? '') < 32) {
@@ -91,6 +122,18 @@ function assertProductionReady(config) {
   if (!config.llm.available || config.llm.provider === 'deterministic') {
     throw new Error('Production requires a configured real LLM provider');
   }
+  const providerUrls = config.llm.provider === 'hkbu'
+    ? [config.llm.settings.baseUrl]
+    : config.llm.provider === 'azure-openai'
+      ? [config.llm.settings.endpoint]
+      : [config.llm.settings.baseUrl, config.llm.settings.anthropicBaseUrl];
+  for (const value of providerUrls) {
+    let url;
+    try { url = new URL(value); } catch { throw new Error('Production LLM provider URLs must be valid HTTPS URLs'); }
+    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
+      throw new Error('Production LLM provider URLs must be valid HTTPS URLs');
+    }
+  }
   if (config.instancePolicy !== 'single') throw new Error('V1_INSTANCE_POLICY=single is required in production');
   if (!config.privacyNoticeVersion || !config.privacyNoticeApproved) {
     throw new Error('An approved V1_PRIVACY_NOTICE_VERSION is required in production');
@@ -103,6 +146,7 @@ export function loadConfig(environment = process.env) {
   const nodeEnv = env.NODE_ENV ?? 'development';
   const isProduction = nodeEnv === 'production';
   const llmProvider = asProvider(firstDefined(env, 'V1_LLM_PROVIDER', 'LLM_PROVIDER'), 'deterministic');
+  const llmSettings = selectedLlmSettings(env, llmProvider);
   const asrProvider = asProvider(firstDefined(env, 'V1_ASR_PROVIDER', 'ASR_PROVIDER'));
   const ttsProvider = asProvider(firstDefined(env, 'V1_TTS_PROVIDER', 'TTS_PROVIDER'));
   const trustedProxyValue = isProduction
@@ -123,6 +167,7 @@ export function loadConfig(environment = process.env) {
     trustedProxyHops: parseTrustedProxyHops(trustedProxyValue),
     trustedProxyHopsExplicit: env.V1_TRUST_PROXY_HOPS !== undefined,
     storeDriver: firstDefined(env, 'V1_STORE_DRIVER', 'STORE_DRIVER') ?? 'atomic-file',
+    atomicFilePath: resolve(firstDefined(env, 'V1_ATOMIC_FILE_PATH', 'ATOMIC_FILE_PATH') ?? 'data/store.json'),
     databaseUrl: env.DATABASE_URL,
     mediaDriver: firstDefined(env, 'V1_MEDIA_DRIVER', 'MEDIA_DRIVER') ?? 'local',
     mediaContainer: firstDefined(env, 'V1_AZURE_BLOB_CONTAINER', 'AZURE_BLOB_CONTAINER', 'AZURE_STORAGE_CONTAINER'),
@@ -136,9 +181,19 @@ export function loadConfig(environment = process.env) {
       message5m: rateLimit(env.V1_MESSAGE_LIMIT_5M, 30),
       messageDaily: rateLimit(env.V1_MESSAGE_LIMIT_DAY, 300),
     },
-    llm: { provider: llmProvider, available: configuredLlm(env, llmProvider) },
+    llm: {
+      provider: llmProvider,
+      available: configuredLlm(llmProvider, llmSettings),
+      settings: llmSettings,
+      timeoutMs: boundedInteger(firstDefined(env, 'V1_LLM_PROVIDER_TIMEOUT_MS', 'LLM_PROVIDER_TIMEOUT_MS'), 12_000, 1_000, 12_000),
+    },
     asr: { provider: asrProvider, available: configuredAsr(env, asrProvider) },
     tts: { provider: ttsProvider, available: configuredTts(env, ttsProvider) },
+    sse: {
+      pageSize: boundedInteger(env.V1_SSE_PAGE_SIZE, 100, 1, 100),
+      bufferSize: boundedInteger(env.V1_SSE_BUFFER_SIZE, 256, 1, 1024),
+      heartbeatMs: boundedInteger(env.V1_SSE_HEARTBEAT_MS, 20_000, 10, 60_000),
+    },
   };
 
   if (!isProduction && config.trustedProxyHops === null) {
