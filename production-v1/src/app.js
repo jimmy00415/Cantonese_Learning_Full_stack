@@ -4,6 +4,7 @@ import express from 'express';
 import helmet from 'helmet';
 
 import { requireSameOrigin } from './http/security.js';
+import { createSessionRouter } from './http/session.js';
 
 const publicDirectory = fileURLToPath(new URL('../public/', import.meta.url));
 
@@ -12,7 +13,6 @@ function envelope(response, data, error = null) {
 }
 
 export function createApp({ config, store, mediaStore, answerService, eventHub } = {}) {
-  void store;
   void mediaStore;
   void answerService;
   void eventHub;
@@ -35,6 +35,7 @@ export function createApp({ config, store, mediaStore, answerService, eventHub }
   app.get('/api/health/live', (request, response) => {
     response.json(envelope(response, { status: 'ok', version: config.version ?? '0.1.0' }));
   });
+  if (store) app.use('/api/v1', createSessionRouter({ config, store }));
   app.use('/api', (request, response) => {
     response.status(404).json(envelope(response, null, { code: 'NOT_FOUND', message: 'The requested API route does not exist.' }));
   });

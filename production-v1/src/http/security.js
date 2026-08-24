@@ -4,7 +4,7 @@ export function requireSameOrigin(publicOrigin) {
   return (request, response, next) => {
     if (!WRITE_METHODS.has(request.method)) return next();
 
-    if (request.get('origin') === publicOrigin) return next();
+    if (publicOrigin && request.get('origin') === publicOrigin) return next();
 
     return response.status(403).json({
       data: null,

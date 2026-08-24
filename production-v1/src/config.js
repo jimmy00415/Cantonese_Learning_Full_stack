@@ -68,6 +68,12 @@ function parseTrustedProxyHops(value) {
   return Number(value);
 }
 
+function rateLimit(value, fallback) {
+  if (value === undefined) return fallback;
+  if (!/^\d+$/.test(value) || Number(value) < 1) throw new Error('Rate limit overrides must be positive integers');
+  return Math.min(Number(value), fallback);
+}
+
 function assertProductionReady(config) {
   if (!config.publicOrigin) throw new Error('V1_PUBLIC_ORIGIN is required in production');
   if (Buffer.byteLength(config.sessionSecret ?? '') < 32) {
@@ -125,6 +131,11 @@ export function loadConfig(environment = process.env) {
     privacyNoticeVersion: env.V1_PRIVACY_NOTICE_VERSION,
     privacyNoticeApproved: asBoolean(env.V1_PRIVACY_NOTICE_APPROVED),
     retentionWorkerEnabled: asBoolean(env.V1_RETENTION_WORKER_ENABLED),
+    rateLimits: {
+      bootstrap: rateLimit(env.V1_SESSION_BOOTSTRAP_LIMIT_10M, 20),
+      message5m: rateLimit(env.V1_MESSAGE_LIMIT_5M, 30),
+      messageDaily: rateLimit(env.V1_MESSAGE_LIMIT_DAY, 300),
+    },
     llm: { provider: llmProvider, available: configuredLlm(env, llmProvider) },
     asr: { provider: asrProvider, available: configuredAsr(env, asrProvider) },
     tts: { provider: ttsProvider, available: configuredTts(env, ttsProvider) },
