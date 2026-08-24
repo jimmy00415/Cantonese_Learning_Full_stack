@@ -26,6 +26,12 @@ const STUDENT_PHOTO_DEADLINES = Object.freeze([
 ]);
 const CURRENT_HOURS_ALIASES = ['today', 'current', 'now', '今日', '今天', '而家', '現在', '现在', '幾點', '几点'];
 const DINING_OUTLET_ALIASES = ['bu fiesta', 'main canteen', '主飯堂', '主食堂'];
+const DINING_OPEN_STATE_ALIASES = ['open', 'closed', '營業', '营业', '開門', '开门', '開', '开'];
+const DINING_OPEN_SET_ALIASES = [
+  'what food', 'which canteen', 'what canteen', 'which restaurant', 'what restaurant',
+  'what else', 'where else', 'anything else', 'other than', 'besides',
+  '其他', '其它', '仲有', '還有', '还有', '有咩食', '有什么吃', '邊間', '边间', '哪間', '哪间',
+];
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -113,12 +119,62 @@ function claimDeadlineDate(claim) {
   return typeof value === 'string' ? value.slice(0, 10) : null;
 }
 
+function explicitQueryYears(query) {
+  return new Set(
+    [...query.matchAll(/(?:^|[^\p{N}])((?:19|20)\d{2})(?=$|[^\p{N}])/gu)]
+      .map((match) => Number(match[1])),
+  );
+}
+
+function structuredClaimYears(claim) {
+  const years = new Set();
+  if (Number.isInteger(claim.facts?.scheduleYear)) years.add(claim.facts.scheduleYear);
+  for (const field of [
+    'photoUploadDeadline', 'collectionStarts', 'earliestCheckIn', 'onOrAfterDate', 'effectiveFrom',
+  ]) {
+    const match = String(claim.facts?.[field] ?? '').match(/(?:19|20)\d{2}/);
+    if (match) years.add(Number(match[0]));
+  }
+  for (const field of ['academicYear', 'period']) {
+    const match = String(claim.facts?.[field] ?? '').match(/(?:19|20)\d{2}/);
+    if (match) years.add(Number(match[0]));
+  }
+  return years;
+}
+
+function structuredSourceYears(source) {
+  const years = new Set();
+  for (const claim of source.claims) {
+    for (const year of structuredClaimYears(claim)) years.add(year);
+  }
+  return years;
+}
+
+function hasStructuredYearMismatch(source, query) {
+  const queryYears = explicitQueryYears(query);
+  const sourceYears = structuredSourceYears(source);
+  return queryYears.size > 0 && sourceYears.size > 0
+    && [...queryYears].some((year) => !sourceYears.has(year));
+}
+
+function isDiningOpenSetQuery(query) {
+  return hasAny(query, INTENT_ALIASES.dining)
+    && hasAny(query, DINING_OPEN_STATE_ALIASES)
+    && hasAny(query, DINING_OPEN_SET_ALIASES);
+}
+
 function selectClaims(source, query) {
+  const queryYears = explicitQueryYears(query);
+  if (hasStructuredYearMismatch(source, query)) return [];
   const rows = source.claims.map((claim) => ({
     claim,
     source,
     claimScore: scoreClaim(claim, query),
-  }));
+  })).filter(({ claim }) => {
+    const claimYears = structuredClaimYears(claim);
+    return queryYears.size === 0 || claimYears.size === 0
+      || [...queryYears].every((year) => claimYears.has(year));
+  });
   if (source.id === 'hkbu.ar.student-card-collection') {
     const route = structuredStudentRoute(query);
     if (route.admissionRoute || route.photoUploadDeadline) {
@@ -143,14 +199,17 @@ function hasAny(query, aliases) {
 function rankSources(corpus, query) {
   const selected = new Map();
   const asksCurrentHours = hasAny(query, CURRENT_HOURS_ALIASES);
-  const hasExplicitDiningOutlet = hasAny(query, DINING_OUTLET_ALIASES);
+  const asksCurrentDining = asksCurrentHours || hasAny(query, DINING_OPEN_STATE_ALIASES);
+  const hasDiningOpenSetIntent = isDiningOpenSetQuery(query);
+  const hasExplicitDiningOutlet = !hasDiningOpenSetIntent && hasAny(query, DINING_OUTLET_ALIASES);
+  const requiresDiningSetGuard = hasDiningOpenSetIntent
+    || (asksCurrentDining && !hasExplicitDiningOutlet);
   for (const { intent, score: intentScore } of matchedIntents(query)) {
     const candidates = corpus.sources
       .filter((source) => source.intentGroups.includes(intent))
       .filter((source) => (
         intent !== 'dining'
-        || !asksCurrentHours
-        || hasExplicitDiningOutlet
+        || !requiresDiningSetGuard
         || source.id === 'hkbu.eo.dining-overview'
       ))
       .map((source) => ({ source, specificity: sourceSpecificity(source, query) }));
@@ -169,7 +228,7 @@ function rankSources(corpus, query) {
     .sort((left, right) => right.score - left.score || left.source.id.localeCompare(right.source.id));
   const hasMainCanteen = ranked.some(({ source }) => source.id === 'hkbu.eo.dining.main-canteen');
   const hasDiningGuard = ranked.some(({ source }) => source.id === 'hkbu.eo.dining-overview');
-  if (asksCurrentHours && hasMainCanteen && !hasDiningGuard) {
+  if (asksCurrentDining && hasMainCanteen && !hasDiningGuard) {
     const guard = corpus.sources.find((source) => source.id === 'hkbu.eo.dining-overview');
     if (guard) ranked.push({ source: guard, score: Math.max(1, (ranked[0]?.score ?? 2) - 1) });
   }
@@ -180,6 +239,16 @@ function rankSources(corpus, query) {
 
 function ambiguityFor(query, ranked, selectedClaims) {
   const codes = [];
+  const yearMismatchSources = ranked
+    .map(({ source }) => source)
+    .filter((source) => hasStructuredYearMismatch(source, query));
+  const collectionYearMismatch = yearMismatchSources.some(
+    (source) => source.id === 'hkbu.ar.student-card-collection',
+  );
+  if (collectionYearMismatch) codes.push('STUDENT_CARD_ROUTE_YEAR_MISMATCH');
+  if (yearMismatchSources.some((source) => source.id !== 'hkbu.ar.student-card-collection')) {
+    codes.push('SCHEDULE_YEAR_MISMATCH');
+  }
   const relevantOfficialClaims = selectedClaims
     .map(({ claim }) => claim)
     .filter((claim) => claim.verificationStatus === 'official_verified');
@@ -210,7 +279,8 @@ function ambiguityFor(query, ranked, selectedClaims) {
   )?.source;
   if (collectionSource) {
     const route = structuredStudentRoute(query);
-    if (route.admissionRoute && route.photoUploadDeadline && collectionClaims.length === 0) {
+    if (!collectionYearMismatch && route.admissionRoute
+      && route.photoUploadDeadline && collectionClaims.length === 0) {
       codes.push('STUDENT_CARD_ROUTE_MISMATCH');
     }
     const requiresAdmissionRoute = collectionClaims.some(
@@ -227,16 +297,19 @@ function ambiguityFor(query, ranked, selectedClaims) {
     }
   }
 
-  const asksCurrentHours = hasAny(query, CURRENT_HOURS_ALIASES);
+  const asksCurrentDining = hasAny(query, CURRENT_HOURS_ALIASES)
+    || hasAny(query, DINING_OPEN_STATE_ALIASES);
+  const hasDiningOpenSetIntent = isDiningOpenSetQuery(query);
   const diningClaims = relevantOfficialClaims.filter((claim) => (
     claim.facts?.regularHoursOnly
     || claim.facts?.specialHoursOverrideRegular
     || claim.facts?.open === false
   ));
-  const hasDefinitiveClosure = hasAny(query, ['bu fiesta']) && diningClaims.some(
+  const hasDefinitiveClosure = !hasDiningOpenSetIntent
+    && hasAny(query, ['bu fiesta']) && diningClaims.some(
     (claim) => claim.facts?.open === false && claim.facts?.until === 'further_notice',
   );
-  if (asksCurrentHours && diningClaims.length > 0 && !hasDefinitiveClosure) {
+  if (asksCurrentDining && diningClaims.length > 0 && !hasDefinitiveClosure) {
     codes.push('CATERING_SPECIAL_HOURS_REQUIRED');
   }
   return [...new Set(codes)];
@@ -252,7 +325,7 @@ function isBlockedByClarification(claim, ambiguityCodes, query) {
     && ambiguityCodes.includes('CATERING_SPECIAL_HOURS_REQUIRED')) return true;
   if (claim.facts?.open === false
     && ambiguityCodes.includes('CATERING_SPECIAL_HOURS_REQUIRED')
-    && !hasAny(query, ['bu fiesta'])) return true;
+    && (!hasAny(query, ['bu fiesta']) || isDiningOpenSetQuery(query))) return true;
   return false;
 }
 

@@ -286,8 +286,44 @@ test('student-card collection matches exact structured admission and photo route
   }
 });
 
+test('structured schedules reject an explicit year outside the reviewed schedule', () => {
+  const validChineseRoutes = [
+    'Non-JUPAS 已於2026年8月2日上載電子相片，學生證幾時領取',
+    'Non-JUPAS 已於8月2日上传电子照片，学生证什么时候领取',
+  ];
+  for (const input of validChineseRoutes) {
+    const result = retrieve(input);
+    assert.deepEqual(result.evidenceIds, [
+      'evidence.ar.student-card-collection.non-jupas-photo-by-2026-08-02',
+    ], input);
+    assert.equal(result.needsClarification, false, input);
+  }
+
+  const wrongYears = [
+    'Non-JUPAS 已於2025年8月2日上載電子相片，學生證幾時領取',
+    'Non-JUPAS 已于2027年8月2日上传电子照片，学生证什么时候领取',
+  ];
+  for (const input of wrongYears) {
+    const result = retrieve(input);
+    assert.equal(result.needsClarification, true, input);
+    assert.ok(result.ambiguityCodes.includes('STUDENT_CARD_ROUTE_YEAR_MISMATCH'), input);
+    assert.equal(result.supportableClaims.length, 0, input);
+  }
+
+  const residenceWrongYear = retrieve('Village CARE non-local freshman 2027年8月20日 check-in');
+  assert.ok(residenceWrongYear.ambiguityCodes.includes('SCHEDULE_YEAR_MISMATCH'));
+  assert.equal(residenceWrongYear.supportableClaims.length, 0);
+});
+
 test('generic current dining asks for reviewed special hours while explicit outlets stay scoped', () => {
-  for (const input of ['what food is open now', 'which canteen is open today']) {
+  for (const input of [
+    'what food is open now',
+    'which canteen is open today',
+    'BU Fiesta is closed, what food is open now?',
+    'Other than BU Fiesta, which canteen is open today?',
+    'BU Fiesta 已經關門，仲有咩飯堂而家開？',
+    '除了 BU Fiesta，其他哪间食堂今天开门？',
+  ]) {
     const generic = retrieve(input);
     assert.equal(generic.needsClarification, true, input);
     assert.ok(generic.ambiguityCodes.includes('CATERING_SPECIAL_HOURS_REQUIRED'), input);
