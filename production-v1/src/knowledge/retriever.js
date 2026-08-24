@@ -18,14 +18,14 @@ const INTENT_ALIASES = Object.freeze({
 
 const BRANCH_ALIASES = ['main library', '主館', '主馆', '主圖書館', '主图书馆', 'fong shu chuen library', 'cml', 'chinese medicine library', '中醫藥圖書館', '中医药图书馆', 'smcl', 'shek mun', '石門', '石门'];
 const COHORT_ALIASES = ['non local freshman', 'non local freshmen', 'non-local freshman', 'local freshman', 'local freshmen', 'exchange student', 'exchange students', 'returning student', 'returning students', 'research postgraduate', 'research postgraduates', 'rpg', '非本地新生', '本地新生', '交換生', '交换生', '研究生', '舊生', '旧生'];
-const STUDENT_ADMISSION_ALIASES = ['jupas', 'non jupas', 'non-jupas'];
-const STUDENT_PHOTO_ROUTE_ALIASES = [
-  'uploaded by', 'photo by', 'photo upload date', 'digital photo',
-  '2 august', '7 august', '23 august', '1 september',
-  '2026-08-02', '2026-08-07', '2026-08-23', '2026-09-01',
-  '相片上載', '照片上传', '上載電子相片', '上传电子照片',
-];
+const STUDENT_PHOTO_DEADLINES = Object.freeze([
+  Object.freeze({ value: '2026-08-02', aliases: ['2 august 2026', 'august 2 2026', '2 aug 2026', '2026-08-02', '2026年8月2日', '8月2日'] }),
+  Object.freeze({ value: '2026-08-07', aliases: ['7 august 2026', 'august 7 2026', '7 aug 2026', '2026-08-07', '2026年8月7日', '8月7日'] }),
+  Object.freeze({ value: '2026-08-23', aliases: ['23 august 2026', 'august 23 2026', '23 aug 2026', '2026-08-23', '2026年8月23日', '8月23日'] }),
+  Object.freeze({ value: '2026-09-01', aliases: ['1 september 2026', 'september 1 2026', '1 sep 2026', '2026-09-01', '2026年9月1日', '9月1日'] }),
+]);
 const CURRENT_HOURS_ALIASES = ['today', 'current', 'now', '今日', '今天', '而家', '現在', '现在', '幾點', '几点'];
+const DINING_OUTLET_ALIASES = ['bu fiesta', 'main canteen', '主飯堂', '主食堂'];
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -48,7 +48,10 @@ function phraseMatches(query, rawPhrase) {
   const phrase = normalizeKnowledgeQuery(rawPhrase);
   if (!phrase) return false;
   if (/\p{Script=Han}/u.test(phrase)) return query.includes(phrase);
-  return new RegExp(`(?:^|[^\\p{L}\\p{N}])${escapeRegExp(phrase)}(?:$|[^\\p{L}\\p{N}])`, 'u').test(query);
+  const candidateQuery = phrase === 'jupas'
+    ? query.replace(/(?:^|[^\p{L}\p{N}])non jupas(?=$|[^\p{L}\p{N}])/gu, ' ')
+    : query;
+  return new RegExp(`(?:^|[^\\p{L}\\p{N}])${escapeRegExp(phrase)}(?:$|[^\\p{L}\\p{N}])`, 'u').test(candidateQuery);
 }
 
 function scoreClaim(claim, query) {
@@ -92,12 +95,42 @@ function sourceSpecificity(source, query) {
   return score;
 }
 
+function structuredStudentRoute(query) {
+  const admissionRoute = hasAny(query, ['non jupas', 'non-jupas'])
+    ? 'Non-JUPAS'
+    : (hasAny(query, ['jupas']) ? 'JUPAS' : null);
+  const matchedDeadline = STUDENT_PHOTO_DEADLINES.find(
+    ({ aliases }) => hasAny(query, aliases),
+  );
+  return {
+    admissionRoute,
+    photoUploadDeadline: matchedDeadline?.value ?? null,
+  };
+}
+
+function claimDeadlineDate(claim) {
+  const value = claim.facts?.photoUploadDeadline;
+  return typeof value === 'string' ? value.slice(0, 10) : null;
+}
+
 function selectClaims(source, query) {
   const rows = source.claims.map((claim) => ({
     claim,
     source,
     claimScore: scoreClaim(claim, query),
   }));
+  if (source.id === 'hkbu.ar.student-card-collection') {
+    const route = structuredStudentRoute(query);
+    if (route.admissionRoute || route.photoUploadDeadline) {
+      return rows.filter(({ claim }) => {
+        if (route.photoUploadDeadline
+          && claimDeadlineDate(claim) !== route.photoUploadDeadline) return false;
+        if (route.admissionRoute && claim.facts?.requirements?.admissionRoute
+          && claim.facts?.admissionRoute !== route.admissionRoute) return false;
+        return true;
+      });
+    }
+  }
   const maximum = Math.max(0, ...rows.map(({ claimScore }) => claimScore));
   if (maximum === 0) return rows;
   return rows.filter(({ claimScore }) => claimScore === maximum);
@@ -109,9 +142,17 @@ function hasAny(query, aliases) {
 
 function rankSources(corpus, query) {
   const selected = new Map();
+  const asksCurrentHours = hasAny(query, CURRENT_HOURS_ALIASES);
+  const hasExplicitDiningOutlet = hasAny(query, DINING_OUTLET_ALIASES);
   for (const { intent, score: intentScore } of matchedIntents(query)) {
     const candidates = corpus.sources
       .filter((source) => source.intentGroups.includes(intent))
+      .filter((source) => (
+        intent !== 'dining'
+        || !asksCurrentHours
+        || hasExplicitDiningOutlet
+        || source.id === 'hkbu.eo.dining-overview'
+      ))
       .map((source) => ({ source, specificity: sourceSpecificity(source, query) }));
     const maximum = Math.max(0, ...candidates.map(({ specificity }) => specificity));
     const gated = maximum > 0
@@ -126,7 +167,6 @@ function rankSources(corpus, query) {
 
   const ranked = [...selected.values()]
     .sort((left, right) => right.score - left.score || left.source.id.localeCompare(right.source.id));
-  const asksCurrentHours = hasAny(query, CURRENT_HOURS_ALIASES);
   const hasMainCanteen = ranked.some(({ source }) => source.id === 'hkbu.eo.dining.main-canteen');
   const hasDiningGuard = ranked.some(({ source }) => source.id === 'hkbu.eo.dining-overview');
   if (asksCurrentHours && hasMainCanteen && !hasDiningGuard) {
@@ -165,17 +205,24 @@ function ambiguityFor(query, ranked, selectedClaims) {
   const collectionClaims = selectedClaims
     .filter(({ source }) => source.id === 'hkbu.ar.student-card-collection')
     .map(({ claim }) => claim);
-  if (collectionClaims.length > 0) {
+  const collectionSource = ranked.find(
+    ({ source }) => source.id === 'hkbu.ar.student-card-collection',
+  )?.source;
+  if (collectionSource) {
+    const route = structuredStudentRoute(query);
+    if (route.admissionRoute && route.photoUploadDeadline && collectionClaims.length === 0) {
+      codes.push('STUDENT_CARD_ROUTE_MISMATCH');
+    }
     const requiresAdmissionRoute = collectionClaims.some(
       (claim) => claim.facts?.requirements?.admissionRoute,
     );
     const requiresPhotoUploadRoute = collectionClaims.some(
       (claim) => claim.facts?.requirements?.photoUploadRoute,
     );
-    if (requiresAdmissionRoute && !hasAny(query, STUDENT_ADMISSION_ALIASES)) {
+    if (requiresAdmissionRoute && !route.admissionRoute) {
       codes.push('STUDENT_CARD_ADMISSION_ROUTE_REQUIRED');
     }
-    if (requiresPhotoUploadRoute && !hasAny(query, STUDENT_PHOTO_ROUTE_ALIASES)) {
+    if (requiresPhotoUploadRoute && !route.photoUploadDeadline) {
       codes.push('STUDENT_CARD_PHOTO_UPLOAD_ROUTE_REQUIRED');
     }
   }
@@ -186,7 +233,7 @@ function ambiguityFor(query, ranked, selectedClaims) {
     || claim.facts?.specialHoursOverrideRegular
     || claim.facts?.open === false
   ));
-  const hasDefinitiveClosure = diningClaims.some(
+  const hasDefinitiveClosure = hasAny(query, ['bu fiesta']) && diningClaims.some(
     (claim) => claim.facts?.open === false && claim.facts?.until === 'further_notice',
   );
   if (asksCurrentHours && diningClaims.length > 0 && !hasDefinitiveClosure) {
@@ -195,7 +242,7 @@ function ambiguityFor(query, ranked, selectedClaims) {
   return [...new Set(codes)];
 }
 
-function isBlockedByClarification(claim, ambiguityCodes) {
+function isBlockedByClarification(claim, ambiguityCodes, query) {
   if (claim.sourceId === 'hkbu.ar.student-card-collection'
     && ambiguityCodes.some((code) => code.startsWith('STUDENT_CARD_'))) return true;
   if (claim.facts?.branch && ambiguityCodes.includes('LIBRARY_BRANCH_REQUIRED')) return true;
@@ -203,6 +250,9 @@ function isBlockedByClarification(claim, ambiguityCodes) {
     && ambiguityCodes.some((code) => code.startsWith('RESIDENCE_'))) return true;
   if (claim.facts?.regularHoursOnly
     && ambiguityCodes.includes('CATERING_SPECIAL_HOURS_REQUIRED')) return true;
+  if (claim.facts?.open === false
+    && ambiguityCodes.includes('CATERING_SPECIAL_HOURS_REQUIRED')
+    && !hasAny(query, ['bu fiesta'])) return true;
   return false;
 }
 
@@ -255,7 +305,7 @@ export function createRetriever({ corpus, now = () => new Date() }) {
       ...conflictMetadataRows(ranked, selectedClaims),
     ];
     for (const { claim, source, claimScore } of rowsWithMetadata) {
-      if (isBlockedByClarification(claim, ambiguityCodes)) continue;
+      if (isBlockedByClarification(claim, ambiguityCodes, query)) continue;
       claimRows.push({
         ...claim,
         status: evaluateClaimFreshness(claim, current),

@@ -261,6 +261,49 @@ test('knowledge retrieval gates sources, claims, and clarification by the matche
   assert.equal(canteen.evidenceIds.includes('evidence.eo.dining-overview.special-hours'), true);
 });
 
+test('student-card collection matches exact structured admission and photo routes', () => {
+  const nonJupas = retrieve('Non-JUPAS uploaded photo by 2 August 2026 student card collection');
+  assert.deepEqual(nonJupas.evidenceIds, [
+    'evidence.ar.student-card-collection.non-jupas-photo-by-2026-08-02',
+  ]);
+  assert.equal(nonJupas.needsClarification, false);
+
+  const jupas = retrieve('JUPAS uploaded photo by 7 August 2026 at 12 noon student card collection');
+  assert.deepEqual(jupas.evidenceIds, [
+    'evidence.ar.student-card-collection.jupas-photo-by-2026-08-07-noon',
+  ]);
+  assert.equal(jupas.needsClarification, false);
+
+  const conflicts = [
+    'JUPAS uploaded photo by 2 August 2026 student card collection',
+    'Non-JUPAS uploaded photo by 7 August 2026 student card collection',
+  ];
+  for (const input of conflicts) {
+    const result = retrieve(input);
+    assert.equal(result.needsClarification, true, input);
+    assert.ok(result.ambiguityCodes.includes('STUDENT_CARD_ROUTE_MISMATCH'), input);
+    assert.equal(result.supportableClaims.length, 0, input);
+  }
+});
+
+test('generic current dining asks for reviewed special hours while explicit outlets stay scoped', () => {
+  for (const input of ['what food is open now', 'which canteen is open today']) {
+    const generic = retrieve(input);
+    assert.equal(generic.needsClarification, true, input);
+    assert.ok(generic.ambiguityCodes.includes('CATERING_SPECIAL_HOURS_REQUIRED'), input);
+    assert.equal(generic.supportableClaims.some((claim) => claim.facts?.open !== undefined), false, input);
+    assert.equal(generic.supportableClaims.some((claim) => claim.facts?.regularHoursOnly), false, input);
+  }
+
+  const fiesta = retrieve('Is BU Fiesta open today?');
+  assert.equal(fiesta.needsClarification, false);
+  assert.equal(fiesta.supportableClaims[0].facts.open, false);
+
+  const main = retrieve('Is Main Canteen open today?');
+  assert.ok(main.ambiguityCodes.includes('CATERING_SPECIAL_HOURS_REQUIRED'));
+  assert.equal(main.evidenceIds.includes('evidence.eo.dining.main-canteen.regular'), false);
+});
+
 test('knowledge retrieval normalizes bilingual aliases without Latin substring false positives', () => {
   assert.equal(normalizeKnowledgeQuery('  JC³\u200b， Room 201　'), 'jc3 room 201');
   assert.equal(normalizeKnowledgeQuery('主\u2060馆　几点关门'), '主馆 几点关门');
