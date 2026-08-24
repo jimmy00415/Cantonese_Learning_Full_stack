@@ -19,6 +19,9 @@ function productionEnvironment(overrides = {}) {
     V1_AZURE_STORAGE_CONNECTION_STRING: 'UseDevelopmentStorage=true',
     V1_LLM_PROVIDER: 'hkbu',
     HKBU_API_KEY: 'test-key',
+    HKBU_BASE_URL: 'https://hkbu.example.test',
+    HKBU_MODEL: 'hkbu-model',
+    HKBU_API_VERSION: 'v1',
     V1_INSTANCE_POLICY: 'single',
     V1_PRIVACY_NOTICE_VERSION: '2026-08-25',
     V1_PRIVACY_NOTICE_APPROVED: 'true',
@@ -44,22 +47,62 @@ test('config gives V1 provider selectors precedence over legacy selectors', () =
     V1_LLM_PROVIDER: 'hkbu',
     LLM_PROVIDER: 'minimax',
     HKBU_API_KEY: 'test-key',
+    HKBU_BASE_URL: 'https://hkbu.example.test',
+    HKBU_MODEL: 'hkbu-model',
+    HKBU_API_VERSION: 'v1',
   });
 
   assert.equal(config.llm.provider, 'hkbu');
   assert.equal(config.llm.available, true);
 });
 
-test('config recognizes each complete supported provider pair', () => {
-  const azureLlm = loadConfig({
-    NODE_ENV: 'test', V1_LLM_PROVIDER: 'azure-openai', AZURE_OPENAI_KEY: 'key',
-    AZURE_OPENAI_ENDPOINT: 'https://azure.example.test', AZURE_OPENAI_DEPLOYMENT: 'chat',
-  });
-  const minimaxLlm = loadConfig({
-    NODE_ENV: 'test', V1_LLM_PROVIDER: 'minimax', MINIMAX_API_KEY: 'key',
-    MINIMAX_BASE_URL: 'https://minimax.example.test', MINIMAX_ANTHROPIC_BASE_URL: 'https://anthropic.example.test',
-    MINIMAX_LLM_MODEL: 'model',
-  });
+test('config requires every explicit selected LLM provider member', () => {
+  const providers = [
+    {
+      name: 'HKBU',
+      selector: 'hkbu',
+      values: {
+        HKBU_API_KEY: 'key', HKBU_BASE_URL: 'https://hkbu.example.test',
+        HKBU_MODEL: 'hkbu-model', HKBU_API_VERSION: 'v1',
+      },
+    },
+    {
+      name: 'Azure OpenAI',
+      selector: 'azure-openai',
+      values: {
+        AZURE_OPENAI_KEY: 'key', AZURE_OPENAI_ENDPOINT: 'https://azure.example.test',
+        AZURE_OPENAI_DEPLOYMENT: 'chat', AZURE_OPENAI_API_VERSION: '2024-10-21',
+      },
+    },
+    {
+      name: 'MiniMax',
+      selector: 'minimax',
+      values: {
+        MINIMAX_API_KEY: 'key', MINIMAX_BASE_URL: 'https://minimax.example.test',
+        MINIMAX_ANTHROPIC_BASE_URL: 'https://anthropic.example.test', MINIMAX_LLM_MODEL: 'model',
+      },
+    },
+  ];
+
+  for (const provider of providers) {
+    const complete = { NODE_ENV: 'test', V1_LLM_PROVIDER: provider.selector, ...provider.values };
+    assert.equal(loadConfig(complete).llm.available, true, `${provider.name} complete pair is available`);
+
+    for (const missingMember of Object.keys(provider.values)) {
+      const incompleteValues = { ...provider.values };
+      delete incompleteValues[missingMember];
+      const incomplete = { NODE_ENV: 'test', V1_LLM_PROVIDER: provider.selector, ...incompleteValues };
+      const incompleteProduction = productionEnvironment({ V1_LLM_PROVIDER: provider.selector, ...provider.values });
+      delete incompleteProduction[missingMember];
+      assert.equal(loadConfig(incomplete).llm.available, false, `${provider.name} requires ${missingMember} locally`);
+      assert.throws(
+        () => loadConfig(incompleteProduction),
+        /configured real LLM provider/,
+        `${provider.name} requires ${missingMember} in production`,
+      );
+    }
+  }
+
   const azureVoice = loadConfig({
     NODE_ENV: 'test', V1_ASR_PROVIDER: 'azure', V1_TTS_PROVIDER: 'azure',
     AZURE_SPEECH_KEY: 'key', AZURE_SPEECH_REGION: 'eastasia',
@@ -71,8 +114,6 @@ test('config recognizes each complete supported provider pair', () => {
     MINIMAX_TTS_MODEL: 'tts-model', MINIMAX_TTS_VOICE: 'voice',
   });
 
-  assert.equal(azureLlm.llm.available, true);
-  assert.equal(minimaxLlm.llm.available, true);
   assert.equal(azureVoice.asr.available, true);
   assert.equal(azureVoice.tts.available, true);
   assert.equal(minimaxVoice.asr.available, true);
@@ -93,11 +134,37 @@ test('config gives V1 voice selectors precedence over legacy selectors', () => {
   assert.equal(config.tts.available, false);
 });
 
+test('config requires the Azure deployment setting rather than a model alias', () => {
+  const azureModelOnly = {
+    NODE_ENV: 'test',
+    V1_LLM_PROVIDER: 'azure-openai',
+    AZURE_OPENAI_KEY: 'key',
+    AZURE_OPENAI_ENDPOINT: 'https://azure.example.test',
+    AZURE_OPENAI_MODEL: 'not-a-deployment',
+    AZURE_OPENAI_API_VERSION: '2024-10-21',
+  };
+
+  assert.equal(loadConfig(azureModelOnly).llm.available, false);
+  assert.throws(
+    () => loadConfig(productionEnvironment({
+      V1_LLM_PROVIDER: 'azure-openai',
+      AZURE_OPENAI_KEY: 'key',
+      AZURE_OPENAI_ENDPOINT: 'https://azure.example.test',
+      AZURE_OPENAI_MODEL: 'not-a-deployment',
+      AZURE_OPENAI_API_VERSION: '2024-10-21',
+    })),
+    /configured real LLM provider/,
+  );
+});
+
 test('config disables incomplete voice providers without disabling text', () => {
   const config = loadConfig({
     NODE_ENV: 'test',
     V1_LLM_PROVIDER: 'hkbu',
     HKBU_API_KEY: 'test-key',
+    HKBU_BASE_URL: 'https://hkbu.example.test',
+    HKBU_MODEL: 'hkbu-model',
+    HKBU_API_VERSION: 'v1',
     V1_ASR_PROVIDER: 'azure',
     AZURE_SPEECH_KEY: 'speech-key',
     V1_TTS_PROVIDER: 'minimax',
@@ -118,6 +185,13 @@ test('config rejects an incomplete selected production LLM after earlier gates p
   );
 });
 
+test('config rejects legacy-only trusted proxy hops in production', () => {
+  assert.throws(
+    () => loadConfig(productionEnvironment({ V1_TRUST_PROXY_HOPS: undefined, TRUST_PROXY_HOPS: '1' })),
+    /V1_TRUST_PROXY_HOPS/,
+  );
+});
+
 test('config marks a fully configured production environment ready', () => {
   const config = loadConfig(productionEnvironment());
 
@@ -130,6 +204,9 @@ test('config public status contains capability booleans rather than secret value
     NODE_ENV: 'test',
     V1_LLM_PROVIDER: 'hkbu',
     HKBU_API_KEY: 'very-secret-value',
+    HKBU_BASE_URL: 'https://hkbu.example.test',
+    HKBU_MODEL: 'hkbu-model',
+    HKBU_API_VERSION: 'v1',
   });
 
   assert.deepEqual(config.publicStatus, {

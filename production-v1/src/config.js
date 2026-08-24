@@ -29,13 +29,13 @@ function asProvider(value, fallback = 'none') {
 
 function configuredLlm(env, provider) {
   if (provider === 'hkbu') {
-    return Boolean(env.HKBU_API_KEY) && Boolean(env.HKBU_BASE_URL ?? 'https://api.hkbu.edu.hk')
-      && Boolean(env.HKBU_MODEL ?? 'hkbu-chat') && Boolean(env.HKBU_API_VERSION ?? 'v1');
+    return Boolean(env.HKBU_API_KEY) && Boolean(env.HKBU_BASE_URL)
+      && Boolean(env.HKBU_MODEL) && Boolean(env.HKBU_API_VERSION);
   }
   if (provider === 'azure-openai') {
     return Boolean(env.AZURE_OPENAI_KEY) && Boolean(env.AZURE_OPENAI_ENDPOINT)
-      && Boolean(env.AZURE_OPENAI_DEPLOYMENT ?? env.AZURE_OPENAI_MODEL)
-      && Boolean(env.AZURE_OPENAI_API_VERSION ?? '2024-10-21');
+      && Boolean(env.AZURE_OPENAI_DEPLOYMENT)
+      && Boolean(env.AZURE_OPENAI_API_VERSION);
   }
   if (provider === 'minimax') {
     return Boolean(env.MINIMAX_API_KEY) && Boolean(env.MINIMAX_BASE_URL)
@@ -99,7 +99,9 @@ export function loadConfig(environment = process.env) {
   const llmProvider = asProvider(firstDefined(env, 'V1_LLM_PROVIDER', 'LLM_PROVIDER'), 'deterministic');
   const asrProvider = asProvider(firstDefined(env, 'V1_ASR_PROVIDER', 'ASR_PROVIDER'));
   const ttsProvider = asProvider(firstDefined(env, 'V1_TTS_PROVIDER', 'TTS_PROVIDER'));
-  const trustedProxyValue = firstDefined(env, 'V1_TRUST_PROXY_HOPS', 'TRUST_PROXY_HOPS');
+  const trustedProxyValue = isProduction
+    ? env.V1_TRUST_PROXY_HOPS
+    : firstDefined(env, 'V1_TRUST_PROXY_HOPS', 'TRUST_PROXY_HOPS');
   const mediaCredential = firstDefined(
     env,
     'V1_AZURE_STORAGE_CONNECTION_STRING',
@@ -113,7 +115,7 @@ export function loadConfig(environment = process.env) {
     publicOrigin: firstDefined(env, 'V1_PUBLIC_ORIGIN', 'PUBLIC_ORIGIN'),
     sessionSecret: firstDefined(env, 'V1_SESSION_SECRET', 'SESSION_SECRET'),
     trustedProxyHops: parseTrustedProxyHops(trustedProxyValue),
-    trustedProxyHopsExplicit: trustedProxyValue !== undefined,
+    trustedProxyHopsExplicit: env.V1_TRUST_PROXY_HOPS !== undefined,
     storeDriver: firstDefined(env, 'V1_STORE_DRIVER', 'STORE_DRIVER') ?? 'atomic-file',
     databaseUrl: env.DATABASE_URL,
     mediaDriver: firstDefined(env, 'V1_MEDIA_DRIVER', 'MEDIA_DRIVER') ?? 'local',
