@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f6f0e7">
+    <title>Hong Kong Buddy | Campus AI Senior</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="chat-shell">
+      <header id="app-header" class="app-header">
+        <div class="profile-mark" aria-hidden="true">HK</div>
+        <div>
+          <h1>Campus AI Senior</h1>
+          <p>AI assistant</p>
+        </div>
+        <button class="info-button" type="button" aria-label="About Campus AI Senior" aria-controls="assistant-info" aria-expanded="false">i</button>
+      </header>
+
+      <main id="message-list" class="message-list" aria-label="Conversation">
+        <section class="welcome-message" aria-label="Welcome message">
+          <p>I’m your Campus AI Senior. Ask about getting started at HKBU, and I’ll show official sources whenever I can verify an answer.</p>
+        </section>
+      </main>
+
+      <p id="turn-status" class="turn-status" aria-live="polite" aria-atomic="true"></p>
+
+      <form id="composer" class="composer" aria-label="Message Campus AI Senior">
+        <label class="sr-only" for="message-input">Your message</label>
+        <textarea id="message-input" name="message" rows="1" placeholder="Ask your AI senior…" disabled></textarea>
+        <button id="voice-button" type="button" aria-label="Record a voice message" disabled>Voice</button>
+        <button id="send-button" type="submit" disabled>Send</button>
+      </form>
+    </div>
+
+    <dialog id="assistant-info" class="assistant-info" aria-labelledby="assistant-info-title">
+      <button class="close-button" type="button" aria-label="Close information">Close</button>
+      <h2 id="assistant-info-title">About Campus AI Senior</h2>
+      <p>This is an AI assistant, not a student or an official HKBU representative. Check the cited official source for important details.</p>
+      <p class="parent-brand">A Simplify product</p>
+    </dialog>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
