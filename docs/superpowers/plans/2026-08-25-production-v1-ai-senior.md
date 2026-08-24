@@ -343,19 +343,23 @@ Commit message: `feat(v1): persist anonymous conversations and turns`
 - `https://eo.hkbu.edu.hk/eo-services/services-facilities/medical-services.html`
 - `https://sa.hkbu.edu.hk/en/contact-us.html`
 - `https://sa.hkbu.edu.hk/en/cdc/counselling/counselling-and-consultation.html`
-- `https://cmc.hkbu.edu.hk/content/eo/en/eo-services/services-facilities/Security-Control-Rooms-and-Security-Hotline/_jcr_content.html`
-- `https://cmc.hkbu.edu.hk/content/dam/eo-assets/health-and-safety/document/staff-student/resources-and-download/safety-information/Emergency%20Procedures.pdf`
+- `https://sa.hkbu.edu.hk/en/cdc/counselling/emergency-hotlines-and-community-services.html`
+- `https://eo.hkbu.edu.hk/eo-services/services-facilities/Security-Control-Rooms-and-Security-Hotline.html`
 
 - [ ] **Step 1: Write failing corpus and retrieval tests**
 
-Tests must reject non-HTTPS, non-HKBU domains, missing source locators, verified
-claims without review metadata, invalid validity windows, and duplicate IDs.
+Tests must reject non-HTTPS, non-HKBU canonical source domains, hostname
+lookalikes, URL credentials, missing source locators, verified claims without
+review metadata, invalid validity windows, and duplicate IDs across source,
+claim, and action namespaces.
 They must assert these representative outcomes at `now=2026-08-25T12:00:00+08:00`:
 
 ```js
 retrieve('Duo 换手机怎么办').topSourceId === 'hkbu.ito.duo'
 retrieve('BU Fiesta 今日开吗').claims[0].status === 'verified'
-retrieve('图书馆今天几点关门').hasTimeSensitiveEvidence === true
+retrieve('BU Fiesta 今日开吗').claims[0].facts.open === false
+retrieve('图书馆今天几点关门').needsClarification === true
+retrieve('图书馆今天几点关门').ambiguityCodes.includes('LIBRARY_BRANCH_REQUIRED')
 routeSafety('有人受伤流很多血').kind === 'emergency'
 ```
 
@@ -381,13 +385,13 @@ transport, and emergency. Each atomic claim contains:
 ```json
 {
   "id": "claim-id",
-  "text": { "en": "...", "zhHant": "..." },
+  "text": { "en": "...", "zhHant": "...", "zhHans": "..." },
   "sourceId": "source-id",
   "sourceLocator": "section/table label",
-  "verifiedAt": "2026-08-25",
+  "verifiedAt": "2026-08-25T12:00:00+08:00",
   "validFrom": null,
   "validUntil": null,
-  "reviewAfter": "2026-09-25",
+  "reviewAfter": "2026-09-25T23:59:59+08:00",
   "volatility": "monthly",
   "verificationStatus": "official_verified"
 }
@@ -397,17 +401,33 @@ Never store passwords/passcodes. Add crisis facts for 999 and HKBU Security
 3411 7777. Mark timetable, fee, opening-hours, and 2026/27 check-in claims with
 short review windows.
 
-Each claim also stores a concise paraphrased `evidenceNote`, exact
-`sourceLocator`, and `reviewAttestation` (`reviewer`, `reviewedAt`, `sourceHash`
-when captured). Add a corpus-level owner/review cadence record. Tests prove a
-claim cannot be `official_verified` without this evidence trail.
+The claim `id` is also its model-facing evidence ID; page-level `sourceId` alone
+can never justify verified grounding. Each claim also stores a concise
+paraphrased `evidenceNote`, exact `sourceLocator`, and `reviewAttestation`
+(`reviewer`, `reviewedAt`, `sourceLocator`, `captureMethod`, and `sourceHash`). A
+hash, when present, must be the SHA-256 of the normalized captured evidence
+fragment; manual review may use `sourceHash: null` and must never invent a
+placeholder. Add a corpus-level owner/review cadence record. Tests prove a claim
+cannot be `official_verified` without this evidence trail.
+
+Interpret all retrieval time through an injected clock in `Asia/Hong_Kong`.
+Freshness status is one of `verified`, `review_overdue`, `expired`,
+`not_yet_valid`, `conflicted`, or `unverified`; only `verified` enters
+`supportableClaims`. Page update time never overrides a stale sibling claim.
 
 - [ ] **Step 4: Implement deterministic bilingual retrieval and safety bypass**
 
-Normalize case, Unicode punctuation, Traditional/Simplified aliases, building
-codes, and English tokens. Score exact intents/tags before token overlap. Return
-only currently supportable claims; return expired/conflict metadata separately.
-Safety routing runs before normal retrieval.
+Normalize with Unicode NFKC, remove zero-width characters, normalize full-width
+punctuation/whitespace and `JC³`/`JC3`, use whole-word Latin matching, and use a
+curated Cantonese/Traditional/Simplified alias set for intents and building
+codes. Score exact intents/tags before token overlap with a stable tie-break.
+Return only currently supportable claims; return expired/conflict metadata
+separately. Branch- or cohort-dependent questions (for example library hours or
+residence check-in) return a clarification instead of guessing. Safety routing
+runs before normal retrieval and covers injury, fire, immediate self-harm, and
+violence in English, Traditional Chinese, and Simplified Chinese. Near misses
+such as `Duo emergency access code`, `firewall login problem`, drills, figurative
+English, and non-urgent Health Centre questions must not trigger the bypass.
 
 - [ ] **Step 5: Verify green**
 
@@ -440,7 +460,7 @@ Commit message: `feat(v1): add verified HKBU campus knowledge`
 ```js
 {
   replyText,
-  citationIds,
+  evidenceIds,
   cards,
   suggestedReplies,
   needsClarification,
@@ -458,8 +478,8 @@ Use injected fake `fetch` and a temporary store. Cover:
 - MiniMax Anthropic-compatible request/response normalization;
 - timeout and one transient retry with the same turn ID;
 - fenced/extra-text JSON parsing and invalid schema rejection;
-- unknown citation/action IDs rejected;
-- `verified` downgraded when no current citation supports it;
+- unknown evidence/action IDs rejected;
+- `verified` downgraded when no current claim-level evidence supports it;
 - deterministic evidence summary on provider failure;
 - honest unverified response when retrieval is insufficient;
 - two accepted messages on one conversation deliver in order;

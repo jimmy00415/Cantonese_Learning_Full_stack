@@ -390,10 +390,14 @@ Each knowledge record includes:
   its precise official page section without treating copied page text as model
   instructions
 
-Every claim—not merely every page—has its own `sourceId`, `sourceLocator`,
-`verifiedAt`, optional `validFrom`/`validUntil`, `reviewAfter`, volatility, and
-verification status. A page containing a 2026 schedule and a stale 2025/26 note
-therefore cannot accidentally promote both as current.
+Every claim—not merely every page—has its own globally unique `id` (the evidence
+ID), `sourceId`, `sourceLocator`, `verifiedAt`, optional
+`validFrom`/`validUntil`, `reviewAfter`, volatility, and verification status. All
+time boundaries are RFC 3339 instants with a Hong Kong offset. Runtime status
+distinguishes `verified`, `review_overdue`, `expired`, `not_yet_valid`,
+`conflicted`, and `unverified`; only `verified` claims may support a verified
+answer. A page containing a 2026 schedule and a stale 2025/26 note therefore
+cannot accidentally promote both as current.
 
 The initial corpus covers student identity/account help, Duo/MFA, Academic
 Registry and campus navigation, accommodation/check-in, IT support, library,
@@ -421,7 +425,7 @@ The model must return:
 ```json
 {
   "replyText": "...",
-  "citationIds": ["source-id"],
+  "evidenceIds": ["claim-id"],
   "cards": [],
   "suggestedReplies": [],
   "needsClarification": false,
@@ -429,9 +433,9 @@ The model must return:
 }
 ```
 
-The application, not the model, converts source IDs into URLs/cards. Unknown
-source IDs, arbitrary URLs/actions, and `verified` without a valid current source
-are rejected.
+The application, not the model, validates evidence IDs and folds their source
+records into deduplicated URLs/cards. Unknown evidence IDs, arbitrary
+URLs/actions, and `verified` without a valid current claim are rejected.
 
 ## Provider Strategy
 
