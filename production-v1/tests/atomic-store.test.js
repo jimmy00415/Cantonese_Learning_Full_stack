@@ -78,3 +78,23 @@ test('atomic store rejects corruption and removes only owned session data', asyn
   assert.equal(await store.getSessionByTokenHash('c'.repeat(64)), null);
   assert.ok(await store.getSessionByTokenHash('d'.repeat(64)));
 });
+
+test('atomic store rejects persisted default chat quota boundaries without incrementing them', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'hb-v1-quota-'));
+  const filePath = join(directory, 'store.json');
+  const expiresAt = '2026-08-26T00:00:00.000Z';
+  await writeFile(filePath, JSON.stringify({
+    schemaVersion: 1, sessions: [], conversations: [], messages: [], turns: [], events: [], mediaAssets: [], serviceState: {},
+    rateLimitBuckets: [
+      { id: 'short', subjectHash: 'session-hash', quota: 'messages-5m', windowStart: '2026-08-25T00:00:00.000Z', count: 30, expiresAt },
+      { id: 'daily', subjectHash: 'session-hash', quota: 'messages-day', windowStart: '2026-08-25T00:00:00.000Z', count: 300, expiresAt },
+    ],
+  }), 'utf8');
+  const store = new AtomicFileStore({ filePath });
+  await store.init();
+  const short = await store.consumeRateLimit({ subjectHash: 'session-hash', quota: 'messages-5m', windowStart: '2026-08-25T00:00:00.000Z', limit: 30, expiresAt });
+  const daily = await store.consumeRateLimit({ subjectHash: 'session-hash', quota: 'messages-day', windowStart: '2026-08-25T00:00:00.000Z', limit: 300, expiresAt });
+  assert.deepEqual(short, { allowed: false, count: 30, expiresAt });
+  assert.deepEqual(daily, { allowed: false, count: 300, expiresAt });
+  await store.close();
+});

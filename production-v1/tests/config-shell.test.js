@@ -35,6 +35,7 @@ test('config defaults to a local atomic-file runtime outside production', () => 
 
   assert.equal(config.storeDriver, 'atomic-file');
   assert.equal(config.productionReady, false);
+  assert.deepEqual(config.rateLimits, { bootstrap: 20, message5m: 30, messageDaily: 300 });
 });
 
 test('config rejects production without a public origin', () => {

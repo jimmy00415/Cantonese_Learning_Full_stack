@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -23,7 +23,7 @@ async function startApp(t, configOverrides = {}) {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
   });
-  return { baseUrl: `http://127.0.0.1:${server.address().port}`, origin };
+  return { baseUrl: `http://127.0.0.1:${server.address().port}`, origin, directory, store };
 }
 
 async function json(url, options = {}) { const response = await fetch(url, options); return { response, body: await response.json() }; }
@@ -40,7 +40,7 @@ test('security rejects missing and cross-site origins before session writes', as
 });
 
 test('security rate limit hashes bootstrap IP and enforces durable session chat limits', async (t) => {
-  const { baseUrl, origin } = await startApp(t, { V1_MESSAGE_LIMIT_5M: '1' });
+  const { baseUrl, origin, directory } = await startApp(t, { V1_MESSAGE_LIMIT_5M: '1' });
   const bootstrap = await json(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin, 'X-Forwarded-For': '198.51.100.72' } });
   const cookie = bootstrap.response.headers.getSetCookie()[0].split(';')[0];
   const headers = { Origin: origin, Cookie: cookie, 'Content-Type': 'application/json' };
@@ -57,5 +57,29 @@ test('security rate limit hashes bootstrap IP and enforces durable session chat 
   const raw = JSON.stringify(limited.body);
   assert.equal(raw.includes('198.51.100.72'), false);
   assert.equal(raw.includes(cookie), false);
-  assert.notEqual(createHmac('sha256', 's'.repeat(32)).update('198.51.100.72').digest('hex'), '198.51.100.72');
+  const persisted = JSON.parse(await readFile(join(directory, 'store.json'), 'utf8'));
+  const bootstrapBucket = persisted.rateLimitBuckets.find((bucket) => bucket.quota === 'session-bootstrap');
+  assert.equal(bootstrapBucket.subjectHash, createHmac('sha256', 's'.repeat(32)).update('198.51.100.72').digest('hex'));
+  assert.equal(bootstrapBucket.count, 1);
+  assert.match(bootstrapBucket.windowStart, /^\d{4}-\d{2}-\d{2}T/);
+});
+
+test('security concurrent identical sends share one accepted record and one durable quota consumption', async (t) => {
+  const { baseUrl, origin, directory } = await startApp(t, { V1_MESSAGE_LIMIT_5M: '1' });
+  const bootstrap = await json(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin } });
+  const cookie = bootstrap.response.headers.getSetCookie()[0].split(';')[0];
+  const headers = { Origin: origin, Cookie: cookie, 'Content-Type': 'application/json' };
+  const payload = { clientMessageId: '88888888-8888-4888-8888-888888888888', text: '同一個請求' };
+  const [left, right] = await Promise.all([
+    json(`${baseUrl}/api/v1/messages`, { method: 'POST', headers, body: JSON.stringify(payload) }),
+    json(`${baseUrl}/api/v1/messages`, { method: 'POST', headers, body: JSON.stringify(payload) }),
+  ]);
+
+  assert.deepEqual([left.response.status, right.response.status].sort(), [202, 202]);
+  assert.equal([left.body.data.idempotent, right.body.data.idempotent].filter(Boolean).length, 1);
+  assert.equal(left.body.data.message.id, right.body.data.message.id);
+  const persisted = JSON.parse(await readFile(join(directory, 'store.json'), 'utf8'));
+  const expectedSubjectHash = createHmac('sha256', 's'.repeat(32)).update(bootstrap.body.data.session.id).digest('hex');
+  const chatBuckets = persisted.rateLimitBuckets.filter((bucket) => bucket.subjectHash === expectedSubjectHash);
+  assert.deepEqual(chatBuckets.map((bucket) => [bucket.quota, bucket.count]).sort(), [['messages-5m', 1], ['messages-day', 1]]);
 });

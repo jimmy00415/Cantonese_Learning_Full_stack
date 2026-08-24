@@ -4,6 +4,7 @@ import express from 'express';
 import helmet from 'helmet';
 
 import { requireSameOrigin } from './http/security.js';
+import { sendError } from './http/errors.js';
 import { createSessionRouter } from './http/session.js';
 
 const publicDirectory = fileURLToPath(new URL('../public/', import.meta.url));
@@ -44,7 +45,7 @@ export function createApp({ config, store, mediaStore, answerService, eventHub }
     void request;
     void next;
     if (response.headersSent) return;
-    response.status(500).json(envelope(response, null, { code: 'INTERNAL_ERROR', message: 'The service could not process this request.' }));
+    sendError(response, error);
   });
 
   return app;

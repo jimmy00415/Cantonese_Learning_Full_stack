@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import express from 'express';
 
 import { httpError, sendError } from './errors.js';
-import { createRateLimiter } from '../services/rate-limiter.js';
+import { createRateLimiter, rateLimitBucket } from '../services/rate-limiter.js';
 
 const COOKIE_NAME = 'hb_v1_session';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -12,7 +12,7 @@ function parseCookies(header = '') { return Object.fromEntries(header.split(';')
 function requestHash({ text, voiceDraftId }) { return createHash('sha256').update(JSON.stringify({ text, voiceDraftId: voiceDraftId ?? null })).digest('hex'); }
 function rateLimited(response, result) { response.set('Retry-After', String(result.retryAfter)); throw httpError(429, 'RATE_LIMITED'); }
 
-function cookieOptions(config) { return { httpOnly: true, sameSite: 'lax', secure: config.nodeEnv === 'production', path: '/', maxAge: 60 * 60 * 24 * 30 }; }
+function cookieOptions(config) { return { httpOnly: true, sameSite: 'lax', secure: config.nodeEnv === 'production', path: '/', maxAge: 30 * 24 * 60 * 60 * 1000 }; }
 
 export function createSessionRouter({ config, store }) {
   const router = express.Router();
@@ -36,9 +36,10 @@ export function createSessionRouter({ config, store }) {
       if (existing) {
         const resumed = await store.getSessionByTokenHash(tokenHash(existing));
         if (resumed) {
-          const sessionData = await store.createOrResumeSession({ tokenHash: resumed.tokenHash });
-          const messages = await store.listMessages({ sessionId: sessionData.session.id, conversationId: sessionData.conversation.id, after: 0 });
-          return response.json({ data: { session: { id: sessionData.session.id }, conversation: sessionData.conversation, messages, capabilities: config.publicStatus, knowledgeSnapshotDate: null }, error: null, requestId: response.locals.requestId });
+          const conversation = await store.getConversationForSession({ sessionId: resumed.id });
+          if (!conversation) throw httpError(401, 'SESSION_NOT_FOUND');
+          const messages = await store.listMessages({ sessionId: resumed.id, conversationId: conversation.id, after: 0 });
+          return response.json({ data: { session: { id: resumed.id }, conversation, messages, capabilities: config.publicStatus, knowledgeSnapshotDate: null }, error: null, requestId: response.locals.requestId });
         }
       }
       const bootstrap = await limiter.consume({ subject: request.ip, quota: 'session-bootstrap', limit: limits.bootstrap, durationMs: 10 * 60 * 1000 });
@@ -69,19 +70,20 @@ export function createSessionRouter({ config, store }) {
       const voiceDraftId = request.body?.voiceDraftId ?? null;
       if (!UUID.test(clientMessageId ?? '') || text.length < 1 || text.length > 4000 || (voiceDraftId !== null && typeof voiceDraftId !== 'string')) throw httpError(400, 'INVALID_REQUEST');
       const payloadHash = requestHash({ text, voiceDraftId });
-      const existing = await store.getAcceptedMessage({ sessionId: sessionData.session.id, conversationId: sessionData.conversation.id, clientMessageId });
-      if (existing) {
-        if (existing.turn.requestHash !== payloadHash) throw httpError(409, 'IDEMPOTENCY_CONFLICT');
-        return response.status(202).json({ data: { idempotent: true, ...existing }, error: null, requestId: response.locals.requestId });
-      }
       const subject = sessionData.session.id;
-      const shortQuota = await limiter.consume({ subject, quota: 'messages-5m', limit: limits.message5m, durationMs: 5 * 60 * 1000 });
-      if (!shortQuota.allowed) return rateLimited(response, shortQuota);
-      const dailyQuota = await limiter.consume({ subject, quota: 'messages-day', limit: limits.messageDaily, durationMs: 24 * 60 * 60 * 1000 });
-      if (!dailyQuota.allowed) return rateLimited(response, dailyQuota);
-      const accepted = await store.acceptMessage({ sessionId: sessionData.session.id, conversationId: sessionData.conversation.id, clientMessageId, requestHash: payloadHash, text, voiceDraftId });
+      const now = Date.now();
+      const accepted = await store.acceptMessageWithRateLimits({
+        sessionId: sessionData.session.id, conversationId: sessionData.conversation.id, clientMessageId, requestHash: payloadHash, text, voiceDraftId,
+        rateLimits: [
+          rateLimitBucket({ secret: config.sessionSecret ?? 'local-development-session-secret', subject, quota: 'messages-5m', limit: limits.message5m, durationMs: 5 * 60 * 1000, now }),
+          rateLimitBucket({ secret: config.sessionSecret ?? 'local-development-session-secret', subject, quota: 'messages-day', limit: limits.messageDaily, durationMs: 24 * 60 * 60 * 1000, now }),
+        ],
+      });
       return response.status(202).json({ data: accepted, error: null, requestId: response.locals.requestId });
-    } catch (error) { return sendError(response, error); }
+    } catch (error) {
+      if (error.code === 'RATE_LIMITED' && error.expiresAt) response.set('Retry-After', String(Math.max(1, Math.ceil((new Date(error.expiresAt).getTime() - Date.now()) / 1000))));
+      return sendError(response, error);
+    }
   });
 
   router.delete('/session', async (request, response) => {

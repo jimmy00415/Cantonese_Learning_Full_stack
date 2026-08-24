@@ -139,30 +139,66 @@ export class AtomicFileStore {
 
   async acceptMessage({ sessionId, conversationId, clientMessageId, requestHash, text, voiceDraftId = null, now }) {
     return this.#mutate((snapshot) => {
-      this.#ownedConversation(snapshot, sessionId, conversationId);
-      const duplicate = snapshot.messages.find((message) => message.conversationId === conversationId && message.clientMessageId === clientMessageId);
-      if (duplicate) {
-        const turn = snapshot.turns.find((item) => item.userMessageId === duplicate.id);
-        const event = snapshot.events.find((item) => item.type === 'message.accepted' && item.messageId === duplicate.id);
-        if (!turn || !event) throw new Error('Atomic store state is corrupt');
-        if (turn.requestHash !== requestHash) throw storeError('IDEMPOTENCY_CONFLICT', 'This client message ID was already used with different content.');
-        return { idempotent: true, message: duplicate, turn, event };
-      }
-      if (voiceDraftId) {
-        const voiceDraft = snapshot.mediaAssets.find((asset) => asset.id === voiceDraftId && asset.sessionId === sessionId && asset.kind === 'user_voice' && asset.status === 'draft');
-        if (!voiceDraft) throw storeError('INVALID_VOICE_DRAFT', 'The voice draft is unavailable.');
-      }
-      const timestamp = nowIso(now);
-      const sequence = snapshot.messages.filter((message) => message.conversationId === conversationId).length + 1;
-      const message = { id: randomUUID(), sessionId, conversationId, clientMessageId, sequence, role: 'user', text, voiceDraftId, createdAt: timestamp };
-      const turn = { id: randomUUID(), sessionId, conversationId, userMessageId: message.id, requestHash, state: 'accepted', failureCode: null, attempt: 0, leaseExpiresAt: null, leaseToken: null, createdAt: timestamp, updatedAt: timestamp };
-      const cursor = snapshot.events.filter((event) => event.conversationId === conversationId).length + 1;
-      const event = { id: randomUUID(), sessionId, conversationId, cursor, type: 'message.accepted', messageId: message.id, turnId: turn.id, payloadJson: { messageId: message.id, turnId: turn.id }, createdAt: timestamp };
-      snapshot.messages.push(message);
-      snapshot.turns.push(turn);
-      snapshot.events.push(event);
-      return { idempotent: false, message, turn, event };
+      return this.#acceptMessage(snapshot, { sessionId, conversationId, clientMessageId, requestHash, text, voiceDraftId, now });
     });
+  }
+
+  async acceptMessageWithRateLimits({ rateLimits, ...messageInput }) {
+    return this.#mutate((snapshot) => {
+      const duplicate = this.#findAcceptedMessage(snapshot, messageInput);
+      if (duplicate) {
+        if (duplicate.turn.requestHash !== messageInput.requestHash) throw storeError('IDEMPOTENCY_CONFLICT', 'This client message ID was already used with different content.');
+        return { idempotent: true, ...duplicate };
+      }
+      const exhausted = rateLimits.map((request) => ({ request, bucket: snapshot.rateLimitBuckets.find((bucket) => bucket.subjectHash === request.subjectHash && bucket.quota === request.quota && bucket.windowStart === request.windowStart) }))
+        .find(({ request, bucket }) => bucket && bucket.count >= request.limit);
+      if (exhausted) {
+        const error = storeError('RATE_LIMITED', 'Rate limit exceeded.');
+        error.expiresAt = exhausted.bucket.expiresAt;
+        throw error;
+      }
+      for (const request of rateLimits) {
+        let bucket = snapshot.rateLimitBuckets.find((item) => item.subjectHash === request.subjectHash && item.quota === request.quota && item.windowStart === request.windowStart);
+        if (!bucket) {
+          bucket = { id: randomUUID(), subjectHash: request.subjectHash, quota: request.quota, windowStart: request.windowStart, count: 0, expiresAt: request.expiresAt };
+          snapshot.rateLimitBuckets.push(bucket);
+        }
+        bucket.count += 1;
+      }
+      return this.#acceptMessage(snapshot, messageInput);
+    });
+  }
+
+  #findAcceptedMessage(snapshot, { sessionId, conversationId, clientMessageId }) {
+    this.#ownedConversation(snapshot, sessionId, conversationId);
+    const message = snapshot.messages.find((item) => item.conversationId === conversationId && item.clientMessageId === clientMessageId);
+    if (!message) return null;
+    const turn = snapshot.turns.find((item) => item.userMessageId === message.id);
+    const event = snapshot.events.find((item) => item.type === 'message.accepted' && item.messageId === message.id);
+    if (!turn || !event) throw new Error('Atomic store state is corrupt');
+    return { message, turn, event };
+  }
+
+  #acceptMessage(snapshot, { sessionId, conversationId, clientMessageId, requestHash, text, voiceDraftId = null, now }) {
+    const duplicate = this.#findAcceptedMessage(snapshot, { sessionId, conversationId, clientMessageId });
+    if (duplicate) {
+      if (duplicate.turn.requestHash !== requestHash) throw storeError('IDEMPOTENCY_CONFLICT', 'This client message ID was already used with different content.');
+      return { idempotent: true, ...duplicate };
+    }
+    if (voiceDraftId) {
+      const voiceDraft = snapshot.mediaAssets.find((asset) => asset.id === voiceDraftId && asset.sessionId === sessionId && asset.kind === 'user_voice' && asset.status === 'draft');
+      if (!voiceDraft) throw storeError('INVALID_VOICE_DRAFT', 'The voice draft is unavailable.');
+    }
+    const timestamp = nowIso(now);
+    const sequence = snapshot.messages.filter((message) => message.conversationId === conversationId).length + 1;
+    const message = { id: randomUUID(), sessionId, conversationId, clientMessageId, sequence, role: 'user', text, voiceDraftId, createdAt: timestamp };
+    const turn = { id: randomUUID(), sessionId, conversationId, userMessageId: message.id, requestHash, state: 'accepted', failureCode: null, attempt: 0, leaseExpiresAt: null, leaseToken: null, createdAt: timestamp, updatedAt: timestamp };
+    const cursor = snapshot.events.filter((event) => event.conversationId === conversationId).length + 1;
+    const event = { id: randomUUID(), sessionId, conversationId, cursor, type: 'message.accepted', messageId: message.id, turnId: turn.id, payloadJson: { messageId: message.id, turnId: turn.id }, createdAt: timestamp };
+    snapshot.messages.push(message);
+    snapshot.turns.push(turn);
+    snapshot.events.push(event);
+    return { idempotent: false, message, turn, event };
   }
 
   async listMessages({ sessionId, conversationId, after = 0 }) {
