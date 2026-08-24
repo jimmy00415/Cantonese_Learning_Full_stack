@@ -297,15 +297,20 @@ and safe user messages, not provider payloads, stack traces, or secrets.
 - `GET /api/v1/messages?after=<sequence>`
   - Returns ordered canonical messages and active turn state.
 - `GET /api/v1/events?afterCursor=<cursor>`
-  - `afterCursor` and numeric `Last-Event-ID` mean the same exclusive event
-    cursor; when both exist they must match or the request fails.
+  - `afterCursor` bootstraps the first connection. A valid numeric
+    `Last-Event-ID` takes precedence on native EventSource reconnect; if it is
+    lower than a simultaneous query cursor, the request fails as an attempted
+    rewind.
   - Establishes a buffered live subscription, captures the durable high-water
-    cursor, drains every persisted event `(afterCursor, highWater]` in ascending
+    cursor, drains every persisted event `(resumeCursor, highWater]` in ascending
     bounded pages, then flushes buffered events above the high-water cursor in
     order and switches to live delivery. Every event uses its cursor as SSE
     `id`; duplicate cursors are ignored. Buffer overflow closes with a safe
-    `resync_required` event so the client reconnects from its last delivered
-    cursor. No backlog page is silently skipped.
+    `resync_required` event without an SSE `id`, so the client reconnects from
+    its last durably delivered cursor. Live notifications only trigger a drain
+    from the durable store; they are never trusted as the event payload. Socket
+    backpressure closes safely for replay instead of growing an unbounded
+    buffer. No backlog page is silently skipped.
   - Streams `turn.state`, `message.delivered`, `audio.ready`, `turn.failed`, and
     heartbeat after catch-up.
 
@@ -352,14 +357,21 @@ and safe user messages, not provider payloads, stack traces, or secrets.
    depend on the HTTP handler's in-memory enqueue succeeding. It atomically
    claims the earliest unfinished turn for a conversation, assigns a random
    fencing token and lease expiry, and renews the lease during provider work.
-   Expired leases are safely reclaimed after restart.
+   Expired leases are safely reclaimed after restart. Renew, transition,
+   failure, and delivery writes require both the matching fencing token and an
+   unexpired lease; losing a lease aborts provider work.
 4. Set `retrieving`, select approved knowledge entries, and emit a real state.
+   Build context with `getTurnContext(turnId)`: prior completed user/assistant
+   pairs plus the current inbound message only. Later accepted turns never enter
+   an earlier turn's prompt, even when their user-message sequence is lower than
+   the first assistant reply's sequence.
 5. If the message requests an HKBU fact and evidence is insufficient, deliver a
    transparent unverified response with an official help/directory source; do
    not ask a model to guess.
 6. Set `generating`, call the selected real provider with a bounded evidence
    pack and strict JSON response contract.
-7. Validate every citation ID and action/card against the retrieved allowlist.
+7. Validate every claim-level evidence ID and action/card against the retrieved
+   allowlist.
 8. If provider output is invalid or the provider fails, deliver a conservative
    deterministic evidence summary where evidence exists. Otherwise deliver the
    honest unverified response.
@@ -368,8 +380,12 @@ and safe user messages, not provider payloads, stack traces, or secrets.
    then emit the persisted `message.delivered` event. A unique assistant-per-turn
    constraint makes a stale worker unable to duplicate a reply.
 
-Provider retries are limited to one retry for transient failures and use the
-same turn. TTS has an independent retry path and never changes turn delivery.
+Provider transport returns bounded raw text and metadata; the answer service is
+the only layer that parses and validates model output. LLM retries are limited
+to one retry for transient failures and use the same serialized request,
+evidence snapshot, turn, and 12-second total deadline across both attempts. The
+deadline covers response-body reading and the body is capped. TTS has an
+independent retry path and never changes turn delivery.
 
 ## Knowledge and Grounding
 
@@ -417,7 +433,7 @@ offers only short, safe follow-up guidance.
 ### Retrieval and validation
 
 V1 retrieval is deterministic lexical/tag matching with bilingual aliases. It
-returns a small evidence pack with claim-level source IDs. This is sufficient for
+returns a small evidence pack with claim-level evidence IDs. This is sufficient for
 the bounded initial corpus and is easier to audit than premature embeddings.
 
 The model must return:
@@ -471,7 +487,10 @@ Provider configuration precedence and required pairs are explicit:
 - TTS selector: `V1_TTS_PROVIDER`, then `TTS_PROVIDER`; unsupported or incomplete
   voice configuration disables that capability rather than affecting text.
 
-LLM timeout defaults to 12 seconds with one retry only for timeout, 429, and 5xx.
+LLM work has one 12-second total deadline across the initial request, bounded
+response read, retry delay, and at most one retry for network failure, timeout,
+408, 429, or 5xx. Authentication, refusal/content filter, and invalid successful
+output are not retried.
 ASR and TTS default to 15 seconds with no automatic retry inside the request;
 the user can retry the same owned draft/message action idempotently.
 

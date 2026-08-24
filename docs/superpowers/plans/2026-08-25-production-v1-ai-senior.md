@@ -446,10 +446,13 @@ Commit message: `feat(v1): add verified HKBU campus knowledge`
 - Create: `production-v1/src/services/events.js`
 - Create: `production-v1/src/services/dispatcher.js`
 - Create: `production-v1/src/services/turn-processor.js`
+- Modify: `production-v1/src/config.js`
+- Modify: `production-v1/.env.example`
 - Modify: `production-v1/src/stores/store-contract.js`
 - Modify: `production-v1/src/stores/atomic-file-store.js`
 - Modify: `production-v1/src/app.js`
 - Modify: `production-v1/src/server.js`
+- Modify: `production-v1/src/http/session.js`
 - Create: `production-v1/tests/provider-contracts.test.js`
 - Create: `production-v1/tests/answer.test.js`
 - Create: `production-v1/tests/turn-api.test.js`
@@ -459,16 +462,18 @@ Commit message: `feat(v1): add verified HKBU campus knowledge`
 
 ```js
 {
-  replyText,
-  evidenceIds,
-  cards,
-  suggestedReplies,
-  needsClarification,
-  groundingStatus,
+  rawText,
   provider,
-  latencyMs
+  latencyMs,
+  usage,
+  finishReason,
+  providerRequestId
 }
 ```
+
+`answerService` alone parses `rawText` into a strict `ModelDraft` containing
+`replyText`, `evidenceIds`, `actionIds`, `suggestedReplies`,
+`needsClarification`, and `groundingStatus`, then derives cards from the corpus.
 
 - [ ] **Step 1: Write failing provider, answer, ordering, and SSE tests**
 
@@ -476,17 +481,27 @@ Use injected fake `fetch` and a temporary store. Cover:
 
 - HKBU/Azure OpenAI request URL/header/body shape without logging key values;
 - MiniMax Anthropic-compatible request/response normalization;
-- timeout and one transient retry with the same turn ID;
+- one 12-second total deadline across fetch, bounded response-body read, and at
+  most one transient retry with the exact same serialized body, turn ID, and
+  evidence snapshot; no retry for auth, invalid schema, refusal, or content
+  filter;
+- response bodies over 256 KiB and provider truncation/content-filter finish
+  reasons fail safely;
 - fenced/extra-text JSON parsing and invalid schema rejection;
+- a string-aware brace scanner accepts at most one object and rejects multiple
+  objects, truncation, legacy `citationIds`, extra properties, or oversized
+  fields/arrays;
 - unknown evidence/action IDs rejected;
 - `verified` downgraded when no current claim-level evidence supports it;
 - deterministic evidence summary on provider failure;
 - honest unverified response when retrieval is insufficient;
 - two accepted messages on one conversation deliver in order;
 - duplicate client ID creates one assistant message;
-- SSE assigns monotonic durable cursors, replays strictly after `afterCursor` or
-  numeric `Last-Event-ID`, rejects conflicting resume cursors, paginates replay
-  before live events, and emits heartbeat, delivery, and safe failure codes;
+- SSE assigns monotonic durable cursors and replays strictly after the query
+  cursor on first connect. On native EventSource reconnect, a valid numeric
+  `Last-Event-ID` takes precedence over the unchanged bootstrap query; only a
+  header lower than the query is rejected. Replay precedes live delivery and
+  emits heartbeat, delivery, and safe failure codes;
 - a backlog larger than two replay pages plus an event arriving during replay is
   delivered once, strictly ordered, with no cursor gap; simulated live-buffer
   overflow emits `resync_required` and reconnect from the last delivered cursor
@@ -499,6 +514,15 @@ Use injected fake `fetch` and a temporary store. Cover:
   and a stale token cannot renew, transition, or deliver;
 - an earlier unfinished turn prevents a later turn in that conversation from
   being claimed, while another conversation can progress.
+- turn 1 context excludes an already accepted turn 2 user message; turn 2
+  context includes turn 1's delivered assistant reply even when persistence
+  sequence is interleaved;
+- a lease expiring during provider work prevents the stale worker from failing
+  or delivering, renewal failure aborts the request, session deletion cannot be
+  undone by a worker, and terminal failures remain visible after reload;
+- duplicate/out-of-order live notifications, persisted-before-publish crash,
+  close during replay, slow-client backpressure, heartbeat cursor neutrality,
+  and listener cleanup after session deletion.
 
 - [ ] **Step 2: Confirm red**
 
@@ -507,9 +531,12 @@ Run `npm.cmd test -- --test-name-pattern="provider|answer|turn api"`.
 - [ ] **Step 3: Implement adapters and strict answer validation**
 
 Support `hkbu`, `azure-openai`, and `minimax` from existing variable names plus
-V1 overrides. Use AbortController timeouts. Do not include raw evidence as model
-instructions; wrap it as untrusted reference data. Require JSON, cap output, and
-map only retrieved source IDs/actions into delivered UI data.
+V1 overrides. Private `config.llm.settings` contains only the selected adapter's
+settings; `publicStatus` remains booleans. Use AbortController with one shared
+deadline. Do not include raw evidence as model instructions; wrap it as
+untrusted reference data. Require strict JSON, cap output, and map only retrieved
+claim-level evidence IDs and allowlisted action IDs into delivered UI data.
+Never silently try a second configured provider.
 
 The deterministic fallback must synthesize only selected claim text and source
 metadata. It cannot invent procedures. Safety bypass returns deterministic
@@ -525,27 +552,39 @@ turns and atomically calls:
 store.claimNextTurn({ workerId, leaseToken, leaseUntil, now })
 store.renewTurnLease({ turnId, leaseToken, leaseUntil, now })
 store.setTurnState({ turnId, leaseToken, state, now })
+store.getTurnContext({ turnId })
+store.failTurn({ turnId, leaseToken, failureCode, now })
 store.deliverAssistant({ turnId, leaseToken, message, now })
+store.getEventHighWater({ sessionId, conversationId })
+store.listEventsPage({ sessionId, conversationId, afterCursor, throughCursor, limit })
 ```
 
 Claim only the earliest unfinished turn per conversation. Every worker mutation
-checks the random fencing token. Delivery persists assistant message, terminal
-turn, and event in one operation with a unique assistant-per-turn invariant.
-`GET /events` treats `afterCursor` and numeric `Last-Event-ID` as the same
-exclusive cursor and rejects mismatch. It registers a bounded live buffer first,
+checks the random fencing token and unexpired lease; a failed renewal aborts the
+provider request. Delivery persists assistant message, terminal turn, and event
+in one operation with a unique assistant-per-turn invariant. `getTurnContext`
+uses turn order, not raw message sequence, so later accepted input cannot leak
+into an earlier prompt. `GET /events` uses numeric `Last-Event-ID` when present
+and otherwise uses `afterCursor`; it rejects only a header that rewinds below the
+query cursor. It registers a bounded live buffer first,
 captures the store's high-water cursor, drains all persisted pages through that
 cursor, flushes buffered higher cursors in order with deduplication, and only
-then switches to live. Each event's numeric cursor is the SSE `id`. On buffer
-overflow it sends `resync_required` and closes; the client reconnects from its
-last delivered ID, so no page or live-race event can be skipped. Send `retry:
-3000`, 20-second heartbeat comments, and clean listeners on close.
+then switches to live. Notifications trigger a durable cursor drain rather than
+being written directly. Each durable event's cursor is the SSE `id`. On buffer
+overflow or socket backpressure it sends `resync_required` without an `id` and
+closes; the client reconnects from its last delivered ID, so no page or live-race
+event can be skipped. Send `retry: 3000`, 20-second heartbeat comments, and clean
+listeners on close.
 
 - [ ] **Step 5: Add a secret-safe real-provider smoke script**
 
-The script loads `ENV_FILE`, sends one low-token non-sensitive test prompt, and
-prints provider, HTTP class, normalized success, and latency only. It exits
-nonzero if no configured real provider succeeds. It is manual and never part of
-unit tests.
+The script does nothing unless `--confirm-real-provider` is supplied. It loads
+`ENV_FILE`, calls only the selected provider once with a fixed low-token,
+non-sensitive prompt and no retry/fallback, and prints provider, HTTP class,
+normalized success, latency, and a stable error code only. It never prints
+endpoint/model/prompt/body/header/raw error and exits nonzero before network if
+no real provider is selected. Fake-fetch tests prove key values cannot reach
+stdout/stderr. It is manual and never part of unit tests.
 
 - [ ] **Step 6: Verify green**
 
