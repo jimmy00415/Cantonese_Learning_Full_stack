@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -97,4 +97,42 @@ test('atomic store rejects persisted default chat quota boundaries without incre
   assert.deepEqual(short, { allowed: false, count: 30, expiresAt });
   assert.deepEqual(daily, { allowed: false, count: 300, expiresAt });
   await store.close();
+});
+
+test('atomic store serializes idle no-change claims without persisting or weakening claim races', async (t) => {
+  const { directory, store } = await createStore(t);
+  const filePath = join(directory, 'store.json');
+  const before = await stat(filePath, { bigint: true });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const idleClaims = await Promise.all(Array.from({ length: 8 }, (_, index) => store.claimNextTurn({
+    workerId: `idle-${index}`,
+    leaseToken: `idle-token-${index}`,
+    now: new Date(Date.parse('2026-08-25T00:00:00.000Z') + index),
+    leaseUntil: new Date(Date.parse('2026-08-25T00:00:10.000Z') + index),
+  })));
+  const after = await stat(filePath, { bigint: true });
+  assert.deepEqual(idleClaims, Array(8).fill(null));
+  assert.equal(after.mtimeNs, before.mtimeNs);
+
+  const owner = await store.createOrResumeSession({ tokenHash: 'idle-race-owner', now: '2026-08-25T00:01:00.000Z' });
+  const acceptedPromise = store.acceptMessage({
+    sessionId: owner.session.id,
+    conversationId: owner.conversation.id,
+    clientMessageId: '75000000-0000-4000-8000-000000000000',
+    requestHash: 'idle-race-hash',
+    text: 'race safely',
+    now: '2026-08-25T00:01:01.000Z',
+  });
+  const firstClaimPromise = store.claimNextTurn({
+    workerId: 'race-first', leaseToken: 'race-first-token',
+    now: new Date('2026-08-25T00:01:02.000Z'), leaseUntil: new Date('2026-08-25T00:01:12.000Z'),
+  });
+  const secondClaimPromise = store.claimNextTurn({
+    workerId: 'race-second', leaseToken: 'race-second-token',
+    now: new Date('2026-08-25T00:01:02.000Z'), leaseUntil: new Date('2026-08-25T00:01:12.000Z'),
+  });
+  const [accepted, firstClaim, secondClaim] = await Promise.all([acceptedPromise, firstClaimPromise, secondClaimPromise]);
+  assert.equal(firstClaim.id, accepted.turn.id);
+  assert.equal(firstClaim.leaseToken, 'race-first-token');
+  assert.equal(secondClaim, null);
 });

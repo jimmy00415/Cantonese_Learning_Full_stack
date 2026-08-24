@@ -126,6 +126,10 @@ export function createEventStreamHandler({ store, eventHub, resolveSession, page
     };
 
     const drainThrough = async (throughCursor) => {
+      if (lastDelivered > throughCursor) {
+        resyncAndClose();
+        return false;
+      }
       while (!closed && lastDelivered < throughCursor) {
         const page = await store.listEventsPage({
           sessionId: owner.session.id,
@@ -134,20 +138,28 @@ export function createEventStreamHandler({ store, eventHub, resolveSession, page
           throughCursor,
           limit: pageSize,
         });
-        if (closed || page.length === 0) break;
+        if (closed) return false;
+        if (page.length === 0) {
+          resyncAndClose();
+          return false;
+        }
         for (const event of page) {
-          if (closed) return;
-          if (event.cursor <= lastDelivered) continue;
-          if (!write(eventFrame(event))) return;
+          if (closed) return false;
+          if (!Number.isSafeInteger(event.cursor) || event.cursor !== lastDelivered + 1 || event.cursor > throughCursor) {
+            resyncAndClose();
+            return false;
+          }
+          if (!write(eventFrame(event))) return false;
           lastDelivered = event.cursor;
         }
       }
+      return !closed && lastDelivered === throughCursor;
     };
 
     const drainCurrent = async () => {
       if (closed) return;
       const highWater = await store.getEventHighWater({ sessionId: owner.session.id, conversationId: owner.conversation.id });
-      await drainThrough(highWater);
+      return drainThrough(highWater);
     };
 
     const scheduleDrain = () => {
@@ -194,10 +206,10 @@ export function createEventStreamHandler({ store, eventHub, resolveSession, page
     void (async () => {
       try {
         const capturedHighWater = await store.getEventHighWater({ sessionId: owner.session.id, conversationId: owner.conversation.id });
-        await drainThrough(capturedHighWater);
+        if (!await drainThrough(capturedHighWater)) return;
         while (!closed && pendingHints.size > 0) {
           pendingHints.clear();
-          await drainCurrent();
+          if (!await drainCurrent()) return;
         }
         if (closed) return;
         live = true;

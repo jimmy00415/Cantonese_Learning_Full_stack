@@ -6,8 +6,19 @@ import { createRetriever } from '../src/knowledge/retriever.js';
 import { createAnswerService, parseModelDraft } from '../src/services/answer.js';
 
 const FIXED_NOW = new Date('2026-08-25T12:00:00+08:00');
+const STALE_NOW = new Date('2026-10-26T00:00:00+08:00');
 const corpus = await loadDefaultCorpus();
 const retriever = createRetriever({ corpus, now: () => FIXED_NOW });
+
+const duoActions = [{
+  id: 'action.ito.duo.open',
+  sourceId: 'hkbu.ito.duo',
+  label: { en: 'Open Duo guidance', zhHant: '查看 Duo 指引', zhHans: '查看 Duo 指引' },
+}];
+
+function parseAt(rawText, retrieval, overrides = {}) {
+  return parseModelDraft(rawText, { retrieval, corpus, actionSnapshot: duoActions, now: FIXED_NOW, ...overrides });
+}
 
 function validDraft(overrides = {}) {
   return {
@@ -24,7 +35,7 @@ function validDraft(overrides = {}) {
 test('answer parser accepts one fenced object and handles braces inside JSON strings', () => {
   const retrieval = retriever.retrieve('Duo 换手机怎么办');
   const draft = validDraft({ replyText: 'Open {Duo} guidance without guessing.' });
-  const parsed = parseModelDraft(`Here is the result:\n\`\`\`json\n${JSON.stringify(draft)}\n\`\`\``, { retrieval, corpus });
+  const parsed = parseAt(`Here is the result:\n\`\`\`json\n${JSON.stringify(draft)}\n\`\`\``, retrieval);
   assert.equal(parsed.replyText, draft.replyText);
   assert.deepEqual(parsed.evidenceIds, draft.evidenceIds);
   assert.equal(parsed.groundingStatus, 'verified');
@@ -43,7 +54,7 @@ test('answer parser rejects multiple, truncated, oversized, legacy, arbitrary-ca
     JSON.stringify(validDraft({ suggestedReplies: ['x'.repeat(161)] })),
   ];
   for (const rawText of invalid) {
-    assert.throws(() => parseModelDraft(rawText, { retrieval, corpus }), /MODEL_DRAFT_INVALID|MODEL_DRAFT_TOO_LARGE/);
+    assert.throws(() => parseAt(rawText, retrieval), /MODEL_DRAFT_INVALID|MODEL_DRAFT_TOO_LARGE/);
   }
 });
 
@@ -54,20 +65,22 @@ test('answer parser rejects unknown or stale evidence and non-allowlisted action
     { evidenceIds: ['evidence.library.main.from-september-2026'] },
     { actionIds: ['action.unknown'] },
   ]) {
-    assert.throws(() => parseModelDraft(JSON.stringify(validDraft(overrides)), { retrieval, corpus }), /MODEL_DRAFT_INVALID/);
+    assert.throws(() => parseAt(JSON.stringify(validDraft(overrides)), retrieval), /MODEL_DRAFT_INVALID/);
   }
 });
 
 test('answer parser downgrades unsupported verified status instead of promoting an uncited claim', () => {
   const retrieval = retriever.retrieve('Duo 换手机怎么办');
-  const parsed = parseModelDraft(JSON.stringify(validDraft({ evidenceIds: [], actionIds: [], groundingStatus: 'verified' })), { retrieval, corpus });
+  const parsed = parseAt(JSON.stringify(validDraft({ evidenceIds: [], actionIds: [], groundingStatus: 'verified' })), retrieval);
   assert.equal(parsed.groundingStatus, 'unverified');
 });
 
 test('answer service maps only corpus evidence/actions into citations and cards', async () => {
+  let providerInput;
   const provider = {
     provider: 'hkbu',
-    async generate() {
+    async generate(input) {
+      providerInput = input;
       return { rawText: JSON.stringify(validDraft()), provider: 'hkbu', latencyMs: 12, usage: {}, finishReason: 'stop', providerRequestId: 'request-1' };
     },
   };
@@ -81,6 +94,54 @@ test('answer service maps only corpus evidence/actions into citations and cards'
   assert.equal(answer.citations[0].url, 'https://ito.hkbu.edu.hk/services/it-security/mfa.html');
   assert.deepEqual(answer.cards.map((card) => card.actionId), ['action.ito.duo.open']);
   assert.equal(answer.cards[0].url, 'https://ito.hkbu.edu.hk/services/it-security/mfa.html');
+  assert.deepEqual(providerInput.actionSnapshot, duoActions);
+});
+
+test('answer parser validates actions against the exact current snapshot rather than any retrieval source', () => {
+  const retrieval = structuredClone(retriever.retrieve('Duo 换手机怎么办'));
+  retrieval.sources.push({ id: 'hkbu.ar.student-card-collection' });
+  const guessed = validDraft({ actionIds: ['action.ar.student-card-collection.open'] });
+  assert.throws(() => parseAt(JSON.stringify(guessed), retrieval), /MODEL_DRAFT_INVALID/);
+});
+
+test('answer acceptance and deterministic fallback recheck corpus freshness at the final clock boundary', async () => {
+  const retrieval = retriever.retrieve('Duo 换手机怎么办');
+  assert.throws(
+    () => parseAt(JSON.stringify(validDraft()), retrieval, { now: STALE_NOW }),
+    /MODEL_DRAFT_INVALID/,
+  );
+
+  let modelClock = FIXED_NOW;
+  const modelService = createAnswerService({
+    corpus,
+    retriever,
+    now: () => modelClock,
+    llmProvider: {
+      provider: 'hkbu',
+      async generate() {
+        modelClock = STALE_NOW;
+        return { rawText: JSON.stringify(validDraft()), provider: 'hkbu', latencyMs: 1, usage: null, finishReason: 'stop', providerRequestId: null };
+      },
+    },
+  });
+  let fallbackClock = FIXED_NOW;
+  const fallbackService = createAnswerService({
+    corpus,
+    retriever,
+    now: () => fallbackClock,
+    llmProvider: {
+      provider: 'hkbu',
+      async generate() {
+        fallbackClock = STALE_NOW;
+        throw Object.assign(new Error('unavailable'), { code: 'PROVIDER_UNAVAILABLE' });
+      },
+    },
+  });
+  for (const service of [modelService, fallbackService]) {
+    const answer = await service.answer({ turnId: 'turn-stale', text: 'Duo 换手机怎么办', context: [], beforeProvider: async () => {} });
+    assert.equal(answer.groundingStatus, 'unverified');
+    assert.equal(answer.citations.some((citation) => citation.status === 'verified' || citation.evidenceId), false);
+  }
 });
 
 test('answer service falls back deterministically to selected evidence and source metadata on provider failure', async () => {

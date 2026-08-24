@@ -1,3 +1,5 @@
+import { contextLimits, retainRecentCompletePairs } from '../context-budget.js';
+
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const DEFAULT_DEADLINE_MS = 12_000;
 const DEFAULT_RETRY_DELAY_MS = 250;
@@ -29,15 +31,10 @@ function trimTrailingSlash(value) {
 function safeBaseUrl(value) {
   let url;
   try { url = new URL(String(value ?? '')); } catch { throw providerError('PROVIDER_NOT_CONFIGURED'); }
-  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
     throw providerError('PROVIDER_NOT_CONFIGURED');
   }
   return trimTrailingSlash(url.href);
-}
-
-function isDefaultTemperatureOnly(model) {
-  const value = String(model ?? '').toLowerCase();
-  return value.includes('gpt-5') || /(?:^|[^a-z0-9])o\d(?:[^a-z0-9]|$)/.test(value);
 }
 
 function safeUsage(value) {
@@ -58,10 +55,11 @@ function requestIdFrom(response, payload) {
   return null;
 }
 
-function evidenceMessage(turnId, evidenceSnapshot) {
+function evidenceMessage(turnId, evidenceSnapshot, actionSnapshot) {
   const serialized = JSON.stringify({
     turnId: String(turnId ?? '').slice(0, 128),
     evidence: Array.isArray(evidenceSnapshot) ? evidenceSnapshot : [],
+    actions: Array.isArray(actionSnapshot) ? actionSnapshot : [],
   });
   return `<untrusted_reference_data>\n${serialized}\n</untrusted_reference_data>`;
 }
@@ -70,9 +68,13 @@ function normalizedMessages(input) {
   const messages = Array.isArray(input.messages) ? input.messages : [];
   const normalized = messages
     .filter((message) => message && ['user', 'assistant'].includes(message.role) && typeof message.content === 'string' && message.content.trim())
-    .map((message) => ({ role: message.role, content: message.content.slice(0, 16_000) }));
-  normalized.push({ role: 'user', content: evidenceMessage(input.turnId, input.evidenceSnapshot) });
-  return normalized;
+    .map((message) => ({ role: message.role, content: message.content }));
+  const bounded = retainRecentCompletePairs(normalized, {
+    maxBytes: contextLimits.providerConversationBytes,
+    contentKey: 'content',
+  });
+  bounded.push({ role: 'user', content: evidenceMessage(input.turnId, input.evidenceSnapshot, input.actionSnapshot) });
+  return bounded;
 }
 
 function buildRequest(config, input) {
@@ -98,16 +100,18 @@ function buildRequest(config, input) {
   }
 
   if (config.provider === 'azure-openai') {
+    const requestProfile = settings.requestProfile;
+    if (!['standard', 'reasoning'].includes(requestProfile)) throw providerError('PROVIDER_NOT_CONFIGURED');
     const url = `${safeBaseUrl(settings.endpoint)}/openai/deployments/${encodeURIComponent(settings.deployment)}/chat/completions?api-version=${encodeURIComponent(settings.apiVersion)}`;
     const body = {
       messages: [{ role: 'system', content: system }, ...messages],
-      max_completion_tokens: isDefaultTemperatureOnly(settings.deployment)
+      max_completion_tokens: requestProfile === 'reasoning'
         ? Math.max(maxOutputTokens, Number(settings.minCompletionTokens) || 1_600)
         : maxOutputTokens,
       response_format: { type: 'json_object' },
       stream: false,
     };
-    if (!isDefaultTemperatureOnly(settings.deployment)) body.temperature = 0.2;
+    if (requestProfile === 'standard') body.temperature = 0.2;
     return {
       url,
       headers: { 'api-key': settings.apiKey, 'Content-Type': 'application/json' },
@@ -258,6 +262,9 @@ export function createLlmProvider({
   const generate = async (input, options = {}) => {
     const request = buildRequest(config, input);
     const serializedBody = JSON.stringify(request.body);
+    if (Buffer.byteLength(serializedBody) > contextLimits.providerRequestBytes) {
+      throw providerError('PROVIDER_REQUEST_TOO_LARGE');
+    }
     const startedAt = now();
     const deadlineMs = Math.max(1, Number(options.totalDeadlineMs ?? totalDeadlineMs));
     const deadlineAt = startedAt + deadlineMs;
@@ -278,6 +285,7 @@ export function createLlmProvider({
             headers: request.headers,
             body: serializedBody,
             signal: controller.signal,
+            redirect: 'error',
           });
           if (controller.signal.aborted || now() >= deadlineAt) throw providerError('PROVIDER_TIMEOUT');
           const responseText = await readBoundedBody(response, controller.signal);
@@ -316,4 +324,6 @@ export const providerLimits = Object.freeze({
   responseBytes: MAX_RESPONSE_BYTES,
   deadlineMs: DEFAULT_DEADLINE_MS,
   retries: 1,
+  requestBytes: contextLimits.providerRequestBytes,
+  conversationBytes: contextLimits.providerConversationBytes,
 });

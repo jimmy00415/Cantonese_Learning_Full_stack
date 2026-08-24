@@ -10,7 +10,9 @@ import { loadConfig } from '../src/config.js';
 import { createEventStreamHandler, EventHub } from '../src/services/events.js';
 import { createDispatcher } from '../src/services/dispatcher.js';
 import { createTurnProcessor } from '../src/services/turn-processor.js';
+import { startServer } from '../src/server.js';
 import { AtomicFileStore } from '../src/stores/atomic-file-store.js';
+import * as storeContract from '../src/stores/store-contract.js';
 
 const ORIGIN = 'https://v1.example.test';
 
@@ -94,13 +96,59 @@ test('turn api context is turn-ordered and excludes later accepted input from an
   assert.deepEqual(contextOne.messages.map((message) => [message.role, message.text]), [['user', 'user one']]);
 
   await store.setTurnState({ turnId: first.turn.id, leaseToken: 'lease-a', state: 'retrieving', now: new Date(base + 1) });
-  await store.deliverAssistant({ turnId: first.turn.id, leaseToken: 'lease-a', message: finalMessage('assistant one'), now: new Date(base + 2) });
-  const claimedSecond = await store.claimNextTurn(lease('worker-b', 'lease-b', base + 3));
+  await store.setTurnState({ turnId: first.turn.id, leaseToken: 'lease-a', state: 'generating', now: new Date(base + 2) });
+  await store.deliverAssistant({ turnId: first.turn.id, leaseToken: 'lease-a', message: finalMessage('assistant one'), now: new Date(base + 3) });
+  const claimedSecond = await store.claimNextTurn(lease('worker-b', 'lease-b', base + 4));
   assert.equal(claimedSecond.id, second.turn.id);
   const contextTwo = await store.getTurnContext({ turnId: second.turn.id });
   assert.deepEqual(contextTwo.messages.map((message) => [message.role, message.text]), [
     ['user', 'user one'], ['assistant', 'assistant one'], ['user', 'user two'],
   ]);
+});
+
+test('turn api bounds history to the newest complete pairs while always retaining current inbound', async (t) => {
+  const { store } = await createStore(t);
+  const owner = await createOwnedConversation(store, 'budget');
+  const base = Date.parse('2026-08-25T00:01:00.000Z');
+  for (let index = 0; index < 14; index += 1) {
+    const accepted = await accept(
+      store,
+      owner,
+      `60000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      `history-user-${index}-${'用'.repeat(1_000)}`,
+      new Date(base + (index * 10)),
+    );
+    const claimed = await store.claimNextTurn(lease(`budget-worker-${index}`, `budget-token-${index}`, base + (index * 10) + 1));
+    assert.equal(claimed.id, accepted.turn.id);
+    await store.setTurnState({ turnId: claimed.id, leaseToken: `budget-token-${index}`, state: 'retrieving', now: new Date(base + (index * 10) + 2) });
+    await store.setTurnState({ turnId: claimed.id, leaseToken: `budget-token-${index}`, state: 'generating', now: new Date(base + (index * 10) + 3) });
+    await store.deliverAssistant({
+      turnId: claimed.id,
+      leaseToken: `budget-token-${index}`,
+      message: finalMessage(`history-assistant-${index}-${'答'.repeat(1_000)}`),
+      now: new Date(base + (index * 10) + 4),
+    });
+  }
+  const current = await accept(
+    store,
+    owner,
+    '69999999-9999-4999-8999-999999999999',
+    'CURRENT-INBOUND-MUST-REMAIN',
+    new Date(base + 200),
+  );
+  await store.claimNextTurn(lease('budget-current', 'budget-current-token', base + 201));
+  const context = await store.getTurnContext({ turnId: current.turn.id });
+  const normalized = context.messages.map((message) => ({ role: message.role, text: message.text }));
+  assert.equal(Number.isInteger(storeContract.contextLimits?.turnBytes), true);
+  assert.equal(Buffer.byteLength(JSON.stringify(normalized)) <= storeContract.contextLimits.turnBytes, true);
+  assert.equal(context.messages.at(-1).text, 'CURRENT-INBOUND-MUST-REMAIN');
+  assert.equal(context.messages.some((message) => message.text.startsWith('history-user-13-')), true);
+  assert.equal(context.messages.some((message) => message.text.startsWith('history-user-0-')), false);
+  assert.equal((context.messages.length - 1) % 2, 0);
+  for (let index = 0; index < context.messages.length - 1; index += 2) {
+    assert.equal(context.messages[index].role, 'user');
+    assert.equal(context.messages[index + 1].role, 'assistant');
+  }
 });
 
 test('turn api reclaims expired work, prevents stale fail/delivery, and preserves terminal failure after reload', async (t) => {
@@ -109,7 +157,8 @@ test('turn api reclaims expired work, prevents stale fail/delivery, and preserve
   const first = await accept(store, owner, '11111111-1111-4111-8111-111111111111', 'recover me', '2026-08-25T00:00:01.000Z');
   const base = Date.parse('2026-08-25T00:01:00.000Z');
   await store.claimNextTurn(lease('worker-a', 'expired-token', base, 10));
-  await store.setTurnState({ turnId: first.turn.id, leaseToken: 'expired-token', state: 'generating', now: new Date(base + 1) });
+  await store.setTurnState({ turnId: first.turn.id, leaseToken: 'expired-token', state: 'retrieving', now: new Date(base + 1) });
+  await store.setTurnState({ turnId: first.turn.id, leaseToken: 'expired-token', state: 'generating', now: new Date(base + 2) });
   const reclaimed = await store.claimNextTurn(lease('worker-b', 'fresh-token', base + 11));
   assert.equal(reclaimed.id, first.turn.id);
   assert.equal(reclaimed.attempt, 2);
@@ -162,6 +211,118 @@ test('turn api dispatcher polling finds persisted work without wake and racing d
   assert.equal(answerCalls, 1);
 });
 
+test('turn api one dispatcher progresses another conversation and stop aborts every active lane', async (t) => {
+  const { store } = await createStore(t);
+  const blockedOwner = await createOwnedConversation(store, 'blocked-lane');
+  const quickOwner = await createOwnedConversation(store, 'quick-lane');
+  await accept(store, blockedOwner, '71000000-0000-4000-8000-000000000000', 'blocked conversation A', '2026-08-25T00:00:01.000Z');
+  await accept(store, quickOwner, '72000000-0000-4000-8000-000000000000', 'quick conversation B', '2026-08-25T00:00:02.000Z');
+  let blockedStartedResolve;
+  const blockedStarted = new Promise((resolve) => { blockedStartedResolve = resolve; });
+  let releaseBlocked;
+  const blockedRelease = new Promise((resolve) => { releaseBlocked = resolve; });
+  let blockedAborted = false;
+  const answerService = {
+    async answer({ text, beforeProvider, signal }) {
+      await beforeProvider();
+      if (text.includes('blocked')) {
+        blockedStartedResolve();
+        await Promise.race([
+          blockedRelease,
+          new Promise((resolve) => signal.addEventListener('abort', () => { blockedAborted = true; resolve(); }, { once: true })),
+        ]);
+      }
+      return finalMessage(`reply to ${text}`);
+    },
+  };
+  const processor = createTurnProcessor({ store, answerService, eventHub: new EventHub() });
+  const dispatcher = createDispatcher({
+    store,
+    processTurn: processor.processTurn,
+    workerId: 'multi-lane',
+    concurrency: 2,
+    pollIntervalMs: 5,
+    leaseDurationMs: 1_000,
+    renewalIntervalMs: 100,
+  });
+  dispatcher.start();
+  t.after(async () => { releaseBlocked(); await dispatcher.stop(); });
+  await blockedStarted;
+  const deadline = Date.now() + 500;
+  let quickDelivered = false;
+  while (Date.now() < deadline) {
+    const messages = await store.listMessages({ sessionId: quickOwner.session.id, conversationId: quickOwner.conversation.id, after: 0 });
+    quickDelivered = messages.some((message) => message.role === 'assistant');
+    if (quickDelivered) break;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(quickDelivered, true);
+  await dispatcher.stop();
+  assert.equal(blockedAborted, true);
+});
+
+test('turn api dispatcher default concurrency is bounded at four independent turns', async (t) => {
+  const { store } = await createStore(t);
+  const owners = [];
+  for (let index = 0; index < 6; index += 1) {
+    const owner = await createOwnedConversation(store, `bounded-${index}`);
+    owners.push(owner);
+    await accept(
+      store,
+      owner,
+      `76000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      `bounded ${index}`,
+      new Date(Date.parse('2026-08-25T00:00:01.000Z') + index),
+    );
+  }
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let active = 0;
+  let maxActive = 0;
+  const startedSignals = new Set();
+  const answerService = {
+    async answer({ beforeProvider, signal }) {
+      await beforeProvider();
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      startedSignals.add(signal);
+      await gate;
+      active -= 1;
+      return finalMessage('bounded reply');
+    },
+  };
+  const processor = createTurnProcessor({ store, answerService, eventHub: new EventHub() });
+  const dispatcher = createDispatcher({
+    store,
+    processTurn: processor.processTurn,
+    workerId: 'default-bounded',
+    pollIntervalMs: 5,
+    leaseDurationMs: 1_000,
+    renewalIntervalMs: 100,
+  });
+  dispatcher.start();
+  t.after(async () => { release(); await dispatcher.stop(); });
+  const deadline = Date.now() + 500;
+  while (startedSignals.size < 4 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(startedSignals.size, 4);
+  assert.equal(maxActive, 4);
+  release();
+  const deliveredDeadline = Date.now() + 1_000;
+  let delivered = 0;
+  while (Date.now() < deliveredDeadline) {
+    delivered = 0;
+    for (const owner of owners) {
+      const messages = await store.listMessages({ sessionId: owner.session.id, conversationId: owner.conversation.id, after: 0 });
+      delivered += messages.filter((message) => message.role === 'assistant').length;
+    }
+    if (delivered === 6) break;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(delivered, 6);
+  await dispatcher.stop();
+});
+
 test('turn api processes two accepted messages in order and duplicate client IDs create one assistant reply', async (t) => {
   const { store } = await createStore(t);
   const owner = await createOwnedConversation(store);
@@ -207,7 +368,8 @@ test('turn api restart recovery can reclaim accepted, retrieving, and generating
   const retrieving = await store.claimNextTurn(lease('old-retrieving', 'old-r', base, 5));
   await store.setTurnState({ turnId: retrieving.id, leaseToken: 'old-r', state: 'retrieving', now: new Date(base + 1) });
   const generating = await store.claimNextTurn(lease('old-generating', 'old-g', base, 5));
-  await store.setTurnState({ turnId: generating.id, leaseToken: 'old-g', state: 'generating', now: new Date(base + 1) });
+  await store.setTurnState({ turnId: generating.id, leaseToken: 'old-g', state: 'retrieving', now: new Date(base + 1) });
+  await store.setTurnState({ turnId: generating.id, leaseToken: 'old-g', state: 'generating', now: new Date(base + 2) });
 
   const reclaimed = [];
   for (let index = 0; index < 3; index += 1) {
@@ -217,6 +379,107 @@ test('turn api restart recovery can reclaim accepted, retrieving, and generating
   assert.equal(reclaimed.filter((turn) => turn.attempt === 2).length, 2);
   assert.equal(reclaimed.filter((turn) => turn.attempt === 1).length, 1);
   assert.equal(await store.claimNextTurn(lease('extra', 'extra-token', base + 6)), null);
+});
+
+test('turn api recovery keeps durable state events monotonic and same-state transitions are no-change', async (t) => {
+  const { store } = await createStore(t);
+  const owner = await createOwnedConversation(store, 'monotonic');
+  const accepted = await accept(store, owner, '73000000-0000-4000-8000-000000000000', 'recover generating', '2026-08-25T00:00:01.000Z');
+  const base = Date.parse('2026-08-25T00:01:00.000Z');
+  await store.claimNextTurn(lease('old-worker', 'old-token', base, 10));
+  await assert.rejects(
+    store.setTurnState({ turnId: accepted.turn.id, leaseToken: 'old-token', state: 'generating', now: new Date(base + 1) }),
+    (error) => error.code === 'INVALID_TURN_TRANSITION',
+  );
+  const retrieving = await store.setTurnState({ turnId: accepted.turn.id, leaseToken: 'old-token', state: 'retrieving', now: new Date(base + 1) });
+  const duplicate = await store.setTurnState({ turnId: accepted.turn.id, leaseToken: 'old-token', state: 'retrieving', now: new Date(base + 2) });
+  assert.equal(retrieving.changed, true);
+  assert.equal(duplicate.changed, false);
+  assert.equal(duplicate.event, null);
+  await store.setTurnState({ turnId: accepted.turn.id, leaseToken: 'old-token', state: 'generating', now: new Date(base + 3) });
+  const duplicateGenerating = await store.setTurnState({ turnId: accepted.turn.id, leaseToken: 'old-token', state: 'generating', now: new Date(base + 3) });
+  assert.equal(duplicateGenerating.changed, false);
+  assert.equal(duplicateGenerating.event, null);
+  await assert.rejects(
+    store.setTurnState({ turnId: accepted.turn.id, leaseToken: 'old-token', state: 'retrieving', now: new Date(base + 4) }),
+    (error) => error.code === 'INVALID_TURN_TRANSITION',
+  );
+  const reclaimed = await store.claimNextTurn(lease('new-worker', 'new-token', base + 11));
+  assert.equal(reclaimed.state, 'generating');
+  const processor = createTurnProcessor({
+    store,
+    eventHub: new EventHub(),
+    answerService: {
+      async answer({ beforeProvider }) {
+        await beforeProvider();
+        return finalMessage('recovered once');
+      },
+    },
+    now: () => new Date(base + 12),
+  });
+  const result = await processor.processTurn({ turn: reclaimed, leaseToken: 'new-token', signal: new AbortController().signal });
+  assert.equal(result.delivered, true);
+  const events = await store.listEvents({ sessionId: owner.session.id, conversationId: owner.conversation.id, afterCursor: 0 });
+  assert.deepEqual(events.map((event) => [event.type, event.payloadJson.state ?? null]), [
+    ['message.accepted', null],
+    ['turn.state', 'retrieving'],
+    ['turn.state', 'generating'],
+    ['message.delivered', null],
+  ]);
+});
+
+test('turn api reclaimed retrieving resumes without duplicating its durable state event', async (t) => {
+  const { store } = await createStore(t);
+  const owner = await createOwnedConversation(store, 'reclaimed-retrieving');
+  const accepted = await accept(store, owner, '73100000-0000-4000-8000-000000000000', 'recover retrieving', '2026-08-25T00:00:01.000Z');
+  const base = Date.parse('2026-08-25T00:01:00.000Z');
+  await store.claimNextTurn(lease('retrieving-old', 'retrieving-old-token', base, 10));
+  await store.setTurnState({ turnId: accepted.turn.id, leaseToken: 'retrieving-old-token', state: 'retrieving', now: new Date(base + 1) });
+  const reclaimed = await store.claimNextTurn(lease('retrieving-new', 'retrieving-new-token', base + 11));
+  const processor = createTurnProcessor({
+    store,
+    eventHub: new EventHub(),
+    answerService: {
+      async answer({ beforeProvider }) {
+        await beforeProvider();
+        return finalMessage('retrieving recovered');
+      },
+    },
+    now: () => new Date(base + 12),
+  });
+  const result = await processor.processTurn({ turn: reclaimed, leaseToken: 'retrieving-new-token', signal: new AbortController().signal });
+  assert.equal(result.delivered, true);
+  const events = await store.listEvents({ sessionId: owner.session.id, conversationId: owner.conversation.id, afterCursor: 0 });
+  assert.deepEqual(events.map((event) => [event.type, event.payloadJson.state ?? null]), [
+    ['message.accepted', null],
+    ['turn.state', 'retrieving'],
+    ['turn.state', 'generating'],
+    ['message.delivered', null],
+  ]);
+});
+
+test('turn api persists generating once before delivering an answer that bypasses the provider callback', async (t) => {
+  const { store } = await createStore(t);
+  const owner = await createOwnedConversation(store, 'provider-bypass');
+  const accepted = await accept(store, owner, '77000000-0000-4000-8000-000000000000', 'local safety answer', '2026-08-25T00:00:01.000Z');
+  const base = Date.parse('2026-08-25T00:01:00.000Z');
+  const claimed = await store.claimNextTurn(lease('bypass-worker', 'bypass-token', base));
+  const processor = createTurnProcessor({
+    store,
+    eventHub: new EventHub(),
+    answerService: { async answer() { return finalMessage('local deterministic answer'); } },
+    now: () => new Date(base + 1),
+  });
+  const result = await processor.processTurn({ turn: claimed, leaseToken: 'bypass-token', signal: new AbortController().signal });
+  assert.equal(result.delivered, true);
+  const events = await store.listEvents({ sessionId: owner.session.id, conversationId: owner.conversation.id, afterCursor: 0 });
+  assert.deepEqual(events.map((event) => [event.type, event.payloadJson.state ?? null]), [
+    ['message.accepted', null],
+    ['turn.state', 'retrieving'],
+    ['turn.state', 'generating'],
+    ['message.delivered', null],
+  ]);
+  assert.equal(events.at(-1).turnId, accepted.turn.id);
 });
 
 test('turn api renewal loss aborts provider work and session deletion cannot be undone', async (t) => {
@@ -341,10 +604,11 @@ test('turn api SSE replays delivery and terminal failure with stable safe payloa
   const base = Date.now() + 100;
   await runtime.store.claimNextTurn(lease('delivery-worker', 'delivery-token', base));
   await runtime.store.setTurnState({ turnId: first.turn.id, leaseToken: 'delivery-token', state: 'retrieving', now: new Date(base + 1) });
-  await runtime.store.deliverAssistant({ turnId: first.turn.id, leaseToken: 'delivery-token', message: finalMessage(), now: new Date(base + 2) });
-  await runtime.store.claimNextTurn(lease('failure-worker', 'failure-token', base + 3));
-  await runtime.store.setTurnState({ turnId: second.turn.id, leaseToken: 'failure-token', state: 'retrieving', now: new Date(base + 4) });
-  await runtime.store.failTurn({ turnId: second.turn.id, leaseToken: 'failure-token', failureCode: 'PROVIDER_TIMEOUT', now: new Date(base + 5) });
+  await runtime.store.setTurnState({ turnId: first.turn.id, leaseToken: 'delivery-token', state: 'generating', now: new Date(base + 2) });
+  await runtime.store.deliverAssistant({ turnId: first.turn.id, leaseToken: 'delivery-token', message: finalMessage(), now: new Date(base + 3) });
+  await runtime.store.claimNextTurn(lease('failure-worker', 'failure-token', base + 4));
+  await runtime.store.setTurnState({ turnId: second.turn.id, leaseToken: 'failure-token', state: 'retrieving', now: new Date(base + 5) });
+  await runtime.store.failTurn({ turnId: second.turn.id, leaseToken: 'failure-token', failureCode: 'PROVIDER_TIMEOUT', now: new Date(base + 6) });
   const highWater = await runtime.store.getEventHighWater({ sessionId: runtime.owner.session.id, conversationId: runtime.owner.conversation.id });
   const response = await fetch(`${runtime.baseUrl}/api/v1/events?afterCursor=0`, { headers: { Cookie: runtime.cookie } });
   const stream = await collectSse(response, (text) => eventIds(text).includes(highWater));
@@ -458,4 +722,183 @@ test('turn api SSE closes for replay on socket backpressure and emits resync_req
   assert.ok(resync);
   assert.doesNotMatch(resync, /^id:/m);
   assert.equal(eventHub.listenerCount(owner.conversation.id), 0);
+});
+
+test('turn api SSE rejects empty, nonconsecutive, and duplicate durable pages without entering live mode', async () => {
+  const cases = [
+    ['empty page below high-water', []],
+    ['gap', [2, 3]],
+    ['duplicate', [1, 1, 2, 3]],
+  ];
+  for (const [name, cursors] of cases) {
+    const eventHub = new EventHub();
+    const owner = { session: { id: `session-${name}` }, conversation: { id: `conversation-${name}` } };
+    let pageCalls = 0;
+    const store = {
+      async getEventHighWater() { return 3; },
+      async listEventsPage() {
+        pageCalls += 1;
+        if (pageCalls > 1) return [];
+        return cursors.map((cursor) => ({ cursor, type: 'turn.state', payloadJson: { cursor } }));
+      },
+    };
+    const request = new EventEmitter();
+    request.query = { afterCursor: '0' };
+    request.get = () => undefined;
+    const response = new EventEmitter();
+    response.locals = { requestId: `request-${name}` };
+    response.writableEnded = false;
+    response.destroyed = false;
+    response.status = () => response;
+    response.set = () => response;
+    response.flushHeaders = () => {};
+    const writes = [];
+    response.write = (value) => { writes.push(value); return true; };
+    response.end = () => {
+      if (response.writableEnded) return;
+      response.writableEnded = true;
+      response.emit('close');
+    };
+    const handler = createEventStreamHandler({ store, eventHub, resolveSession: async () => owner, pageSize: 10, bufferSize: 10, heartbeatMs: 10 });
+    await handler(request, response);
+    const forcedClose = setTimeout(() => request.emit('close'), 60);
+    while (!response.writableEnded) await new Promise((resolve) => setTimeout(resolve, 5));
+    clearTimeout(forcedClose);
+    const rendered = writes.join('');
+    const resync = rendered.split('\n\n').find((block) => block.includes('resync_required'));
+    assert.ok(resync, name);
+    assert.doesNotMatch(resync, /^id:/m, name);
+    assert.equal(rendered.includes(': heartbeat'), false, name);
+    assert.equal(eventHub.listenerCount(owner.conversation.id), 0, name);
+  }
+});
+
+test('turn api SSE resyncs when query or Last-Event-ID is ahead of durable high-water', async () => {
+  const cases = [
+    ['query high-water plus one', { query: '4', header: undefined }],
+    ['Last-Event-ID far ahead', { query: '0', header: '999' }],
+  ];
+  for (const [name, cursor] of cases) {
+    const eventHub = new EventHub();
+    const owner = { session: { id: `session-${name}` }, conversation: { id: `conversation-${name}` } };
+    const store = {
+      async getEventHighWater() { return 3; },
+      async listEventsPage() { throw new Error('ahead cursor must fail before page drain'); },
+    };
+    const request = new EventEmitter();
+    request.query = { afterCursor: cursor.query };
+    request.get = (headerName) => (headerName === 'Last-Event-ID' ? cursor.header : undefined);
+    const response = new EventEmitter();
+    response.locals = { requestId: `request-${name}` };
+    response.writableEnded = false;
+    response.destroyed = false;
+    response.status = () => response;
+    response.set = () => response;
+    response.flushHeaders = () => {};
+    const writes = [];
+    response.write = (value) => { writes.push(value); return true; };
+    response.end = () => {
+      if (response.writableEnded) return;
+      response.writableEnded = true;
+      response.emit('close');
+    };
+    const handler = createEventStreamHandler({ store, eventHub, resolveSession: async () => owner, pageSize: 10, bufferSize: 10, heartbeatMs: 10 });
+    await handler(request, response);
+    const deadline = Date.now() + 80;
+    while (!response.writableEnded && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+    if (!response.writableEnded) request.emit('close');
+    const rendered = writes.join('');
+    const resync = rendered.split('\n\n').find((block) => block.includes('resync_required'));
+    assert.ok(resync, name);
+    assert.doesNotMatch(resync, /^id:/m, name);
+    assert.equal(rendered.includes(': heartbeat'), false, name);
+    assert.equal(response.writableEnded, true, name);
+    assert.equal(eventHub.listenerCount(owner.conversation.id), 0, name);
+  }
+});
+
+test('turn api real server shutdown is idempotent and closes SSE while aborting blocked provider work', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'hb-v1-shutdown-'));
+  const environment = {
+    NODE_ENV: 'test',
+    PORT: '0',
+    V1_PUBLIC_ORIGIN: ORIGIN,
+    V1_SESSION_SECRET: 's'.repeat(32),
+    V1_ATOMIC_FILE_PATH: join(directory, 'store.json'),
+    V1_LLM_PROVIDER: 'deterministic',
+    V1_SSE_HEARTBEAT_MS: '1000',
+  };
+  const previous = new Map(Object.keys(environment).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, environment);
+  let providerStartedResolve;
+  const providerStarted = new Promise((resolve) => { providerStartedResolve = resolve; });
+  let providerAborted = false;
+  const blockedProvider = {
+    provider: 'blocked-test-provider',
+    async generate({ signal }) {
+      providerStartedResolve();
+      await new Promise((resolve) => {
+        if (signal.aborted) { providerAborted = true; resolve(); return; }
+        signal.addEventListener('abort', () => { providerAborted = true; resolve(); }, { once: true });
+      });
+      throw Object.assign(new Error('aborted'), { code: 'PROVIDER_TIMEOUT' });
+    },
+  };
+  let server;
+  try {
+    server = await startServer({
+      environment,
+      port: 0,
+      host: '127.0.0.1',
+      llmProvider: blockedProvider,
+      now: () => new Date('2026-08-25T12:00:00+08:00'),
+      dispatcherOptions: { concurrency: 2, pollIntervalMs: 5, leaseDurationMs: 1_000, renewalIntervalMs: 100 },
+    });
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  t.after(async () => {
+    if (!server) return;
+    if (typeof server.shutdown === 'function') await server.shutdown();
+    else {
+      server.runtime?.eventHub.close();
+      await server.runtime?.dispatcher.stop();
+      server.closeAllConnections();
+      if (server.listening) await new Promise((resolve) => server.close(resolve));
+      await server.runtime?.store.close();
+    }
+  });
+
+  assert.equal(typeof server.shutdown, 'function');
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const createdResponse = await fetch(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: ORIGIN } });
+  const created = await createdResponse.json();
+  const cookie = createdResponse.headers.getSetCookie()[0].split(';')[0];
+  const eventsResponse = await fetch(`${baseUrl}/api/v1/events?afterCursor=0`, { headers: { Cookie: cookie } });
+  assert.equal(eventsResponse.status, 200);
+  assert.equal(server.runtime.eventHub.listenerCount(created.data.conversation.id), 1);
+  const acceptedResponse = await fetch(`${baseUrl}/api/v1/messages`, {
+    method: 'POST',
+    headers: { Origin: ORIGIN, Cookie: cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clientMessageId: '74000000-0000-4000-8000-000000000000', text: 'Duo 换手机怎么办' }),
+  });
+  assert.equal(acceptedResponse.status, 202);
+  await Promise.race([
+    providerStarted,
+    new Promise((resolve, reject) => setTimeout(() => reject(new Error('blocked provider did not start')), 1_000)),
+  ]);
+  const firstShutdown = server.shutdown();
+  const secondShutdown = server.shutdown();
+  assert.equal(firstShutdown, secondShutdown);
+  await Promise.race([
+    firstShutdown,
+    new Promise((resolve, reject) => setTimeout(() => reject(new Error('server shutdown timed out')), 1_000)),
+  ]);
+  assert.equal(providerAborted, true);
+  assert.equal(server.listening, false);
+  assert.equal(server.runtime.eventHub.listenerCount(created.data.conversation.id), 0);
+  await eventsResponse.body.cancel().catch(() => undefined);
 });

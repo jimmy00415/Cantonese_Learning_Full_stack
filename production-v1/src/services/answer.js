@@ -95,7 +95,61 @@ function corpusIndexes(corpus) {
   return { sources, claims, actions };
 }
 
-export function parseModelDraft(rawText, { retrieval, corpus }) {
+function asInstant(value) {
+  const instant = value instanceof Date ? value : new Date(value ?? Date.now());
+  if (Number.isNaN(instant.getTime())) throw new Error('answer clock returned an invalid instant');
+  return instant;
+}
+
+function groundingSnapshot(retrieval, corpus, instant) {
+  const { claims } = corpusIndexes(corpus);
+  const evidence = [];
+  for (const selected of retrieval.supportableClaims ?? []) {
+    const row = claims.get(selected.id);
+    if (!row || evaluateClaimFreshness(row.claim, instant) !== 'verified') continue;
+    evidence.push({
+      id: row.claim.id,
+      text: row.claim.text,
+      facts: row.claim.facts ?? null,
+      sourceId: row.source.id,
+      sourceTitle: row.source.title,
+      sourceLocator: row.claim.sourceLocator,
+      verifiedAt: row.claim.verifiedAt,
+      status: 'verified',
+    });
+    if (evidence.length === MAX_ID_ITEMS) break;
+  }
+  const eligibleSources = new Set(evidence.map((claim) => claim.sourceId));
+  const actions = [];
+  for (const source of corpus.sources ?? []) {
+    if (!eligibleSources.has(source.id)) continue;
+    for (const action of source.actions ?? []) {
+      actions.push({ id: action.id, sourceId: source.id, label: action.label });
+      if (actions.length === MAX_ID_ITEMS) break;
+    }
+    if (actions.length === MAX_ID_ITEMS) break;
+  }
+  return { evidence, actions };
+}
+
+function currentEvidenceRows(snapshot, corpus, instant) {
+  const { claims } = corpusIndexes(corpus);
+  const rows = [];
+  for (const selected of snapshot ?? []) {
+    const row = claims.get(selected.id);
+    if (!row || evaluateClaimFreshness(row.claim, instant) !== 'verified') continue;
+    rows.push(row);
+  }
+  return rows;
+}
+
+export function parseModelDraft(rawText, {
+  retrieval,
+  corpus,
+  evidenceSnapshot: capturedEvidence,
+  actionSnapshot = [],
+  now = new Date(),
+}) {
   const draft = extractOneObject(rawText);
   const keys = Object.keys(draft).sort();
   if (keys.length !== MODEL_DRAFT_KEYS.length || keys.some((key, index) => key !== MODEL_DRAFT_KEYS[index])) invalid();
@@ -105,11 +159,21 @@ export function parseModelDraft(rawText, { retrieval, corpus }) {
   const evidenceIds = validateIdArray(draft.evidenceIds);
   const actionIds = validateIdArray(draft.actionIds);
   const suggestedReplies = validateSuggestions(draft.suggestedReplies);
-  const supportable = new Set((retrieval.supportableClaims ?? []).filter((claim) => claim.status === 'verified').map((claim) => claim.id));
-  if (evidenceIds.some((id) => !supportable.has(id))) invalid();
-  const selectedSourceIds = new Set((retrieval.sources ?? []).map((source) => source.id));
-  const { actions } = corpusIndexes(corpus);
-  if (actionIds.some((id) => !actions.has(id) || !selectedSourceIds.has(actions.get(id).source.id))) invalid();
+  const instant = asInstant(now);
+  const evidenceReference = capturedEvidence ?? retrieval.supportableClaims ?? [];
+  const capturedEvidenceIds = new Set(evidenceReference.map((claim) => claim.id));
+  const { claims, actions } = corpusIndexes(corpus);
+  if (evidenceIds.some((id) => {
+    const row = claims.get(id);
+    return !capturedEvidenceIds.has(id) || !row || evaluateClaimFreshness(row.claim, instant) !== 'verified';
+  })) invalid();
+  const currentSourceIds = new Set(currentEvidenceRows(evidenceReference, corpus, instant).map((row) => row.source.id));
+  const capturedActions = new Map(actionSnapshot.map((action) => [action.id, action]));
+  if (actionIds.some((id) => {
+    const captured = capturedActions.get(id);
+    const row = actions.get(id);
+    return !captured || !row || captured.sourceId !== row.source.id || !currentSourceIds.has(row.source.id);
+  })) invalid();
   const groundingStatus = draft.groundingStatus === 'verified' && evidenceIds.length === 0 ? 'unverified' : draft.groundingStatus;
   return {
     replyText: draft.replyText.trim(),
@@ -166,8 +230,9 @@ function mapValidatedDraft(draft, corpus) {
   };
 }
 
-function groundedFallback(retrieval, corpus, language) {
-  const selected = (retrieval.supportableClaims ?? []).filter((claim) => claim.status === 'verified').slice(0, 3);
+function groundedFallback(retrieval, corpus, language, capturedEvidence, instant) {
+  const selected = currentEvidenceRows(capturedEvidence, corpus, instant).slice(0, 3).map((row) => row.claim);
+  if (selected.length === 0) return unverifiedAnswer(retrieval, corpus, language);
   const text = selected.map((claim) => claim.text?.[language] ?? claim.text?.en).filter(Boolean).join('\n\n');
   const draft = {
     replyText: text,
@@ -205,7 +270,8 @@ function unverifiedAnswer(retrieval, corpus, language) {
 function safetyAnswer(retrieval, corpus, language, now) {
   const { sources } = corpusIndexes(corpus);
   const source = sources.get('hkbu.eo.security');
-  const currentClaims = (source?.claims ?? []).filter((claim) => evaluateClaimFreshness(claim, now()) === 'verified');
+  const instant = asInstant(now());
+  const currentClaims = (source?.claims ?? []).filter((claim) => evaluateClaimFreshness(claim, instant) === 'verified');
   return {
     text: retrieval.guidance[language] ?? retrieval.guidance.en,
     citations: source ? currentClaims.map((claim) => sourceCitation(source, claim, 'verified')) : [],
@@ -226,19 +292,6 @@ function modelSystemPrompt() {
   ].join('\n');
 }
 
-function evidenceSnapshot(retrieval) {
-  return (retrieval.supportableClaims ?? []).slice(0, 8).map((claim) => ({
-    id: claim.id,
-    text: claim.text,
-    facts: claim.facts ?? null,
-    sourceId: claim.sourceId,
-    sourceTitle: claim.sourceTitle,
-    sourceLocator: claim.sourceLocator,
-    verifiedAt: claim.verifiedAt,
-    status: claim.status,
-  }));
-}
-
 export function createAnswerService({ corpus, retriever, llmProvider, now = () => new Date() } = {}) {
   if (!corpus?.sources || typeof retriever?.retrieve !== 'function' || typeof llmProvider?.generate !== 'function') {
     throw new Error('createAnswerService requires corpus, retriever, and llmProvider');
@@ -248,7 +301,8 @@ export function createAnswerService({ corpus, retriever, llmProvider, now = () =
     const retrieval = retriever.retrieve(text);
     const language = languageFor(text);
     if (retrieval.kind === 'emergency') return safetyAnswer(retrieval, corpus, language, now);
-    if ((retrieval.supportableClaims ?? []).length === 0) return unverifiedAnswer(retrieval, corpus, language);
+    const reference = groundingSnapshot(retrieval, corpus, asInstant(now()));
+    if (reference.evidence.length === 0) return unverifiedAnswer(retrieval, corpus, language);
 
     await beforeProvider();
     if (signal?.aborted) throw Object.assign(new Error('LEASE_LOST'), { code: 'LEASE_LOST' });
@@ -257,12 +311,19 @@ export function createAnswerService({ corpus, retriever, llmProvider, now = () =
         turnId,
         systemPrompt: modelSystemPrompt(),
         messages: context.map((message) => ({ role: message.role, content: message.text })),
-        evidenceSnapshot: evidenceSnapshot(retrieval),
+        evidenceSnapshot: reference.evidence,
+        actionSnapshot: reference.actions,
         maxOutputTokens: 1_200,
         signal,
       });
       if (signal?.aborted) throw Object.assign(new Error('LEASE_LOST'), { code: 'LEASE_LOST' });
-      const draft = parseModelDraft(providerResult.rawText, { retrieval, corpus });
+      const draft = parseModelDraft(providerResult.rawText, {
+        retrieval,
+        corpus,
+        evidenceSnapshot: reference.evidence,
+        actionSnapshot: reference.actions,
+        now: asInstant(now()),
+      });
       return {
         ...mapValidatedDraft(draft, corpus),
         provider: providerResult.provider,
@@ -270,7 +331,7 @@ export function createAnswerService({ corpus, retriever, llmProvider, now = () =
       };
     } catch (error) {
       if (signal?.aborted || error?.code === 'LEASE_LOST') throw error;
-      return groundedFallback(retrieval, corpus, language);
+      return groundedFallback(retrieval, corpus, language, reference.evidence, asInstant(now()));
     }
   }
 

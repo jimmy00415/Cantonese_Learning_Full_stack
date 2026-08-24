@@ -73,6 +73,7 @@ test('config requires every explicit selected LLM provider member', () => {
       values: {
         AZURE_OPENAI_KEY: 'key', AZURE_OPENAI_ENDPOINT: 'https://azure.example.test',
         AZURE_OPENAI_DEPLOYMENT: 'chat', AZURE_OPENAI_API_VERSION: '2024-10-21',
+        AZURE_OPENAI_REQUEST_PROFILE: 'standard',
       },
     },
     {
@@ -143,6 +144,7 @@ test('config requires the Azure deployment setting rather than a model alias', (
     AZURE_OPENAI_ENDPOINT: 'https://azure.example.test',
     AZURE_OPENAI_MODEL: 'not-a-deployment',
     AZURE_OPENAI_API_VERSION: '2024-10-21',
+    AZURE_OPENAI_REQUEST_PROFILE: 'standard',
   };
 
   assert.equal(loadConfig(azureModelOnly).llm.available, false);
@@ -153,9 +155,22 @@ test('config requires the Azure deployment setting rather than a model alias', (
       AZURE_OPENAI_ENDPOINT: 'https://azure.example.test',
       AZURE_OPENAI_MODEL: 'not-a-deployment',
       AZURE_OPENAI_API_VERSION: '2024-10-21',
+      AZURE_OPENAI_REQUEST_PROFILE: 'standard',
     })),
     /configured real LLM provider/,
   );
+});
+
+test('config fails closed when selected Azure lacks an explicit allowed request profile', () => {
+  const base = {
+    NODE_ENV: 'test', V1_LLM_PROVIDER: 'azure-openai',
+    V1_AZURE_OPENAI_KEY: 'key', V1_AZURE_OPENAI_ENDPOINT: 'https://azure.example.test',
+    V1_AZURE_OPENAI_DEPLOYMENT: 'neutral-slot', V1_AZURE_OPENAI_API_VERSION: '2024-10-21',
+  };
+  assert.equal(loadConfig(base).llm.available, false);
+  assert.equal(loadConfig({ ...base, V1_AZURE_OPENAI_REQUEST_PROFILE: 'standard' }).llm.available, true);
+  assert.equal(loadConfig({ ...base, V1_AZURE_OPENAI_REQUEST_PROFILE: 'reasoning' }).llm.available, true);
+  assert.throws(() => loadConfig({ ...base, V1_AZURE_OPENAI_REQUEST_PROFILE: 'auto' }), /REQUEST_PROFILE/);
 });
 
 test('config disables incomplete voice providers without disabling text', () => {

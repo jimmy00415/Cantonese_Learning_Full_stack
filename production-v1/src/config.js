@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { parse } from 'dotenv';
 
 const TRUE = 'true';
+const AZURE_REQUEST_PROFILES = new Set(['standard', 'reasoning']);
 
 function firstDefined(env, ...names) {
   for (const name of names) {
@@ -46,6 +47,7 @@ function selectedLlmSettings(env, provider) {
       endpoint: firstDefined(env, 'V1_AZURE_OPENAI_ENDPOINT', 'AZURE_OPENAI_ENDPOINT'),
       deployment: firstDefined(env, 'V1_AZURE_OPENAI_DEPLOYMENT', 'AZURE_OPENAI_DEPLOYMENT'),
       apiVersion: firstDefined(env, 'V1_AZURE_OPENAI_API_VERSION', 'AZURE_OPENAI_API_VERSION'),
+      requestProfile: firstDefined(env, 'V1_AZURE_OPENAI_REQUEST_PROFILE', 'AZURE_OPENAI_REQUEST_PROFILE')?.trim().toLowerCase(),
       minCompletionTokens: boundedInteger(firstDefined(env, 'V1_AZURE_OPENAI_MIN_COMPLETION_TOKENS', 'AZURE_OPENAI_MIN_COMPLETION_TOKENS'), 1600, 800, 6000),
     };
   }
@@ -62,7 +64,10 @@ function selectedLlmSettings(env, provider) {
 
 function configuredLlm(provider, settings) {
   if (provider === 'hkbu') return Boolean(settings.apiKey && settings.baseUrl && settings.model && settings.apiVersion);
-  if (provider === 'azure-openai') return Boolean(settings.apiKey && settings.endpoint && settings.deployment && settings.apiVersion);
+  if (provider === 'azure-openai') {
+    return Boolean(settings.apiKey && settings.endpoint && settings.deployment && settings.apiVersion
+      && AZURE_REQUEST_PROFILES.has(settings.requestProfile));
+  }
   if (provider === 'minimax') return Boolean(settings.apiKey && settings.baseUrl && settings.anthropicBaseUrl && settings.model);
   return provider === 'deterministic';
 }
@@ -147,6 +152,10 @@ export function loadConfig(environment = process.env) {
   const isProduction = nodeEnv === 'production';
   const llmProvider = asProvider(firstDefined(env, 'V1_LLM_PROVIDER', 'LLM_PROVIDER'), 'deterministic');
   const llmSettings = selectedLlmSettings(env, llmProvider);
+  if (llmProvider === 'azure-openai' && llmSettings.requestProfile
+    && !AZURE_REQUEST_PROFILES.has(llmSettings.requestProfile)) {
+    throw new Error('V1_AZURE_OPENAI_REQUEST_PROFILE must be standard or reasoning');
+  }
   const asrProvider = asProvider(firstDefined(env, 'V1_ASR_PROVIDER', 'ASR_PROVIDER'));
   const ttsProvider = asProvider(firstDefined(env, 'V1_TTS_PROVIDER', 'TTS_PROVIDER'));
   const trustedProxyValue = isProduction

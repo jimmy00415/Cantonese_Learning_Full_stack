@@ -15,10 +15,22 @@ export function createTurnProcessor({ store, answerService, eventHub, now = () =
 
   async function processTurn({ turn, leaseToken, signal }) {
     try {
-      const retrieving = await store.setTurnState({ turnId: turn.id, leaseToken, state: 'retrieving', now: now() });
-      publish(eventHub, retrieving);
+      let state = turn.state;
+      if (!['accepted', 'retrieving', 'generating'].includes(state)) {
+        throw Object.assign(new Error('LEASE_LOST'), { code: 'LEASE_LOST' });
+      }
+      const transition = async (nextState) => {
+        if (state === nextState) return;
+        const result = await store.setTurnState({ turnId: turn.id, leaseToken, state: nextState, now: now() });
+        publish(eventHub, result);
+        state = result.turn.state;
+      };
+      if (state === 'accepted') await transition('retrieving');
       const context = await store.getTurnContext({ turnId: turn.id });
       const current = context.messages.at(-1);
+      const ensureGenerating = async () => {
+        if (state === 'retrieving') await transition('generating');
+      };
       const answer = await answerService.answer({
         turnId: turn.id,
         text: current.text,
@@ -26,11 +38,11 @@ export function createTurnProcessor({ store, answerService, eventHub, now = () =
         signal,
         beforeProvider: async () => {
           if (signal?.aborted) throw Object.assign(new Error('LEASE_LOST'), { code: 'LEASE_LOST' });
-          const generating = await store.setTurnState({ turnId: turn.id, leaseToken, state: 'generating', now: now() });
-          publish(eventHub, generating);
+          await ensureGenerating();
         },
       });
       if (signal?.aborted) return { leaseLost: true };
+      await ensureGenerating();
       const delivered = await store.deliverAssistant({ turnId: turn.id, leaseToken, message: answer, now: now() });
       publish(eventHub, delivered);
       return { delivered: true, message: delivered.message };

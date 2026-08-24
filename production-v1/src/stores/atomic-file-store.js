@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
+import { contextLimits, retainRecentCompletePairs } from '../context-budget.js';
 import {
   SAFE_TURN_FAILURE_CODES,
   STORE_SCHEMA_VERSION,
@@ -11,6 +12,10 @@ import {
 } from './store-contract.js';
 
 const COLLECTIONS = ['sessions', 'conversations', 'messages', 'turns', 'events', 'mediaAssets', 'rateLimitBuckets', 'serviceState'];
+const NO_CHANGE = Symbol('atomic-store-no-change');
+const NONTERMINAL_TRANSITIONS = Object.freeze({ accepted: 'retrieving', retrieving: 'generating' });
+
+function noChange(value) { return { [NO_CHANGE]: true, value }; }
 
 function emptySnapshot() {
   return { schemaVersion: STORE_SCHEMA_VERSION, sessions: [], conversations: [], messages: [], turns: [], events: [], mediaAssets: [], rateLimitBuckets: [], serviceState: {} };
@@ -118,6 +123,7 @@ export class AtomicFileStore {
       if (!this.snapshot) throw new Error('AtomicFileStore.init() must finish before use');
       const draft = clone(this.snapshot);
       const result = await callback(draft);
+      if (result?.[NO_CHANGE]) return clone(result.value);
       validateSnapshot(draft);
       await this.#persist(draft);
       this.snapshot = draft;
@@ -311,7 +317,7 @@ export class AtomicFileStore {
         return leftCreated - rightCreated || inboundSequence(snapshot, left) - inboundSequence(snapshot, right) || left.id.localeCompare(right.id);
       });
       const turn = claimable[0];
-      if (!turn) return null;
+      if (!turn) return noChange(null);
       turn.workerId = workerId;
       turn.leaseToken = leaseToken;
       turn.leaseExpiresAt = new Date(leaseUntilMs).toISOString();
@@ -336,6 +342,10 @@ export class AtomicFileStore {
     return this.#mutate((snapshot) => {
       if (!TURN_STATES.has(state) || TURN_TERMINAL_STATES.has(state)) throw new Error('setTurnState requires a nonterminal state');
       const turn = this.#liveLease(snapshot, { turnId, leaseToken, now });
+      if (turn.state === state) return noChange({ turn, event: null, changed: false });
+      if (NONTERMINAL_TRANSITIONS[turn.state] !== state) {
+        throw storeError('INVALID_TURN_TRANSITION', 'The requested turn transition is not allowed.');
+      }
       turn.state = state;
       turn.failureCode = null;
       turn.updatedAt = nowIso(now);
@@ -343,7 +353,7 @@ export class AtomicFileStore {
         sessionId: turn.sessionId, conversationId: turn.conversationId, type: 'turn.state',
         turnId, payloadJson: { turnId, state }, now,
       });
-      return { turn, event };
+      return { turn, event, changed: true };
     });
   }
 
@@ -366,7 +376,8 @@ export class AtomicFileStore {
       const current = snapshot.messages.find((message) => message.id === turn.userMessageId);
       if (!current) throw new Error('Atomic store state is corrupt');
       messages.push(current);
-      return clone({ turn, messages });
+      const bounded = retainRecentCompletePairs(messages, { maxBytes: contextLimits.turnBytes, contentKey: 'text' });
+      return clone({ turn, messages: bounded });
     });
   }
 
@@ -395,6 +406,9 @@ export class AtomicFileStore {
   async deliverAssistant({ turnId, leaseToken, message, now }) {
     return this.#mutate((snapshot) => {
       const turn = this.#liveLease(snapshot, { turnId, leaseToken, now });
+      if (turn.state !== 'generating') {
+        throw storeError('INVALID_TURN_TRANSITION', 'Assistant delivery requires a generating turn.');
+      }
       if (snapshot.messages.some((item) => item.turnId === turnId && item.role === 'assistant')) {
         throw storeError('LEASE_LOST', 'The worker no longer owns this turn.');
       }
