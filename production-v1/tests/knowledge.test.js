@@ -75,7 +75,13 @@ test('knowledge corpus rejects incomplete evidence, invalid HKT windows, and fak
     [(claim) => { claim.reviewAttestation.captureMethod = ''; }, /captureMethod/],
     [(claim) => { claim.reviewAttestation.sourceHash = 'placeholder'; }, /SHA-256/],
     [(claim) => { claim.reviewAttestation.sourceHash = '0'.repeat(64); }, /SHA-256/],
+    [(claim) => { claim.reviewAttestation.sourceHash = '0123456789abcdef'.repeat(4); }, /SHA-256/],
+    [(claim) => {
+      claim.reviewAttestation.captureMethod = 'captured_fragment';
+      claim.reviewAttestation.sourceHash = 'abcdef0123456789'.repeat(4);
+    }, /captured_fragment.*unsupported|stored normalized fragment/i],
     [(claim) => { claim.verifiedAt = '2026-08-25T04:00:00Z'; }, /\+08:00/],
+    [(claim) => { claim.verifiedAt = '2026-02-30T12:00:00+08:00'; }, /valid calendar|valid instant/],
     [(claim) => { claim.reviewAfter = '2026-08-20T12:00:00+08:00'; }, /reviewAfter/],
     [(claim) => {
       claim.validFrom = '2026-09-02T00:00:00+08:00';
@@ -156,10 +162,60 @@ test('knowledge residence evidence keeps 2026 schedules separate from stale 2025
   const halls = retrieve('Student Residence Halls local freshman check-in 2026');
 
   for (const result of [village, halls]) {
-    assert.equal(result.supportableClaims.some((claim) => claim.facts.academicYear === '2026/27'), true);
+    assert.equal(result.supportableClaims.some((claim) => claim.facts.scheduleYear === 2026), true);
     assert.equal(result.supportableClaims.some((claim) => JSON.stringify(claim).includes('2025/26')), false);
     assert.equal(result.staleClaims.some((claim) => claim.status === 'conflicted'), true);
   }
+});
+
+test('knowledge corpus stores atomic current student-card and residence schedule rows', () => {
+  const nonJupas = retrieve('Non-JUPAS uploaded photo by 2 August 2026 student card collection');
+  const latePhoto = retrieve('student card photo uploaded by 23 August 2026 collection');
+  const villageFreshman = retrieve('Village CARE non-local freshman check-in 2026');
+  const villageExchange = retrieve('Village CARE exchange students check-in 2026');
+  const hallsLocal = retrieve('Student Residence Halls local freshman check-in 2026');
+
+  const nonJupasClaim = nonJupas.supportableClaims.find(
+    (claim) => claim.id === 'evidence.ar.student-card-collection.non-jupas-photo-by-2026-08-02',
+  );
+  assert.ok(nonJupasClaim);
+  assert.equal(nonJupasClaim.facts.photoUploadDeadline, '2026-08-02');
+  assert.deepEqual(nonJupasClaim.facts.collectionDates, ['2026-08-10', '2026-08-11', '2026-08-24']);
+  assert.equal(nonJupasClaim.facts.venuesByDate['2026-08-10'], 'WYS201 (Tsang Chan Sik Yue Auditorium)');
+  assert.equal(nonJupasClaim.facts.venuesByDate['2026-08-24'], 'WLB103/WLB104');
+
+  const latePhotoClaim = latePhoto.supportableClaims.find(
+    (claim) => claim.id === 'evidence.ar.student-card-collection.photo-by-2026-08-23',
+  );
+  assert.ok(latePhotoClaim);
+  assert.equal(latePhotoClaim.facts.collectionStarts, '2026-09-01');
+  assert.equal(latePhotoClaim.facts.venue, 'Academic Registry, SCE301');
+  assert.deepEqual(latePhotoClaim.facts.weekdayHours, ['09:00-12:45', '14:00-17:00']);
+
+  const villageFreshmanClaim = villageFreshman.supportableClaims.find(
+    (claim) => claim.id === 'evidence.sa.village-care-check-in.non-local-freshmen-2026',
+  );
+  assert.ok(villageFreshmanClaim);
+  assert.deepEqual(villageFreshmanClaim.facts.checkInDates, [
+    '2026-08-20', '2026-08-25', '2026-08-26', '2026-08-27',
+  ]);
+  assert.equal(villageFreshmanClaim.facts.officeVenue, 'Rooms 302-303, 3/F, JC3');
+
+  const villageExchangeClaim = villageExchange.supportableClaims.find(
+    (claim) => claim.id === 'evidence.sa.village-care-check-in.exchange-students-2026',
+  );
+  assert.ok(villageExchangeClaim);
+  assert.equal(villageExchangeClaim.facts.earliestCheckIn, '2026-08-25');
+  assert.deepEqual(villageExchangeClaim.facts.checkInDates, ['2026-08-25', '2026-08-26', '2026-08-27']);
+  assert.equal(villageExchangeClaim.facts.onOrAfterDate, '2026-08-28');
+
+  const hallsLocalClaim = hallsLocal.supportableClaims.find(
+    (claim) => claim.id === 'evidence.sa.residence-halls-check-in.local-freshmen-2026',
+  );
+  assert.ok(hallsLocalClaim);
+  assert.deepEqual(hallsLocalClaim.facts.checkInDates, ['2026-08-27']);
+  assert.equal(hallsLocalClaim.facts.officeVenue, 'Rev. James Mau Memorial Chapel G9');
+  assert.equal(hallsLocalClaim.facts.outsideOfficeHoursVenue, 'Security Counter, G/F, North Tower, Student Residence Halls');
 });
 
 test('knowledge retrieval asks for branch, cohort, or current special-hours detail instead of guessing', () => {
@@ -175,13 +231,69 @@ test('knowledge retrieval asks for branch, cohort, or current special-hours deta
   assert.ok(catering.ambiguityCodes.includes('CATERING_SPECIAL_HOURS_REQUIRED'));
 });
 
+test('knowledge retrieval gates sources, claims, and clarification by the matched route', () => {
+  const village = retrieve('Village CARE non-local freshman check-in 2026');
+  assert.deepEqual(village.sources.map((source) => source.id), ['hkbu.sa.village-care-check-in']);
+  assert.equal(village.supportableClaims.every(
+    (claim) => claim.sourceId === 'hkbu.sa.village-care-check-in',
+  ), true);
+
+  const genericHostel = retrieve('When can non-local freshmen check into the hostel?');
+  assert.equal(genericHostel.needsClarification, true);
+  assert.ok(genericHostel.ambiguityCodes.includes('RESIDENCE_TYPE_REQUIRED'));
+  assert.equal(genericHostel.supportableClaims.length, 0);
+
+  const card = retrieve('When can I collect my student card?');
+  assert.deepEqual(card.sources.map((source) => source.id), ['hkbu.ar.student-card-collection']);
+  assert.ok(card.ambiguityCodes.includes('STUDENT_CARD_ADMISSION_ROUTE_REQUIRED'));
+  assert.ok(card.ambiguityCodes.includes('STUDENT_CARD_PHOTO_UPLOAD_ROUTE_REQUIRED'));
+  assert.equal(card.supportableClaims.length, 0);
+  assert.equal(card.staleClaims.some((claim) => /replacement|e-card/.test(claim.id)), false);
+
+  const mainLibrary = retrieve('Main Library opening hours');
+  assert.deepEqual(mainLibrary.sources.map((source) => source.id), ['hkbu.library.hours']);
+  assert.equal(mainLibrary.supportableClaims.every((claim) => claim.facts.branch === 'Main Library'), true);
+  assert.equal(mainLibrary.supportableClaims.some((claim) => claim.id.startsWith('evidence.ar.')), false);
+
+  const canteen = retrieve('Main Canteen current hours today');
+  assert.ok(canteen.ambiguityCodes.includes('CATERING_SPECIAL_HOURS_REQUIRED'));
+  assert.equal(canteen.evidenceIds.includes('evidence.eo.dining.main-canteen.regular'), false);
+  assert.equal(canteen.evidenceIds.includes('evidence.eo.dining-overview.special-hours'), true);
+});
+
 test('knowledge retrieval normalizes bilingual aliases without Latin substring false positives', () => {
   assert.equal(normalizeKnowledgeQuery('  JC³\u200b， Room 201　'), 'jc3 room 201');
+  assert.equal(normalizeKnowledgeQuery('主\u2060馆　几点关门'), '主馆 几点关门');
   assert.equal(retrieve('JC3 Room 201 在哪').topSourceId, 'hkbu.eo.campus-map');
   assert.notEqual(retrieve('library').topSourceId, 'hkbu.ar.contact');
   assert.equal(retrieve('雙重認證換咗電話').topSourceId, 'hkbu.ito.duo');
   assert.equal(retrieve('双重认证换了手机').topSourceId, 'hkbu.ito.duo');
   assert.equal(retrieve('點樣搵學生事務處').topSourceId, 'hkbu.sa.contact');
+  assert.equal(retrieve('主馆几点关门').topSourceId, 'hkbu.library.hours');
+  assert.equal(retrieve('Village CARE exchange students check-in').topSourceId, 'hkbu.sa.village-care-check-in');
+});
+
+test('future-dated Main Library schedule activates with exact official hours', () => {
+  const august = retrieve('Main Library opening hours');
+  const futureInAugust = august.staleClaims.find(
+    (claim) => claim.id === 'evidence.library.main.from-september-2026',
+  );
+  assert.equal(futureInAugust.status, 'not_yet_valid');
+
+  const afterActivation = createRetriever({
+    corpus,
+    now: () => new Date('2026-09-02T12:00:00+08:00'),
+  }).retrieve('Main Library opening hours');
+  const active = afterActivation.supportableClaims.find(
+    (claim) => claim.id === 'evidence.library.main.from-september-2026',
+  );
+  assert.ok(active);
+  assert.equal(active.status, 'verified');
+  assert.deepEqual(
+    { weekday: active.facts.weekday, saturday: active.facts.saturday, sunday: active.facts.sunday },
+    { weekday: '08:30-23:00', saturday: '09:00-21:00', sunday: '13:00-19:00' },
+  );
+  assert.doesNotMatch(active.text.en, /future/i);
 });
 
 test('knowledge retrieval is stable for empty, long, punctuation, and emoji-only inputs', () => {
@@ -223,6 +335,14 @@ test('knowledge safety bypasses retrieval for immediate danger in English, Tradi
     ['Someone has a knife and is attacking people', 'violence'],
     ['有人持刀傷人', 'violence'],
     ['有人持刀伤人', 'violence'],
+    ['我而家想死', 'self_harm'],
+    ['朋友说不想活了', 'self_harm'],
+    ['我朋友話唔想再活', 'self_harm'],
+    ['有人拎刀要斬人', 'violence'],
+    ['有人拿刀要砍人', 'violence'],
+    ['而家已經流好多血，不用報警', 'injury'],
+    ['现在流很多血，不要报警', 'injury'],
+    ['我而家想\u2060死', 'self_harm'],
   ];
 
   for (const [input, category] of emergencies) {

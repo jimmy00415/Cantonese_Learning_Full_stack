@@ -8,9 +8,8 @@ const APPROVED_HOSTS = new Set([
   'sa.hkbu.edu.hk',
 ]);
 
-const HKT_RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?\+08:00$/;
+const HKT_RFC3339 = /^(?<year>\d{4})-(?<month>\d{2})-(?<day>\d{2})T(?<hour>\d{2}):(?<minute>\d{2}):(?<second>\d{2})(?:\.(?<millisecond>\d{1,3}))?\+08:00$/;
 const ID_PATTERN = /^[a-z][a-z0-9.-]+$/;
-const HASH_PATTERN = /^[a-f0-9]{64}$/;
 const VERIFICATION_STATUSES = new Set(['official_verified', 'conflicted', 'unverified']);
 const FORBIDDEN_DATA_KEYS = new Set(['apikey', 'password', 'passcode', 'secret', 'token']);
 const REQUIRED_INTENT_GROUPS = Object.freeze([
@@ -36,7 +35,20 @@ function assertId(id, field, seen) {
 function parseHktInstant(value, field, { nullable = false } = {}) {
   if (value === null && nullable) return null;
   requiredString(value, field);
-  if (!HKT_RFC3339.test(value)) throw new Error(`${field} must be RFC3339 with +08:00 semantics`);
+  const match = HKT_RFC3339.exec(value);
+  if (!match) throw new Error(`${field} must be RFC3339 with +08:00 semantics`);
+  const year = Number(match.groups.year);
+  const month = Number(match.groups.month);
+  const day = Number(match.groups.day);
+  const hour = Number(match.groups.hour);
+  const minute = Number(match.groups.minute);
+  const second = Number(match.groups.second);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (month < 1 || month > 12 || day < 1 || day > daysInMonth[month - 1]
+    || hour > 23 || minute > 59 || second > 59) {
+    throw new Error(`${field} is not a valid calendar instant`);
+  }
   const instant = new Date(value);
   if (Number.isNaN(instant.getTime())) throw new Error(`${field} is not a valid instant`);
   return instant;
@@ -90,19 +102,11 @@ function validateReviewAttestation(claim, field) {
     throw new Error(`${field} attestation locator must equal claim sourceLocator`);
   }
   requiredString(attestation.captureMethod, `${field}.reviewAttestation.captureMethod`);
-  if (!['manual_review', 'captured_fragment'].includes(attestation.captureMethod)) {
-    throw new Error(`${field}.reviewAttestation.captureMethod is unsupported`);
+  if (attestation.captureMethod !== 'manual_review') {
+    throw new Error(`${field}.reviewAttestation.captureMethod captured_fragment is unsupported until the stored normalized fragment can be recomputed`);
   }
-  if (attestation.sourceHash === null) {
-    if (attestation.captureMethod !== 'manual_review') {
-      throw new Error(`${field}.reviewAttestation.sourceHash is required for captured fragments`);
-    }
-    return;
-  }
-  if (typeof attestation.sourceHash !== 'string'
-    || !HASH_PATTERN.test(attestation.sourceHash)
-    || /^([a-f0-9])\1{63}$/.test(attestation.sourceHash)) {
-    throw new Error(`${field}.reviewAttestation.sourceHash must be a real-looking SHA-256`);
+  if (attestation.sourceHash !== null) {
+    throw new Error(`${field}.reviewAttestation.sourceHash must be null for manual_review; an arbitrary SHA-256 is not evidence`);
   }
 }
 

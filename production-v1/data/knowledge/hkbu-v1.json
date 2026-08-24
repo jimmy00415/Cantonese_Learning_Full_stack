@@ -23,26 +23,44 @@
         "sourceId": "hkbu.ar.student-card-collection",
         "label": {"en": "Open collection schedule", "zhHant": "查看領證時間表", "zhHans": "查看领证时间表"}
       }],
-      "claims": [{
-        "id": "evidence.ar.student-card-collection.2026-routes",
-        "text": {
-          "en": "The 2026 collection schedule is split by admission cohort and digital-photo upload date; use the row matching both rather than one blanket date.",
-          "zhHant": "2026 年領證時間按入學組別及電子相片上載日期分流，應同時核對兩項，不可套用單一日期。",
-          "zhHans": "2026 年领证时间按入学组别及电子照片上传日期分流，应同时核对两项，不可套用单一日期。"
+      "claims": [
+        {
+          "id": "evidence.ar.student-card-collection.non-jupas-photo-by-2026-08-02",
+          "text": {"en": "For Non-JUPAS students whose digital photo was uploaded by 2 August 2026, collection is on the assigned date and time in the New Student Briefing: 10 or 11 August at WYS201, or 24 August at WLB103/WLB104.", "zhHant": "Non-JUPAS 學生如在 2026 年 8 月 2 日前上載電子相片，須按新生簡介指定日期及時間領證：8 月 10 或 11 日於 WYS201，或 8 月 24 日於 WLB103/WLB104。", "zhHans": "Non-JUPAS 学生如在 2026 年 8 月 2 日前上传电子照片，须按新生简介指定日期及时间领证：8 月 10 或 11 日在 WYS201，或 8 月 24 日在 WLB103/WLB104。"},
+          "sourceId": "hkbu.ar.student-card-collection", "sourceLocator": "Student Card Collection Schedule table: Non-JUPAS / photo uploaded by 2 Aug 2026 row", "evidenceNote": "Reviewed the Non-JUPAS row, including its deadline, assigned-date rule, dates, and date-specific venues.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": "2026-08-02T00:00:00+08:00", "validUntil": "2026-09-30T23:59:59+08:00", "reviewAfter": "2026-08-28T23:59:59+08:00", "volatility": "daily", "verificationStatus": "official_verified",
+          "facts": {"academicYear": "2026/27", "route": "non_jupas_photo_by_2026_08_02", "admissionRoute": "Non-JUPAS", "photoUploadDeadline": "2026-08-02", "collectionDates": ["2026-08-10", "2026-08-11", "2026-08-24"], "assignmentSource": "New Student Briefing", "venuesByDate": {"2026-08-10": "WYS201 (Tsang Chan Sik Yue Auditorium)", "2026-08-11": "WYS201 (Tsang Chan Sik Yue Auditorium)", "2026-08-24": "WLB103/WLB104"}, "requirements": {"admissionRoute": true, "photoUploadRoute": true}},
+          "keywords": ["collection", "collect", "non jupas", "non-jupas", "uploaded by 2 august", "photo by 2 august", "2026-08-02", "領證", "领证"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Student Card Collection Schedule table: Non-JUPAS / photo uploaded by 2 Aug 2026 row", "captureMethod": "manual_review", "sourceHash": null}
         },
-        "sourceId": "hkbu.ar.student-card-collection",
-        "sourceLocator": "Student Card Collection Schedule table: Digital Photo Uploaded by / Collection Period / Venue",
-        "evidenceNote": "Reviewed table separates JUPAS and Non-JUPAS photo deadlines and later upload-date collection routes.",
-        "verifiedAt": "2026-08-25T12:00:00+08:00",
-        "validFrom": "2026-08-02T00:00:00+08:00",
-        "validUntil": "2026-09-30T23:59:59+08:00",
-        "reviewAfter": "2026-08-31T23:59:59+08:00",
-        "volatility": "weekly",
-        "verificationStatus": "official_verified",
-        "facts": {"academicYear": "2026/27", "requiresAdmissionCohort": true, "requiresPhotoUploadRoute": true},
-        "keywords": ["collect", "collection", "photo upload", "JUPAS", "Non-JUPAS", "領證", "领证"],
-        "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Student Card Collection Schedule table: Digital Photo Uploaded by / Collection Period / Venue", "captureMethod": "manual_review", "sourceHash": null}
-      }]
+        {
+          "id": "evidence.ar.student-card-collection.jupas-photo-by-2026-08-07-noon",
+          "text": {"en": "For JUPAS students whose digital photo was uploaded by 12:00 noon on 7 August 2026, collection is on the assigned date and time in the New Student Briefing: 10 or 11 August at WYS201, or 24 August at WLB103/WLB104.", "zhHant": "JUPAS 學生如在 2026 年 8 月 7 日中午 12 時前上載電子相片，須按新生簡介指定日期及時間領證：8 月 10 或 11 日於 WYS201，或 8 月 24 日於 WLB103/WLB104。", "zhHans": "JUPAS 学生如在 2026 年 8 月 7 日中午 12 时前上传电子照片，须按新生简介指定日期及时间领证：8 月 10 或 11 日在 WYS201，或 8 月 24 日在 WLB103/WLB104。"},
+          "sourceId": "hkbu.ar.student-card-collection", "sourceLocator": "Student Card Collection Schedule table: JUPAS / photo uploaded by 7 Aug 2026 12:00 noon row", "evidenceNote": "Reviewed the JUPAS row, including its noon deadline, assigned-date rule, dates, and date-specific venues.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": "2026-08-07T00:00:00+08:00", "validUntil": "2026-09-30T23:59:59+08:00", "reviewAfter": "2026-08-28T23:59:59+08:00", "volatility": "daily", "verificationStatus": "official_verified",
+          "facts": {"academicYear": "2026/27", "route": "jupas_photo_by_2026_08_07_noon", "admissionRoute": "JUPAS", "photoUploadDeadline": "2026-08-07T12:00:00+08:00", "collectionDates": ["2026-08-10", "2026-08-11", "2026-08-24"], "assignmentSource": "New Student Briefing", "venuesByDate": {"2026-08-10": "WYS201 (Tsang Chan Sik Yue Auditorium)", "2026-08-11": "WYS201 (Tsang Chan Sik Yue Auditorium)", "2026-08-24": "WLB103/WLB104"}, "requirements": {"admissionRoute": true, "photoUploadRoute": true}},
+          "keywords": ["collection", "collect", "jupas", "uploaded by 7 august", "photo by 7 august", "12 noon", "2026-08-07", "領證", "领证"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Student Card Collection Schedule table: JUPAS / photo uploaded by 7 Aug 2026 12:00 noon row", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.ar.student-card-collection.photo-by-2026-08-23",
+          "text": {"en": "For the route with a digital photo uploaded by 23 August 2026, collection starts 1 September 2026 at Academic Registry, SCE301, Monday-Friday except public holidays, 09:00-12:45 and 14:00-17:00.", "zhHant": "如屬 2026 年 8 月 23 日前上載電子相片的分流，可由 9 月 1 日起於教務處 SCE301 領證；星期一至五（公眾假期除外）09:00-12:45、14:00-17:00。", "zhHans": "如属 2026 年 8 月 23 日前上传电子照片的分流，可从 9 月 1 日起在教务处 SCE301 领证；周一至周五（公众假期除外）09:00-12:45、14:00-17:00。"},
+          "sourceId": "hkbu.ar.student-card-collection", "sourceLocator": "Student Card Collection Schedule table: photo uploaded by 23 Aug 2026 row", "evidenceNote": "Reviewed the 23 August upload row, including collection start, venue, weekdays, exclusions, and two service windows.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": "2026-08-23T00:00:00+08:00", "validUntil": "2026-09-30T23:59:59+08:00", "reviewAfter": "2026-08-28T23:59:59+08:00", "volatility": "daily", "verificationStatus": "official_verified",
+          "facts": {"academicYear": "2026/27", "route": "photo_by_2026_08_23", "photoUploadDeadline": "2026-08-23", "collectionStarts": "2026-09-01", "venue": "Academic Registry, SCE301", "weekdaysOnly": true, "publicHolidaysExcluded": true, "weekdayHours": ["09:00-12:45", "14:00-17:00"], "requirements": {"admissionRoute": false, "photoUploadRoute": true}},
+          "keywords": ["collection", "collect", "uploaded by 23 august", "photo by 23 august", "2026-08-23", "領證", "领证"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Student Card Collection Schedule table: photo uploaded by 23 Aug 2026 row", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.ar.student-card-collection.photo-by-2026-09-01",
+          "text": {"en": "For the route with a digital photo uploaded by 1 September 2026, collection starts 8 September 2026 at Academic Registry, SCE301, Monday-Friday except public holidays, 09:00-12:45 and 14:00-17:00.", "zhHant": "如屬 2026 年 9 月 1 日前上載電子相片的分流，可由 9 月 8 日起於教務處 SCE301 領證；星期一至五（公眾假期除外）09:00-12:45、14:00-17:00。", "zhHans": "如属 2026 年 9 月 1 日前上传电子照片的分流，可从 9 月 8 日起在教务处 SCE301 领证；周一至周五（公众假期除外）09:00-12:45、14:00-17:00。"},
+          "sourceId": "hkbu.ar.student-card-collection", "sourceLocator": "Student Card Collection Schedule table: photo uploaded by 1 Sep 2026 row", "evidenceNote": "Reviewed the 1 September upload row, including collection start, venue, weekdays, exclusions, and two service windows.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": "2026-08-23T00:00:00+08:00", "validUntil": "2026-09-30T23:59:59+08:00", "reviewAfter": "2026-08-28T23:59:59+08:00", "volatility": "daily", "verificationStatus": "official_verified",
+          "facts": {"academicYear": "2026/27", "route": "photo_by_2026_09_01", "photoUploadDeadline": "2026-09-01", "collectionStarts": "2026-09-08", "venue": "Academic Registry, SCE301", "weekdaysOnly": true, "publicHolidaysExcluded": true, "weekdayHours": ["09:00-12:45", "14:00-17:00"], "requirements": {"admissionRoute": false, "photoUploadRoute": true}},
+          "keywords": ["collection", "collect", "uploaded by 1 september", "photo by 1 september", "2026-09-01", "領證", "领证"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Student Card Collection Schedule table: photo uploaded by 1 Sep 2026 row", "captureMethod": "manual_review", "sourceHash": null}
+        }
+      ]
     },
     {
       "id": "hkbu.ar.student-e-card",
@@ -197,14 +215,48 @@
       "verifiedAt": "2026-08-25T12:00:00+08:00",
       "risk": "time_sensitive",
       "intentGroups": ["residence_check_in"],
-      "tags": ["Village CARE", "check-in", "non-local freshman", "local freshman", "exchange student", "JC3"],
+      "tags": ["Village CARE", "check-in", "non-local freshman", "local freshman", "exchange student", "exchange students", "JC3"],
       "exampleQuestions": ["Village CARE check-in 2026", "Village CARE 入住", "Village CARE 入住时间"],
       "claims": [
         {
-          "id": "evidence.sa.village-care-check-in.2026-cohorts", "text": {"en": "Village CARE's 2026/27 check-in table has different dates and locations for non-local freshmen, research postgraduates, exchange, returning, and local freshmen; confirm the student's cohort before giving a schedule.", "zhHant": "Village CARE 2026/27 入住表按非本地新生、研究生、交換生、舊生及本地新生分列日期與地點，回答前必須確認組別。", "zhHans": "Village CARE 2026/27 入住表按非本地新生、研究生、交换生、旧生及本地新生分列日期与地点，回答前必须确认组别。"},
-          "sourceId": "hkbu.sa.village-care-check-in", "sourceLocator": "Check-in Date and Time: 2026 cohort table", "evidenceNote": "Reviewed the current cohort schedule table independently from the separate reminder section lower on the page.",
-          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": "2026-08-20T00:00:00+08:00", "validUntil": "2026-09-30T23:59:59+08:00", "reviewAfter": "2026-08-28T23:59:59+08:00", "volatility": "daily", "verificationStatus": "official_verified", "facts": {"academicYear": "2026/27", "requiresCohort": true, "tentative": true}, "keywords": ["2026", "non local freshman", "local freshman", "exchange", "returning", "research postgraduate", "入住"],
-          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Check-in Date and Time: 2026 cohort table", "captureMethod": "manual_review", "sourceHash": null}
+          "id": "evidence.sa.village-care-check-in.non-local-freshmen-2026", "text": {"en": "Village CARE's tentative non-local freshmen schedule allows earliest check-in on 20 August 2026, with listed check-in dates 20 and 25-27 August. The staffed counter is Rooms 302-303, 3/F, JC3, 10:00-13:00 and 14:00-17:00; outside those hours use the Village CARE security counters.", "zhHant": "Village CARE 非本地新生暫定最早可於 2026 年 8 月 20 日入住，表列日期為 8 月 20、25 至 27 日。辦公櫃位在 JC3 三樓 302-303 室，10:00-13:00、14:00-17:00；辦公時間外使用 Village CARE 保安櫃位。", "zhHans": "Village CARE 非本地新生暂定最早可于 2026 年 8 月 20 日入住，表列日期为 8 月 20、25 至 27 日。办公柜台在 JC3 三楼 302-303 室，10:00-13:00、14:00-17:00；办公时间外使用 Village CARE 保安柜台。"},
+          "sourceId": "hkbu.sa.village-care-check-in", "sourceLocator": "Check-in Date and Time table: Non-local Freshmen row", "evidenceNote": "Reviewed the current non-local freshmen table row only; dates are marked tentative and sibling reminder text was excluded.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": "2026-08-20T00:00:00+08:00", "validUntil": "2026-09-30T23:59:59+08:00", "reviewAfter": "2026-08-28T23:59:59+08:00", "volatility": "daily", "verificationStatus": "official_verified",
+          "facts": {"scheduleYear": 2026, "residenceType": "village_care", "cohort": "non_local_freshmen", "tentative": true, "earliestCheckIn": "2026-08-20", "checkInDates": ["2026-08-20", "2026-08-25", "2026-08-26", "2026-08-27"], "officeVenue": "Rooms 302-303, 3/F, JC3", "officeHours": ["10:00-13:00", "14:00-17:00"], "outsideOfficeHoursVenue": "Security Counter, 3/F, College 1 and College 3, Village CARE", "otherDatesVenue": "ACCM General Office, Room 201, 2/F, JC3", "otherDatesHours": ["09:00-13:00", "14:00-17:30"]},
+          "keywords": ["2026", "non local freshman", "non local freshmen", "non-local freshman", "非本地新生", "入住"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Check-in Date and Time table: Non-local Freshmen row", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.sa.village-care-check-in.new-rpg-2026", "text": {"en": "Village CARE's tentative new research postgraduate schedule has earliest check-in on 22 August 2026: 22-23 August at the security counter, and 25-27 August at Rooms 302-303, 3/F, JC3 during 10:00-13:00 and 14:00-17:00.", "zhHant": "Village CARE 新研究式研究生暫定最早於 2026 年 8 月 22 日入住：8 月 22 至 23 日到保安櫃位，8 月 25 至 27 日於 JC3 三樓 302-303 室辦理，時間為 10:00-13:00、14:00-17:00。", "zhHans": "Village CARE 新研究式研究生暂定最早于 2026 年 8 月 22 日入住：8 月 22 至 23 日到保安柜台，8 月 25 至 27 日在 JC3 三楼 302-303 室办理，时间为 10:00-13:00、14:00-17:00。"},
+          "sourceId": "hkbu.sa.village-care-check-in", "sourceLocator": "Check-in Date and Time table: New Research Postgraduate Students row", "evidenceNote": "Reviewed the current new-RPG row and separated security-only dates from staffed-office dates.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": "2026-08-20T00:00:00+08:00", "validUntil": "2026-09-30T23:59:59+08:00", "reviewAfter": "2026-08-28T23:59:59+08:00", "volatility": "daily", "verificationStatus": "official_verified",
+          "facts": {"scheduleYear": 2026, "residenceType": "village_care", "cohort": "new_research_postgraduates", "tentative": true, "earliestCheckIn": "2026-08-22", "securityOnlyDates": ["2026-08-22", "2026-08-23"], "checkInDates": ["2026-08-25", "2026-08-26", "2026-08-27"], "officeVenue": "Rooms 302-303, 3/F, JC3", "officeHours": ["10:00-13:00", "14:00-17:00"], "outsideOfficeHoursVenue": "Security Counter, 3/F, College 1 and College 3, Village CARE", "otherDatesVenue": "ACCM General Office, Room 201, 2/F, JC3", "otherDatesHours": ["09:00-13:00", "14:00-17:30"]},
+          "keywords": ["2026", "research postgraduate", "research postgraduates", "new rpg", "rpg", "研究生", "入住"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Check-in Date and Time table: New Research Postgraduate Students row", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.sa.village-care-check-in.exchange-students-2026", "text": {"en": "Village CARE's tentative Fall exchange-student schedule has earliest check-in on 25 August 2026, with staffed check-in on 25-27 August at Rooms 302-303, 3/F, JC3, 10:00-13:00 and 14:00-17:00. From 28 August, use the ACCM General Office at Room 201, 2/F, JC3 during its listed hours.", "zhHant": "Village CARE 秋季交換生暫定最早於 2026 年 8 月 25 日入住；8 月 25 至 27 日在 JC3 三樓 302-303 室辦理，時間為 10:00-13:00、14:00-17:00。8 月 28 日起改到 JC3 二樓 201 室 ACCM 總辦事處。", "zhHans": "Village CARE 秋季交换生暂定最早于 2026 年 8 月 25 日入住；8 月 25 至 27 日在 JC3 三楼 302-303 室办理，时间为 10:00-13:00、14:00-17:00。8 月 28 日起改到 JC3 二楼 201 室 ACCM 总办公室。"},
+          "sourceId": "hkbu.sa.village-care-check-in", "sourceLocator": "Check-in Date and Time table: Exchange Students (Fall Semester) row", "evidenceNote": "Reviewed the current Fall exchange row, including the 28 August venue transition.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": "2026-08-20T00:00:00+08:00", "validUntil": "2026-09-30T23:59:59+08:00", "reviewAfter": "2026-08-28T23:59:59+08:00", "volatility": "daily", "verificationStatus": "official_verified",
+          "facts": {"scheduleYear": 2026, "residenceType": "village_care", "cohort": "exchange_students_fall", "tentative": true, "earliestCheckIn": "2026-08-25", "checkInDates": ["2026-08-25", "2026-08-26", "2026-08-27"], "officeVenue": "Rooms 302-303, 3/F, JC3", "officeHours": ["10:00-13:00", "14:00-17:00"], "outsideOfficeHoursVenue": "Security Counter, 3/F, College 1 and College 3, Village CARE", "onOrAfterDate": "2026-08-28", "laterVenue": "ACCM General Office, Room 201, 2/F, JC3", "laterHours": ["09:00-13:00", "14:00-17:30"]},
+          "keywords": ["2026", "exchange student", "exchange students", "fall exchange", "交換生", "交换生", "入住"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Check-in Date and Time table: Exchange Students (Fall Semester) row", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.sa.village-care-check-in.returning-students-2026", "text": {"en": "Village CARE's tentative returning-student schedule has earliest and staffed check-in on 26-27 August 2026 at Rooms 302-303, 3/F, JC3, 10:00-13:00 and 14:00-17:00. From 28 August, use the ACCM General Office at Room 201, 2/F, JC3.", "zhHant": "Village CARE 舊生暫定最早及表列辦理日期為 2026 年 8 月 26 至 27 日，地點為 JC3 三樓 302-303 室，時間 10:00-13:00、14:00-17:00。8 月 28 日起改到 JC3 二樓 201 室 ACCM 總辦事處。", "zhHans": "Village CARE 旧生暂定最早及表列办理日期为 2026 年 8 月 26 至 27 日，地点为 JC3 三楼 302-303 室，时间 10:00-13:00、14:00-17:00。8 月 28 日起改到 JC3 二楼 201 室 ACCM 总办公室。"},
+          "sourceId": "hkbu.sa.village-care-check-in", "sourceLocator": "Check-in Date and Time table: Returning Students row", "evidenceNote": "Reviewed the current returning-student row and its 28 August venue transition.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": "2026-08-20T00:00:00+08:00", "validUntil": "2026-09-30T23:59:59+08:00", "reviewAfter": "2026-08-28T23:59:59+08:00", "volatility": "daily", "verificationStatus": "official_verified",
+          "facts": {"scheduleYear": 2026, "residenceType": "village_care", "cohort": "returning_students", "tentative": true, "earliestCheckIn": "2026-08-26", "checkInDates": ["2026-08-26", "2026-08-27"], "officeVenue": "Rooms 302-303, 3/F, JC3", "officeHours": ["10:00-13:00", "14:00-17:00"], "outsideOfficeHoursVenue": "Security Counter, 3/F, College 1 and College 3, Village CARE", "onOrAfterDate": "2026-08-28", "laterVenue": "ACCM General Office, Room 201, 2/F, JC3", "laterHours": ["09:00-13:00", "14:00-17:30"]},
+          "keywords": ["2026", "returning student", "returning students", "舊生", "旧生", "入住"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Check-in Date and Time table: Returning Students row", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.sa.village-care-check-in.local-freshmen-2026", "text": {"en": "Village CARE's tentative local-freshmen schedule has earliest and staffed check-in on 27 August 2026 at Rooms 302-303, 3/F, JC3, 10:00-13:00 and 14:00-17:00. From 28 August, use the ACCM General Office at Room 201, 2/F, JC3.", "zhHant": "Village CARE 本地新生暫定最早及表列辦理日期為 2026 年 8 月 27 日，地點為 JC3 三樓 302-303 室，時間 10:00-13:00、14:00-17:00。8 月 28 日起改到 JC3 二樓 201 室 ACCM 總辦事處。", "zhHans": "Village CARE 本地新生暂定最早及表列办理日期为 2026 年 8 月 27 日，地点为 JC3 三楼 302-303 室，时间 10:00-13:00、14:00-17:00。8 月 28 日起改到 JC3 二楼 201 室 ACCM 总办公室。"},
+          "sourceId": "hkbu.sa.village-care-check-in", "sourceLocator": "Check-in Date and Time table: Local Freshmen row", "evidenceNote": "Reviewed the current local-freshmen row and its 28 August venue transition.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": "2026-08-20T00:00:00+08:00", "validUntil": "2026-09-30T23:59:59+08:00", "reviewAfter": "2026-08-28T23:59:59+08:00", "volatility": "daily", "verificationStatus": "official_verified",
+          "facts": {"scheduleYear": 2026, "residenceType": "village_care", "cohort": "local_freshmen", "tentative": true, "earliestCheckIn": "2026-08-27", "checkInDates": ["2026-08-27"], "officeVenue": "Rooms 302-303, 3/F, JC3", "officeHours": ["10:00-13:00", "14:00-17:00"], "outsideOfficeHoursVenue": "Security Counter, 3/F, College 1 and College 3, Village CARE", "onOrAfterDate": "2026-08-28", "laterVenue": "ACCM General Office, Room 201, 2/F, JC3", "laterHours": ["09:00-13:00", "14:00-17:30"]},
+          "keywords": ["2026", "local freshman", "local freshmen", "本地新生", "入住"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Check-in Date and Time table: Local Freshmen row", "captureMethod": "manual_review", "sourceHash": null}
         },
         {
           "id": "evidence.sa.village-care-check-in.stale-reminder-2025", "text": {"en": "The page still contains a 2025/26 welcome reminder; it is conflicted for 2026/27 schedule answers and cannot support them.", "zhHant": "頁面仍含 2025/26 歡迎提示，與 2026/27 時間表衝突，不可用作現學年依據。", "zhHans": "页面仍含 2025/26 欢迎提示，与 2026/27 时间表冲突，不可用作现学年依据。"},
@@ -226,10 +278,28 @@
       "exampleQuestions": ["Residence Halls check-in 2026", "學生宿舍入住", "学生宿舍入住"],
       "claims": [
         {
-          "id": "evidence.sa.residence-halls-check-in.2026-cohorts", "text": {"en": "The Student Residence Halls 2026/27 check-in table separates non-local freshmen, returning students, and local freshmen; confirm the cohort before giving a date or counter.", "zhHant": "學生宿舍 2026/27 入住表分開非本地新生、舊生及本地新生，提供日期或櫃位前必須確認組別。", "zhHans": "学生宿舍 2026/27 入住表分开非本地新生、旧生及本地新生，提供日期或柜台前必须确认组别。"},
-          "sourceId": "hkbu.sa.residence-halls-check-in", "sourceLocator": "Check-in Date and Time: 2026 cohort table", "evidenceNote": "Reviewed the current cohort schedule table separately from the reminder section.",
-          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": "2026-08-20T00:00:00+08:00", "validUntil": "2026-09-30T23:59:59+08:00", "reviewAfter": "2026-08-28T23:59:59+08:00", "volatility": "daily", "verificationStatus": "official_verified", "facts": {"academicYear": "2026/27", "requiresCohort": true, "tentative": true}, "keywords": ["2026", "non local freshman", "local freshman", "returning", "入住"],
-          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Check-in Date and Time: 2026 cohort table", "captureMethod": "manual_review", "sourceHash": null}
+          "id": "evidence.sa.residence-halls-check-in.non-local-freshmen-2026", "text": {"en": "The Student Residence Halls' tentative non-local freshmen schedule allows earliest check-in on 20 August 2026, with listed dates 20 and 25-27 August. The staffed counter is Rev. James Mau Memorial Chapel G9, opposite the North Tower entrance, 10:00-13:00 and 14:00-17:00; outside those hours use the North Tower security counter.", "zhHant": "學生宿舍非本地新生暫定最早可於 2026 年 8 月 20 日入住，表列日期為 8 月 20、25 至 27 日。辦公櫃位在北座入口對面的 Rev. James Mau Memorial Chapel G9，時間 10:00-13:00、14:00-17:00；辦公時間外使用北座地下保安櫃位。", "zhHans": "学生宿舍非本地新生暂定最早可于 2026 年 8 月 20 日入住，表列日期为 8 月 20、25 至 27 日。办公柜台在北座入口对面的 Rev. James Mau Memorial Chapel G9，时间 10:00-13:00、14:00-17:00；办公时间外使用北座地下保安柜台。"},
+          "sourceId": "hkbu.sa.residence-halls-check-in", "sourceLocator": "Check-in Date and Time table: Non-local Freshmen row", "evidenceNote": "Reviewed the current non-local freshmen table row only; tentative dates were kept separate from sibling reminder text.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": "2026-08-20T00:00:00+08:00", "validUntil": "2026-09-30T23:59:59+08:00", "reviewAfter": "2026-08-28T23:59:59+08:00", "volatility": "daily", "verificationStatus": "official_verified",
+          "facts": {"scheduleYear": 2026, "residenceType": "student_residence_halls", "cohort": "non_local_freshmen", "tentative": true, "earliestCheckIn": "2026-08-20", "checkInDates": ["2026-08-20", "2026-08-25", "2026-08-26", "2026-08-27"], "officeVenue": "Rev. James Mau Memorial Chapel G9", "officeVenueNote": "Opposite the North Tower entrance", "officeHours": ["10:00-13:00", "14:00-17:00"], "outsideOfficeHoursVenue": "Security Counter, G/F, North Tower, Student Residence Halls", "otherDatesVenue": "ACCM General Office, Room 201, 2/F, JC3", "otherDatesHours": ["09:00-13:00", "14:00-17:30"]},
+          "keywords": ["2026", "non local freshman", "non local freshmen", "non-local freshman", "非本地新生", "入住"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Check-in Date and Time table: Non-local Freshmen row", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.sa.residence-halls-check-in.returning-students-2026", "text": {"en": "The Student Residence Halls' tentative returning-student schedule has earliest and staffed check-in on 26-27 August 2026 at Rev. James Mau Memorial Chapel G9, 10:00-13:00 and 14:00-17:00. From 28 August, use the ACCM General Office at Room 201, 2/F, JC3.", "zhHant": "學生宿舍舊生暫定最早及表列辦理日期為 2026 年 8 月 26 至 27 日，地點為 Rev. James Mau Memorial Chapel G9，時間 10:00-13:00、14:00-17:00。8 月 28 日起改到 JC3 二樓 201 室 ACCM 總辦事處。", "zhHans": "学生宿舍旧生暂定最早及表列办理日期为 2026 年 8 月 26 至 27 日，地点为 Rev. James Mau Memorial Chapel G9，时间 10:00-13:00、14:00-17:00。8 月 28 日起改到 JC3 二楼 201 室 ACCM 总办公室。"},
+          "sourceId": "hkbu.sa.residence-halls-check-in", "sourceLocator": "Check-in Date and Time table: Returning Students row", "evidenceNote": "Reviewed the current returning-student row and its 28 August venue transition.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": "2026-08-20T00:00:00+08:00", "validUntil": "2026-09-30T23:59:59+08:00", "reviewAfter": "2026-08-28T23:59:59+08:00", "volatility": "daily", "verificationStatus": "official_verified",
+          "facts": {"scheduleYear": 2026, "residenceType": "student_residence_halls", "cohort": "returning_students", "tentative": true, "earliestCheckIn": "2026-08-26", "checkInDates": ["2026-08-26", "2026-08-27"], "officeVenue": "Rev. James Mau Memorial Chapel G9", "officeVenueNote": "Opposite the North Tower entrance", "officeHours": ["10:00-13:00", "14:00-17:00"], "outsideOfficeHoursVenue": "Security Counter, G/F, North Tower, Student Residence Halls", "onOrAfterDate": "2026-08-28", "laterVenue": "ACCM General Office, Room 201, 2/F, JC3", "laterHours": ["09:00-13:00", "14:00-17:30"]},
+          "keywords": ["2026", "returning student", "returning students", "舊生", "旧生", "入住"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Check-in Date and Time table: Returning Students row", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.sa.residence-halls-check-in.local-freshmen-2026", "text": {"en": "The Student Residence Halls' tentative local-freshmen schedule has earliest and staffed check-in on 27 August 2026 at Rev. James Mau Memorial Chapel G9, 10:00-13:00 and 14:00-17:00. From 28 August, use the ACCM General Office at Room 201, 2/F, JC3.", "zhHant": "學生宿舍本地新生暫定最早及表列辦理日期為 2026 年 8 月 27 日，地點為 Rev. James Mau Memorial Chapel G9，時間 10:00-13:00、14:00-17:00。8 月 28 日起改到 JC3 二樓 201 室 ACCM 總辦事處。", "zhHans": "学生宿舍本地新生暂定最早及表列办理日期为 2026 年 8 月 27 日，地点为 Rev. James Mau Memorial Chapel G9，时间 10:00-13:00、14:00-17:00。8 月 28 日起改到 JC3 二楼 201 室 ACCM 总办公室。"},
+          "sourceId": "hkbu.sa.residence-halls-check-in", "sourceLocator": "Check-in Date and Time table: Local Freshmen row", "evidenceNote": "Reviewed the current local-freshmen row and its 28 August venue transition.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": "2026-08-20T00:00:00+08:00", "validUntil": "2026-09-30T23:59:59+08:00", "reviewAfter": "2026-08-28T23:59:59+08:00", "volatility": "daily", "verificationStatus": "official_verified",
+          "facts": {"scheduleYear": 2026, "residenceType": "student_residence_halls", "cohort": "local_freshmen", "tentative": true, "earliestCheckIn": "2026-08-27", "checkInDates": ["2026-08-27"], "officeVenue": "Rev. James Mau Memorial Chapel G9", "officeVenueNote": "Opposite the North Tower entrance", "officeHours": ["10:00-13:00", "14:00-17:00"], "outsideOfficeHoursVenue": "Security Counter, G/F, North Tower, Student Residence Halls", "onOrAfterDate": "2026-08-28", "laterVenue": "ACCM General Office, Room 201, 2/F, JC3", "laterHours": ["09:00-13:00", "14:00-17:30"]},
+          "keywords": ["2026", "local freshman", "local freshmen", "本地新生", "入住"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Check-in Date and Time table: Local Freshmen row", "captureMethod": "manual_review", "sourceHash": null}
         },
         {
           "id": "evidence.sa.residence-halls-check-in.stale-reminder-2025", "text": {"en": "The page's 2025/26 welcome reminder is conflicted for current 2026/27 schedule answers and cannot support them.", "zhHant": "頁面的 2025/26 歡迎提示與現時 2026/27 時間表衝突，不可用作依據。", "zhHans": "页面的 2025/26 欢迎提示与目前 2026/27 时间表冲突，不可用作依据。"},
@@ -297,19 +367,19 @@
       "verifiedAt": "2026-08-25T12:00:00+08:00",
       "risk": "time_sensitive",
       "intentGroups": ["library"],
-      "tags": ["Main Library", "CML", "SMCL", "opening hours", "summer hours", "圖書館", "图书馆"],
+      "tags": ["Main Library", "CML", "SMCL", "opening hours", "summer hours", "主館", "主馆", "圖書館", "图书馆"],
       "exampleQuestions": ["When does Main Library close?", "中醫藥圖書館幾點關門", "石门图书馆几点关门"],
       "claims": [
         {
           "id": "evidence.library.main.summer-2026", "text": {"en": "From 1 June through 31 August 2026, Main Library summer hours are weekdays 09:00-21:00, Saturdays 09:00-19:00, and Sundays closed; special holidays can differ.", "zhHant": "2026 年 6 月 1 日至 8 月 31 日，主圖書館暑期時間為平日 09:00-21:00、星期六 09:00-19:00、星期日休息；特別假期或有不同。", "zhHans": "2026 年 6 月 1 日至 8 月 31 日，主图书馆暑期时间为工作日 09:00-21:00、星期六 09:00-19:00、星期日关闭；特别假期可能不同。"},
           "sourceId": "hkbu.library.hours", "sourceLocator": "Regular Service Hours: Main Library summer opening hours", "evidenceNote": "Reviewed summer column and kept it separate from the future 1 September schedule.",
-          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": "2026-06-01T00:00:00+08:00", "validUntil": "2026-08-31T23:59:59+08:00", "reviewAfter": "2026-08-31T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"branch": "Main Library", "period": "summer-2026"}, "keywords": ["main library", "summer", "主圖書館", "主图书馆"],
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": "2026-06-01T00:00:00+08:00", "validUntil": "2026-08-31T23:59:59+08:00", "reviewAfter": "2026-08-31T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"branch": "Main Library", "period": "summer-2026", "weekday": "09:00-21:00", "saturday": "09:00-19:00", "sunday": "closed"}, "keywords": ["main library", "summer", "主館", "主馆", "主圖書館", "主图书馆"],
           "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Regular Service Hours: Main Library summer opening hours", "captureMethod": "manual_review", "sourceHash": null}
         },
         {
-          "id": "evidence.library.main.from-september-2026", "text": {"en": "Main Library's regular schedule effective 1 September 2026 is a future claim at this snapshot and must not answer August questions.", "zhHant": "主圖書館由 2026 年 9 月 1 日生效的常規時間，在本快照仍屬未生效，不可回答 8 月問題。", "zhHans": "主图书馆自 2026 年 9 月 1 日生效的常规时间，在本快照仍属未生效，不可回答 8 月问题。"},
-          "sourceId": "hkbu.library.hours", "sourceLocator": "Regular Service Hours: Main Library effective 1 September 2026 column", "evidenceNote": "Reviewed future-dated column and encoded its activation boundary.",
-          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": "2026-09-01T00:00:00+08:00", "validUntil": null, "reviewAfter": "2026-09-08T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"branch": "Main Library", "period": "from-2026-09-01"}, "keywords": ["main library", "september", "主圖書館", "主图书馆"],
+          "id": "evidence.library.main.from-september-2026", "text": {"en": "Effective 1 September 2026, Main Library regular hours are weekdays 08:30-23:00, Saturdays 09:00-21:00, and Sundays 13:00-19:00; special holidays can differ.", "zhHant": "由 2026 年 9 月 1 日起，主圖書館常規時間為平日 08:30-23:00、星期六 09:00-21:00、星期日 13:00-19:00；特別假期或有不同。", "zhHans": "自 2026 年 9 月 1 日起，主图书馆常规时间为工作日 08:30-23:00、周六 09:00-21:00、周日 13:00-19:00；特别假期可能不同。"},
+          "sourceId": "hkbu.library.hours", "sourceLocator": "Regular Service Hours: Main Library effective 1 September 2026 column", "evidenceNote": "Reviewed the effective-dated Main Library row and encoded its activation boundary with exact weekday, Saturday, and Sunday hours.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": "2026-09-01T00:00:00+08:00", "validUntil": null, "reviewAfter": "2026-09-08T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"branch": "Main Library", "period": "from-2026-09-01", "effectiveFrom": "2026-09-01", "weekday": "08:30-23:00", "saturday": "09:00-21:00", "sunday": "13:00-19:00"}, "keywords": ["main library", "september", "主館", "主馆", "主圖書館", "主图书馆"],
           "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Regular Service Hours: Main Library effective 1 September 2026 column", "captureMethod": "manual_review", "sourceHash": null}
         },
         {
