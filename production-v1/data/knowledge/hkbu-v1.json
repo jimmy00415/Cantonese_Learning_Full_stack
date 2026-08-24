@@ -1,0 +1,475 @@
+{
+  "schemaVersion": "1.0.0",
+  "snapshotAt": "2026-08-25T12:00:00+08:00",
+  "governance": {
+    "owner": "Hong Kong Buddy knowledge owner",
+    "reviewCadence": "Weekly for high-volatility claims; monthly for stable service facts",
+    "timeZone": "Asia/Hong_Kong"
+  },
+  "sources": [
+    {
+      "id": "hkbu.ar.student-card-collection",
+      "title": "Student Card Collection Schedule",
+      "publisher": "HKBU Academic Registry",
+      "canonicalUrl": "https://ar.hkbu.edu.hk/student-services/new-student-orientation/student-card-collection-schedule",
+      "verifiedAt": "2026-08-25T12:00:00+08:00",
+      "risk": "time_sensitive",
+      "intentGroups": ["student_card"],
+      "tags": ["student card", "collection", "photo upload", "JUPAS", "Non-JUPAS", "學生證", "学生证"],
+      "exampleQuestions": ["When can I collect my student card?", "學生證幾時拎", "学生证什么时候领"],
+      "actions": [{
+        "id": "action.ar.student-card-collection.open",
+        "kind": "open_source",
+        "sourceId": "hkbu.ar.student-card-collection",
+        "label": {"en": "Open collection schedule", "zhHant": "查看領證時間表", "zhHans": "查看领证时间表"}
+      }],
+      "claims": [{
+        "id": "evidence.ar.student-card-collection.2026-routes",
+        "text": {
+          "en": "The 2026 collection schedule is split by admission cohort and digital-photo upload date; use the row matching both rather than one blanket date.",
+          "zhHant": "2026 年領證時間按入學組別及電子相片上載日期分流，應同時核對兩項，不可套用單一日期。",
+          "zhHans": "2026 年领证时间按入学组别及电子照片上传日期分流，应同时核对两项，不可套用单一日期。"
+        },
+        "sourceId": "hkbu.ar.student-card-collection",
+        "sourceLocator": "Student Card Collection Schedule table: Digital Photo Uploaded by / Collection Period / Venue",
+        "evidenceNote": "Reviewed table separates JUPAS and Non-JUPAS photo deadlines and later upload-date collection routes.",
+        "verifiedAt": "2026-08-25T12:00:00+08:00",
+        "validFrom": "2026-08-02T00:00:00+08:00",
+        "validUntil": "2026-09-30T23:59:59+08:00",
+        "reviewAfter": "2026-08-31T23:59:59+08:00",
+        "volatility": "weekly",
+        "verificationStatus": "official_verified",
+        "facts": {"academicYear": "2026/27", "requiresAdmissionCohort": true, "requiresPhotoUploadRoute": true},
+        "keywords": ["collect", "collection", "photo upload", "JUPAS", "Non-JUPAS", "領證", "领证"],
+        "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Student Card Collection Schedule table: Digital Photo Uploaded by / Collection Period / Venue", "captureMethod": "manual_review", "sourceHash": null}
+      }]
+    },
+    {
+      "id": "hkbu.ar.student-e-card",
+      "title": "Student e-Card",
+      "publisher": "HKBU Academic Registry",
+      "canonicalUrl": "https://ar.hkbu.edu.hk/student-services/useful-information/student-e-card",
+      "verifiedAt": "2026-08-25T12:00:00+08:00",
+      "risk": "normal",
+      "intentGroups": ["student_card"],
+      "tags": ["e-Card", "QR code", "accessible locations", "電子學生證", "电子学生证"],
+      "exampleQuestions": ["Can e-Card replace my physical card everywhere?", "電子學生證邊度用到", "电子学生证在哪里能用"],
+      "claims": [{
+        "id": "evidence.ar.student-e-card.listed-facilities-only",
+        "text": {"en": "The e-Card is an alternative to the physical student card only at the facilities listed on the official page; it is not a universal replacement.", "zhHant": "電子學生證只在官方頁列出的設施可作實體學生證替代，並非所有場合通用。", "zhHans": "电子学生证只在官方页面列出的设施可作实体学生证替代，并非所有场合通用。"},
+        "sourceId": "hkbu.ar.student-e-card",
+        "sourceLocator": "Student e-Card: e-Card Accessible Locations",
+        "evidenceNote": "Reviewed section describes e-Card as an alternative and enumerates accessible locations.",
+        "verifiedAt": "2026-08-25T12:00:00+08:00",
+        "validFrom": null,
+        "validUntil": null,
+        "reviewAfter": "2026-09-25T23:59:59+08:00",
+        "volatility": "monthly",
+        "verificationStatus": "official_verified",
+        "facts": {"alternative": true, "universalReplacement": false, "listedFacilitiesOnly": true},
+        "keywords": ["e card", "ecard", "accessible locations", "QR", "電子學生證", "电子学生证"],
+        "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Student e-Card: e-Card Accessible Locations", "captureMethod": "manual_review", "sourceHash": null}
+      }]
+    },
+    {
+      "id": "hkbu.ar.student-card-replacement",
+      "title": "Replacement of Student Card",
+      "publisher": "HKBU Academic Registry",
+      "canonicalUrl": "https://ar.hkbu.edu.hk/student-services/student-record/replacement-of-student-card",
+      "verifiedAt": "2026-08-25T12:00:00+08:00",
+      "risk": "time_sensitive",
+      "intentGroups": ["student_card"],
+      "tags": ["replacement", "lost card", "HK$100", "補領", "补领"],
+      "exampleQuestions": ["How much is a replacement student card?", "學生證唔見咗", "学生证丢了"],
+      "claims": [{
+        "id": "evidence.ar.student-card-replacement.fee",
+        "text": {"en": "A replacement student card currently carries a HK$100 fee; report a lost card to Academic Registry promptly and re-check the fee before applying.", "zhHant": "補領學生證現時收費為港幣 100 元；遺失後應盡快向教務處報失，申請前再核對最新收費。", "zhHans": "补领学生证目前收费为港币 100 元；遗失后应尽快向教务处报失，申请前再核对最新收费。"},
+        "sourceId": "hkbu.ar.student-card-replacement",
+        "sourceLocator": "Replacement of Student Card: items 1-2",
+        "evidenceNote": "Reviewed instructions say to report loss immediately and state a HK$100 replacement fee.",
+        "verifiedAt": "2026-08-25T12:00:00+08:00",
+        "validFrom": null,
+        "validUntil": null,
+        "reviewAfter": "2026-09-08T23:59:59+08:00",
+        "volatility": "biweekly",
+        "verificationStatus": "official_verified",
+        "facts": {"feeHkd": 100, "timeSensitive": true},
+        "keywords": ["replacement", "fee", "lost", "補領", "补领", "遺失", "遗失"],
+        "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Replacement of Student Card: items 1-2", "captureMethod": "manual_review", "sourceHash": null}
+      }]
+    },
+    {
+      "id": "hkbu.ito.account",
+      "title": "Account and Password",
+      "publisher": "HKBU Office of Information Technology",
+      "canonicalUrl": "https://ito.hkbu.edu.hk/services/account-password.html",
+      "verifiedAt": "2026-08-25T12:00:00+08:00",
+      "risk": "normal",
+      "intentGroups": ["account_password"],
+      "tags": ["SSOid", "account activation", "reset", "帳戶", "账户"],
+      "exampleQuestions": ["How do I activate my SSOid?", "忘記 SSOid 密碼", "忘记 SSOid 密码"],
+      "claims": [
+        {
+          "id": "evidence.ito.account.student-activation",
+          "text": {"en": "New students register their SSOid after receiving their student number from Academic Registry, using the official account page.", "zhHant": "新生收到教務處發出的學生編號後，才經官方帳戶頁註冊 SSOid。", "zhHans": "新生收到教务处发出的学生编号后，才通过官方账户页面注册 SSOid。"},
+          "sourceId": "hkbu.ito.account",
+          "sourceLocator": "Account & Password: SSOid overview and new-student activation",
+          "evidenceNote": "Reviewed student activation prerequisite and official self-service route without retaining credential data.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-10-25T23:59:59+08:00", "volatility": "quarterly", "verificationStatus": "official_verified",
+          "facts": {"studentNumberRequired": true},
+          "keywords": ["activate", "register", "new student", "啟用", "启用", "註冊", "注册"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Account & Password: SSOid overview and new-student activation", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.ito.account.self-service-reset",
+          "text": {"en": "Students can use the official self-service route for a forgotten SSOid password; contact ITO if identity verification cannot be completed.", "zhHant": "學生忘記 SSOid 密碼可使用官方自助重設；若無法完成身分驗證，應聯絡 ITO。", "zhHans": "学生忘记 SSOid 密码可使用官方自助重置；若无法完成身份验证，应联系 ITO。"},
+          "sourceId": "hkbu.ito.account",
+          "sourceLocator": "Account & Password FAQ: forgotten SSOid password",
+          "evidenceNote": "Reviewed self-service reset and escalation route; no credential or security-answer values are stored.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-10-25T23:59:59+08:00", "volatility": "quarterly", "verificationStatus": "official_verified",
+          "facts": {"selfServiceAvailable": true},
+          "keywords": ["forgot", "reset", "忘記", "忘记", "重設", "重置"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Account & Password FAQ: forgotten SSOid password", "captureMethod": "manual_review", "sourceHash": null}
+        }
+      ]
+    },
+    {
+      "id": "hkbu.ito.duo",
+      "title": "Multi-Factor Authentication and Duo",
+      "publisher": "HKBU Office of Information Technology",
+      "canonicalUrl": "https://ito.hkbu.edu.hk/services/it-security/mfa.html",
+      "verifiedAt": "2026-08-25T12:00:00+08:00",
+      "risk": "normal",
+      "intentGroups": ["duo"],
+      "tags": ["Duo", "MFA", "new phone", "reinstall", "lost phone", "push notification", "雙重認證", "双重认证"],
+      "exampleQuestions": ["Duo 换手机怎么办", "Duo push not arriving", "Duo 手機唔見咗"],
+      "actions": [{"id": "action.ito.duo.open", "kind": "open_source", "sourceId": "hkbu.ito.duo", "label": {"en": "Open Duo guidance", "zhHant": "查看 Duo 指引", "zhHans": "查看 Duo 指引"}}],
+      "claims": [
+        {
+          "id": "evidence.ito.duo.new-phone", "text": {"en": "After changing to a new phone, re-activate Duo Mobile using the official re-activation guide.", "zhHant": "更換新手機後，應按官方重新啟用指引啟用 Duo Mobile。", "zhHans": "更换新手机后，应按官方重新激活指引激活 Duo Mobile。"},
+          "sourceId": "hkbu.ito.duo", "sourceLocator": "MFA FAQ 2: changed mobile phone", "evidenceNote": "Reviewed FAQ gives re-activation as the new-phone path.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-10-25T23:59:59+08:00", "volatility": "quarterly", "verificationStatus": "official_verified", "facts": {"issue": "new_phone", "reactivationRequired": true}, "keywords": ["new phone", "changed phone", "換手機", "换手机", "換咗電話", "换了手机"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "MFA FAQ 2: changed mobile phone", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.ito.duo.reinstall", "text": {"en": "After reinstalling Duo Mobile, re-activate the app using the official guide; this is handled separately from a push-delivery problem.", "zhHant": "重新安裝 Duo Mobile 後要按官方指引重新啟用；這與單純收不到推送屬不同情況。", "zhHans": "重新安装 Duo Mobile 后要按官方指引重新激活；这与单纯收不到推送属于不同情况。"},
+          "sourceId": "hkbu.ito.duo", "sourceLocator": "MFA FAQ 2: reinstalled Duo Mobile", "evidenceNote": "Reviewed FAQ explicitly groups reinstall with re-activation while keeping push troubleshooting separate.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-10-25T23:59:59+08:00", "volatility": "quarterly", "verificationStatus": "official_verified", "facts": {"issue": "reinstall", "reactivationRequired": true}, "keywords": ["reinstall", "重新安裝", "重新安装"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "MFA FAQ 2: reinstalled Duo Mobile", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.ito.duo.lost-phone", "text": {"en": "If the registered phone is lost or unavailable, use the official emergency account-access guidance and report a lost device to ITO immediately.", "zhHant": "已登記手機遺失或無法使用時，應查看官方緊急帳戶存取指引，並立即向 ITO 報失。", "zhHans": "已登记手机遗失或无法使用时，应查看官方紧急账户访问指引，并立即向 ITO 报失。"},
+          "sourceId": "hkbu.ito.duo", "sourceLocator": "MFA FAQ 4-5: lost or unavailable mobile device", "evidenceNote": "Reviewed lost-device FAQ points to emergency account access and immediate ITO reporting without copying any access code.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-10-25T23:59:59+08:00", "volatility": "quarterly", "verificationStatus": "official_verified", "facts": {"issue": "lost_phone", "contactItoImmediately": true}, "keywords": ["lost phone", "phone unavailable", "手機唔見", "手机丢了", "冇帶手機", "没带手机"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "MFA FAQ 4-5: lost or unavailable mobile device", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.ito.duo.push-problem", "text": {"en": "For a missing Duo Push, first check the selected device, network connection, and phone date/time; use the official re-activation route if it still fails.", "zhHant": "收不到 Duo Push 時，先檢查所選裝置、網絡及手機日期時間；仍失敗才按官方指引重新啟用。", "zhHans": "收不到 Duo Push 时，先检查所选设备、网络及手机日期时间；仍失败才按官方指引重新激活。"},
+          "sourceId": "hkbu.ito.duo", "sourceLocator": "MFA FAQ 3: cannot receive Duo Push Notification", "evidenceNote": "Reviewed push troubleshooting steps and escalation to re-activation.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-10-25T23:59:59+08:00", "volatility": "quarterly", "verificationStatus": "official_verified", "facts": {"issue": "push_problem"}, "keywords": ["push", "notification", "收不到", "推送", "通知"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "MFA FAQ 3: cannot receive Duo Push Notification", "captureMethod": "manual_review", "sourceHash": null}
+        }
+      ]
+    },
+    {
+      "id": "hkbu.ito.contact",
+      "title": "ITO Contact Us",
+      "publisher": "HKBU Office of Information Technology",
+      "canonicalUrl": "https://ito.hkbu.edu.hk/contact-us.html",
+      "verifiedAt": "2026-08-25T12:00:00+08:00",
+      "risk": "time_sensitive",
+      "intentGroups": ["it_help"],
+      "tags": ["ITO", "3411 7899", "hotline@hkbu.edu.hk", "RRS303", "IT help"],
+      "exampleQuestions": ["How do I contact ITO?", "ITO 在哪", "ITO 在哪里"],
+      "claims": [{
+        "id": "evidence.ito.contact.service-centre",
+        "text": {"en": "ITO's general Service Call Centre is at RRS303; phone 3411 7899 or email hotline@hkbu.edu.hk.", "zhHant": "ITO 一般服務中心位於 RRS303，可致電 3411 7899 或電郵 hotline@hkbu.edu.hk。", "zhHans": "ITO 一般服务中心位于 RRS303，可致电 3411 7899 或电邮 hotline@hkbu.edu.hk。"},
+        "sourceId": "hkbu.ito.contact", "sourceLocator": "Contact Us: General Service / Service Call Centre", "evidenceNote": "Reviewed primary contact block for phone, email, and location.",
+        "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-25T23:59:59+08:00", "volatility": "monthly", "verificationStatus": "official_verified", "facts": {"phone": "3411 7899", "email": "hotline@hkbu.edu.hk", "location": "RRS303"}, "keywords": ["contact", "phone", "email", "location", "聯絡", "联系", "RRS303"],
+        "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Contact Us: General Service / Service Call Centre", "captureMethod": "manual_review", "sourceHash": null}
+      }]
+    },
+    {
+      "id": "hkbu.sa.village-care-check-in",
+      "title": "Village CARE Check-in Procedures",
+      "publisher": "HKBU Office of Student Affairs",
+      "canonicalUrl": "https://sa.hkbu.edu.hk/en/accm/on-campus-accommodation/village-care/check-in-procedures.html",
+      "verifiedAt": "2026-08-25T12:00:00+08:00",
+      "risk": "time_sensitive",
+      "intentGroups": ["residence_check_in"],
+      "tags": ["Village CARE", "check-in", "non-local freshman", "local freshman", "exchange student", "JC3"],
+      "exampleQuestions": ["Village CARE check-in 2026", "Village CARE 入住", "Village CARE 入住时间"],
+      "claims": [
+        {
+          "id": "evidence.sa.village-care-check-in.2026-cohorts", "text": {"en": "Village CARE's 2026/27 check-in table has different dates and locations for non-local freshmen, research postgraduates, exchange, returning, and local freshmen; confirm the student's cohort before giving a schedule.", "zhHant": "Village CARE 2026/27 入住表按非本地新生、研究生、交換生、舊生及本地新生分列日期與地點，回答前必須確認組別。", "zhHans": "Village CARE 2026/27 入住表按非本地新生、研究生、交换生、旧生及本地新生分列日期与地点，回答前必须确认组别。"},
+          "sourceId": "hkbu.sa.village-care-check-in", "sourceLocator": "Check-in Date and Time: 2026 cohort table", "evidenceNote": "Reviewed the current cohort schedule table independently from the separate reminder section lower on the page.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": "2026-08-20T00:00:00+08:00", "validUntil": "2026-09-30T23:59:59+08:00", "reviewAfter": "2026-08-28T23:59:59+08:00", "volatility": "daily", "verificationStatus": "official_verified", "facts": {"academicYear": "2026/27", "requiresCohort": true, "tentative": true}, "keywords": ["2026", "non local freshman", "local freshman", "exchange", "returning", "research postgraduate", "入住"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Check-in Date and Time: 2026 cohort table", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.sa.village-care-check-in.stale-reminder-2025", "text": {"en": "The page still contains a 2025/26 welcome reminder; it is conflicted for 2026/27 schedule answers and cannot support them.", "zhHant": "頁面仍含 2025/26 歡迎提示，與 2026/27 時間表衝突，不可用作現學年依據。", "zhHans": "页面仍含 2025/26 欢迎提示，与 2026/27 时间表冲突，不可用作现学年依据。"},
+          "sourceId": "hkbu.sa.village-care-check-in", "sourceLocator": "Check-In Reminder: Welcome to Village CARE in 2025/26", "evidenceNote": "Reviewed stale sibling section and explicitly quarantined it from current schedule evidence.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": "2026-08-31T23:59:59+08:00", "reviewAfter": "2026-08-28T23:59:59+08:00", "volatility": "daily", "verificationStatus": "conflicted", "facts": {"academicYear": "2025/26", "mustNotPromote": true}, "keywords": ["2025", "reminder"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Check-In Reminder: Welcome to Village CARE in 2025/26", "captureMethod": "manual_review", "sourceHash": null}
+        }
+      ]
+    },
+    {
+      "id": "hkbu.sa.residence-halls-check-in",
+      "title": "Student Residence Halls Check-in Procedures",
+      "publisher": "HKBU Office of Student Affairs",
+      "canonicalUrl": "https://sa.hkbu.edu.hk/en/accm/on-campus-accommodation/student-residence-halls/check-in-procedures.html",
+      "verifiedAt": "2026-08-25T12:00:00+08:00",
+      "risk": "time_sensitive",
+      "intentGroups": ["residence_check_in"],
+      "tags": ["Student Residence Halls", "SRH", "check-in", "non-local freshman", "local freshman", "returning student"],
+      "exampleQuestions": ["Residence Halls check-in 2026", "學生宿舍入住", "学生宿舍入住"],
+      "claims": [
+        {
+          "id": "evidence.sa.residence-halls-check-in.2026-cohorts", "text": {"en": "The Student Residence Halls 2026/27 check-in table separates non-local freshmen, returning students, and local freshmen; confirm the cohort before giving a date or counter.", "zhHant": "學生宿舍 2026/27 入住表分開非本地新生、舊生及本地新生，提供日期或櫃位前必須確認組別。", "zhHans": "学生宿舍 2026/27 入住表分开非本地新生、旧生及本地新生，提供日期或柜台前必须确认组别。"},
+          "sourceId": "hkbu.sa.residence-halls-check-in", "sourceLocator": "Check-in Date and Time: 2026 cohort table", "evidenceNote": "Reviewed the current cohort schedule table separately from the reminder section.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": "2026-08-20T00:00:00+08:00", "validUntil": "2026-09-30T23:59:59+08:00", "reviewAfter": "2026-08-28T23:59:59+08:00", "volatility": "daily", "verificationStatus": "official_verified", "facts": {"academicYear": "2026/27", "requiresCohort": true, "tentative": true}, "keywords": ["2026", "non local freshman", "local freshman", "returning", "入住"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Check-in Date and Time: 2026 cohort table", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.sa.residence-halls-check-in.stale-reminder-2025", "text": {"en": "The page's 2025/26 welcome reminder is conflicted for current 2026/27 schedule answers and cannot support them.", "zhHant": "頁面的 2025/26 歡迎提示與現時 2026/27 時間表衝突，不可用作依據。", "zhHans": "页面的 2025/26 欢迎提示与目前 2026/27 时间表冲突，不可用作依据。"},
+          "sourceId": "hkbu.sa.residence-halls-check-in", "sourceLocator": "Check-In Reminder: Welcome to Student Residence Halls in 2025/26", "evidenceNote": "Reviewed and quarantined stale sibling content.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": "2026-08-31T23:59:59+08:00", "reviewAfter": "2026-08-28T23:59:59+08:00", "volatility": "daily", "verificationStatus": "conflicted", "facts": {"academicYear": "2025/26", "mustNotPromote": true}, "keywords": ["2025", "reminder"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Check-In Reminder: Welcome to Student Residence Halls in 2025/26", "captureMethod": "manual_review", "sourceHash": null}
+        }
+      ]
+    },
+    {
+      "id": "hkbu.eo.campus-map",
+      "title": "Campus Map",
+      "publisher": "HKBU Estates Office",
+      "canonicalUrl": "https://eo.hkbu.edu.hk/eo-services/campus-map.html",
+      "verifiedAt": "2026-08-25T12:00:00+08:00",
+      "risk": "normal",
+      "intentGroups": ["campus_ar_navigation", "transport"],
+      "tags": ["campus map", "JC3", "Kowloon Tong", "MTR", "minibus", "校園地圖", "校园地图"],
+      "exampleQuestions": ["Where is JC³?", "How do I get to campus?", "JC3 在哪"],
+      "claims": [
+        {
+          "id": "evidence.eo.campus-map.jc3", "text": {"en": "JC³ means Jockey Club Campus of Creativity, one of the four areas of the Kowloon Tong Campus.", "zhHant": "JC³ 指賽馬會創意校園，是九龍塘校園四個校區之一。", "zhHans": "JC³ 指赛马会创意校园，是九龙塘校园四个校区之一。"},
+          "sourceId": "hkbu.eo.campus-map", "sourceLocator": "Campus Map: Kowloon Tong Campus", "evidenceNote": "Reviewed campus composition and JC³ expansion.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-11-25T23:59:59+08:00", "volatility": "quarterly", "verificationStatus": "official_verified", "facts": {"buildingCode": "JC3", "name": "Jockey Club Campus of Creativity"}, "keywords": ["jc3", "jockey club campus of creativity", "創意校園", "创意校园"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Campus Map: Kowloon Tong Campus", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.eo.campus-map.kowloon-tong-route", "text": {"en": "For Kowloon Tong Campus, the official map says Kowloon Tong MTR is nearest; walking from Exit A2 takes roughly 10-15 minutes, with minibuses also listed.", "zhHant": "前往九龍塘校園，官方地圖列九龍塘港鐵站為最近車站；由 A2 出口步行約 10 至 15 分鐘，亦列有小巴路線。", "zhHans": "前往九龙塘校园，官方地图列九龙塘地铁站为最近车站；由 A2 出口步行约 10 至 15 分钟，也列有小巴路线。"},
+          "sourceId": "hkbu.eo.campus-map", "sourceLocator": "Campus Map: Kowloon Tong Campus - Getting There", "evidenceNote": "Reviewed official MTR walking and minibus route summary; no stale student-fare scheme is included.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-25T23:59:59+08:00", "volatility": "monthly", "verificationStatus": "official_verified", "facts": {"nearestMtr": "Kowloon Tong", "walkingExit": "A2", "walkingMinutes": "10-15"}, "keywords": ["mtr", "transport", "kowloon tong", "walk", "minibus", "交通", "港鐵", "港铁", "小巴"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Campus Map: Kowloon Tong Campus - Getting There", "captureMethod": "manual_review", "sourceHash": null}
+        }
+      ]
+    },
+    {
+      "id": "hkbu.ar.contact",
+      "title": "Academic Registry Contact Us",
+      "publisher": "HKBU Academic Registry",
+      "canonicalUrl": "https://ar.hkbu.edu.hk/about-ar/contact-us",
+      "verifiedAt": "2026-08-25T12:00:00+08:00",
+      "risk": "time_sensitive",
+      "intentGroups": ["campus_ar_navigation"],
+      "tags": ["Academic Registry", "SCE301", "office hours", "AR", "教務處", "教务处"],
+      "exampleQuestions": ["Where is Academic Registry?", "AR 幾點關門", "教务处几点关门"],
+      "claims": [
+        {
+          "id": "evidence.ar.contact.location", "text": {"en": "Academic Registry, except its Academic Quality Support Section, is at Room 301 on 3/F of SCE Tower.", "zhHant": "除學術質素支援組外，教務處位於 SCE 大樓 3 樓 301 室。", "zhHans": "除学术质量支援组外，教务处位于 SCE 大楼 3 楼 301 室。"},
+          "sourceId": "hkbu.ar.contact", "sourceLocator": "Contact Us: Academic Registry address", "evidenceNote": "Reviewed AR location separately from service-hour facts.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-25T23:59:59+08:00", "volatility": "monthly", "verificationStatus": "official_verified", "facts": {"room": "SCE301", "floor": "3/F"}, "keywords": ["where", "location", "SCE301", "地址", "位置", "邊度", "哪里"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Contact Us: Academic Registry address", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.ar.contact.hours", "text": {"en": "AR counter and office hours are Monday-Friday 9:00-13:00 and 14:00-17:30; weekends and public holidays are closed.", "zhHant": "教務處櫃位及辦公時間為星期一至五 9:00-13:00、14:00-17:30；週末及公眾假期休息。", "zhHans": "教务处柜台及办公时间为星期一至五 9:00-13:00、14:00-17:30；周末及公众假期休息。"},
+          "sourceId": "hkbu.ar.contact", "sourceLocator": "Contact Us: Counter Service Hours and Office Hours", "evidenceNote": "Reviewed service hours as a separate time-sensitive claim.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-08T23:59:59+08:00", "volatility": "biweekly", "verificationStatus": "official_verified", "facts": {"weekdayMorning": "09:00-13:00", "weekdayAfternoon": "14:00-17:30", "weekendsClosed": true}, "keywords": ["hours", "open", "close", "時間", "时间", "幾點", "几点"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Contact Us: Counter Service Hours and Office Hours", "captureMethod": "manual_review", "sourceHash": null}
+        }
+      ]
+    },
+    {
+      "id": "hkbu.library.hours",
+      "title": "Library Regular Service Hours",
+      "publisher": "HKBU Library",
+      "canonicalUrl": "https://library.hkbu.edu.hk/using-the-library/opening-hours/regular-service-hours/",
+      "verifiedAt": "2026-08-25T12:00:00+08:00",
+      "risk": "time_sensitive",
+      "intentGroups": ["library"],
+      "tags": ["Main Library", "CML", "SMCL", "opening hours", "summer hours", "圖書館", "图书馆"],
+      "exampleQuestions": ["When does Main Library close?", "中醫藥圖書館幾點關門", "石门图书馆几点关门"],
+      "claims": [
+        {
+          "id": "evidence.library.main.summer-2026", "text": {"en": "From 1 June through 31 August 2026, Main Library summer hours are weekdays 09:00-21:00, Saturdays 09:00-19:00, and Sundays closed; special holidays can differ.", "zhHant": "2026 年 6 月 1 日至 8 月 31 日，主圖書館暑期時間為平日 09:00-21:00、星期六 09:00-19:00、星期日休息；特別假期或有不同。", "zhHans": "2026 年 6 月 1 日至 8 月 31 日，主图书馆暑期时间为工作日 09:00-21:00、星期六 09:00-19:00、星期日关闭；特别假期可能不同。"},
+          "sourceId": "hkbu.library.hours", "sourceLocator": "Regular Service Hours: Main Library summer opening hours", "evidenceNote": "Reviewed summer column and kept it separate from the future 1 September schedule.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": "2026-06-01T00:00:00+08:00", "validUntil": "2026-08-31T23:59:59+08:00", "reviewAfter": "2026-08-31T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"branch": "Main Library", "period": "summer-2026"}, "keywords": ["main library", "summer", "主圖書館", "主图书馆"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Regular Service Hours: Main Library summer opening hours", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.library.main.from-september-2026", "text": {"en": "Main Library's regular schedule effective 1 September 2026 is a future claim at this snapshot and must not answer August questions.", "zhHant": "主圖書館由 2026 年 9 月 1 日生效的常規時間，在本快照仍屬未生效，不可回答 8 月問題。", "zhHans": "主图书馆自 2026 年 9 月 1 日生效的常规时间，在本快照仍属未生效，不可回答 8 月问题。"},
+          "sourceId": "hkbu.library.hours", "sourceLocator": "Regular Service Hours: Main Library effective 1 September 2026 column", "evidenceNote": "Reviewed future-dated column and encoded its activation boundary.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": "2026-09-01T00:00:00+08:00", "validUntil": null, "reviewAfter": "2026-09-08T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"branch": "Main Library", "period": "from-2026-09-01"}, "keywords": ["main library", "september", "主圖書館", "主图书馆"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Regular Service Hours: Main Library effective 1 September 2026 column", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.library.cml.regular", "text": {"en": "Chinese Medicine Library regular hours are weekdays 09:00-19:00, Saturdays 10:00-17:00, and Sundays closed; holiday arrangements may differ.", "zhHant": "中醫藥圖書館常規時間為平日 09:00-19:00、星期六 10:00-17:00、星期日休息；假期安排或有不同。", "zhHans": "中医药图书馆常规时间为工作日 09:00-19:00、星期六 10:00-17:00、星期日关闭；假期安排可能不同。"},
+          "sourceId": "hkbu.library.hours", "sourceLocator": "Regular Service Hours: Chinese Medicine Library", "evidenceNote": "Reviewed branch-specific regular hours.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-08-31T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"branch": "Chinese Medicine Library"}, "keywords": ["cml", "chinese medicine library", "中醫藥圖書館", "中医药图书馆"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Regular Service Hours: Chinese Medicine Library", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.library.smcl.summer-2026", "text": {"en": "Through 31 August 2026, Shek Mun Campus Library summer hours are weekdays 09:00-18:00, Saturdays 09:00-13:00, and Sundays closed.", "zhHant": "截至 2026 年 8 月 31 日，石門校園圖書館暑期時間為平日 09:00-18:00、星期六 09:00-13:00、星期日休息。", "zhHans": "截至 2026 年 8 月 31 日，石门校园图书馆暑期时间为工作日 09:00-18:00、星期六 09:00-13:00、星期日关闭。"},
+          "sourceId": "hkbu.library.hours", "sourceLocator": "Regular Service Hours: Shek Mun Campus Library summer column", "evidenceNote": "Reviewed branch-specific summer column.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": "2026-05-22T00:00:00+08:00", "validUntil": "2026-08-31T23:59:59+08:00", "reviewAfter": "2026-08-31T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"branch": "Shek Mun Campus Library", "period": "summer-2026"}, "keywords": ["smcl", "shek mun", "石門", "石门"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Regular Service Hours: Shek Mun Campus Library summer column", "captureMethod": "manual_review", "sourceHash": null}
+        }
+      ]
+    },
+    {
+      "id": "hkbu.eo.dining-overview",
+      "title": "Catering Services",
+      "publisher": "HKBU Estates Office",
+      "canonicalUrl": "https://eo.hkbu.edu.hk/eo-services/services-facilities/Catering-Services.html",
+      "verifiedAt": "2026-08-25T12:00:00+08:00",
+      "risk": "time_sensitive",
+      "intentGroups": ["dining"],
+      "tags": ["catering outlets", "summer break", "special operating hours", "飯堂", "饭堂"],
+      "exampleQuestions": ["What food outlets are on campus?", "暑假飯堂開唔開", "暑假食堂开不开"],
+      "claims": [{
+        "id": "evidence.eo.dining-overview.special-hours", "text": {"en": "HKBU lists catering outlets by campus and publishes separate summer-break and bad-weather arrangements; regular outlet hours alone do not prove today's hours.", "zhHant": "浸大按校區列出餐飲店，並另發暑假及惡劣天氣安排；單憑常規時間不能確認今日營業。", "zhHans": "浸大按校区列出餐饮店，并另发暑假及恶劣天气安排；仅凭常规时间不能确认今日营业。"},
+        "sourceId": "hkbu.eo.dining-overview", "sourceLocator": "Catering Services: Special Operating Hours and Catering Outlets", "evidenceNote": "Reviewed override links and outlet grouping; retrieval must clarify current special hours.",
+        "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-01T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"specialHoursOverrideRegular": true}, "keywords": ["outlets", "summer", "special hours", "暑假", "惡劣天氣", "恶劣天气"],
+        "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Catering Services: Special Operating Hours and Catering Outlets", "captureMethod": "manual_review", "sourceHash": null}
+      }]
+    },
+    {
+      "id": "hkbu.eo.dining.main-canteen",
+      "title": "Main Canteen",
+      "publisher": "HKBU Estates Office",
+      "canonicalUrl": "https://eo.hkbu.edu.hk/eo-services/services-facilities/Catering-Services/Main-Canteen.html",
+      "verifiedAt": "2026-08-25T12:00:00+08:00",
+      "risk": "time_sensitive",
+      "intentGroups": ["dining"],
+      "tags": ["Main Canteen", "WYS Level 5", "opening hours", "主飯堂", "主食堂"],
+      "exampleQuestions": ["Where is Main Canteen?", "Main Canteen 今日開到幾點"],
+      "claims": [{
+        "id": "evidence.eo.dining.main-canteen.regular", "text": {"en": "Main Canteen's listed regular hours are Mon-Fri 07:30-20:00, Sat 08:30-17:00, and closed Sun/public holidays; current summer or special arrangements must be checked separately.", "zhHant": "Main Canteen 列出的常規時間為星期一至五 07:30-20:00、星期六 08:30-17:00、星期日及公眾假期休息；暑假或特別安排須另行核對。", "zhHans": "Main Canteen 列出的常规时间为周一至五 07:30-20:00、周六 08:30-17:00、周日及公众假期关闭；暑假或特别安排须另行核对。"},
+        "sourceId": "hkbu.eo.dining.main-canteen", "sourceLocator": "Main Canteen: Opening Hours and Location", "evidenceNote": "Reviewed regular outlet listing with explicit special-hours limitation.",
+        "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-01T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"regularHoursOnly": true, "location": "Level 5, Dr. Wu Yee Sun Building"}, "keywords": ["main canteen", "regular hours", "WYS", "主飯堂", "主食堂"],
+        "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Main Canteen: Opening Hours and Location", "captureMethod": "manual_review", "sourceHash": null}
+      }]
+    },
+    {
+      "id": "hkbu.eo.dining.bu-fiesta",
+      "title": "BU Fiesta",
+      "publisher": "HKBU Estates Office",
+      "canonicalUrl": "https://eo.hkbu.edu.hk/eo-services/services-facilities/Catering-Services/BU-Fiesta.html",
+      "verifiedAt": "2026-08-25T12:00:00+08:00",
+      "risk": "time_sensitive",
+      "intentGroups": ["dining"],
+      "tags": ["BU Fiesta", "closed", "renovation", "餐廳", "餐厅"],
+      "exampleQuestions": ["BU Fiesta 今日開嗎", "Is BU Fiesta open today?"],
+      "claims": [{
+        "id": "evidence.eo.dining.bu-fiesta.renovation-closure",
+        "text": {"en": "BU Fiesta is closed for renovation until further notice.", "zhHant": "BU Fiesta 因裝修暫停營業，直至另行通知。", "zhHans": "BU Fiesta 因装修暂停营业，直至另行通知。"},
+        "sourceId": "hkbu.eo.dining.bu-fiesta", "sourceLocator": "BU Fiesta: Operating Hours", "evidenceNote": "Reviewed operating-hours row states an indefinite renovation closure.",
+        "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-01T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"open": false, "reason": "renovation", "until": "further_notice"}, "keywords": ["BU Fiesta", "open", "closed", "renovation", "開", "开", "裝修", "装修"],
+        "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "BU Fiesta: Operating Hours", "captureMethod": "manual_review", "sourceHash": null}
+      }]
+    },
+    {
+      "id": "hkbu.eo.medical",
+      "title": "Medical Services",
+      "publisher": "HKBU Estates Office",
+      "canonicalUrl": "https://eo.hkbu.edu.hk/eo-services/services-facilities/medical-services.html",
+      "verifiedAt": "2026-08-25T12:00:00+08:00",
+      "risk": "high_stakes",
+      "intentGroups": ["medical"],
+      "tags": ["Health Centre", "medical", "dental", "3411 2011", "健康中心", "牙科"],
+      "exampleQuestions": ["Where is the Health Centre?", "How do I book a doctor?", "牙科計劃仲有效嗎"],
+      "claims": [
+        {
+          "id": "evidence.eo.medical.health-centre", "text": {"en": "The Health Centre is on Level 5 of Sir Run Run Shaw Building; appointments can be made in HKBU Mobile or by calling 3411 2011.", "zhHant": "健康中心位於邵逸夫大樓 5 樓，可經 HKBU Mobile 或致電 3411 2011 預約。", "zhHans": "健康中心位于邵逸夫大楼 5 楼，可通过 HKBU Mobile 或致电 3411 2011 预约。"},
+          "sourceId": "hkbu.eo.medical", "sourceLocator": "Medical Services: Health Centre location and appointment registration", "evidenceNote": "Reviewed current Health Centre location and booking paths separately from the stale dental scheme.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-08T23:59:59+08:00", "volatility": "biweekly", "verificationStatus": "official_verified", "facts": {"location": "Level 5, Sir Run Run Shaw Building", "appointmentPhone": "3411 2011"}, "keywords": ["health centre", "doctor", "appointment", "健康中心", "醫生", "医生", "預約", "预约"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Medical Services: Health Centre location and appointment registration", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.eo.medical.dental-2025-26-stale", "text": {"en": "The displayed dental section is for the 2025/26 scheme and its enrolment deadline has passed; it cannot support current 2026/27 fees or enrolment advice.", "zhHant": "頁面所示牙科部分屬 2025/26 計劃且報名截止日已過，不可用來確認 2026/27 收費或報名安排。", "zhHans": "页面所示牙科部分属于 2025/26 计划且报名截止日已过，不可用来确认 2026/27 收费或报名安排。"},
+          "sourceId": "hkbu.eo.medical", "sourceLocator": "Medical Services: Student Dental Scheme 2025-26 enrolment section", "evidenceNote": "Reviewed academic-year label and passed enrolment deadline; quarantined from current answers.",
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": "2025-10-01T00:00:00+08:00", "validUntil": "2026-08-31T23:59:59+08:00", "reviewAfter": "2026-08-25T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "conflicted", "facts": {"academicYear": "2025/26", "enrolmentClosed": true, "mustNotPromote": true}, "keywords": ["dental", "牙科", "2025", "fee", "收費", "收费"],
+          "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Medical Services: Student Dental Scheme 2025-26 enrolment section", "captureMethod": "manual_review", "sourceHash": null}
+        }
+      ]
+    },
+    {
+      "id": "hkbu.sa.contact",
+      "title": "Office of Student Affairs Contact Us",
+      "publisher": "HKBU Office of Student Affairs",
+      "canonicalUrl": "https://sa.hkbu.edu.hk/en/contact-us.html",
+      "verifiedAt": "2026-08-25T12:00:00+08:00",
+      "risk": "time_sensitive",
+      "intentGroups": ["osa_counselling"],
+      "tags": ["OSA", "Office of Student Affairs", "WLB401", "sa@hkbu.edu.hk", "學生事務處", "学生事务处"],
+      "exampleQuestions": ["Where is OSA?", "點樣搵學生事務處", "学生事务处在哪里"],
+      "claims": [{
+        "id": "evidence.sa.contact.osa", "text": {"en": "The Office of Student Affairs is at WLB401, Shaw Campus; its general email is sa@hkbu.edu.hk and weekday service hours are 09:00-13:00 and 14:00-17:30.", "zhHant": "學生事務處位於逸夫校園 WLB401；一般電郵為 sa@hkbu.edu.hk，平日服務時間 09:00-13:00、14:00-17:30。", "zhHans": "学生事务处位于逸夫校园 WLB401；一般电邮为 sa@hkbu.edu.hk，工作日服务时间 09:00-13:00、14:00-17:30。"},
+        "sourceId": "hkbu.sa.contact", "sourceLocator": "Contact Us: Office of Student Affairs address and service hours", "evidenceNote": "Reviewed OSA general contact, address, and service hours.",
+        "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-25T23:59:59+08:00", "volatility": "monthly", "verificationStatus": "official_verified", "facts": {"location": "WLB401", "email": "sa@hkbu.edu.hk"}, "keywords": ["osa", "student affairs", "WLB401", "學生事務處", "学生事务处", "邊度", "哪里"],
+        "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Contact Us: Office of Student Affairs address and service hours", "captureMethod": "manual_review", "sourceHash": null}
+      }]
+    },
+    {
+      "id": "hkbu.sa.counselling",
+      "title": "Counselling and Consultation",
+      "publisher": "HKBU Office of Student Affairs",
+      "canonicalUrl": "https://sa.hkbu.edu.hk/en/cdc/counselling/counselling-and-consultation.html",
+      "verifiedAt": "2026-08-25T12:00:00+08:00",
+      "risk": "high_stakes",
+      "intentGroups": ["osa_counselling"],
+      "tags": ["counselling", "consultation", "CDC", "輔導", "辅导"],
+      "exampleQuestions": ["How can I talk to a counsellor?", "我想搵輔導員", "我想找辅导员"],
+      "claims": [{
+        "id": "evidence.sa.counselling.official-service", "text": {"en": "HKBU's Counselling and Development Centre provides counselling and consultation; use its official page for the current appointment route. Immediate danger is handled through the emergency path instead.", "zhHant": "浸大輔導及發展中心提供輔導及諮詢；應由官方頁查看最新預約方式。即時危險則改走緊急支援。", "zhHans": "浸大辅导及发展中心提供辅导及咨询；应通过官方页面查看最新预约方式。即时危险则改走紧急支援。"},
+        "sourceId": "hkbu.sa.counselling", "sourceLocator": "Counselling and Consultation: service overview", "evidenceNote": "Reviewed service scope without inferring an unverified booking detail.",
+        "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-08T23:59:59+08:00", "volatility": "biweekly", "verificationStatus": "official_verified", "facts": {"immediateDangerUsesEmergencyRoute": true}, "keywords": ["counselling", "counselor", "counsellor", "consultation", "輔導", "辅导", "諮詢", "咨询"],
+        "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Counselling and Consultation: service overview", "captureMethod": "manual_review", "sourceHash": null}
+      }]
+    },
+    {
+      "id": "hkbu.sa.emergency-hotlines",
+      "title": "Emergency Hotlines and Community Services",
+      "publisher": "HKBU Office of Student Affairs",
+      "canonicalUrl": "https://sa.hkbu.edu.hk/en/cdc/counselling/emergency-hotlines-and-community-services.html",
+      "verifiedAt": "2026-08-25T12:00:00+08:00",
+      "risk": "high_stakes",
+      "intentGroups": ["emergency"],
+      "tags": ["emergency", "999", "crisis", "緊急", "紧急"],
+      "exampleQuestions": ["What do I do in an immediate emergency?", "有緊急危險點算", "有紧急危险怎么办"],
+      "claims": [{
+        "id": "evidence.sa.emergency-hotlines.immediate-999", "text": {"en": "For immediate danger in Hong Kong, call 999 first.", "zhHant": "在香港如有即時危險，先致電 999。", "zhHans": "在香港如有即时危险，先致电 999。"},
+        "sourceId": "hkbu.sa.emergency-hotlines", "sourceLocator": "Emergency Hotlines and Community Services: emergency contact guidance", "evidenceNote": "Reviewed official emergency path; safety routing always presents it before normal retrieval.",
+        "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-01T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"phone": "999", "priority": 1}, "keywords": ["emergency", "999", "危險", "危险", "緊急", "紧急"],
+        "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Emergency Hotlines and Community Services: emergency contact guidance", "captureMethod": "manual_review", "sourceHash": null}
+      }]
+    },
+    {
+      "id": "hkbu.eo.security",
+      "title": "Security Control Rooms and Security Hotline",
+      "publisher": "HKBU Estates Office",
+      "canonicalUrl": "https://eo.hkbu.edu.hk/eo-services/services-facilities/Security-Control-Rooms-and-Security-Hotline.html",
+      "verifiedAt": "2026-08-25T12:00:00+08:00",
+      "risk": "high_stakes",
+      "intentGroups": ["emergency"],
+      "tags": ["HKBU Security", "3411 7777", "security hotline", "保安"],
+      "exampleQuestions": ["What is HKBU Security's number?", "浸大保安電話", "浸大保安电话"],
+      "claims": [{
+        "id": "evidence.eo.security.hotline", "text": {"en": "HKBU Security can be reached at 3411 7777; in immediate danger call 999 first.", "zhHant": "浸大保安電話為 3411 7777；如有即時危險，先致電 999。", "zhHans": "浸大保安电话为 3411 7777；如有即时危险，先致电 999。"},
+        "sourceId": "hkbu.eo.security", "sourceLocator": "Security Control Rooms and Security Hotline: hotline contact", "evidenceNote": "Reviewed canonical Estates Office security page and fixed hotline used by safety routing.",
+        "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-01T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"phone": "3411 7777", "immediateEmergencyFirst": "999"}, "keywords": ["security", "hotline", "3411 7777", "保安"],
+        "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Security Control Rooms and Security Hotline: hotline contact", "captureMethod": "manual_review", "sourceHash": null}
+      }]
+    }
+  ]
+}
