@@ -169,4 +169,6 @@ test('ui contract syntax check covers every shipped client module', async () => 
   assert.match(check, /node --check public\/message-renderer\.js/);
   assert.match(check, /node --check public\/timeline-view\.js/);
   assert.match(check, /node --check public\/chat-copy\.js/);
+  assert.match(check, /node --check public\/voice-transport\.js/);
+  assert.match(check, /node --check public\/voice-upload-coordinator\.js/);
 });
