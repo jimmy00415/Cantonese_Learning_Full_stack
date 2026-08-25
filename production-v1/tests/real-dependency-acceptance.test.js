@@ -217,12 +217,15 @@ function createFakeBucket({
   storageClientEmail = ACCEPTANCE_SERVICE_ACCOUNT,
   storageCredentialType = 'Compute',
   bucketProjectNumber = PROJECT_NUMBER,
+  concurrentConditionalWrite = null,
+  ambiguousConditionalConflict = false,
 } = {}) {
-  const objects = new Map(initialObjects.map(([name, bytes]) => [name, {
+  const objects = new Map(initialObjects.map(([name, bytes, customMetadata = {}]) => [name, {
     bytes: Buffer.from(bytes),
     updated: NOW.toISOString(),
     generation: '1',
     contentType: 'application/octet-stream',
+    customMetadata: { ...customMetadata },
   }]));
   const calls = {
     writes: [], reads: [], metadata: [], deletes: [], lists: [], permissions: [],
@@ -230,6 +233,8 @@ function createFakeBucket({
   };
   let generation = objects.size;
   let committedWriteErrorRaised = false;
+  let concurrentConditionalWriteCommitted = false;
+  let ambiguousConditionalConflictRaised = false;
 
   const bucket = {
     name: BUCKET_NAME,
@@ -260,7 +265,25 @@ function createFakeBucket({
               callback();
             },
             final(callback) {
+              if (options?.preconditionOpts?.ifGenerationMatch === 0
+                && concurrentConditionalWrite?.name === name
+                && !concurrentConditionalWriteCommitted) {
+                concurrentConditionalWriteCommitted = true;
+                generation += 1;
+                objects.set(name, {
+                  bytes: Buffer.from(concurrentConditionalWrite.bytes),
+                  updated: NOW.toISOString(),
+                  generation: String(generation),
+                  contentType: concurrentConditionalWrite.contentType ?? 'application/octet-stream',
+                  customMetadata: { ...(concurrentConditionalWrite.customMetadata ?? {}) },
+                });
+              }
               if (options?.preconditionOpts?.ifGenerationMatch === 0 && objects.has(name)) {
+                if (ambiguousConditionalConflict && !ambiguousConditionalConflictRaised) {
+                  ambiguousConditionalConflictRaised = true;
+                  callback(new Error('transport hid the create-only precondition result'));
+                  return;
+                }
                 callback(providerError(412));
                 return;
               }
@@ -270,6 +293,7 @@ function createFakeBucket({
                 updated: NOW.toISOString(),
                 generation: String(generation),
                 contentType: options?.metadata?.contentType ?? 'application/octet-stream',
+                customMetadata: { ...(options?.metadata?.metadata ?? {}) },
               });
               if (name === commitWriteThenErrorName && !committedWriteErrorRaised) {
                 committedWriteErrorRaised = true;
@@ -284,13 +308,14 @@ function createFakeBucket({
           calls.metadata.push({ name, options });
           const object = objects.get(name);
           if (!object) throw providerError(404);
-          if (malformedMetadata) return [malformedMetadata];
+          if (malformedMetadata?.name === name) return [malformedMetadata];
           return [{
             name,
             size: String(object.bytes.length),
             updated: object.updated,
             generation: object.generation,
             contentType: object.contentType,
+            metadata: { ...object.customMetadata },
           }];
         },
         createReadStream(options = {}) {
@@ -382,12 +407,22 @@ function createFakeBucket({
 
 function createFakePoolClass({
   schemaInitiallyExists = false,
+  schemaInitiallyOwnedBy = schemaInitiallyExists ? 'pre-existing-owner' : null,
   serverVersion = '160004',
   commitCreateThenError = false,
+  concurrentCreateCollisionOwner = null,
+  ambiguousCreateCollisionOwner = null,
 } = {}) {
-  const state = { schemaExists: schemaInitiallyExists, ended: [], options: [], sql: [] };
+  const state = {
+    schemaExists: schemaInitiallyExists,
+    schemaOwnerToken: schemaInitiallyOwnedBy,
+    ended: [],
+    options: [],
+    sql: [],
+  };
   let poolIndex = 0;
   let committedCreateErrorRaised = false;
+  let concurrentCreateCollisionRaised = false;
   class PoolClass {
     constructor(options) {
       this.index = poolIndex;
@@ -411,17 +446,41 @@ function createFakePoolClass({
           rowCount: 1,
         };
       }
+      if (/obj_description\s*\(/i.test(text)) {
+        return {
+          rows: state.schemaExists ? [{ owner_token: state.schemaOwnerToken }] : [],
+          rowCount: state.schemaExists ? 1 : 0,
+        };
+      }
       if (/pg_namespace/i.test(text)) {
         return { rows: [{ count: state.schemaExists ? 1 : 0 }], rowCount: 1 };
       }
       if (/CREATE SCHEMA/i.test(text)) {
+        if (concurrentCreateCollisionOwner && !concurrentCreateCollisionRaised) {
+          concurrentCreateCollisionRaised = true;
+          state.schemaExists = true;
+          state.schemaOwnerToken = concurrentCreateCollisionOwner;
+          throw providerError('42P06', 'schema was concurrently created');
+        }
+        if (ambiguousCreateCollisionOwner && !concurrentCreateCollisionRaised) {
+          concurrentCreateCollisionRaised = true;
+          state.schemaExists = true;
+          state.schemaOwnerToken = ambiguousCreateCollisionOwner;
+          throw new Error('transport hid the concurrent schema create result');
+        }
+        if (state.schemaExists) throw providerError('42P06', 'schema already exists');
+        const ownerMatch = /COMMENT ON SCHEMA\s+"[^"]+"\s+IS\s+'([^']+)'/i.exec(text);
         state.schemaExists = true;
+        state.schemaOwnerToken = ownerMatch?.[1] ?? null;
         if (commitCreateThenError && !committedCreateErrorRaised) {
           committedCreateErrorRaised = true;
           throw new Error('transport failed after committed schema create');
         }
       }
-      if (/DROP SCHEMA/i.test(text)) state.schemaExists = false;
+      if (/DROP SCHEMA/i.test(text)) {
+        state.schemaExists = false;
+        state.schemaOwnerToken = null;
+      }
       return { rows: [], rowCount: 0 };
     }
 
@@ -979,7 +1038,7 @@ test('real runtime uses project-scoped attached ADC and proves intended GCS life
   assert.deepEqual(fixture.postgres.state.ended.sort(), [0, 1, 2, 3]);
 });
 
-test('real runtime uses migrator only for isolated DDL and publishes canonical evidence create-only after cleanup', async () => {
+test('real runtime uses migrator only for isolated DDL and a duplicate publish preserves the first evidence object', async () => {
   const fixture = realRuntimeOptions();
   const runtime = await createRealAcceptanceRuntime(fixture.options);
   const record = legacyInventory();
@@ -1008,12 +1067,19 @@ test('real runtime uses migrator only for isolated DDL and publishes canonical e
     objectSha256,
   });
   assert.deepEqual(fixture.provider.objects.get(OUTPUT_OBJECT).bytes, Buffer.from(contents));
+  const firstGeneration = fixture.provider.objects.get(OUTPUT_OBJECT).generation;
   assert.equal([...fixture.provider.objects.keys()].some((name) => name.startsWith(GCS_PREFIX)), false);
   assert.equal(fixture.provider.calls.publicFetches.length, 1);
   assert.equal(fixture.provider.calls.publicFetches[0].options.headers?.Authorization, undefined);
-  await assert.rejects(runtime.writeEvidenceObject({
-    objectName: OUTPUT_OBJECT, contents, artifactSha256, objectSha256,
-  }));
+  await assert.rejects(
+    runtime.writeEvidenceObject({
+      objectName: OUTPUT_OBJECT, contents, artifactSha256, objectSha256,
+    }),
+    (error) => error?.code === 'DEPENDENCY_EVIDENCE_OUTPUT_EXISTS',
+  );
+  assert.equal(fixture.provider.objects.get(OUTPUT_OBJECT).generation, firstGeneration);
+  assert.deepEqual(fixture.provider.objects.get(OUTPUT_OBJECT).bytes, Buffer.from(contents));
+  assert.equal(fixture.provider.calls.deletes.some(({ name }) => name === OUTPUT_OBJECT), false);
 
   const migratorSql = fixture.postgres.state.sql
     .filter(([index]) => [0, 1].includes(index)).map(([, sql]) => sql).join('\n');
@@ -1023,6 +1089,89 @@ test('real runtime uses migrator only for isolated DDL and publishes canonical e
   assert.match(migratorSql, /GRANT USAGE ON SCHEMA/);
   assert.match(migratorSql, /DROP SCHEMA/);
   assert.equal(/CREATE SCHEMA|DROP SCHEMA|GRANT USAGE ON SCHEMA/.test(appSql), false);
+});
+
+test('pre-existing identical immutable evidence is never deleted after a known create-only conflict', async () => {
+  const record = legacyInventory();
+  const contents = `${JSON.stringify(record, null, 2)}\n`;
+  const provider = createFakeBucket({
+    initialObjects: [[OUTPUT_OBJECT, Buffer.from(contents)]],
+  });
+  const fixture = realRuntimeOptions({ provider });
+  const runtime = await createRealAcceptanceRuntime(fixture.options);
+
+  await runtime.runChecks();
+  assert.equal(await runtime.cleanupGcsPrefix(GCS_PREFIX), 0);
+  assert.equal(await runtime.dropSchema(SCHEMA), true);
+  await runtime.close();
+
+  await assert.rejects(
+    runtime.writeEvidenceObject({
+      objectName: OUTPUT_OBJECT,
+      contents,
+      artifactSha256: record.artifactSha256,
+      objectSha256: sha256(contents),
+    }),
+    (error) => error?.code === 'DEPENDENCY_EVIDENCE_OUTPUT_EXISTS',
+  );
+  assert.equal(provider.objects.get(OUTPUT_OBJECT).generation, '1');
+  assert.deepEqual(provider.objects.get(OUTPUT_OBJECT).bytes, Buffer.from(contents));
+  assert.equal(provider.calls.deletes.some(({ name }) => name === OUTPUT_OBJECT), false);
+});
+
+test('ambiguous evidence commit is deleted only when its per-attempt nonce proves ownership', async () => {
+  const record = legacyInventory();
+  const contents = `${JSON.stringify(record, null, 2)}\n`;
+  const provider = createFakeBucket({ commitWriteThenErrorName: OUTPUT_OBJECT });
+  const fixture = realRuntimeOptions({ provider });
+  const runtime = await createRealAcceptanceRuntime(fixture.options);
+  const input = {
+    objectName: OUTPUT_OBJECT,
+    contents,
+    artifactSha256: record.artifactSha256,
+    objectSha256: sha256(contents),
+  };
+
+  await runtime.runChecks();
+  assert.equal(await runtime.cleanupGcsPrefix(GCS_PREFIX), 0);
+  assert.equal(await runtime.dropSchema(SCHEMA), true);
+  await runtime.close();
+
+  await assert.rejects(runtime.writeEvidenceObject(input), (error) => (
+    error?.code === 'DEPENDENCY_GCS_RESPONSE_INVALID'
+  ));
+  assert.equal(provider.objects.has(OUTPUT_OBJECT), false);
+  const compensatingDelete = provider.calls.deletes.find(({ name }) => name === OUTPUT_OBJECT);
+  assert.equal(compensatingDelete?.generation, '2');
+
+  const receipt = await runtime.writeEvidenceObject(input);
+  assert.equal(receipt.generation, '3');
+});
+
+test('ambiguous evidence conflict preserves identical bytes that lack the current attempt nonce', async () => {
+  const record = legacyInventory();
+  const contents = `${JSON.stringify(record, null, 2)}\n`;
+  const provider = createFakeBucket({
+    initialObjects: [[OUTPUT_OBJECT, Buffer.from(contents)]],
+    ambiguousConditionalConflict: true,
+  });
+  const fixture = realRuntimeOptions({ provider });
+  const runtime = await createRealAcceptanceRuntime(fixture.options);
+
+  await runtime.runChecks();
+  assert.equal(await runtime.cleanupGcsPrefix(GCS_PREFIX), 0);
+  assert.equal(await runtime.dropSchema(SCHEMA), true);
+  await runtime.close();
+
+  await assert.rejects(runtime.writeEvidenceObject({
+    objectName: OUTPUT_OBJECT,
+    contents,
+    artifactSha256: record.artifactSha256,
+    objectSha256: sha256(contents),
+  }));
+  assert.equal(provider.objects.get(OUTPUT_OBJECT).generation, '1');
+  assert.deepEqual(provider.objects.get(OUTPUT_OBJECT).bytes, Buffer.from(contents));
+  assert.equal(provider.calls.deletes.some(({ name }) => name === OUTPUT_OBJECT), false);
 });
 
 test('failed evidence verification deletes the exact committed generation and permits a clean rerun', async () => {
@@ -1122,11 +1271,12 @@ test('oversized object metadata is rejected before any range stream opens', asyn
         contentType: 'application/octet-stream',
         ifAbsent: true,
       });
+      const readsBeforeOversizedObject = provider.calls.reads.length;
       await assert.rejects(
         gcsClient.readObject({ name, start: 0, end: 0 }),
         (error) => error?.code === 'DEPENDENCY_GCS_RESPONSE_INVALID',
       );
-      assert.equal(provider.calls.reads.length, 0);
+      assert.equal(provider.calls.reads.length, readsBeforeOversizedObject);
       return passChecks();
     },
   });
@@ -1208,6 +1358,55 @@ test('GCS cleanup recovers a create that committed before the transport failed',
   assert.equal(fixture.provider.calls.deletes.some(({ name }) => name === owner), true);
 });
 
+test('GCS conditional-create collision loser preserves the concurrent winner prefix', async () => {
+  const owner = `${GCS_PREFIX}.acceptance-owner`;
+  const winnerBytes = Buffer.from('winner-owned-prefix');
+  const provider = createFakeBucket({
+    concurrentConditionalWrite: {
+      name: owner,
+      bytes: winnerBytes,
+      customMetadata: { hkbuddyAcceptanceNonce: 'winner-attempt-nonce' },
+    },
+  });
+  const fixture = realRuntimeOptions({ provider });
+  const runtime = await createRealAcceptanceRuntime(fixture.options);
+
+  await assert.rejects(runtime.runChecks(), (error) => (
+    error?.code === 'DEPENDENCY_GCS_SCOPE_CONFLICT'
+  ));
+  assert.equal(await runtime.cleanupGcsPrefix(GCS_PREFIX), 1);
+  assert.equal(await runtime.dropSchema(SCHEMA), true);
+  await runtime.close();
+
+  assert.deepEqual(provider.objects.get(owner).bytes, winnerBytes);
+  assert.equal(provider.calls.deletes.some(({ name }) => name === owner), false);
+});
+
+test('GCS ambiguous create result preserves a winner whose nonce does not match this attempt', async () => {
+  const owner = `${GCS_PREFIX}.acceptance-owner`;
+  const winnerBytes = Buffer.from('ambiguous-winner-owned-prefix');
+  const provider = createFakeBucket({
+    concurrentConditionalWrite: {
+      name: owner,
+      bytes: winnerBytes,
+      customMetadata: { hkbuddyAcceptanceNonce: 'ambiguous-winner-nonce' },
+    },
+    ambiguousConditionalConflict: true,
+  });
+  const fixture = realRuntimeOptions({ provider });
+  const runtime = await createRealAcceptanceRuntime(fixture.options);
+
+  await assert.rejects(runtime.runChecks(), (error) => (
+    error?.code === 'DEPENDENCY_GCS_RESPONSE_INVALID'
+  ));
+  assert.equal(await runtime.cleanupGcsPrefix(GCS_PREFIX), 1);
+  assert.equal(await runtime.dropSchema(SCHEMA), true);
+  await runtime.close();
+
+  assert.deepEqual(provider.objects.get(owner).bytes, winnerBytes);
+  assert.equal(provider.calls.deletes.some(({ name }) => name === owner), false);
+});
+
 test('PostgreSQL cleanup recovers a schema create that committed before the transport failed', async () => {
   const fixture = realRuntimeOptions({
     postgres: createFakePoolClass({ commitCreateThenError: true }),
@@ -1222,6 +1421,42 @@ test('PostgreSQL cleanup recovers a schema create that committed before the tran
 
   assert.equal(fixture.postgres.state.schemaExists, false);
   assert.equal(fixture.postgres.state.sql.some(([, sql]) => /DROP SCHEMA/i.test(sql)), true);
+});
+
+test('PostgreSQL duplicate-schema collision loser preserves the concurrent winner schema', async () => {
+  const winnerOwner = 'winner-postgres-attempt-nonce';
+  const postgres = createFakePoolClass({ concurrentCreateCollisionOwner: winnerOwner });
+  const fixture = realRuntimeOptions({ postgres });
+  const runtime = await createRealAcceptanceRuntime(fixture.options);
+
+  await assert.rejects(runtime.runChecks(), (error) => (
+    error?.code === 'DEPENDENCY_POSTGRES_SCOPE_CONFLICT'
+  ));
+  assert.equal(await runtime.cleanupGcsPrefix(GCS_PREFIX), 0);
+  assert.equal(await runtime.dropSchema(SCHEMA), false);
+  await runtime.close();
+
+  assert.equal(postgres.state.schemaExists, true);
+  assert.equal(postgres.state.schemaOwnerToken, winnerOwner);
+  assert.equal(postgres.state.sql.some(([, sql]) => /DROP SCHEMA/i.test(sql)), false);
+});
+
+test('PostgreSQL ambiguous create result preserves a schema with another attempt nonce', async () => {
+  const winnerOwner = 'ambiguous-winner-postgres-nonce';
+  const postgres = createFakePoolClass({ ambiguousCreateCollisionOwner: winnerOwner });
+  const fixture = realRuntimeOptions({ postgres });
+  const runtime = await createRealAcceptanceRuntime(fixture.options);
+
+  await assert.rejects(runtime.runChecks(), (error) => (
+    error?.message === 'transport hid the concurrent schema create result'
+  ));
+  assert.equal(await runtime.cleanupGcsPrefix(GCS_PREFIX), 0);
+  assert.equal(await runtime.dropSchema(SCHEMA), false);
+  await runtime.close();
+
+  assert.equal(postgres.state.schemaExists, true);
+  assert.equal(postgres.state.schemaOwnerToken, winnerOwner);
+  assert.equal(postgres.state.sql.some(([, sql]) => /DROP SCHEMA/i.test(sql)), false);
 });
 
 test('owned cleanup deletes every paginated object and proves zero schema objects and zero prefix objects', async () => {

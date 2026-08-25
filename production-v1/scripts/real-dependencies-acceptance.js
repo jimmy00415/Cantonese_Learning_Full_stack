@@ -18,6 +18,7 @@ const RELEASE_SHA = /^[0-9a-f]{40}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 const SCHEMA = /^v1_accept_([0-9a-f]{32})$/;
 const GCS_PREFIX = /^v1-accept\/([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/$/;
+const ATTEMPT_NONCE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const EVIDENCE_OUTPUT_OBJECT = /^release-evidence\/([0-9a-f]{40})\/dependency-acceptance\/([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.json$/;
 const CHECK_NAME = /^[a-z0-9][a-z0-9-]{0,79}$/;
 const PROJECT_ID = 'hkbuddy-prod-v1-20260826';
@@ -170,6 +171,12 @@ function isGcsNotFound(error) {
     || error?.errors?.some?.((entry) => entry?.reason === 'notFound');
 }
 
+function isGcsPreconditionFailed(error) {
+  return Number(error?.code) === 412 || Number(error?.statusCode) === 412
+    || error?.errors?.some?.((entry) => ['conditionNotMet', 'preconditionFailed']
+      .includes(entry?.reason));
+}
+
 function scopedGcsName(value, gcsPrefix, { allowPrefix = false } = {}) {
   return typeof value === 'string' && value.length > gcsPrefix.length
     && value.length <= 1_024 && value.startsWith(gcsPrefix)
@@ -305,25 +312,41 @@ function createBoundedGcsClient(rawBucket, {
         throw gcsError('DEPENDENCY_GCS_ACCESS_INVALID');
       }
     },
-    async putObject({ name, bytes, contentType, ifAbsent = false } = {}) {
+    async putObject({
+      name,
+      bytes,
+      contentType,
+      ifAbsent = false,
+      ownershipNonce = null,
+    } = {}) {
       validateName(name);
       const byteLength = Buffer.isBuffer(bytes) || bytes instanceof Uint8Array
         ? bytes.byteLength
         : -1;
       if (byteLength < 1 || byteLength > MAX_GCS_OBJECT_BYTES
-        || typeof contentType !== 'string' || !contentType || contentType.length > 255) {
+        || typeof contentType !== 'string' || !contentType || contentType.length > 255
+        || (ownershipNonce !== null && !ATTEMPT_NONCE.test(String(ownershipNonce)))) {
         throw gcsError('DEPENDENCY_GCS_RESPONSE_INVALID');
       }
       const body = Buffer.from(bytes);
-      await normalize(async (signal) => {
-        const options = {
-          resumable: false,
-          validation: 'crc32c',
-          metadata: { contentType, cacheControl: 'private, no-store' },
-        };
-        if (ifAbsent) options.preconditionOpts = { ifGenerationMatch: 0 };
-        await pipeline(Readable.from([body]), rawBucket.file(name).createWriteStream(options), { signal });
-      });
+      try {
+        await bounded(async (signal) => {
+          const metadata = { contentType, cacheControl: 'private, no-store' };
+          if (ownershipNonce !== null) {
+            metadata.metadata = { hkbuddyAcceptanceNonce: ownershipNonce };
+          }
+          const options = { resumable: false, validation: 'crc32c', metadata };
+          if (ifAbsent) options.preconditionOpts = { ifGenerationMatch: 0 };
+          await pipeline(Readable.from([body]), rawBucket.file(name).createWriteStream(options), { signal });
+        });
+      } catch (error) {
+        if (['DEPENDENCY_OPERATION_DEADLINE_EXCEEDED', 'DEPENDENCY_OPERATION_CANCELLED']
+          .includes(error?.code)) throw error;
+        if (isGcsPreconditionFailed(error)) {
+          throw gcsError('DEPENDENCY_GCS_PRECONDITION_FAILED');
+        }
+        throw gcsError('DEPENDENCY_GCS_RESPONSE_INVALID');
+      }
     },
     async headObject({ name, allowMissing = false } = {}) {
       validateName(name);
@@ -343,7 +366,16 @@ function createBoundedGcsClient(rawBucket, {
         || String(size) !== String(metadata.size)) {
         throw gcsError('DEPENDENCY_GCS_RESPONSE_INVALID');
       }
-      return { size, generation: metadata.generation ?? null, contentType: metadata.contentType ?? null };
+      const ownershipNonce = typeof metadata.metadata?.hkbuddyAcceptanceNonce === 'string'
+        && metadata.metadata.hkbuddyAcceptanceNonce.length <= 128
+        ? metadata.metadata.hkbuddyAcceptanceNonce
+        : null;
+      return {
+        size,
+        generation: metadata.generation ?? null,
+        contentType: metadata.contentType ?? null,
+        ownershipNonce,
+      };
     },
     async readObject({ name, start, end } = {}) {
       validateName(name);
@@ -1564,10 +1596,12 @@ export async function createRealAcceptanceRuntime({
     fetchImpl,
     additionalExactNames: [evidenceOutputObject],
   });
-  let schemaOwned = false;
-  let gcsPrefixOwned = false;
-  let schemaAcquisitionAttempted = false;
-  let gcsPrefixAcquisitionAttempted = false;
+  const gcsOwnerName = `${gcsPrefix}.acceptance-owner`;
+  const gcsOwnershipNonce = randomUUID();
+  const gcsOwnerBytes = Buffer.from(gcsOwnershipNonce, 'utf8');
+  const schemaOwnershipNonce = randomUUID();
+  let schemaOwnershipState = 'none';
+  let gcsOwnershipState = 'none';
   let gcsCleanupVerified = false;
   let schemaCleanupVerified = false;
   let closed = false;
@@ -1588,6 +1622,40 @@ export async function createRealAcceptanceRuntime({
     } while (cursor);
     return count;
   };
+
+  const proveGcsOwnership = async () => {
+    const before = await gcsClient.headObject({ name: gcsOwnerName, allowMissing: true });
+    if (!before || !/^[1-9]\d*$/.test(String(before.generation ?? ''))
+      || before.ownershipNonce !== gcsOwnershipNonce
+      || before.size !== gcsOwnerBytes.length) return null;
+    const body = await gcsClient.readObject({ name: gcsOwnerName });
+    const after = await gcsClient.headObject({ name: gcsOwnerName, allowMissing: true });
+    if (!after || String(after.generation) !== String(before.generation)
+      || after.ownershipNonce !== gcsOwnershipNonce
+      || Buffer.compare(body, gcsOwnerBytes) !== 0) return null;
+    return { generation: String(before.generation) };
+  };
+
+  const schemaOwner = async () => {
+    const result = await adminPool.query(`
+      SELECT obj_description(oid, 'pg_namespace') AS owner_token
+      FROM pg_namespace
+      WHERE nspname = $1
+    `, [schema]);
+    if (result.rowCount === 0 || result.rows.length === 0) return null;
+    return typeof result.rows[0]?.owner_token === 'string'
+      ? result.rows[0].owner_token
+      : null;
+  };
+
+  const ownedSchemaCreation = `
+    DO $hkbuddy_acceptance$
+    BEGIN
+      CREATE SCHEMA "${schema}";
+      COMMENT ON SCHEMA "${schema}" IS '${schemaOwnershipNonce}';
+    END
+    $hkbuddy_acceptance$;
+  `;
 
   return {
     async runChecks({ signal = null } = {}) {
@@ -1658,17 +1726,40 @@ export async function createRealAcceptanceRuntime({
         if (await prefixObjectCount({ stopAfterFirst: true }) !== 0) {
           throw new Error('Acceptance GCS prefix is not fresh');
         }
-        gcsPrefixAcquisitionAttempted = true;
-        await gcsClient.putObject({
-          name: `${gcsPrefix}.acceptance-owner`,
-          bytes: Buffer.from(runId, 'utf8'),
-          contentType: 'application/octet-stream',
-          ifAbsent: true,
-        });
-        gcsPrefixOwned = true;
-        schemaAcquisitionAttempted = true;
-        await adminPool.query(`CREATE SCHEMA "${schema}"`);
-        schemaOwned = true;
+        gcsOwnershipState = 'ambiguous';
+        try {
+          await gcsClient.putObject({
+            name: gcsOwnerName,
+            bytes: gcsOwnerBytes,
+            contentType: 'application/octet-stream',
+            ifAbsent: true,
+            ownershipNonce: gcsOwnershipNonce,
+          });
+        } catch (error) {
+          if (error?.code === 'DEPENDENCY_GCS_PRECONDITION_FAILED') {
+            gcsOwnershipState = 'conflict';
+            throw gcsError('DEPENDENCY_GCS_SCOPE_CONFLICT');
+          }
+          throw error;
+        }
+        if (!await proveGcsOwnership()) {
+          throw gcsError('DEPENDENCY_GCS_OWNERSHIP_INVALID');
+        }
+        gcsOwnershipState = 'owned';
+        schemaOwnershipState = 'ambiguous';
+        try {
+          await adminPool.query(ownedSchemaCreation);
+        } catch (error) {
+          if (String(error?.code) === '42P06') {
+            schemaOwnershipState = 'conflict';
+            throw deadlineError('DEPENDENCY_POSTGRES_SCOPE_CONFLICT');
+          }
+          throw error;
+        }
+        if (await schemaOwner() !== schemaOwnershipNonce) {
+          throw deadlineError('DEPENDENCY_POSTGRES_OWNERSHIP_INVALID');
+        }
+        schemaOwnershipState = 'owned';
         const migration = await withDeadline((operationSignal) => readMigration({ signal: operationSignal }), {
           timeoutMs: operationDeadlineMs,
           code: 'DEPENDENCY_OPERATION_DEADLINE_EXCEEDED',
@@ -1711,26 +1802,39 @@ export async function createRealAcceptanceRuntime({
         if (prefix !== gcsPrefix || !GCS_PREFIX.test(prefix)) {
           throw new Error('GCS cleanup scope is invalid');
         }
-        if (!gcsPrefixOwned && !gcsPrefixAcquisitionAttempted) {
+        if (['none', 'conflict'].includes(gcsOwnershipState)) {
           const remaining = await prefixObjectCount({ stopAfterFirst: true });
           gcsCleanupVerified = remaining === 0;
           return remaining;
         }
+        let ownership = await proveGcsOwnership();
+        if (!ownership) {
+          gcsCleanupVerified = false;
+          return prefixObjectCount({ stopAfterFirst: true });
+        }
+        gcsOwnershipState = 'owned';
         let deleted = 0;
         while (true) {
           const page = await gcsClient.listObjectsPage({ prefix, limit: 100 });
           if (page.names.length === 0) break;
-          for (const name of page.names) {
+          const names = page.names.filter((name) => name !== gcsOwnerName);
+          if (names.length === 0) break;
+          for (const name of names) {
             await gcsClient.deleteObject({ name });
             deleted += 1;
             if (deleted > 10_000) throw gcsError('DEPENDENCY_GCS_RESPONSE_INVALID');
           }
         }
+        ownership = await proveGcsOwnership();
+        if (!ownership) {
+          gcsCleanupVerified = false;
+          return prefixObjectCount({ stopAfterFirst: true });
+        }
+        await gcsClient.deleteObject({ name: gcsOwnerName, generation: ownership.generation });
         const remaining = await prefixObjectCount();
         gcsCleanupVerified = remaining === 0;
         if (gcsCleanupVerified) {
-          gcsPrefixOwned = false;
-          gcsPrefixAcquisitionAttempted = false;
+          gcsOwnershipState = 'none';
         }
         return remaining;
       } finally {
@@ -1741,13 +1845,17 @@ export async function createRealAcceptanceRuntime({
       activeSignal = signal;
       try {
         if (scope !== schema || !SCHEMA.test(scope)) throw new Error('Schema cleanup scope is invalid');
-        if (!schemaOwned && !schemaAcquisitionAttempted) {
+        if (['none', 'conflict'].includes(schemaOwnershipState)) {
           const existing = await adminPool.query(
             'SELECT count(*)::int AS count FROM pg_namespace WHERE nspname = $1',
             [schema],
           );
           schemaCleanupVerified = Number(existing.rows[0]?.count) === 0;
           return schemaCleanupVerified;
+        }
+        if (await schemaOwner() !== schemaOwnershipNonce) {
+          schemaCleanupVerified = false;
+          return false;
         }
         await adminPool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
         const result = await adminPool.query(
@@ -1757,8 +1865,7 @@ export async function createRealAcceptanceRuntime({
         const absent = Number(result.rows[0]?.count) === 0;
         schemaCleanupVerified = absent;
         if (absent) {
-          schemaOwned = false;
-          schemaAcquisitionAttempted = false;
+          schemaOwnershipState = 'none';
         }
         return absent;
       } finally {
@@ -1803,20 +1910,21 @@ export async function createRealAcceptanceRuntime({
           || finalizeReleaseEvidenceRecord(parsedRecord ?? {}).artifactSha256 !== artifactSha256) {
           throw deadlineError('DEPENDENCY_EVIDENCE_OUTPUT_INVALID');
         }
-        let writeCompleted = false;
+        const evidenceOwnershipNonce = randomUUID();
         try {
           await evidenceGcsClient.putObject({
             name: objectName,
             bytes: body,
             contentType: 'application/json',
             ifAbsent: true,
+            ownershipNonce: evidenceOwnershipNonce,
           });
-          writeCompleted = true;
           const metadata = await evidenceGcsClient.headObject({ name: objectName });
           const readback = await evidenceGcsClient.readObject({ name: objectName });
           await evidenceGcsClient.assertObjectPrivate(objectName);
           if (!/^[1-9]\d*$/.test(String(metadata.generation ?? ''))
             || metadata.size !== body.length
+            || metadata.ownershipNonce !== evidenceOwnershipNonce
             || Buffer.compare(readback, body) !== 0
             || sha256(readback) !== objectSha256) {
             throw deadlineError('DEPENDENCY_EVIDENCE_OUTPUT_INVALID');
@@ -1828,19 +1936,15 @@ export async function createRealAcceptanceRuntime({
             objectSha256,
           };
         } catch (error) {
+          if (error?.code === 'DEPENDENCY_GCS_PRECONDITION_FAILED') {
+            throw deadlineError('DEPENDENCY_EVIDENCE_OUTPUT_EXISTS');
+          }
           try {
             const discovered = await evidenceGcsClient.headObject({
               name: objectName,
               allowMissing: true,
             });
-            if (discovered) {
-              if (!writeCompleted) {
-                const discoveredBody = await evidenceGcsClient.readObject({ name: objectName });
-                if (Buffer.compare(discoveredBody, body) !== 0
-                  || sha256(discoveredBody) !== objectSha256) {
-                  throw deadlineError('DEPENDENCY_EVIDENCE_OUTPUT_CLEANUP_FAILED');
-                }
-              }
+            if (discovered?.ownershipNonce === evidenceOwnershipNonce) {
               if (!/^[1-9]\d*$/.test(String(discovered.generation ?? ''))) {
                 throw deadlineError('DEPENDENCY_EVIDENCE_OUTPUT_CLEANUP_FAILED');
               }
