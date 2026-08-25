@@ -7,6 +7,7 @@ import test from 'node:test';
 import { createStorageRuntime } from '../src/services/storage-runtime.js';
 import { AtomicFileStore } from '../src/stores/atomic-file-store.js';
 import { AzureBlobMediaStore } from '../src/stores/azure-blob-media-store.js';
+import { GcsMediaStore } from '../src/stores/gcs-media-store.js';
 import { LocalMediaStore } from '../src/stores/local-media-store.js';
 import { PostgresStore } from '../src/stores/postgres-store.js';
 
@@ -30,10 +31,10 @@ function productionConfig(overrides = {}) {
     nodeEnv: 'production',
     storeDriver: 'postgres',
     databaseUrl: 'postgresql://v1-db.example.test/campus?sslmode=require',
-    mediaDriver: 'azure-blob',
-    mediaContainer: 'private-v1-media',
-    mediaConnectionString: null,
-    mediaAccountUrl: 'https://v1media.blob.core.windows.net/',
+    mediaDriver: 'gcs',
+    gcsProjectId: 'hkbuddy-prod-v1-20260826',
+    gcsBucket: 'hkbuddy-prod-v1-20260826-media',
+    gcsResourceId: '//storage.googleapis.com/projects/_/buckets/hkbuddy-prod-v1-20260826-media',
     dependencyInitTimeoutMs: 1_000,
     postgresConnectionTimeoutMs: 1_600,
     postgresQueryTimeoutMs: 2_600,
@@ -82,10 +83,16 @@ test('atomic-file plus local creates and initializes only the local adapters', a
   await runtime.close();
 });
 
-test('postgres plus Azure Blob initializes the store first and passes the injected credential', async (t) => {
+test('postgres plus GCS initializes the store first through the injected ADC storage seam', async (t) => {
   const log = [];
   const databaseUrl = 'postgresql://v1-db.example.test/campus?sslmode=require';
-  const credential = { async getToken() { throw new Error('network must not be called'); } };
+  const bucket = { name: 'hkbuddy-prod-v1-20260826-media' };
+  const gcsStorage = {
+    bucket(name) {
+      assert.equal(name, 'hkbuddy-prod-v1-20260826-media');
+      return bucket;
+    },
+  };
   const client = {
     async query(config) {
       log.push('store.init');
@@ -101,13 +108,13 @@ test('postgres plus Azure Blob initializes the store first and passes the inject
     async connect() { return client; },
     async end() { log.push('store.close'); },
   };
-  const originalInit = AzureBlobMediaStore.prototype.init;
-  const originalClose = AzureBlobMediaStore.prototype.close;
-  AzureBlobMediaStore.prototype.init = async function initWithoutNetwork() { log.push('media.init'); };
-  AzureBlobMediaStore.prototype.close = async function closeWithoutNetwork() { log.push('media.close'); };
+  const originalInit = GcsMediaStore.prototype.init;
+  const originalClose = GcsMediaStore.prototype.close;
+  GcsMediaStore.prototype.init = async function initWithoutNetwork() { log.push('media.init'); };
+  GcsMediaStore.prototype.close = async function closeWithoutNetwork() { log.push('media.close'); };
   t.after(() => {
-    AzureBlobMediaStore.prototype.init = originalInit;
-    AzureBlobMediaStore.prototype.close = originalClose;
+    GcsMediaStore.prototype.init = originalInit;
+    GcsMediaStore.prototype.close = originalClose;
   });
 
   const runtime = await createStorageRuntime({
@@ -123,12 +130,14 @@ test('postgres plus Azure Blob initializes the store first and passes the inject
       });
       return pool;
     },
-    azureCredential: credential,
+    gcsStorage,
   });
 
   assert.equal(runtime.store instanceof PostgresStore, true);
-  assert.equal(runtime.mediaStore instanceof AzureBlobMediaStore, true);
-  assert.equal(runtime.mediaStore.containerName, 'private-v1-media');
+  assert.equal(runtime.mediaStore instanceof GcsMediaStore, true);
+  assert.equal(runtime.mediaStore.projectId, 'hkbuddy-prod-v1-20260826');
+  assert.equal(runtime.mediaStore.bucketName, 'hkbuddy-prod-v1-20260826-media');
+  assert.equal(runtime.mediaStore.bucket, bucket);
   assert.deepEqual(log, ['pool.create', 'store.init', 'media.init']);
   await runtime.close();
   assert.deepEqual(log, [
@@ -175,17 +184,11 @@ test('production PostgreSQL requires an explicit secure TLS mode before pool con
   assert.equal(poolFactoryCalls, 0);
 });
 
-test('invalid Blob endpoint identities fail before PostgreSQL pool or Blob construction', async () => {
+test('wrong GCS project, bucket, or full resource identity fails before PostgreSQL or GCS construction', async () => {
   const cases = [
-    productionConfig({ mediaAccountUrl: 'https://v1media.blob.core.windows.net:8443/' }),
-    productionConfig({
-      mediaAccountUrl: null,
-      mediaConnectionString: 'UseDevelopmentStorage=true',
-    }),
-    productionConfig({
-      mediaAccountUrl: null,
-      mediaConnectionString: 'BlobEndpoint=https://v1media.blob.core.windows.net:8443/;AccountName=v1media;AccountKey=private-key',
-    }),
+    productionConfig({ gcsProjectId: 'legacy-project' }),
+    productionConfig({ gcsBucket: 'legacy-media' }),
+    productionConfig({ gcsResourceId: 'projects/_/buckets/hkbuddy-prod-v1-20260826-media' }),
   ];
   for (const config of cases) {
     let poolFactoryCalls = 0;
@@ -195,7 +198,7 @@ test('invalid Blob endpoint identities fail before PostgreSQL pool or Blob const
         poolFactoryCalls += 1;
         throw new Error('pool must not be constructed');
       },
-    }), /Azure Blob.+identity|auth/i);
+    }), /GCS.+identity|project|bucket|resource/i);
     assert.equal(poolFactoryCalls, 0);
   }
 });
@@ -230,7 +233,7 @@ test('production rejects either wrong driver before any adapter initialization o
       store: lifecycleAdapter(log, 'store'),
       mediaStore: lifecycleAdapter(log, 'media'),
       poolFactory: () => { poolFactoryCalls += 1; throw new Error('must not connect'); },
-    }), /production.+postgres.+azure-blob/i);
+    }), /production.+postgres.+gcs/i);
     assert.deepEqual(log, []);
     assert.equal(poolFactoryCalls, 0);
   }

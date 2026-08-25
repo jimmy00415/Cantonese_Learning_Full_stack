@@ -48,6 +48,23 @@ function azureLlmConfig(overrides = {}) {
   };
 }
 
+test('GCS identity digest binds the exact new project and private bucket without credentials', () => {
+  assert.equal(typeof releaseEvidence.gcsIdentitySha256, 'function');
+  const identity = {
+    projectId: 'hkbuddy-prod-v1-20260826',
+    bucket: 'hkbuddy-prod-v1-20260826-media',
+  };
+  assert.equal(
+    releaseEvidence.gcsIdentitySha256(identity),
+    '790771a3d488e3ea04123af67c5f17fac94783a7859f72363ea142df95b70d4f',
+  );
+  for (const invalid of [
+    { ...identity, projectId: 'legacy-project' },
+    { ...identity, bucket: 'legacy-media' },
+    { ...identity, credential: 'must-not-be-accepted' },
+  ]) assert.throws(() => releaseEvidence.gcsIdentitySha256(invalid), /GCS identity/i);
+});
+
 test('LLM config digest binds every effective non-secret Azure setting and credential version', () => {
   assert.equal(typeof releaseEvidence.llmProviderConfigDigest, 'function');
   const digest = releaseEvidence.llmProviderConfigDigest(azureLlmConfig());

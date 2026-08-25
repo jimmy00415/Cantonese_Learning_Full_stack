@@ -8,8 +8,8 @@ import test from 'node:test';
 import { loadConfig, loadLlmSmokeConfiguration } from '../src/config.js';
 import { createApp } from '../src/app.js';
 import {
-  blobIdentitySha256,
   finalizeReleaseEvidenceRecord,
+  gcsIdentitySha256,
   llmProviderConfigDigest,
   postgresIdentitySha256,
 } from '../src/services/release-evidence.js';
@@ -17,10 +17,10 @@ import { createLogger } from '../src/telemetry/logger.js';
 
 const TEST_RELEASE_COMMIT = 'a'.repeat(40);
 const TEST_DATABASE_URL = 'postgres://localhost/v1';
-const TEST_BLOB_ACCOUNT_URL = 'https://v1fixture.blob.core.windows.net/';
-const TEST_BLOB_CONTAINER = 'v1-media';
+const TEST_GCS_PROJECT = 'hkbuddy-prod-v1-20260826';
+const TEST_GCS_BUCKET = 'hkbuddy-prod-v1-20260826-media';
 const TEST_POSTGRES_RESOURCE_ID = 'test-v1-postgres';
-const TEST_BLOB_RESOURCE_ID = 'test-v1-blob';
+const TEST_GCS_RESOURCE_ID = '//storage.googleapis.com/projects/_/buckets/hkbuddy-prod-v1-20260826-media';
 const TEST_LLM_CREDENTIAL_VERSION = 'llm-credential-v1';
 const TEST_LLM_CONFIG = {
   provider: 'hkbu',
@@ -54,23 +54,20 @@ const dependency = finalizeReleaseEvidenceRecord({
   legacyInventoryDigest: inventory.artifactSha256,
   postgresResourceId: TEST_POSTGRES_RESOURCE_ID,
   postgresIdentitySha256: postgresIdentitySha256(TEST_DATABASE_URL),
-  blobResourceId: TEST_BLOB_RESOURCE_ID,
-  blobIdentitySha256: blobIdentitySha256({
-    accountUrl: TEST_BLOB_ACCOUNT_URL,
-    container: TEST_BLOB_CONTAINER,
-  }),
+  gcsResourceId: TEST_GCS_RESOURCE_ID,
+  gcsIdentitySha256: gcsIdentitySha256({ projectId: TEST_GCS_PROJECT, bucket: TEST_GCS_BUCKET }),
   schema: 'v1_accept_12345678123441238123123456789abc',
-  blobPrefix: 'v1-accept/12345678-1234-4123-8123-123456789abc/',
+  gcsPrefix: 'v1-accept/12345678-1234-4123-8123-123456789abc/',
   checks: [
     { name: 'postgres-migration-health', status: 'pass', latencyMs: 1 },
     { name: 'postgres-concurrency-recovery', status: 'pass', latencyMs: 2 },
     { name: 'postgres-integrity-events', status: 'pass', latencyMs: 3 },
     { name: 'postgres-rate-window-fencing', status: 'pass', latencyMs: 4 },
-    { name: 'blob-private-full-range-head', status: 'pass', latencyMs: 5 },
+    { name: 'gcs-private-full-range-head', status: 'pass', latencyMs: 5 },
     { name: 'postgres-media-fencing', status: 'pass', latencyMs: 6 },
   ],
   schemaAbsent: true,
-  blobPrefixObjectCount: 0,
+  gcsPrefixObjectCount: 0,
   result: true,
   occurredAt: new Date().toISOString(),
 });
@@ -105,10 +102,10 @@ function productionEnvironment(overrides = {}) {
     V1_STORE_DRIVER: 'postgres',
     V1_DATABASE_URL: TEST_DATABASE_URL,
     V1_POSTGRES_RESOURCE_ID: TEST_POSTGRES_RESOURCE_ID,
-    V1_MEDIA_DRIVER: 'azure-blob',
-    V1_AZURE_BLOB_CONTAINER: TEST_BLOB_CONTAINER,
-    V1_AZURE_BLOB_ACCOUNT_URL: TEST_BLOB_ACCOUNT_URL,
-    V1_BLOB_RESOURCE_ID: TEST_BLOB_RESOURCE_ID,
+    V1_MEDIA_DRIVER: 'gcs',
+    V1_GOOGLE_CLOUD_PROJECT: TEST_GCS_PROJECT,
+    V1_GCS_BUCKET: TEST_GCS_BUCKET,
+    V1_GCS_RESOURCE_ID: TEST_GCS_RESOURCE_ID,
     V1_LLM_PROVIDER: 'hkbu',
     V1_LLM_CREDENTIAL_VERSION: TEST_LLM_CREDENTIAL_VERSION,
     V1_HKBU_API_KEY: 'test-key',
@@ -272,6 +269,43 @@ test('config requires a canonical HTTPS production origin and derives only a loc
   const legacySecretOnly = productionEnvironment({ SESSION_SECRET: 'l'.repeat(64) });
   delete legacySecretOnly.V1_SESSION_SECRET;
   assert.throws(() => loadConfig(legacySecretOnly), /V1_SESSION_SECRET/);
+});
+
+test('production requires exact V1-only postgres plus private GCS identity while Azure aliases stay local-only', () => {
+  const configured = loadConfig(productionEnvironment());
+  assert.deepEqual({
+    storeDriver: configured.storeDriver,
+    mediaDriver: configured.mediaDriver,
+    projectId: configured.gcsProjectId,
+    bucket: configured.gcsBucket,
+    resourceId: configured.gcsResourceId,
+    authMode: configured.mediaAuthMode,
+  }, {
+    storeDriver: 'postgres',
+    mediaDriver: 'gcs',
+    projectId: TEST_GCS_PROJECT,
+    bucket: TEST_GCS_BUCKET,
+    resourceId: TEST_GCS_RESOURCE_ID,
+    authMode: 'adc',
+  });
+
+  for (const [name, overrides] of [
+    ['Azure production driver', { V1_MEDIA_DRIVER: 'azure-blob' }],
+    ['wrong project', { V1_GOOGLE_CLOUD_PROJECT: 'hkbuddy-pilot-0630' }],
+    ['wrong bucket', { V1_GCS_BUCKET: 'hkbuddy-pilot-0630-media' }],
+    ['wrong resource', { V1_GCS_RESOURCE_ID: `gs://${TEST_GCS_BUCKET}` }],
+    ['missing bucket with unprefixed fallback', { V1_GCS_BUCKET: undefined, GCS_BUCKET: TEST_GCS_BUCKET }],
+    ['missing driver with unprefixed fallback', { V1_MEDIA_DRIVER: undefined, MEDIA_DRIVER: 'gcs' }],
+  ]) assert.throws(() => loadConfig(productionEnvironment(overrides)), /GCS|V1_MEDIA_DRIVER|project|bucket|resource/i, name);
+
+  const localAzure = loadConfig({
+    NODE_ENV: 'test',
+    MEDIA_DRIVER: 'azure-blob',
+    AZURE_BLOB_CONTAINER: 'local-private-media',
+    AZURE_BLOB_ACCOUNT_URL: 'https://localfixture.blob.core.windows.net/',
+  });
+  assert.equal(localAzure.mediaDriver, 'azure-blob');
+  assert.equal(localAzure.mediaAuthMode, 'managed-identity');
 });
 
 test('config gives V1 provider selectors precedence over legacy selectors', () => {

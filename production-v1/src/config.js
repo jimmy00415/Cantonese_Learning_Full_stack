@@ -10,7 +10,7 @@ import {
   voiceEvidenceContracts,
 } from './services/voice-evidence.js';
 import {
-  blobIdentitySha256,
+  gcsIdentitySha256,
   llmProviderConfigDigest,
   postgresIdentitySha256,
   validateLlmSmokeEvidenceFile,
@@ -301,12 +301,17 @@ function assertProductionReady(config) {
   if (config.storeDriver !== 'postgres') throw new Error('V1_STORE_DRIVER=postgres is required in production');
   if (!config.databaseUrl) throw new Error('V1_DATABASE_URL is required in production');
   if (!validResourceId(config.postgresResourceId)) throw new Error('V1_POSTGRES_RESOURCE_ID is required in production');
-  if (config.mediaDriver !== 'azure-blob') throw new Error('V1_MEDIA_DRIVER=azure-blob is required in production');
-  if (!config.mediaContainer) throw new Error('V1_AZURE_BLOB_CONTAINER is required in production');
-  if (!config.mediaCredential) {
-    throw new Error('V1_AZURE_STORAGE_CONNECTION_STRING or V1_AZURE_BLOB_ACCOUNT_URL is required in production');
+  if (config.mediaDriver !== 'gcs') throw new Error('V1_MEDIA_DRIVER=gcs is required in production');
+  if (config.gcsProjectId !== 'hkbuddy-prod-v1-20260826') {
+    throw new Error('V1_GOOGLE_CLOUD_PROJECT must identify the exact V1 Google project in production');
   }
-  if (!validResourceId(config.blobResourceId)) throw new Error('V1_BLOB_RESOURCE_ID is required in production');
+  if (config.gcsBucket !== 'hkbuddy-prod-v1-20260826-media') {
+    throw new Error('V1_GCS_BUCKET must identify the exact private V1 media bucket in production');
+  }
+  gcsIdentitySha256({ projectId: config.gcsProjectId, bucket: config.gcsBucket });
+  if (config.gcsResourceId !== '//storage.googleapis.com/projects/_/buckets/hkbuddy-prod-v1-20260826-media') {
+    throw new Error('V1_GCS_RESOURCE_ID is invalid in production');
+  }
   if (!config.llm.available || config.llm.provider === 'deterministic') {
     throw new Error('Production requires a configured real LLM provider');
   }
@@ -429,27 +434,37 @@ export function loadConfig(environment = process.env, { now = () => new Date() }
     ? env.V1_TRUST_PROXY_HOPS
     : firstDefined(env, 'V1_TRUST_PROXY_HOPS', 'TRUST_PROXY_HOPS');
   const mediaConnectionString = isProduction
-    ? env.V1_AZURE_STORAGE_CONNECTION_STRING
+    ? undefined
     : firstDefined(env, 'V1_AZURE_STORAGE_CONNECTION_STRING', 'AZURE_STORAGE_CONNECTION_STRING');
   const mediaAccountUrl = isProduction
-    ? env.V1_AZURE_BLOB_ACCOUNT_URL
+    ? undefined
     : firstDefined(env, 'V1_AZURE_BLOB_ACCOUNT_URL', 'AZURE_BLOB_ACCOUNT_URL');
   const databaseUrl = isProduction
     ? env.V1_DATABASE_URL
     : firstDefined(env, 'V1_DATABASE_URL', 'DATABASE_URL');
   const mediaContainer = isProduction
-    ? env.V1_AZURE_BLOB_CONTAINER
+    ? undefined
     : firstDefined(env, 'V1_AZURE_BLOB_CONTAINER', 'AZURE_BLOB_CONTAINER', 'AZURE_STORAGE_CONTAINER');
   const postgresResourceId = isProduction
     ? env.V1_POSTGRES_RESOURCE_ID
     : firstDefined(env, 'V1_POSTGRES_RESOURCE_ID', 'POSTGRES_RESOURCE_ID');
   const blobResourceId = isProduction
-    ? env.V1_BLOB_RESOURCE_ID
+    ? undefined
     : firstDefined(env, 'V1_BLOB_RESOURCE_ID', 'BLOB_RESOURCE_ID');
+  const gcsProjectId = isProduction
+    ? env.V1_GOOGLE_CLOUD_PROJECT
+    : firstDefined(env, 'V1_GOOGLE_CLOUD_PROJECT', 'GOOGLE_CLOUD_PROJECT');
+  const gcsBucket = isProduction
+    ? env.V1_GCS_BUCKET
+    : firstDefined(env, 'V1_GCS_BUCKET', 'GCS_BUCKET');
+  const gcsResourceId = isProduction
+    ? env.V1_GCS_RESOURCE_ID
+    : firstDefined(env, 'V1_GCS_RESOURCE_ID', 'GCS_RESOURCE_ID');
   if (mediaConnectionString && mediaAccountUrl) {
     throw new Error('Configure exactly one Azure Blob authentication mode');
   }
   const mediaCredential = mediaConnectionString ?? mediaAccountUrl;
+  if (isProduction) assertGoogleAdcOnly(env);
   const releaseCommitSha = env.V1_RELEASE_COMMIT_SHA?.trim() || null;
   if (releaseCommitSha && !RELEASE_SHA.test(releaseCommitSha)) {
     throw new Error('V1_RELEASE_COMMIT_SHA must be a 40-hex commit SHA');
@@ -482,9 +497,14 @@ export function loadConfig(environment = process.env, { now = () => new Date() }
     localMediaPath: resolve(firstDefined(env, 'V1_LOCAL_MEDIA_PATH', 'LOCAL_MEDIA_PATH') ?? 'media'),
     mediaContainer,
     blobResourceId,
+    gcsProjectId,
+    gcsBucket,
+    gcsResourceId,
     mediaConnectionString,
     mediaAccountUrl,
-    mediaAuthMode: mediaConnectionString ? 'connection-string' : mediaAccountUrl ? 'managed-identity' : null,
+    mediaAuthMode: isProduction && gcsBucket
+      ? 'adc'
+      : mediaConnectionString ? 'connection-string' : mediaAccountUrl ? 'managed-identity' : null,
     mediaCredential,
     instancePolicy: env.V1_INSTANCE_POLICY,
     privacyNoticeVersion: env.V1_PRIVACY_NOTICE_VERSION,
@@ -527,10 +547,9 @@ export function loadConfig(environment = process.env, { now = () => new Date() }
   if (isProduction) {
     assertProductionReady(config);
     const postgresIdentity = postgresIdentitySha256(config.databaseUrl);
-    const blobIdentity = blobIdentitySha256({
-      accountUrl: config.mediaAccountUrl,
-      connectionString: config.mediaConnectionString,
-      container: config.mediaContainer,
+    const gcsIdentity = gcsIdentitySha256({
+      projectId: config.gcsProjectId,
+      bucket: config.gcsBucket,
     });
     const binding = {
       inventoryFile: env.V1_LEGACY_RESOURCE_INVENTORY_FILE,
@@ -541,8 +560,8 @@ export function loadConfig(environment = process.env, { now = () => new Date() }
       commitSha: config.releaseCommitSha,
       postgresResourceId: config.postgresResourceId,
       postgresIdentitySha256: postgresIdentity,
-      blobResourceId: config.blobResourceId,
-      blobIdentitySha256: blobIdentity,
+      gcsResourceId: config.gcsResourceId,
+      gcsIdentitySha256: gcsIdentity,
     };
     const evidence = validateReleaseEvidenceBundle({ ...binding, now: now() });
     if (!evidence.valid) throw new Error(`Production release evidence is invalid (${evidence.code})`);

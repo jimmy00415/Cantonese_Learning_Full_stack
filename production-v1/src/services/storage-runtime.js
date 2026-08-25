@@ -3,16 +3,18 @@ import { Pool } from 'pg';
 
 import { AtomicFileStore } from '../stores/atomic-file-store.js';
 import { AzureBlobMediaStore } from '../stores/azure-blob-media-store.js';
+import { GcsMediaStore } from '../stores/gcs-media-store.js';
 import { LocalMediaStore } from '../stores/local-media-store.js';
 import { PostgresStore } from '../stores/postgres-store.js';
 import {
   assertSecurePostgresRuntimeUrl,
   blobIdentitySha256,
+  gcsIdentitySha256,
   postgresIdentitySha256,
 } from './release-evidence.js';
 
 const STORE_DRIVERS = new Set(['atomic-file', 'postgres']);
-const MEDIA_DRIVERS = new Set(['local', 'azure-blob']);
+const MEDIA_DRIVERS = new Set(['local', 'azure-blob', 'gcs']);
 const CONTAINER = /^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?$/;
 
 function boundedRuntimeTimeout(value, fallback, maximum) {
@@ -75,8 +77,8 @@ function requireAdapter(adapter, name) {
 function validateConfig({ config, suppliedStore, suppliedMediaStore, poolFactory }) {
   if (!config || typeof config !== 'object') throw new Error('Storage runtime requires config');
   if (config.nodeEnv === 'production'
-    && (config.storeDriver !== 'postgres' || config.mediaDriver !== 'azure-blob')) {
-    throw new Error('Production storage requires postgres and azure-blob drivers');
+    && (config.storeDriver !== 'postgres' || config.mediaDriver !== 'gcs')) {
+    throw new Error('Production storage requires postgres and gcs drivers');
   }
   if (!STORE_DRIVERS.has(config.storeDriver)) {
     throw new Error(`Store driver ${String(config.storeDriver)} is not available`);
@@ -124,6 +126,16 @@ function validateConfig({ config, suppliedStore, suppliedMediaStore, poolFactory
         });
       } catch {
         throw new Error('Azure Blob storage requires a valid identity');
+      }
+    }
+    if (config.mediaDriver === 'gcs') {
+      try {
+        gcsIdentitySha256({ projectId: config.gcsProjectId, bucket: config.gcsBucket });
+      } catch {
+        throw new Error('GCS storage requires the exact project and bucket identity');
+      }
+      if (config.gcsResourceId !== '//storage.googleapis.com/projects/_/buckets/hkbuddy-prod-v1-20260826-media') {
+        throw new Error('GCS storage requires the exact full resource identity');
       }
     }
   }
@@ -198,17 +210,24 @@ async function createStore({ config, poolFactory }) {
   }
 }
 
-function createMediaStore({ config, azureCredential }) {
+function createMediaStore({ config, azureCredential, gcsStorage }) {
   if (config.mediaDriver === 'local') {
     return new LocalMediaStore({ rootDirectory: config.localMediaPath });
   }
-  return new AzureBlobMediaStore({
-    containerName: config.mediaContainer,
-    connectionString: config.mediaConnectionString,
-    accountUrl: config.mediaAccountUrl,
-    credential: config.mediaAccountUrl
-      ? (azureCredential ?? new DefaultAzureCredential())
-      : undefined,
+  if (config.mediaDriver === 'azure-blob') {
+    return new AzureBlobMediaStore({
+      containerName: config.mediaContainer,
+      connectionString: config.mediaConnectionString,
+      accountUrl: config.mediaAccountUrl,
+      credential: config.mediaAccountUrl
+        ? (azureCredential ?? new DefaultAzureCredential())
+        : undefined,
+    });
+  }
+  return new GcsMediaStore({
+    projectId: config.gcsProjectId,
+    bucketName: config.gcsBucket,
+    storage: gcsStorage,
   });
 }
 
@@ -218,6 +237,7 @@ export async function createStorageRuntime({
   mediaStore: suppliedMediaStore,
   poolFactory = defaultPoolFactory,
   azureCredential,
+  gcsStorage,
 } = {}) {
   validateConfig({ config, suppliedStore, suppliedMediaStore, poolFactory });
   const initTimeoutMs = boundedRuntimeTimeout(config.dependencyInitTimeoutMs, 10_000, 30_000);
@@ -228,7 +248,7 @@ export async function createStorageRuntime({
     initialized.push(store);
     await withDependencyInitDeadline((signal) => store.init({ signal }), initTimeoutMs);
 
-    const mediaStore = suppliedMediaStore ?? createMediaStore({ config, azureCredential });
+    const mediaStore = suppliedMediaStore ?? createMediaStore({ config, azureCredential, gcsStorage });
     requireAdapter(mediaStore, 'Media store');
     initialized.push(mediaStore);
     await withDependencyInitDeadline((signal) => mediaStore.init({ signal }), initTimeoutMs);

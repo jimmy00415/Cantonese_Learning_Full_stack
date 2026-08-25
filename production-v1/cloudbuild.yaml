@@ -1,0 +1,27 @@
+steps:
+  - id: validate-release-sha
+    name: node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
+    entrypoint: node
+    args:
+      - -e
+      - >-
+        if (!/^[0-9a-f]{40}$/.test(process.env.RELEASE_SHA || ''))
+        { process.stderr.write('invalid release SHA\n'); process.exit(2); }
+    env:
+      - RELEASE_SHA=$_RELEASE_SHA
+  - id: build
+    name: docker:27.5.1-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c
+    waitFor:
+      - validate-release-sha
+    args:
+      - build
+      - --file=Dockerfile
+      - --tag=asia-east2-docker.pkg.dev/$PROJECT_ID/hkbuddy/hkbuddy-api:$_RELEASE_SHA
+      - --label=org.opencontainers.image.revision=$_RELEASE_SHA
+      - --label=org.opencontainers.image.source=hong-kong-buddy-production-v1
+      - .
+images:
+  - asia-east2-docker.pkg.dev/$PROJECT_ID/hkbuddy/hkbuddy-api:$_RELEASE_SHA
+options:
+  logging: CLOUD_LOGGING_ONLY
+timeout: 1200s

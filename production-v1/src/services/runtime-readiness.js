@@ -39,9 +39,9 @@ export function createRuntimeReadinessChecks({
       if (signal?.aborted) return result('media', false);
       return result(
         'media',
-        health?.ok === true && health?.driver === 'azure-blob' && health?.private === true,
+        health?.ok === true && health?.driver === 'gcs' && health?.private === true,
         'version',
-        'azure-blob-v1',
+        'gcs-v1',
       );
     }),
     corpus: () => safely('corpus', async () => {
@@ -82,7 +82,7 @@ export function createRuntimeReadinessChecks({
         config?.nodeEnv === 'production'
         && config?.productionConfigurationReady === true
         && config?.storeDriver === 'postgres'
-        && config?.mediaDriver === 'azure-blob'
+        && config?.mediaDriver === 'gcs'
         && (runtimeState?.accepting === true
           || (allowPausedRuntime === true && runtimeState?.recoverable === true))
         && runtimeState?.instancePolicy === 'single'

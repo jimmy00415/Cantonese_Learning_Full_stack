@@ -64,7 +64,7 @@ function productionConfigurationValid(config) {
     config?.nodeEnv === 'production'
     && config.productionConfigurationReady === true
     && config.storeDriver === 'postgres'
-    && config.mediaDriver === 'azure-blob'
+    && config.mediaDriver === 'gcs'
     && config.llm?.available === true
     && config.llm?.provider !== 'deterministic'
     && config.instancePolicy === 'single'

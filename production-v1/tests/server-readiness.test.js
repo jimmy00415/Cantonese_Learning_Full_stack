@@ -33,7 +33,10 @@ function productionConfig() {
     sessionSecret: 's'.repeat(32),
     trustedProxyHops: 1,
     storeDriver: 'postgres',
-    mediaDriver: 'azure-blob',
+    mediaDriver: 'gcs',
+    gcsProjectId: 'hkbuddy-prod-v1-20260826',
+    gcsBucket: 'hkbuddy-prod-v1-20260826-media',
+    gcsResourceId: '//storage.googleapis.com/projects/_/buckets/hkbuddy-prod-v1-20260826-media',
     llm: { available: true, provider: 'hkbu', timeoutMs: 1_000 },
     asr: { available: false, provider: 'none', settings: {} },
     tts: { available: false, provider: 'none', settings: {} },
@@ -104,7 +107,7 @@ function runtimeFixture(order = []) {
   const mediaStore = {
     init: async () => order.push('media:init'),
     close: async () => order.push('media:close'),
-    healthCheck: async () => ({ ok: true, driver: 'azure-blob', private: true }),
+    healthCheck: async () => ({ ok: true, driver: 'gcs', private: true }),
   };
   const cleanupService = {
     start: () => order.push('cleanup:start'),

@@ -10,10 +10,10 @@ function runtimeFixture(overrides = {}) {
       nodeEnv: 'production',
       productionConfigurationReady: true,
       storeDriver: 'postgres',
-      mediaDriver: 'azure-blob',
+      mediaDriver: 'gcs',
     },
     store: { healthCheck: async () => ({ ok: true, driver: 'postgres' }) },
-    mediaStore: { healthCheck: async () => ({ ok: true, driver: 'azure-blob', private: true }) },
+    mediaStore: { healthCheck: async () => ({ ok: true, driver: 'gcs', private: true }) },
     corpus: { schemaVersion: 'hkbu-campus-v1', snapshotAt: '2026-08-25T12:00:00+08:00', sources: [{}] },
     retentionWorker: {
       readiness: async () => ({
@@ -39,7 +39,7 @@ test('runtime readiness adapters prove the six production boundaries with safe v
     name: 'database', status: 'ready', healthy: true, version: 'postgres-v1',
   });
   assert.deepEqual(await checks.media(), {
-    name: 'media', status: 'ready', healthy: true, version: 'azure-blob-v1',
+    name: 'media', status: 'ready', healthy: true, version: 'gcs-v1',
   });
   assert.deepEqual(await checks.corpus(), {
     name: 'corpus', status: 'ready', healthy: true, version: 'hkbu-campus-v1',
@@ -58,7 +58,7 @@ test('runtime readiness adapters prove the six production boundaries with safe v
 test('runtime readiness checks fail closed for wrong drivers, public media, stale workers, and nonaccepting runtime', async () => {
   const checks = createRuntimeReadinessChecks(runtimeFixture({
     store: { healthCheck: async () => ({ ok: true, driver: 'atomic-file', privateUrl: 'private' }) },
-    mediaStore: { healthCheck: async () => ({ ok: true, driver: 'azure-blob', private: false }) },
+    mediaStore: { healthCheck: async () => ({ ok: true, driver: 'gcs', private: false }) },
     corpus: { schemaVersion: 'hkbu-campus-v1', snapshotAt: 'invalid', sources: [] },
     retentionWorker: { readiness: async () => ({ status: 'stale', healthy: false, privateError: 'secret' }) },
     dispatcher: { readiness: () => ({ status: 'stopped', healthy: false, privateError: 'secret' }) },
@@ -89,7 +89,7 @@ test('missing or throwing runtime dependencies produce safe not-ready checks', a
   }
 });
 
-test('runtime readiness forwards one cancellation signal to database, Blob, retention, and dispatcher probes', async () => {
+test('runtime readiness forwards one cancellation signal to database, GCS, retention, and dispatcher probes', async () => {
   const controller = new AbortController();
   const observed = [];
   const checks = createRuntimeReadinessChecks(runtimeFixture({
@@ -102,7 +102,7 @@ test('runtime readiness forwards one cancellation signal to database, Blob, rete
     mediaStore: {
       healthCheck: async ({ signal } = {}) => {
         observed.push(['media', signal]);
-        return { ok: true, driver: 'azure-blob', private: true };
+        return { ok: true, driver: 'gcs', private: true };
       },
     },
     retentionWorker: {

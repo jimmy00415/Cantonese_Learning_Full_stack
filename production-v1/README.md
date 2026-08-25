@@ -41,7 +41,9 @@ V1 runs as one new application replica behind HTTPS:
 - Node/Express serves the chat UI, API, dispatcher, and SSE updates.
 - A new PostgreSQL resource stores sessions, conversations, turns, event replay,
   quotas, media ownership, deletion outbox, and durable worker state.
-- A new private Azure Blob container stores opaque voice/TTS attempt objects.
+- The private `hkbuddy-prod-v1-20260826-media` GCS bucket stores opaque
+  voice/TTS attempt objects with uniform bucket-level access and public-access
+  prevention.
 - The reviewed HKBU corpus in `data/knowledge/hkbu-v1.json` is the grounding
   boundary; only allowlisted official HKBU sources can support verified claims.
 - One real LLM provider is required. ASR and TTS are separately configured and
@@ -54,7 +56,7 @@ V1 runs as one new application replica behind HTTPS:
 Production does not listen on a port until the first retention run succeeds and
 all six live checks are ready: database, private media, corpus, retention,
 dispatcher, and single-instance runtime. Configuration and release evidence are
-validated before opening PostgreSQL or Blob. The LLM smoke artifact is also
+validated before opening PostgreSQL or GCS. The LLM smoke artifact is also
 validated before startup and re-read on every readiness evaluation; readiness
 never calls the provider. There is no production fallback to the local drivers
 or deterministic model.
@@ -63,7 +65,7 @@ After startup, one low-frequency single-flight watchdog owns live dependency
 evaluation. A red result pauses turn dispatch and rejects every state-changing
 API request with `503`; a later green result resumes both. Public
 `GET /api/health/ready` serves only the watchdog's sanitized cache, so repeated
-public probes never create PostgreSQL or Blob traffic.
+public probes never create PostgreSQL or GCS traffic.
 
 ## Production setting names
 
@@ -74,9 +76,11 @@ values. The production boundary uses these setting names:
   `V1_TRUST_PROXY_HOPS`, `V1_INSTANCE_POLICY`
 - PostgreSQL: `V1_STORE_DRIVER`, `V1_DATABASE_URL`,
   `V1_POSTGRES_RESOURCE_ID`
-- private Blob: `V1_MEDIA_DRIVER`, `V1_AZURE_BLOB_CONTAINER`,
-  `V1_BLOB_RESOURCE_ID`, and exactly one of
-  `V1_AZURE_STORAGE_CONNECTION_STRING` or `V1_AZURE_BLOB_ACCOUNT_URL`
+- private GCS: `V1_MEDIA_DRIVER=gcs`,
+  `V1_GOOGLE_CLOUD_PROJECT=hkbuddy-prod-v1-20260826`,
+  `V1_GCS_BUCKET=hkbuddy-prod-v1-20260826-media`, and
+  `V1_GCS_RESOURCE_ID=//storage.googleapis.com/projects/_/buckets/hkbuddy-prod-v1-20260826-media`;
+  authentication is attached-service-account ADC only
 - model: `V1_LLM_PROVIDER`, `V1_LLM_CREDENTIAL_VERSION`, plus the selected
   provider's complete V1-prefixed credential, endpoint, model/deployment,
   API-version, and request-profile set
@@ -140,8 +144,15 @@ must equal that clean `HEAD` before and after every acceptance run.
    creates only the UUID-scoped schema/prefix and proves both are absent again in
    `finally`. Never run it against an existing app or an unreviewed resource.
 
-3. Apply `migrations/001_initial.sql` only to the approved new V1 database before
-   application startup. Startup refuses a database without migration version 1.
+3. Apply and verify the complete migration set as a separate one-shot command
+   against only the approved new V1 database:
+
+   ```powershell
+   npm.cmd run migrate
+   ```
+
+   Application startup never runs migrations and refuses a database without
+   every expected migration version.
 
 4. Run the separately guarded LLM, ASR, TTS, and real-iPhone acceptance against
    the frozen candidate. A configured provider is not a verified capability.
@@ -189,7 +200,7 @@ transcripts, audio, provider bodies, private URLs, or raw errors.
   been inactive for the full window or the user clears it.
 - Voice/TTS media: 7 days.
 - Expired rate-limit buckets are removed by the same fenced retention run.
-- Explicit conversation deletion revokes ownership first and queues Blob deletion
+- Explicit conversation deletion revokes ownership first and queues GCS deletion
   durably; failed physical deletion remains retryable.
 - The retention worker records durable heartbeat/success state. A stopped or stale
   worker makes readiness fail.
@@ -197,7 +208,7 @@ transcripts, audio, provider bodies, private URLs, or raw errors.
   environment and never beside the live singleton. It uses the same retention
   service and storage boundary, then durably marks its one-shot worker stopped.
 - Configure encrypted PostgreSQL backups and recovery testing for the new V1
-  resource. Blob is temporary media, not the source of conversational truth.
+  resource. GCS is temporary media, not the source of conversational truth.
 - Review every corpus claim at its stated cadence, update source attestations, and
   ship corpus changes through a new frozen release. Overdue/conflicted/unknown
   information must be disclosed rather than invented.
@@ -206,6 +217,20 @@ Student email authentication is deliberately deferred. Anonymous secure-session
 cookies are V1's current identity boundary; do not describe them as student SSO.
 
 ## Deployment and rollback boundary
+
+`Dockerfile` pins the Node 22 OCI base, installs production packages with
+`npm ci` from `package-lock.json`, copies only runtime, migration, and public
+assets, and runs as the unprivileged `node` user on port 8080. Local Docker is
+not required for this tranche. Build the frozen source later with Cloud Build:
+
+```powershell
+gcloud.cmd builds submit --project=hkbuddy-prod-v1-20260826 --config=cloudbuild.yaml --substitutions=_RELEASE_SHA=<lowercase-40-hex-sha> .
+```
+
+The build rejects a noncanonical SHA and publishes only
+`asia-east2-docker.pkg.dev/hkbuddy-prod-v1-20260826/hkbuddy/hkbuddy-api:<sha>`.
+Run `npm.cmd run migrate` as a separate one-shot job; it is never part of
+`CMD` or application startup.
 
 Deploy only as a new application with new resource identities, DNS/hostname, and
 secret scope. Start with exactly one replica. Promote traffic only after privacy,

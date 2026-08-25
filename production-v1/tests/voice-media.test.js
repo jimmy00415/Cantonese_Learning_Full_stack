@@ -1053,8 +1053,8 @@ test('voice config is Azure-only for ASR, validates regions, and keeps all provi
 test('voice release evidence is artifact/config/commit bound and expires dynamically after startup', async (t) => {
   const { finalizeEvidenceRecord, providerConfigDigest } = await import('../src/services/voice-evidence.js');
   const {
-    blobIdentitySha256,
     finalizeReleaseEvidenceRecord,
+    gcsIdentitySha256,
     LLM_SMOKE_CONTRACT_VERSION,
     llmProviderConfigDigest,
     postgresIdentitySha256,
@@ -1069,14 +1069,12 @@ test('voice release evidence is artifact/config/commit bound and expires dynamic
   const commitSha = 'd'.repeat(40);
   const occurredAt = '2026-08-25T00:00:00.000Z';
   const databaseUrl = 'postgres://v1.example.test/v1';
-  const blobConnectionString = 'DefaultEndpointsProtocol=https;AccountName=v1media;AccountKey=fake-only;EndpointSuffix=core.windows.net';
+  const gcsProjectId = 'hkbuddy-prod-v1-20260826';
+  const gcsBucket = 'hkbuddy-prod-v1-20260826-media';
   const postgresResourceId = '/subscriptions/new/resourceGroups/v1/providers/Microsoft.DBforPostgreSQL/flexibleServers/v1';
-  const blobResourceId = '/subscriptions/new/resourceGroups/v1/providers/Microsoft.Storage/storageAccounts/v1media';
+  const gcsResourceId = '//storage.googleapis.com/projects/_/buckets/hkbuddy-prod-v1-20260826-media';
   const postgresIdentity = postgresIdentitySha256(databaseUrl);
-  const blobIdentity = blobIdentitySha256({
-    connectionString: blobConnectionString,
-    container: 'v1-private-media',
-  });
+  const gcsIdentity = gcsIdentitySha256({ projectId: gcsProjectId, bucket: gcsBucket });
   const inventoryRecord = finalizeReleaseEvidenceRecord({
     schemaVersion: 1,
     commitSha,
@@ -1095,20 +1093,20 @@ test('voice release evidence is artifact/config/commit bound and expires dynamic
     legacyInventoryDigest: inventoryRecord.artifactSha256,
     postgresResourceId,
     postgresIdentitySha256: postgresIdentity,
-    blobResourceId,
-    blobIdentitySha256: blobIdentity,
+    gcsResourceId,
+    gcsIdentitySha256: gcsIdentity,
     schema: 'v1_accept_11111111111141118111111111111111',
-    blobPrefix: 'v1-accept/11111111-1111-4111-8111-111111111111/',
+    gcsPrefix: 'v1-accept/11111111-1111-4111-8111-111111111111/',
     checks: [
       { name: 'postgres-migration-health', status: 'pass', latencyMs: 1 },
       { name: 'postgres-concurrency-recovery', status: 'pass', latencyMs: 2 },
       { name: 'postgres-integrity-events', status: 'pass', latencyMs: 3 },
       { name: 'postgres-rate-window-fencing', status: 'pass', latencyMs: 4 },
-      { name: 'blob-private-full-range-head', status: 'pass', latencyMs: 5 },
+      { name: 'gcs-private-full-range-head', status: 'pass', latencyMs: 5 },
       { name: 'postgres-media-fencing', status: 'pass', latencyMs: 6 },
     ],
     schemaAbsent: true,
-    blobPrefixObjectCount: 0,
+    gcsPrefixObjectCount: 0,
     result: true,
     occurredAt,
   });
@@ -1145,9 +1143,8 @@ test('voice release evidence is artifact/config/commit bound and expires dynamic
     NODE_ENV: 'production', V1_PUBLIC_ORIGIN: 'https://v1.example.test', V1_SESSION_SECRET: 's'.repeat(32),
     V1_TRUST_PROXY_HOPS: '1', V1_STORE_DRIVER: 'postgres', V1_DATABASE_URL: databaseUrl,
     V1_POSTGRES_RESOURCE_ID: postgresResourceId,
-    V1_MEDIA_DRIVER: 'azure-blob', V1_AZURE_BLOB_CONTAINER: 'v1-private-media',
-    V1_AZURE_STORAGE_CONNECTION_STRING: blobConnectionString,
-    V1_BLOB_RESOURCE_ID: blobResourceId,
+    V1_MEDIA_DRIVER: 'gcs', V1_GOOGLE_CLOUD_PROJECT: gcsProjectId,
+    V1_GCS_BUCKET: gcsBucket, V1_GCS_RESOURCE_ID: gcsResourceId,
     V1_LLM_PROVIDER: 'hkbu', V1_LLM_CREDENTIAL_VERSION: llmConfig.credentialVersion,
     V1_HKBU_API_KEY: llmConfig.settings.apiKey, V1_HKBU_BASE_URL: llmConfig.settings.baseUrl,
     V1_HKBU_MODEL: llmConfig.settings.model, V1_HKBU_API_VERSION: llmConfig.settings.apiVersion,

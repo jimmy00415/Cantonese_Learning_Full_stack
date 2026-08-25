@@ -48,6 +48,23 @@ const DEPENDENCY_KEYS = [
   'schemaAbsent',
   'schemaVersion',
 ];
+const GCS_DEPENDENCY_KEYS = [
+  'artifactSha256',
+  'checks',
+  'commitSha',
+  'gcsIdentitySha256',
+  'gcsPrefix',
+  'gcsPrefixObjectCount',
+  'gcsResourceId',
+  'legacyInventoryDigest',
+  'occurredAt',
+  'postgresIdentitySha256',
+  'postgresResourceId',
+  'result',
+  'schema',
+  'schemaAbsent',
+  'schemaVersion',
+];
 const LLM_SMOKE_KEYS = [
   'artifactSha256',
   'capability',
@@ -72,6 +89,14 @@ export const DEPENDENCY_ACCEPTANCE_CORE_CHECK_NAMES = Object.freeze([
   'postgres-integrity-events',
   'postgres-rate-window-fencing',
   'blob-private-full-range-head',
+  'postgres-media-fencing',
+]);
+const GCS_DEPENDENCY_ACCEPTANCE_CORE_CHECK_NAMES = Object.freeze([
+  'postgres-migration-health',
+  'postgres-concurrency-recovery',
+  'postgres-integrity-events',
+  'postgres-rate-window-fencing',
+  'gcs-private-full-range-head',
   'postgres-media-fencing',
 ]);
 const ACCEPTANCE_SCHEMA = /^v1_accept_([0-9a-f]{32})$/;
@@ -280,6 +305,15 @@ export function blobIdentitySha256({ accountUrl, connectionString, container } =
   return sha256(canonicalJson(['azure-blob', blobHost({ accountUrl, connectionString }), container]));
 }
 
+export function gcsIdentitySha256(value = {}) {
+  if (!exactKeys(value, ['bucket', 'projectId'])
+    || value.projectId !== 'hkbuddy-prod-v1-20260826'
+    || value.bucket !== 'hkbuddy-prod-v1-20260826-media') {
+    throw new Error('GCS identity is invalid');
+  }
+  return sha256(canonicalJson(['gcs', value.projectId, value.bucket]));
+}
+
 function exactKeys(value, expected) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value)
     && Object.keys(value).sort().join('\0') === expected.join('\0'));
@@ -423,7 +457,7 @@ export function validateLegacyResourceInventory(record, {
   return { valid, code: valid ? null : 'LEGACY_INVENTORY_INVALID', record: valid ? record : null };
 }
 
-function validCheckList(checks) {
+function validCheckList(checks, requiredNames = DEPENDENCY_ACCEPTANCE_CORE_CHECK_NAMES) {
   if (!Array.isArray(checks) || checks.length === 0) return false;
   const names = new Set();
   for (const check of checks) {
@@ -435,7 +469,7 @@ function validCheckList(checks) {
       || names.has(check.name)) return false;
     names.add(check.name);
   }
-  return DEPENDENCY_ACCEPTANCE_CORE_CHECK_NAMES.every((name) => names.has(name));
+  return requiredNames.every((name) => names.has(name));
 }
 
 function legacyContains(inventory, resourceId, identitySha256, field) {
@@ -454,6 +488,8 @@ export function validateDependencyAcceptanceEvidence(record, {
   postgresIdentitySha256: expectedPostgresIdentity,
   blobResourceId,
   blobIdentitySha256: expectedBlobIdentity,
+  gcsResourceId,
+  gcsIdentitySha256: expectedGcsIdentity,
   now = new Date(),
 } = {}) {
   const inventoryValid = validateLegacyResourceInventory(inventory, {
@@ -462,12 +498,15 @@ export function validateDependencyAcceptanceEvidence(record, {
     now,
   }).valid;
   const schemaMatch = ACCEPTANCE_SCHEMA.exec(String(record?.schema ?? ''));
-  const prefixMatch = ACCEPTANCE_PREFIX.exec(String(record?.blobPrefix ?? ''));
+  const gcsMode = DIGEST.test(String(expectedGcsIdentity ?? ''));
+  const prefixMatch = ACCEPTANCE_PREFIX.exec(String(
+    gcsMode ? record?.gcsPrefix : record?.blobPrefix,
+  ));
   const sameRun = Boolean(schemaMatch && prefixMatch
     && schemaMatch[1] === prefixMatch[1].replaceAll('-', ''));
   const valid = Boolean(
     inventoryValid
-    && exactKeys(record, DEPENDENCY_KEYS)
+    && exactKeys(record, gcsMode ? GCS_DEPENDENCY_KEYS : DEPENDENCY_KEYS)
     && validArtifact(record, expectedVersion)
     && record.schemaVersion === 1
     && record.commitSha === commitSha
@@ -475,15 +514,26 @@ export function validateDependencyAcceptanceEvidence(record, {
     && typeof postgresResourceId === 'string' && record.postgresResourceId === postgresResourceId
     && DIGEST.test(String(expectedPostgresIdentity ?? ''))
     && record.postgresIdentitySha256 === expectedPostgresIdentity
-    && typeof blobResourceId === 'string' && record.blobResourceId === blobResourceId
-    && DIGEST.test(String(expectedBlobIdentity ?? ''))
-    && record.blobIdentitySha256 === expectedBlobIdentity
+    && (gcsMode
+      ? typeof gcsResourceId === 'string' && record.gcsResourceId === gcsResourceId
+        && gcsResourceId === '//storage.googleapis.com/projects/_/buckets/hkbuddy-prod-v1-20260826-media'
+        && record.gcsIdentitySha256 === expectedGcsIdentity
+      : typeof blobResourceId === 'string' && record.blobResourceId === blobResourceId
+        && DIGEST.test(String(expectedBlobIdentity ?? ''))
+        && record.blobIdentitySha256 === expectedBlobIdentity)
     && !legacyContains(inventory, postgresResourceId, expectedPostgresIdentity, 'postgresResources')
-    && !legacyContains(inventory, blobResourceId, expectedBlobIdentity, 'blobResources')
+    && !legacyContains(
+      inventory,
+      gcsMode ? gcsResourceId : blobResourceId,
+      gcsMode ? expectedGcsIdentity : expectedBlobIdentity,
+      'blobResources',
+    )
     && sameRun
-    && validCheckList(record.checks)
+    && validCheckList(record.checks, gcsMode
+      ? GCS_DEPENDENCY_ACCEPTANCE_CORE_CHECK_NAMES
+      : DEPENDENCY_ACCEPTANCE_CORE_CHECK_NAMES)
     && record.schemaAbsent === true
-    && record.blobPrefixObjectCount === 0
+    && (gcsMode ? record.gcsPrefixObjectCount : record.blobPrefixObjectCount) === 0
     && record.result === true
     && validInstant(record.occurredAt, now, 7 * DAY_MS)
   );
@@ -644,6 +694,8 @@ export function validateReleaseEvidenceBundle({
   postgresIdentitySha256: expectedPostgresIdentity,
   blobResourceId,
   blobIdentitySha256: expectedBlobIdentity,
+  gcsResourceId,
+  gcsIdentitySha256: expectedGcsIdentity,
   now = new Date(),
   readRecord = readReleaseEvidenceRecord,
 } = {}) {
@@ -674,6 +726,8 @@ export function validateReleaseEvidenceBundle({
     postgresIdentitySha256: expectedPostgresIdentity,
     blobResourceId,
     blobIdentitySha256: expectedBlobIdentity,
+    gcsResourceId,
+    gcsIdentitySha256: expectedGcsIdentity,
     now,
   });
   if (!dependencyResult.valid) {

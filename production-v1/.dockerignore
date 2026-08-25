@@ -1,0 +1,12 @@
+**
+!Dockerfile
+!package.json
+!package-lock.json
+!src/
+!src/**
+!public/
+!public/**
+!migrations/
+!migrations/**
+!scripts/
+!scripts/run-migrations.js

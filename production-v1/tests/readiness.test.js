@@ -8,6 +8,7 @@ import { loadConfig } from '../src/config.js';
 import {
   blobIdentitySha256,
   finalizeReleaseEvidenceRecord,
+  gcsIdentitySha256,
   llmProviderConfigDigest,
   postgresIdentitySha256,
   readReleaseEvidenceRecord,
@@ -27,6 +28,10 @@ const POSTGRES_RESOURCE_ID = '/subscriptions/new/resourceGroups/v1/providers/Mic
 const BLOB_RESOURCE_ID = '/subscriptions/new/resourceGroups/v1/providers/Microsoft.Storage/storageAccounts/v1storage';
 const POSTGRES_IDENTITY = '37e3ef0cd42741f428370ea8381fd9150406e460513d0bb3deeb61ac08ec8d18';
 const BLOB_IDENTITY = 'fc85e13a0ac799694d2cfbead9dec319c5bc5130b6a991de6e0e193a20bbd454';
+const GCS_PROJECT_ID = 'hkbuddy-prod-v1-20260826';
+const GCS_BUCKET = 'hkbuddy-prod-v1-20260826-media';
+const GCS_RESOURCE_ID = '//storage.googleapis.com/projects/_/buckets/hkbuddy-prod-v1-20260826-media';
+const GCS_IDENTITY = '790771a3d488e3ea04123af67c5f17fac94783a7859f72363ea142df95b70d4f';
 
 function inventoryPayload(overrides = {}) {
   return {
@@ -77,6 +82,33 @@ function dependencyPayload(inventory, overrides = {}) {
   };
 }
 
+function gcsDependencyPayload(inventory, overrides = {}) {
+  return {
+    schemaVersion: 1,
+    commitSha: COMMIT,
+    legacyInventoryDigest: inventory.artifactSha256,
+    postgresResourceId: POSTGRES_RESOURCE_ID,
+    postgresIdentitySha256: POSTGRES_IDENTITY,
+    gcsResourceId: GCS_RESOURCE_ID,
+    gcsIdentitySha256: GCS_IDENTITY,
+    schema: 'v1_accept_12345678123441238123123456789abc',
+    gcsPrefix: 'v1-accept/12345678-1234-4123-8123-123456789abc/',
+    checks: [
+      { name: 'postgres-migration-health', status: 'pass', latencyMs: 1 },
+      { name: 'postgres-concurrency-recovery', status: 'pass', latencyMs: 2 },
+      { name: 'postgres-integrity-events', status: 'pass', latencyMs: 3 },
+      { name: 'postgres-rate-window-fencing', status: 'pass', latencyMs: 4 },
+      { name: 'gcs-private-full-range-head', status: 'pass', latencyMs: 5 },
+      { name: 'postgres-media-fencing', status: 'pass', latencyMs: 6 },
+    ],
+    schemaAbsent: true,
+    gcsPrefixObjectCount: 0,
+    result: true,
+    occurredAt: NOW.toISOString(),
+    ...overrides,
+  };
+}
+
 async function productionFixture(t, {
   inventoryOverrides = {},
   dependencyOverrides = {},
@@ -85,7 +117,7 @@ async function productionFixture(t, {
   const directory = await mkdtemp(join(tmpdir(), 'hk-buddy-readiness-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const inventory = finalizeReleaseEvidenceRecord(inventoryPayload(inventoryOverrides));
-  const dependency = finalizeReleaseEvidenceRecord(dependencyPayload(inventory, dependencyOverrides));
+  const dependency = finalizeReleaseEvidenceRecord(gcsDependencyPayload(inventory, dependencyOverrides));
   const llmConfig = {
     provider: 'hkbu',
     credentialVersion: 'llm-credential-v1',
@@ -126,10 +158,10 @@ async function productionFixture(t, {
     V1_STORE_DRIVER: 'postgres',
     V1_DATABASE_URL: 'postgres://private-user:private-password@v1-db.example.test/campus%20v1?sslmode=require',
     V1_POSTGRES_RESOURCE_ID: POSTGRES_RESOURCE_ID,
-    V1_MEDIA_DRIVER: 'azure-blob',
-    V1_AZURE_BLOB_ACCOUNT_URL: 'https://v1storage.blob.core.windows.net/',
-    V1_AZURE_BLOB_CONTAINER: 'v1-private',
-    V1_BLOB_RESOURCE_ID: BLOB_RESOURCE_ID,
+    V1_MEDIA_DRIVER: 'gcs',
+    V1_GOOGLE_CLOUD_PROJECT: GCS_PROJECT_ID,
+    V1_GCS_BUCKET: GCS_BUCKET,
+    V1_GCS_RESOURCE_ID: GCS_RESOURCE_ID,
     V1_LLM_PROVIDER: 'hkbu',
     V1_HKBU_API_KEY: 'private-provider-key',
     V1_HKBU_BASE_URL: 'https://llm.example.test',
@@ -262,6 +294,10 @@ test('resource identities are credential-free canonical hashes and reject ambigu
     connectionString: 'DefaultEndpointsProtocol=https;AccountName=V1Storage;AccountKey=private-key;EndpointSuffix=core.windows.net',
     container: 'v1-private',
   }), BLOB_IDENTITY);
+  assert.equal(gcsIdentitySha256({
+    projectId: GCS_PROJECT_ID,
+    bucket: GCS_BUCKET,
+  }), GCS_IDENTITY);
 
   assert.throws(() => postgresIdentitySha256('https://v1-db.example.test/campus'), /identity/i);
   assert.throws(() => postgresIdentitySha256('postgres://db-a,db-b/campus'), /identity/i);
@@ -424,8 +460,8 @@ test('release evidence bundle requires both approved exact file/version pairs', 
     commitSha: COMMIT,
     postgresResourceId: POSTGRES_RESOURCE_ID,
     postgresIdentitySha256: POSTGRES_IDENTITY,
-    blobResourceId: BLOB_RESOURCE_ID,
-    blobIdentitySha256: BLOB_IDENTITY,
+    gcsResourceId: GCS_RESOURCE_ID,
+    gcsIdentitySha256: GCS_IDENTITY,
     now: NOW,
   };
 
@@ -510,24 +546,24 @@ test('release evidence reader uses one fixed-cap regular-file descriptor', () =>
   assert.equal(oversizedCloses, 1);
 });
 
-test('production storage selects only V1-prefixed database, Blob, and resource identities', async (t) => {
+test('production storage selects only V1-prefixed database, GCS, and resource identities', async (t) => {
   const fixture = await productionFixture(t);
   const config = loadConfig(fixture.environment, { now: () => NOW });
 
   assert.equal(config.databaseUrl, fixture.environment.V1_DATABASE_URL);
-  assert.equal(config.mediaAccountUrl, fixture.environment.V1_AZURE_BLOB_ACCOUNT_URL);
-  assert.equal(config.mediaContainer, fixture.environment.V1_AZURE_BLOB_CONTAINER);
+  assert.equal(config.gcsProjectId, GCS_PROJECT_ID);
+  assert.equal(config.gcsBucket, GCS_BUCKET);
   assert.equal(config.postgresResourceId, POSTGRES_RESOURCE_ID);
-  assert.equal(config.blobResourceId, BLOB_RESOURCE_ID);
+  assert.equal(config.gcsResourceId, GCS_RESOURCE_ID);
   assert.equal(config.productionConfigurationReady, true);
   assert.equal(config.productionReady, false, 'runtime checks are still required');
 
   const cases = [
     ['V1_DATABASE_URL', { DATABASE_URL: fixture.environment.V1_DATABASE_URL }],
-    ['V1_AZURE_BLOB_ACCOUNT_URL', { AZURE_BLOB_ACCOUNT_URL: fixture.environment.V1_AZURE_BLOB_ACCOUNT_URL }],
-    ['V1_AZURE_BLOB_CONTAINER', { AZURE_BLOB_CONTAINER: fixture.environment.V1_AZURE_BLOB_CONTAINER }],
+    ['V1_GOOGLE_CLOUD_PROJECT', { GOOGLE_CLOUD_PROJECT: fixture.environment.V1_GOOGLE_CLOUD_PROJECT }],
+    ['V1_GCS_BUCKET', { GCS_BUCKET: fixture.environment.V1_GCS_BUCKET }],
     ['V1_POSTGRES_RESOURCE_ID', { POSTGRES_RESOURCE_ID }],
-    ['V1_BLOB_RESOURCE_ID', { BLOB_RESOURCE_ID }],
+    ['V1_GCS_RESOURCE_ID', { GCS_RESOURCE_ID }],
   ];
   for (const [missing, legacy] of cases) {
     const environment = { ...fixture.environment, ...legacy };
@@ -539,8 +575,8 @@ test('production storage selects only V1-prefixed database, Blob, and resource i
     /V1_POSTGRES_RESOURCE_ID/,
   );
   assert.throws(
-    () => loadConfig({ ...fixture.environment, V1_BLOB_RESOURCE_ID: '\t' }, { now: () => NOW }),
-    /V1_BLOB_RESOURCE_ID/,
+    () => loadConfig({ ...fixture.environment, V1_GCS_RESOURCE_ID: '\t' }, { now: () => NOW }),
+    /V1_GCS_RESOURCE_ID/,
   );
 });
 
@@ -597,11 +633,11 @@ test('config public status never exposes evidence paths, resource identities, di
     fixture.inventory.artifactSha256,
     fixture.dependency.artifactSha256,
     POSTGRES_RESOURCE_ID,
-    BLOB_RESOURCE_ID,
+    GCS_RESOURCE_ID,
     POSTGRES_IDENTITY,
-    BLOB_IDENTITY,
+    GCS_IDENTITY,
     fixture.environment.V1_DATABASE_URL,
-    fixture.environment.V1_AZURE_BLOB_ACCOUNT_URL,
+    fixture.environment.V1_GCS_BUCKET,
     fixture.environment.V1_SESSION_SECRET,
     fixture.environment.V1_HKBU_API_KEY,
   ]) assert.equal(serialized.includes(privateValue), false);
@@ -673,11 +709,11 @@ test('aggregate readiness revalidates evidence before all injected production ch
     fixture.llmSmokeFile,
     fixture.llmSmoke.artifactSha256,
     POSTGRES_RESOURCE_ID,
-    BLOB_RESOURCE_ID,
+    GCS_RESOURCE_ID,
     POSTGRES_IDENTITY,
-    BLOB_IDENTITY,
+    GCS_IDENTITY,
     fixture.environment.V1_DATABASE_URL,
-    fixture.environment.V1_AZURE_BLOB_ACCOUNT_URL,
+    fixture.environment.V1_GCS_BUCKET,
     'private-retention.example.test',
     'C:\\private',
     'f'.repeat(64),
