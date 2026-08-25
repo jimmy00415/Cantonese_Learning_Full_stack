@@ -2,44 +2,142 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="theme-color" content="#f6f0e7">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#f5f1ec">
+    <meta name="description" content="Ask a grounded AI senior about everyday life at HKBU.">
     <title>Hong Kong Buddy | Campus AI Senior</title>
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="apple-touch-icon" href="/assets/ai-senior-avatar.png">
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
-    <div class="chat-shell">
-      <header id="app-header" class="app-header">
-        <div class="profile-mark" aria-hidden="true">HK</div>
-        <div>
-          <h1>Campus AI Senior</h1>
-          <p>AI assistant</p>
-        </div>
-        <button class="info-button" type="button" aria-label="About Campus AI Senior" aria-controls="assistant-info" aria-expanded="false">i</button>
-      </header>
+    <div class="app-frame">
+      <div class="chat-shell" data-app-state="loading">
+        <header id="app-header" class="app-header">
+          <img class="profile-avatar profile-avatar--header" src="/assets/ai-senior-avatar-128.png" alt="">
+          <div class="profile-copy">
+            <h1>Campus AI Senior</h1>
+            <p>AI assistant · HKBU guide</p>
+          </div>
+          <button class="info-button" type="button" aria-label="About Campus AI Senior" aria-controls="assistant-info" aria-expanded="false">About</button>
+        </header>
 
-      <main id="message-list" class="message-list" aria-label="Conversation">
-        <section class="welcome-message" aria-label="Welcome message">
-          <p>I’m your Campus AI Senior. Ask about getting started at HKBU, and I’ll show official sources whenever I can verify an answer.</p>
-        </section>
-      </main>
+        <p id="connection-status" class="connection-status" role="status" hidden></p>
 
-      <p id="turn-status" class="turn-status" aria-live="polite" aria-atomic="true"></p>
+        <main id="message-list" class="message-list" aria-label="Conversation">
+          <section id="welcome" class="welcome" aria-label="Start a conversation">
+            <div class="message-row message-row--assistant welcome-row">
+              <img class="profile-avatar message-avatar" src="/assets/ai-senior-avatar-128.png" alt="">
+              <div class="message-stack">
+                <div class="message-bubble message-bubble--assistant">
+                  <p>Hi! I’m your Campus AI Senior. I can help with HKBU life, services, and getting started.</p>
+                  <p>What would you like to know?</p>
+                </div>
+                <p class="ai-disclosure">AI assistant · Answers may need checking against the linked official source.</p>
+              </div>
+            </div>
 
-      <form id="composer" class="composer" aria-label="Message Campus AI Senior">
-        <label class="sr-only" for="message-input">Your message</label>
-        <textarea id="message-input" name="message" rows="1" placeholder="Ask your AI senior…" disabled></textarea>
-        <button id="voice-button" type="button" aria-label="Record a voice message" disabled>Voice</button>
-        <button id="send-button" type="submit" disabled>Send</button>
-      </form>
+            <div class="starter-prompts" aria-label="Suggested questions">
+              <button class="starter-prompt" type="button" data-prompt="How do I activate my SSOid?" disabled>How do I activate my SSOid?</button>
+              <button class="starter-prompt" type="button" data-prompt="What food options are available at HKBU?" disabled>What food options are available at HKBU?</button>
+              <button class="starter-prompt" type="button" data-prompt="Where can I use my student e-Card?" disabled>Where can I use my student e-Card?</button>
+              <button class="starter-prompt" type="button" data-prompt="How do I set up Duo on a new phone?" disabled>How do I set up Duo on a new phone?</button>
+            </div>
+          </section>
+
+          <div id="message-feed" class="message-feed" role="log" aria-label="Messages" aria-live="polite" aria-atomic="false" aria-relevant="additions text" aria-busy="true"></div>
+        </main>
+
+        <p id="turn-status" class="turn-status" role="status" aria-live="polite" aria-atomic="true"></p>
+
+        <form id="composer" class="composer" aria-label="Message Campus AI Senior">
+          <div class="composer-panel">
+            <label class="sr-only" for="message-input">Your message</label>
+            <textarea id="message-input" name="message" rows="1" maxlength="4000" placeholder="Ask your AI senior…" autocomplete="off" disabled></textarea>
+            <button id="voice-button" type="button" aria-label="Voice input is not available in this build" title="Voice input is not available in this build" disabled>Voice unavailable</button>
+            <button id="send-button" type="submit" disabled>Send</button>
+          </div>
+          <p id="composer-feedback" class="composer-feedback" aria-live="polite" aria-atomic="true"></p>
+          <div class="composer-attribution" aria-label="from Simplify">
+            <span>from</span>
+            <img src="/assets/simplify-wordmark.svg" alt="Simplify">
+          </div>
+        </form>
+      </div>
     </div>
 
     <dialog id="assistant-info" class="assistant-info" aria-labelledby="assistant-info-title">
-      <button class="close-button" type="button" aria-label="Close information">Close</button>
-      <h2 id="assistant-info-title">About Campus AI Senior</h2>
-      <p>This is an AI assistant, not a student or an official HKBU representative. Check the cited official source for important details.</p>
-      <p class="parent-brand">A Simplify product</p>
+      <div class="sheet-heading">
+        <div>
+          <p class="sheet-eyebrow">Hong Kong Buddy</p>
+          <h2 id="assistant-info-title">About your Campus AI Senior</h2>
+        </div>
+        <button class="close-button" type="button" aria-label="Close information">Close</button>
+      </div>
+
+      <div class="sheet-body">
+        <section>
+          <h3>An AI guide, not a person</h3>
+          <p>This is an AI assistant, not a student or an official HKBU representative. It can make mistakes, so use the cited official source for important details.</p>
+        </section>
+        <section>
+          <h3>Grounded campus answers</h3>
+          <p>Campus-specific facts are linked to reviewed HKBU pages. A verification date shows when the supporting claim was last checked; missing or outdated evidence is described honestly.</p>
+          <p>Knowledge snapshot: <time id="knowledge-snapshot-date">Date unavailable</time>.</p>
+        </section>
+        <section>
+          <h3>Guest conversation</h3>
+          <p>This version uses an anonymous browser session. History is not linked to a student account and will not follow you to another browser or device.</p>
+        </section>
+        <section>
+          <h3>Draft privacy notice</h3>
+          <p>Text you send may be processed by the configured AI provider to produce an answer. Voice input is disabled in this build. Use Clear conversation below to revoke this guest session and queue its stored data for deletion.</p>
+        </section>
+      </div>
+
+      <div class="sheet-actions">
+        <button id="clear-session" class="clear-session" type="button">Clear conversation</button>
+        <p id="clear-status" class="clear-status" role="status" aria-live="polite" aria-atomic="true"></p>
+      </div>
+
+      <div class="sheet-brand" aria-label="from Simplify">
+        <span>from</span>
+        <img src="/assets/simplify-wordmark.svg" alt="Simplify">
+      </div>
     </dialog>
+
+    <template id="message-template">
+      <article class="message-row">
+        <img class="profile-avatar message-avatar" src="/assets/ai-senior-avatar-128.png" alt="">
+        <div class="message-stack">
+          <div class="message-bubble"><p class="message-text"></p></div>
+          <div class="message-sources"></div>
+          <div class="message-actions"></div>
+          <div class="suggested-replies"></div>
+          <div class="message-meta">
+            <time class="message-time"></time>
+            <span class="message-state"></span>
+            <button class="retry-message" type="button" hidden>Retry</button>
+          </div>
+        </div>
+      </article>
+    </template>
+
+    <template id="source-template">
+      <a class="source-card" target="_blank" rel="noopener noreferrer">
+        <span class="source-title"></span>
+        <span class="source-publisher"></span>
+        <span class="source-freshness"></span>
+      </a>
+    </template>
+
+    <template id="action-card-template">
+      <a class="action-card" target="_blank" rel="noopener noreferrer">
+        <span class="action-card-title"></span>
+        <span class="action-card-label"></span>
+      </a>
+    </template>
+
     <script type="module" src="/app.js"></script>
   </body>
 </html>

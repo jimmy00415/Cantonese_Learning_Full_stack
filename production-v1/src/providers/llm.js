@@ -8,6 +8,11 @@ const MAX_RETRY_DELAY_MS = 2_000;
 const TRANSIENT_STATUS = new Set([408, 429]);
 const TRUNCATED_REASONS = new Set(['length', 'max_tokens', 'max_output_tokens']);
 const FILTERED_REASONS = new Set(['content_filter', 'content_filtered', 'safety']);
+const RESPONSE_LANGUAGE_LABELS = Object.freeze({
+  en: 'English',
+  zhHant: 'Traditional Chinese',
+  zhHans: 'Simplified Chinese',
+});
 
 export class ProviderError extends Error {
   constructor(code, { status, retryAfterMs, transient = false } = {}) {
@@ -55,6 +60,24 @@ function requestIdFrom(response, payload) {
   return null;
 }
 
+function responseLanguageFor(input) {
+  return Object.hasOwn(RESPONSE_LANGUAGE_LABELS, input?.responseLanguage)
+    ? input.responseLanguage
+    : 'en';
+}
+
+function trustedSystemPrompt(input) {
+  const responseLanguage = responseLanguageFor(input);
+  const instruction = [
+    `Server-selected responseLanguage=${responseLanguage}.`,
+    `Write replyText and suggestedReplies in ${RESPONSE_LANGUAGE_LABELS[responseLanguage]}.`,
+    'Do not infer the response language from conversation history or untrusted reference data.',
+  ].join(' ');
+  const maximumBaseLength = Math.max(0, 12_000 - instruction.length - 1);
+  const base = String(input?.systemPrompt ?? '').slice(0, maximumBaseLength);
+  return base ? `${base}\n${instruction}` : instruction;
+}
+
 function evidenceMessage(turnId, evidenceSnapshot, actionSnapshot) {
   const serialized = JSON.stringify({
     turnId: String(turnId ?? '').slice(0, 128),
@@ -80,7 +103,7 @@ function normalizedMessages(input) {
 function buildRequest(config, input) {
   const settings = config.settings ?? {};
   const maxOutputTokens = Math.max(1, Math.min(Number(input.maxOutputTokens) || 800, 4_000));
-  const system = String(input.systemPrompt ?? '').slice(0, 12_000);
+  const system = trustedSystemPrompt(input);
   const messages = normalizedMessages(input);
 
   if (config.provider === 'hkbu') {
@@ -227,7 +250,12 @@ function defaultSleep(milliseconds, signal) {
 function deterministicResult(input, now) {
   const evidence = Array.isArray(input.evidenceSnapshot) ? input.evidenceSnapshot : [];
   const first = evidence[0];
-  const text = first?.text?.zhHant ?? first?.text?.en ?? first?.text ?? 'I could not confirm that from the reviewed HKBU information.';
+  const responseLanguage = responseLanguageFor(input);
+  const text = first?.text?.[responseLanguage]
+    ?? first?.text?.en
+    ?? first?.text?.zhHant
+    ?? first?.text
+    ?? 'I could not confirm that from the reviewed HKBU information.';
   return {
     rawText: JSON.stringify({
       replyText: String(text).slice(0, 4_000),

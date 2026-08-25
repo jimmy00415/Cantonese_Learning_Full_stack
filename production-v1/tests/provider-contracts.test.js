@@ -8,6 +8,7 @@ import { runProviderSmoke } from '../scripts/provider-smoke.js';
 const TURN_INPUT = Object.freeze({
   turnId: 'turn-123',
   systemPrompt: 'Return one strict JSON object.',
+  responseLanguage: 'en',
   messages: [{ role: 'user', content: 'Where is the Duo guide?' }],
   evidenceSnapshot: [{ id: 'evidence.ito.duo.new-phone', text: 'Use the official Duo self-service path.' }],
   actionSnapshot: [{ id: 'action.ito.duo.open', label: { en: 'Open Duo guidance' }, sourceId: 'hkbu.ito.duo' }],
@@ -85,13 +86,36 @@ test('provider contract uses the selected MiniMax Anthropic X-Api-Key contract a
   assert.equal(request.url, 'https://minimax.test/anthropic/v1/messages');
   assert.equal(request.init.headers['X-Api-Key'], 'minimax-secret-key');
   assert.equal(request.init.headers.Authorization, undefined);
-  assert.equal(body.system, TURN_INPUT.systemPrompt);
+  assert.match(body.system, /^Return one strict JSON object\./);
+  assert.match(body.system, /responseLanguage=en/);
+  assert.match(body.system, /English/);
   assert.equal(body.messages.some((message) => message.role === 'system'), false);
   assert.match(body.messages.at(-1).content, /untrusted_reference_data/);
   assert.match(body.messages.at(-1).content, /action\.ito\.duo\.open/);
   assert.match(body.messages.at(-1).content, /Open Duo guidance/);
   assert.equal(result.rawText, '{"replyText":"ok"}');
   assert.equal(result.finishReason, 'end_turn');
+});
+
+test('provider binds the trusted server-selected response language instead of inferring from the final reference message', async () => {
+  let requestBody;
+  const provider = createLlmProvider({
+    config: { provider: 'hkbu', settings: { apiKey: 'key', baseUrl: 'https://hkbu.test', model: 'model', apiVersion: 'v1' } },
+    fetchImpl: async (url, init) => { requestBody = JSON.parse(init.body); return openAiSuccess(); },
+  });
+
+  await provider.generate({
+    ...TURN_INPUT,
+    responseLanguage: 'zhHans',
+    messages: [{ role: 'user', content: 'English-looking latest student message' }],
+  });
+
+  const system = requestBody.messages[0].content;
+  assert.match(system, /responseLanguage=zhHans/);
+  assert.match(system, /Simplified Chinese/);
+  assert.match(system, /do not infer.*reference data/i);
+  assert.equal(requestBody.messages.at(-2).content, 'English-looking latest student message');
+  assert.match(requestBody.messages.at(-1).content, /untrusted_reference_data/);
 });
 
 test('provider contract requires HTTPS before fetch and refuses redirects without forwarding credentials', async () => {

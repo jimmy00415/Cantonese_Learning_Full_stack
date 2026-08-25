@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="620" height="144" viewBox="0 0 620 144" role="img" aria-labelledby="title desc">
+  <title id="title">Simplify logo</title>
+  <desc id="desc">The Simplify symbol and Inter wordmark in monochrome.</desc>
+  <g fill="#050505">
+    <g transform="translate(24 30) scale(.179)">
+      <path d="M7 117 255 1q7-3 11 2 3 4-2 11L108 233q-5 8-11 5-3-1-6-5L2 128q-5-7-1-10 2-1 6-1Z"/>
+      <path d="M378 1q4-3 11 1l247 115q7 3 7 8 0 3-4 7l-88 102q-6 7-11 3-2-1-5-5L378 12q-5-7 0-11Z"/>
+      <path d="M20 374 289 24q5-7 11-3 3 2 3 9l9 288q0 11-8 14L27 385q-8 2-9-4-1-4 2-7Z"/>
+      <path d="m354 24 269 350q4 4 2 8-2 5-10 3l-277-53q-7-2-6-14l9-288q0-7 3-9 6-4 10 3Z"/>
+      <path d="m211 369 93-17q8-1 8 7v104q0 6-5 7-4 1-8-3l-89-88q-7-7 1-10Z"/>
+      <path d="m339 352 93 17q8 3 1 10l-89 88q-4 4-8 3-4-1-4-7V359q0-8 7-7Z"/>
+    </g>
+    <text x="164" y="96" font-family="Inter, Helvetica, Arial, sans-serif" font-size="64" font-weight="650" letter-spacing="-1.6">Simplify.</text>
+  </g>
+</svg>
