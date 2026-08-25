@@ -143,6 +143,20 @@ async function settleWithin(promise, milliseconds, message) {
   }
 }
 
+async function waitForCondition(condition, {
+  timeoutMs = 5_000,
+  intervalMs = 10,
+  message = 'condition did not become true before its diagnostic deadline',
+} = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const result = await condition();
+    if (result) return result;
+    if (Date.now() >= deadline) throw new Error(message);
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
 async function createStore(t, prefix = 'hb-v1-voice-store-') {
   const directory = await mkdtemp(join(tmpdir(), prefix));
   const filePath = join(directory, 'store.json');
@@ -2085,7 +2099,14 @@ test('voice media writes have an independent deadline and persist retryable 503 
 test('abort-ignoring ASR and TTS media writes rearm completed cleanup after timeout and leave no orphan', async (t) => {
   const { createMediaCleanupService } = await import('../src/services/media-cleanup.js');
   const { createVoiceService } = await import('../src/services/voice.js');
-  const { filePath, store } = await createStore(t, 'hb-v1-late-media-write-');
+  const { directory, filePath, store } = await createStore(t, 'hb-v1-late-media-write-');
+  const durablyCompletedCleanupKeys = new Set();
+  const completeMediaDeletion = store.completeMediaDeletion.bind(store);
+  store.completeMediaDeletion = async (input) => {
+    const completed = await completeMediaDeletion(input);
+    if (completed.generation >= 2) durablyCompletedCleanupKeys.add(completed.storageKey);
+    return completed;
+  };
   const owner = await store.createOrResumeSession({ tokenHash: 'late-media-owner', now: '2026-08-25T02:45:00.000Z' });
   const assistant = await createDeliveredAssistant(store, owner.session, owner.conversation);
   const keys = {
@@ -2132,6 +2153,7 @@ test('abort-ignoring ASR and TTS media writes rearm completed cleanup after time
     ttsProvider: { synthesize: async () => ({ buffer: Buffer.from([0x49, 0x44, 0x33, 0x04]), mimeType: 'audio/mpeg' }) },
     now,
     mediaDeadlineMs: 10,
+    spoolParentDirectory: join(directory, 'voice-spool'),
   });
   const audio = canonicalWav(10);
   const operations = [
@@ -2146,24 +2168,34 @@ test('abort-ignoring ASR and TTS media writes rearm completed cleanup after time
   ];
   const promptFailures = Promise.all(operations.map((operation) => assert.rejects(operation, (error) => (
     error.code === 'VOICE_MEDIA_UNAVAILABLE' && error.status === 503 && error.retryable === true
-  ))));
-  await Promise.race([
+  )))).then(
+    () => ({ accepted: true }),
+    (error) => ({ accepted: false, error }),
+  );
+  await waitForCondition(() => {
+    const startedKeys = new Set(pendingWrites.map((entry) => entry.storageKey));
+    return Object.values(keys).every((storageKey) => startedKeys.has(storageKey));
+  }, {
+    message: 'both target putAttempt operations did not start before the diagnostic deadline',
+  });
+  const promptOutcome = await settleWithin(
     promptFailures,
-    new Promise((resolve, reject) => {
-      void resolve;
-      setTimeout(() => reject(new Error('media timeout held the service response')), 250).unref?.();
-    }),
-  ]);
+    2_000,
+    'target putAttempt operations started but bounded 503 service responses did not arrive',
+  );
+  if (!promptOutcome.accepted) throw promptOutcome.error;
   assert.equal(asrCalls, 0);
   assert.deepEqual(pendingWrites.map((entry) => entry.storageKey).sort(), Object.values(keys).sort());
 
   await Promise.all(pendingWrites.map((entry) => entry.finish()));
-  const deadline = Date.now() + 500;
-  while (objects.size > 0 && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
+  await waitForCondition(() => (
+    objects.size === 0
+    && Object.values(keys).every((storageKey) => durablyCompletedCleanupKeys.has(storageKey))
+  ), {
+    timeoutMs: 10_000,
+    message: 'late successful writes did not reach durable generation-2 cleanup completion',
+  });
   assert.equal(objects.size, 0, 'late successful writes are durably rearmed and deleted');
-  await new Promise((resolve) => setTimeout(resolve, 25));
   const persisted = JSON.parse(await readFile(filePath, 'utf8'));
   for (const storageKey of Object.values(keys)) {
     const job = persisted.mediaDeletionJobs.find((entry) => entry.storageKey === storageKey);
@@ -2208,6 +2240,13 @@ test('late-rejecting ASR and TTS writes return bounded HTTP 503 and rearm cleanu
     asrProvider: { provider: 'azure', transcribe: async () => { asrCalls += 1; return { transcript: 'must not run' }; } },
     ttsProvider: { provider: 'azure', synthesize: async () => ({ buffer: Buffer.from([0x49, 0x44, 0x33, 0x04]), mimeType: 'audio/mpeg' }) },
   });
+  const durablyCompletedCleanupKeys = new Set();
+  const completeMediaDeletion = store.completeMediaDeletion.bind(store);
+  store.completeMediaDeletion = async (input) => {
+    const completed = await completeMediaDeletion(input);
+    if (completed.generation >= 2) durablyCompletedCleanupKeys.add(completed.storageKey);
+    return completed;
+  };
   const session = await fetchJson(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin } });
   const cookie = session.response.headers.getSetCookie()[0].split(';')[0];
   const assistant = await createDeliveredAssistant(store, session.body.data.session, session.body.data.conversation);
@@ -2229,13 +2268,23 @@ test('late-rejecting ASR and TTS writes return bounded HTTP 503 and rearm cleanu
       method: 'POST', headers: { Origin: origin, Cookie: cookie },
     }),
   ];
-  const responses = await Promise.race([
-    Promise.all(operations),
-    new Promise((resolve, reject) => {
-      void resolve;
-      setTimeout(() => reject(new Error('HTTP response waited for the abort-ignoring media write')), 250).unref?.();
-    }),
-  ]);
+  const responsesPromise = Promise.all(operations).then(
+    (responses) => ({ accepted: true, responses }),
+    (error) => ({ accepted: false, error }),
+  );
+  await waitForCondition(() => {
+    const startedKeys = new Set(pendingWrites.map((entry) => entry.storageKey));
+    return Object.values(keys).every((storageKey) => startedKeys.has(storageKey));
+  }, {
+    message: 'both target late-rejecting putAttempt operations did not start before the diagnostic deadline',
+  });
+  const responsesOutcome = await settleWithin(
+    responsesPromise,
+    2_000,
+    'target late-rejecting putAttempt operations started but bounded HTTP 503 responses did not arrive',
+  );
+  if (!responsesOutcome.accepted) throw responsesOutcome.error;
+  const { responses } = responsesOutcome;
   for (const result of responses) {
     assert.equal(result.response.status, 503);
     assert.equal(result.body.error.code, 'VOICE_MEDIA_UNAVAILABLE');
@@ -2244,13 +2293,14 @@ test('late-rejecting ASR and TTS writes return bounded HTTP 503 and rearm cleanu
   assert.deepEqual(pendingWrites.map((entry) => entry.storageKey).sort(), Object.values(keys).sort());
 
   await Promise.all(pendingWrites.map((entry) => entry.finishAndReject()));
-  const cleanupDeadline = Date.now() + 500;
-  while (objects.size > 0 && Date.now() < cleanupDeadline) {
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
+  await waitForCondition(() => (
+    objects.size === 0
+    && Object.values(keys).every((storageKey) => durablyCompletedCleanupKeys.has(storageKey))
+  ), {
+    timeoutMs: 10_000,
+    message: 'late rejected writes did not reach durable generation-2 cleanup completion',
+  });
   assert.equal(objects.size, 0, 'late rejected writes are durably rearmed and deleted');
-  await new Promise((resolve) => setTimeout(resolve, 25));
-  await store.close();
   const persisted = JSON.parse(await readFile(filePath, 'utf8'));
   for (const storageKey of Object.values(keys)) {
     const job = persisted.mediaDeletionJobs.find((entry) => entry.storageKey === storageKey);
