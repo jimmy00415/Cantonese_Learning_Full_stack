@@ -177,6 +177,119 @@ function browserAudioContextClass(options) {
   return globalThis.AudioContext ?? globalThis.webkitAudioContext;
 }
 
+function browserOfflineAudioContextClass(options) {
+  if (Object.prototype.hasOwnProperty.call(options, 'OfflineAudioContextClass')) {
+    return options.OfflineAudioContextClass;
+  }
+  return globalThis.OfflineAudioContext ?? globalThis.webkitOfflineAudioContext;
+}
+
+function copyMonoIntoAudioBuffer(buffer, mono, sourceSampleRate) {
+  if (!buffer
+    || buffer.numberOfChannels !== CANONICAL_AUDIO.channels
+    || buffer.length !== mono.length
+    || buffer.sampleRate !== sourceSampleRate) {
+    throw new AudioNormalizationError('AUDIO_RESAMPLE_FAILED');
+  }
+  if (typeof buffer.copyToChannel === 'function') {
+    buffer.copyToChannel(mono, 0);
+    return;
+  }
+  if (typeof buffer.getChannelData !== 'function') {
+    throw new AudioNormalizationError('AUDIO_RESAMPLE_FAILED');
+  }
+  const destination = buffer.getChannelData(0);
+  if (!destination || destination.length !== mono.length || typeof destination.set !== 'function') {
+    throw new AudioNormalizationError('AUDIO_RESAMPLE_FAILED');
+  }
+  destination.set(mono);
+}
+
+function renderedMonoSamples(rendered, expectedLength) {
+  if (!rendered
+    || rendered.numberOfChannels !== CANONICAL_AUDIO.channels
+    || rendered.sampleRate !== CANONICAL_AUDIO.sampleRate
+    || rendered.length !== expectedLength
+    || typeof rendered.getChannelData !== 'function') {
+    throw new AudioNormalizationError('AUDIO_RESAMPLE_FAILED');
+  }
+  const channel = rendered.getChannelData(0);
+  if (!channel || channel.length !== expectedLength) {
+    throw new AudioNormalizationError('AUDIO_RESAMPLE_FAILED');
+  }
+  return Float32Array.from(channel, finiteSample);
+}
+
+async function resampleWithOfflineAudioContext(mono, sourceSampleRate, options) {
+  const OfflineAudioContextClass = browserOfflineAudioContextClass(options);
+  if (typeof OfflineAudioContextClass !== 'function') {
+    throw new AudioNormalizationError('WEB_AUDIO_RESAMPLER_UNAVAILABLE');
+  }
+  const targetLength = Math.max(
+    1,
+    Math.round((mono.length * CANONICAL_AUDIO.sampleRate) / sourceSampleRate),
+  );
+  if (!Number.isSafeInteger(targetLength)) {
+    throw new AudioNormalizationError('AUDIO_RESAMPLE_FAILED');
+  }
+
+  let context;
+  try {
+    context = new OfflineAudioContextClass(
+      CANONICAL_AUDIO.channels,
+      targetLength,
+      CANONICAL_AUDIO.sampleRate,
+    );
+  } catch (error) {
+    throw new AudioNormalizationError('WEB_AUDIO_RESAMPLER_UNAVAILABLE', error);
+  }
+
+  let source;
+  try {
+    if (typeof context?.createBuffer !== 'function'
+      || typeof context?.createBufferSource !== 'function'
+      || typeof context?.startRendering !== 'function'
+      || !context.destination) {
+      throw new AudioNormalizationError('AUDIO_RESAMPLE_FAILED');
+    }
+    const buffer = context.createBuffer(
+      CANONICAL_AUDIO.channels,
+      mono.length,
+      sourceSampleRate,
+    );
+    copyMonoIntoAudioBuffer(buffer, mono, sourceSampleRate);
+
+    source = context.createBufferSource();
+    if (!source
+      || typeof source.connect !== 'function'
+      || typeof source.start !== 'function'
+      || typeof source.disconnect !== 'function') {
+      throw new AudioNormalizationError('AUDIO_RESAMPLE_FAILED');
+    }
+    source.buffer = buffer;
+    source.connect(context.destination);
+    source.start(0);
+    const rendered = await context.startRendering();
+    return renderedMonoSamples(rendered, targetLength);
+  } catch (error) {
+    if (error instanceof AudioNormalizationError) throw error;
+    throw new AudioNormalizationError('AUDIO_RESAMPLE_FAILED', error);
+  } finally {
+    if (source) {
+      try {
+        source.disconnect?.();
+      } catch {
+        // Disconnection is best-effort; releasing the source buffer is still required.
+      }
+      try {
+        source.buffer = null;
+      } catch {
+        // A broken source must not replace the stable resampling outcome.
+      }
+    }
+  }
+}
+
 async function closeAudioContext(context) {
   if (typeof context?.close !== 'function') return;
   try {
@@ -225,7 +338,9 @@ export async function normalizeAudioBlobToCanonicalWav(blob, options = {}) {
     try {
       const { channels, sampleRate } = decodedChannels(decoded);
       const mono = downmixChannels(channels);
-      const resampled = resampleLinear(mono, sampleRate, CANONICAL_AUDIO.sampleRate);
+      const resampled = sampleRate === CANONICAL_AUDIO.sampleRate
+        ? mono
+        : await resampleWithOfflineAudioContext(mono, sampleRate, options);
       const wav = encodeCanonicalWav(resampled);
       return new Blob([wav], { type: CANONICAL_AUDIO.mimeType });
     } catch (error) {

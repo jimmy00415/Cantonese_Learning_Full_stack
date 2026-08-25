@@ -45,6 +45,58 @@ function audioContextClass({ decoded, decodeError, constructError, tracker = {} 
   };
 }
 
+function offlineContextClass({ rendered, renderError, constructError, tracker = {} } = {}) {
+  return class FakeOfflineAudioContext {
+    constructor(numberOfChannels, length, sampleRate) {
+      tracker.constructed = (tracker.constructed ?? 0) + 1;
+      tracker.constructorArgs = [numberOfChannels, length, sampleRate];
+      if (constructError) throw constructError;
+      this.destination = { kind: 'offline-destination' };
+    }
+
+    createBuffer(numberOfChannels, length, sampleRate) {
+      tracker.inputBufferArgs = [numberOfChannels, length, sampleRate];
+      const data = new Float32Array(length);
+      return {
+        numberOfChannels,
+        length,
+        sampleRate,
+        copyToChannel(value, channel) {
+          tracker.copyChannel = channel;
+          data.set(value);
+          tracker.copiedMono = data.slice();
+        },
+        getChannelData: () => data,
+      };
+    }
+
+    createBufferSource() {
+      const source = {
+        buffer: null,
+        connect: (destination) => {
+          tracker.connectedTo = destination;
+          tracker.connectCalls = (tracker.connectCalls ?? 0) + 1;
+        },
+        start: (when) => {
+          tracker.startWhen = when;
+          tracker.startCalls = (tracker.startCalls ?? 0) + 1;
+        },
+        disconnect: () => {
+          tracker.disconnectCalls = (tracker.disconnectCalls ?? 0) + 1;
+        },
+      };
+      tracker.source = source;
+      return source;
+    }
+
+    startRendering() {
+      tracker.renderCalls = (tracker.renderCalls ?? 0) + 1;
+      if (renderError) return Promise.reject(renderError);
+      return Promise.resolve(rendered);
+    }
+  };
+}
+
 function wavView(value) {
   const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
   return { bytes, view: new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength) };
@@ -167,13 +219,152 @@ test('normalizeAudioBlobToCanonicalWav decodes the complete opaque blob, downmix
 
 test('normalization accepts exactly 55 seconds and emits only canonical header plus PCM data', async () => {
   const AudioContextClass = audioContextClass({
-    decoded: decodedBuffer([new Float32Array(55)], 1),
+    decoded: decodedBuffer([new Float32Array(55 * 16_000)], 16_000),
   });
   const output = await normalizeAudioBlobToCanonicalWav(new Blob(['x']), { AudioContextClass });
 
   assert.equal(CANONICAL_AUDIO.maxDurationSeconds, 55);
   assert.equal(output.type, 'audio/wav');
   assert.equal(output.size, 44 + (55 * 16_000 * 2));
+});
+
+test('production normalization uses OfflineAudioContext for non-16k mono resampling', async () => {
+  const offline = {};
+  const OfflineAudioContextClass = offlineContextClass({
+    rendered: decodedBuffer([Float32Array.from([0.25, -0.25])], 16_000),
+    tracker: offline,
+  });
+  const AudioContextClass = audioContextClass({
+    decoded: decodedBuffer([
+      Float32Array.from([1, 0, -1, 0.5, 0.25, -0.25]),
+      Float32Array.from([-1, 1, 1, 0.5, -0.25, 0.25]),
+    ], 48_000),
+  });
+
+  const output = await normalizeAudioBlobToCanonicalWav(new Blob(['opaque-webm']), {
+    AudioContextClass,
+    OfflineAudioContextClass,
+  });
+  const bytes = new Uint8Array(await output.arrayBuffer());
+  const view = new DataView(bytes.buffer);
+
+  assert.deepEqual(offline.constructorArgs, [1, 2, 16_000]);
+  assert.deepEqual(offline.inputBufferArgs, [1, 6, 48_000]);
+  assert.equal(offline.copyChannel, 0);
+  assert.deepEqual(Array.from(offline.copiedMono), [0, 0.5, 0, 0.5, 0, 0]);
+  assert.equal(offline.connectedTo.kind, 'offline-destination');
+  assert.equal(offline.startWhen, 0);
+  assert.equal(offline.renderCalls, 1);
+  assert.equal(offline.disconnectCalls, 1);
+  assert.equal(offline.source.buffer, null);
+  assert.equal(output.type, 'audio/wav');
+  assert.equal(output.size, 48);
+  assert.equal(view.getInt16(44, true), 8_192);
+  assert.equal(view.getInt16(46, true), -8_192);
+});
+
+test('16k decoded input bypasses OfflineAudioContext completely', async () => {
+  let offlineConstructions = 0;
+  class MustNotConstructOfflineContext {
+    constructor() {
+      offlineConstructions += 1;
+      throw new Error('same-rate audio must bypass offline rendering');
+    }
+  }
+  const output = await normalizeAudioBlobToCanonicalWav(new Blob(['wav']), {
+    AudioContextClass: audioContextClass({
+      decoded: decodedBuffer([Float32Array.from([0, 0.5, -0.5])], 16_000),
+    }),
+    OfflineAudioContextClass: MustNotConstructOfflineContext,
+  });
+  assert.equal(output.type, 'audio/wav');
+  assert.equal(offlineConstructions, 0);
+});
+
+test('non-16k normalization fails closed when the native resampler is absent or cannot initialize', async () => {
+  const decoded = decodedBuffer([Float32Array.from([0, 1, 0])], 48_000);
+  await rejectsWithCode(
+    () => normalizeAudioBlobToCanonicalWav(new Blob(['webm']), {
+      AudioContextClass: audioContextClass({ decoded }),
+      OfflineAudioContextClass: null,
+    }),
+    'WEB_AUDIO_RESAMPLER_UNAVAILABLE',
+  );
+  await rejectsWithCode(
+    () => normalizeAudioBlobToCanonicalWav(new Blob(['webm']), {
+      AudioContextClass: audioContextClass({ decoded }),
+      OfflineAudioContextClass: offlineContextClass({ constructError: new Error('blocked') }),
+    }),
+    'WEB_AUDIO_RESAMPLER_UNAVAILABLE',
+  );
+});
+
+test('OfflineAudioContext API, render, and rendered-shape failures are stable and fail closed', async (t) => {
+  const decoded = decodedBuffer([Float32Array.from([0, 1, 0])], 48_000);
+  class MissingSourceCleanup extends offlineContextClass({
+    rendered: decodedBuffer([Float32Array.of(0)], 16_000),
+  }) {
+    createBufferSource() {
+      const source = super.createBufferSource();
+      source.disconnect = undefined;
+      return source;
+    }
+  }
+  const cases = [
+    ['missing-api', class MissingOfflineApi {}],
+    ['missing-source-cleanup', MissingSourceCleanup],
+    ['render-reject', offlineContextClass({ renderError: new Error('late render failure') })],
+    ['wrong-rate', offlineContextClass({
+      rendered: decodedBuffer([Float32Array.of(0)], 44_100),
+    })],
+    ['wrong-length', offlineContextClass({
+      rendered: decodedBuffer([Float32Array.from([0, 0])], 16_000),
+    })],
+    ['wrong-channels', offlineContextClass({
+      rendered: decodedBuffer([Float32Array.of(0), Float32Array.of(0)], 16_000),
+    })],
+  ];
+  for (const [name, OfflineAudioContextClass] of cases) {
+    await t.test(name, async () => {
+      await rejectsWithCode(
+        () => normalizeAudioBlobToCanonicalWav(new Blob(['webm']), {
+          AudioContextClass: audioContextClass({ decoded }),
+          OfflineAudioContextClass,
+        }),
+        'AUDIO_RESAMPLE_FAILED',
+      );
+    });
+  }
+});
+
+test('late OfflineAudioContext render rejection disconnects and releases its source without raw fallback', async () => {
+  let rejectRendering;
+  const rendering = new Promise((resolve, reject) => {
+    void resolve;
+    rejectRendering = reject;
+  });
+  const tracker = {};
+  class LateRejectingOfflineContext extends offlineContextClass({
+    rendered: decodedBuffer([Float32Array.of(0)], 16_000),
+    tracker,
+  }) {
+    startRendering() {
+      tracker.renderCalls = (tracker.renderCalls ?? 0) + 1;
+      return rendering;
+    }
+  }
+  const operation = normalizeAudioBlobToCanonicalWav(new Blob(['raw-container']), {
+    AudioContextClass: audioContextClass({
+      decoded: decodedBuffer([Float32Array.from([0, 1, 0])], 48_000),
+    }),
+    OfflineAudioContextClass: LateRejectingOfflineContext,
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  rejectRendering(new Error('render failed later'));
+  await rejectsWithCode(() => operation, 'AUDIO_RESAMPLE_FAILED');
+  assert.equal(tracker.disconnectCalls, 1);
+  assert.equal(tracker.source.buffer, null);
 });
 
 test('normalization rejects empty input, invalid decoded audio, and decoded audio over 55 seconds', async () => {
