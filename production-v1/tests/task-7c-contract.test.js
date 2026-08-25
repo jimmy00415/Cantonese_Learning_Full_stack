@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { promisify } from 'node:util';
+
+import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 
 import {
   LATENCY_ACCEPTANCE_CONTRACT,
@@ -17,6 +21,7 @@ import { createAcceptanceTimingRecorder } from '../src/telemetry/acceptance-timi
 import { createApp } from '../src/app.js';
 import { loadConfig, loadVoiceSmokeConfiguration } from '../src/config.js';
 import { createTtsProvider } from '../src/providers/tts.js';
+import { validateCanonicalWav } from '../src/media/canonical-wav.js';
 import { AtomicFileStore } from '../src/stores/atomic-file-store.js';
 import {
   finalizeEvidenceRecord,
@@ -32,6 +37,14 @@ const COMMIT = '1'.repeat(40);
 const PROJECT_NUMBER = '123456789012';
 const STABLE_ORIGIN = `https://hkbuddy-api-${PROJECT_NUMBER}.asia-east2.run.app`;
 const CANDIDATE_ORIGIN = `https://candidate-${COMMIT.slice(0, 12)}---hkbuddy-api-${PROJECT_NUMBER}.asia-east2.run.app`;
+const executeFile = promisify(execFile);
+const IOS_NORMALIZER_ARGUMENTS = Object.freeze([
+  '-nostdin', '-hide_banner', '-loglevel', 'error',
+  '-protocol_whitelist', 'file', '-i', 'capture.mp4',
+  '-map', '0:a:0', '-map_metadata', '-1', '-vn',
+  '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le',
+  '-flags:a', '+bitexact', '-fflags', '+bitexact', '-f', 'wav', 'derived.wav',
+]);
 
 function canonicalWav(durationMs = 100) {
   const pcmBytes = durationMs * 32;
@@ -74,6 +87,28 @@ function audioMp4Capture() {
     mp4Box('moov', Buffer.from('test-track-handler-soun-codec-mp4a', 'ascii')),
     mp4Box('mdat', Buffer.from(Array.from({ length: 64 }, (_, index) => (index % 251) + 1))),
   ]);
+}
+
+async function generateDecodableMp4Fixture(directory) {
+  const rawCapturePath = join(directory, 'generated-source.mp4');
+  const wavPath = join(directory, 'generated-derived.wav');
+  const options = { cwd: directory, windowsHide: true, timeout: 30_000, maxBuffer: 1024 * 1024 };
+  await executeFile(ffmpegInstaller.path, [
+    '-nostdin', '-hide_banner', '-loglevel', 'error',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
+    '-t', '0.5', '-c:a', 'aac', '-b:a', '64k',
+    '-fflags', '+bitexact', '-flags:a', '+bitexact', '-movflags', '+faststart',
+    rawCapturePath,
+  ], options);
+  await executeFile(ffmpegInstaller.path, IOS_NORMALIZER_ARGUMENTS.map((argument) => {
+    if (argument === 'capture.mp4') return rawCapturePath;
+    if (argument === 'derived.wav') return wavPath;
+    return argument;
+  }), options);
+  return {
+    rawCapture: await readFile(rawCapturePath),
+    wavBytes: await readFile(wavPath),
+  };
 }
 
 function canonicalMp3() {
@@ -415,6 +450,45 @@ test('canonical MP3 validation traverses every frame and rejects magic-only, pse
   assert.equal(decoded.sha256, createHash('sha256').update(fixture).digest('hex'));
 });
 
+test('independent MP3 decode rejects silent PCM planes but retains bounded low-amplitude audio', async () => {
+  const fixture = canonicalMp3Fixture();
+  class TestDecoder {
+    constructor() { this.ready = Promise.resolve(); }
+
+    decode() {
+      return {
+        errors: [], samplesDecoded: 1_199, sampleRate: 44_100,
+        channelData: [this.left, this.right],
+      };
+    }
+
+    free() {}
+  }
+
+  class SilentDecoder extends TestDecoder {
+    constructor() {
+      super();
+      this.left = new Float32Array(1_199);
+      this.right = new Float32Array(1_199);
+    }
+  }
+  await assert.rejects(
+    decodeCanonicalMp3(fixture, { Decoder: SilentDecoder }),
+    /silent|energy|amplitude/i,
+  );
+
+  class LowAmplitudeDecoder extends TestDecoder {
+    constructor() {
+      super();
+      this.left = new Float32Array(1_199).fill(0.000_001);
+      this.right = new Float32Array(1_199).fill(-0.000_001);
+    }
+  }
+  const quiet = await decodeCanonicalMp3(fixture, { Decoder: LowAmplitudeDecoder });
+  assert.equal(quiet.decodedSampleCount, 1_199);
+  assert.equal(quiet.decodedChannelCount, 2);
+});
+
 test('pinned Google TTS can generate canonical LINEAR16 fixtures separately from product MP3', async () => {
   const requests = [];
   const wav = canonicalWav();
@@ -594,60 +668,71 @@ test('candidate URL shape is SHA bound rather than an arbitrary HTTPS or run.app
   assert.equal(STABLE_ORIGIN, 'https://hkbuddy-api-123456789012.asia-east2.run.app');
 });
 
-test('iOS evidence generator binds the exact raw capture, normalized WAV, device report, and structured steps', async () => {
+test('iOS evidence generator derives a decodable AAC fixture with its pinned offline normalizer and rejects forged bindings', async (t) => {
   const { runIosVoiceEvidence } = await import('../scripts/ios-voice-evidence.js');
-  const directory = await mkdtemp(join(tmpdir(), 'hb-ios-real-device-'));
-  const reportPath = join(directory, 'real-device-report.json');
-  const rawCapturePath = join(directory, 'iphone-safari-capture.mp4');
-  const wavPath = join(directory, 'captured-canonical.wav');
-  const stepsPath = join(directory, 'normalization-and-device-steps.json');
+  const normalizerTempsBefore = (await readdir(tmpdir()))
+    .filter((name) => name.startsWith('hkbuddy-ios-normalizer-')).sort();
+  const directory = await mkdtemp(join(tmpdir(), 'hb-ios-synthetic-fixture-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
   const deviceRunId = '88888888-8888-4888-8888-888888888888';
   const observedAt = '2026-08-26T00:00:00.000Z';
-  const rawCapture = audioMp4Capture();
-  const wavBytes = canonicalWav(1_000);
   const stepIds = [
     'permission-prompt-granted', 'recording-auto-stopped-55s',
     'permission-tracks-stopped', 'cancel-stops-tracks',
     'single-idempotent-upload', 'transcript-editable-before-send',
     'text-fallback-after-denial', 'raw-container-not-uploaded',
   ];
-  const steps = {
-    schemaVersion: 1,
-    source: 'real-iphone-safari-normalization-v1',
-    deviceRunId,
-    rawCapture: { sha256: sha256(rawCapture), byteLength: rawCapture.length, mimeType: 'audio/mp4' },
-    normalizedWav: {
-      sha256: sha256(wavBytes), byteLength: wavBytes.length, durationMs: 1_000,
-      normalizerContractVersion: 'canonical-wav-v1',
-    },
-    normalizer: {
-      tool: 'ffmpeg', version: '7.1.1', exitCode: 0,
-      arguments: [
-        '-nostdin', '-hide_banner', '-loglevel', 'error', '-i', '<raw-capture>', '-vn',
-        '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', '<canonical-wav>',
-      ],
-    },
-    steps: stepIds.map((id) => ({ id, outcome: 'pass', observedAt })),
+  const writeBundle = async ({ label, rawCapture, wavBytes, extraStepFields = {} }) => {
+    const wav = validateCanonicalWav(wavBytes);
+    const steps = {
+      schemaVersion: 2,
+      source: 'real-iphone-safari-normalization-v2',
+      deviceRunId,
+      rawCapture: { sha256: sha256(rawCapture), byteLength: rawCapture.length, mimeType: 'audio/mp4' },
+      normalizedWav: {
+        sha256: sha256(wavBytes), byteLength: wavBytes.length, durationMs: wav.durationMs,
+        normalizerContractVersion: 'canonical-wav-v1',
+      },
+      ...extraStepFields,
+      steps: stepIds.map((id) => ({ id, outcome: 'pass', observedAt })),
+    };
+    const stepsBytes = Buffer.from(JSON.stringify(steps));
+    const report = {
+      schemaVersion: 2,
+      reportSource: 'real-iphone-safari-manual-v2',
+      deviceRunId,
+      deviceModelIdentifier: 'iPhone16,1', iosVersion: '19.0', safariVersion: '19.0',
+      captureMimeType: 'audio/mp4', observedAt,
+      rawCapture: { sha256: sha256(rawCapture), byteLength: rawCapture.length },
+      normalizedWav: {
+        sha256: sha256(wavBytes), byteLength: wavBytes.length, durationMs: wav.durationMs,
+        normalizerContractVersion: 'canonical-wav-v1',
+      },
+      normalizationSteps: { sha256: sha256(stepsBytes), byteLength: stepsBytes.length },
+    };
+    const reportBytes = Buffer.from(JSON.stringify(report));
+    const reportPath = join(directory, `${label}-report.json`);
+    const rawCapturePath = join(directory, `${label}-capture.mp4`);
+    const wavPath = join(directory, `${label}-canonical.wav`);
+    const stepsPath = join(directory, `${label}-steps.json`);
+    await writeFile(rawCapturePath, rawCapture);
+    await writeFile(wavPath, wavBytes);
+    await writeFile(stepsPath, stepsBytes);
+    await writeFile(reportPath, reportBytes);
+    return { reportPath, rawCapturePath, wavPath, stepsPath, reportBytes, stepsBytes };
   };
-  const stepsBytes = Buffer.from(JSON.stringify(steps));
-  const report = {
-    schemaVersion: 2,
-    reportSource: 'real-iphone-safari-manual-v2',
-    deviceRunId,
-    deviceModelIdentifier: 'iPhone16,1', iosVersion: '19.0', safariVersion: '19.0',
-    captureMimeType: 'audio/mp4', observedAt,
-    rawCapture: { sha256: sha256(rawCapture), byteLength: rawCapture.length },
-    normalizedWav: {
-      sha256: sha256(wavBytes), byteLength: wavBytes.length, durationMs: 1_000,
-      normalizerContractVersion: 'canonical-wav-v1',
-    },
-    normalizationSteps: { sha256: sha256(stepsBytes), byteLength: stepsBytes.length },
-  };
-  const reportBytes = Buffer.from(JSON.stringify(report));
-  await writeFile(rawCapturePath, rawCapture);
-  await writeFile(wavPath, wavBytes);
-  await writeFile(stepsPath, stepsBytes);
-  await writeFile(reportPath, reportBytes);
+  const invoke = (bundle, dependencies) => runIosVoiceEvidence({
+    argv: [
+      '--device-report', bundle.reportPath,
+      '--raw-capture', bundle.rawCapturePath,
+      '--canonical-wav', bundle.wavPath,
+      '--normalization-steps', bundle.stepsPath,
+      '--confirm-real-iphone-safari',
+    ],
+    ...dependencies,
+  });
+  const { rawCapture, wavBytes } = await generateDecodableMp4Fixture(directory);
+  const validBundle = await writeBundle({ label: 'valid', rawCapture, wavBytes });
   let gitCalls = 0;
   const written = [];
   const dependencies = {
@@ -661,50 +746,69 @@ test('iOS evidence generator binds the exact raw capture, normalized WAV, device
   assert.equal(inert.exitCode, 2);
   assert.equal(gitCalls, 0);
   const legacyArguments = await runIosVoiceEvidence({
-    argv: ['--device-report', reportPath, '--canonical-wav', wavPath, '--confirm-real-iphone-safari'],
+    argv: [
+      '--device-report', validBundle.reportPath,
+      '--canonical-wav', validBundle.wavPath,
+      '--confirm-real-iphone-safari',
+    ],
     ...dependencies,
   });
   assert.equal(legacyArguments.exitCode, 2);
   assert.equal(gitCalls, 0);
-  const result = await runIosVoiceEvidence({
-    argv: [
-      '--device-report', reportPath,
-      '--raw-capture', rawCapturePath,
-      '--canonical-wav', wavPath,
-      '--normalization-steps', stepsPath,
-      '--confirm-real-iphone-safari',
-    ],
-    ...dependencies,
-  });
+  const result = await invoke(validBundle, dependencies);
   assert.equal(result.exitCode, 0);
   assert.equal(gitCalls, 2);
   assert.equal(written.length, 1);
-  assert.equal(written[0].schemaVersion, 3);
+  assert.equal(written[0].schemaVersion, 4);
   assert.equal(written[0].deviceRunId, deviceRunId);
-  assert.equal(written[0].deviceReportSha256, sha256(reportBytes));
+  assert.equal(written[0].deviceReportSha256, sha256(validBundle.reportBytes));
   assert.equal(written[0].rawCaptureSha256, sha256(rawCapture));
   assert.equal(written[0].rawCaptureByteLength, rawCapture.length);
   assert.equal(written[0].fixtureSha256, sha256(wavBytes));
   assert.equal(written[0].fixtureByteLength, wavBytes.length);
-  assert.equal(written[0].normalizationStepsSha256, sha256(stepsBytes));
+  assert.equal(written[0].normalizationStepsSha256, sha256(validBundle.stepsBytes));
   assert.deepEqual(written[0].verifiedStepIds, stepIds);
+  assert.equal(written[0].normalizerPackage, '@ffmpeg-installer/ffmpeg@1.1.0');
+  assert.equal(written[0].normalizerPlatform, `${process.platform}-${process.arch}`);
+  assert.equal(
+    written[0].normalizerBinarySha256,
+    'c8abc49e7be62dde8e12972af373959e0076a7b8dc8040eb45978e0608f8781e',
+  );
+  assert.equal(
+    written[0].normalizerVersion,
+    'ffmpeg version N-92722-gf22fcd4483 Copyright (c) 2000-2018 the FFmpeg developers',
+  );
+  assert.deepEqual(written[0].normalizerArguments, IOS_NORMALIZER_ARGUMENTS);
+  assert.equal(written[0].normalizerExitCode, 0);
   assert.match(written[0].normalizationBindingSha256, /^[0-9a-f]{64}$/);
 
-  const unrelatedWavPath = join(directory, 'unrelated.wav');
-  await writeFile(unrelatedWavPath, canonicalWav(2_000));
-  const unrelated = await runIosVoiceEvidence({
-    argv: [
-      '--device-report', reportPath,
-      '--raw-capture', rawCapturePath,
-      '--canonical-wav', unrelatedWavPath,
-      '--normalization-steps', stepsPath,
-      '--confirm-real-iphone-safari',
-    ],
-    ...dependencies,
+  const unrelatedBundle = await writeBundle({
+    label: 'unrelated', rawCapture, wavBytes: canonicalWav(2_000),
   });
+  const unrelated = await invoke(unrelatedBundle, dependencies);
   assert.equal(unrelated.exitCode, 1);
   assert.equal(unrelated.errorCode, 'IOS_VOICE_EVIDENCE_INVALID');
   assert.equal(written.length, 1);
+
+  const fakeBundle = await writeBundle({
+    label: 'marker-only-fake', rawCapture: audioMp4Capture(), wavBytes: canonicalWav(1_000),
+  });
+  const fake = await invoke(fakeBundle, dependencies);
+  assert.equal(fake.exitCode, 1);
+  assert.equal(fake.errorCode, 'IOS_VOICE_EVIDENCE_INVALID');
+  assert.equal(written.length, 1);
+
+  const selfAttestedNormalizerBundle = await writeBundle({
+    label: 'self-attested-normalizer', rawCapture, wavBytes,
+    extraStepFields: { normalizer: { tool: 'ffmpeg', exitCode: 0 } },
+  });
+  const selfAttestedNormalizer = await invoke(selfAttestedNormalizerBundle, dependencies);
+  assert.equal(selfAttestedNormalizer.exitCode, 1);
+  assert.equal(selfAttestedNormalizer.errorCode, 'IOS_VOICE_EVIDENCE_INVALID');
+  assert.equal(written.length, 1);
+  const normalizerTempsAfter = (await readdir(tmpdir()))
+    .filter((name) => name.startsWith('hkbuddy-ios-normalizer-')).sort();
+  assert.deepEqual(normalizerTempsAfter, normalizerTempsBefore);
 });
 
 test('smoke evidence upload is immutable, generation-bound, and returns only a content digest receipt', async () => {

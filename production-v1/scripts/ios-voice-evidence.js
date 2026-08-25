@@ -1,9 +1,12 @@
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { isAbsolute, join, resolve } from 'node:path';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+
+import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 
 import { validateCanonicalWav } from '../src/media/canonical-wav.js';
 import {
@@ -27,13 +30,14 @@ const WAV_BINDING_KEYS = Object.freeze([
   'sha256', 'byteLength', 'durationMs', 'normalizerContractVersion',
 ]);
 const NORMALIZATION_KEYS = Object.freeze([
-  'schemaVersion', 'source', 'deviceRunId', 'rawCapture', 'normalizedWav',
-  'normalizer', 'steps',
+  'schemaVersion', 'source', 'deviceRunId', 'rawCapture', 'normalizedWav', 'steps',
 ]);
 const NORMALIZATION_RAW_KEYS = Object.freeze(['sha256', 'byteLength', 'mimeType']);
-const NORMALIZER_KEYS = Object.freeze(['tool', 'version', 'exitCode', 'arguments']);
 const STEP_KEYS = Object.freeze(['id', 'outcome', 'observedAt']);
 const ALLOWED_MP4_BRANDS = new Set(['M4A ', 'isom', 'mp41', 'mp42', 'iso2', 'iso5', 'iso6', 'qt  ']);
+const NORMALIZER_TEMP_PREFIX = 'hkbuddy-ios-normalizer-';
+const NORMALIZER_MAX_BINARY_BYTES = 200 * 1_024 * 1_024;
+const NORMALIZER_TIMEOUT_MS = 30_000;
 const productionRoot = fileURLToPath(new URL('../', import.meta.url));
 const executeFile = promisify(execFile);
 
@@ -130,6 +134,83 @@ function validateIsoBmffAudio(value) {
   return { buffer, byteLength: buffer.length, sha256: sha256(buffer) };
 }
 
+function selectedNormalizer() {
+  const platform = `${process.platform}-${process.arch}`;
+  const allowed = iosVoiceEvidenceContract.normalizer.platforms[platform];
+  const binaryPath = String(ffmpegInstaller?.path ?? '');
+  if (!allowed
+    || !isAbsolute(binaryPath)
+    || String(ffmpegInstaller?.version ?? '') !== allowed.installerVersion) {
+    throw new Error('pinned normalizer unavailable');
+  }
+  return { platform, allowed, binaryPath: resolve(binaryPath) };
+}
+
+async function inspectPinnedNormalizer() {
+  const selected = selectedNormalizer();
+  const binaryStat = await stat(selected.binaryPath);
+  if (!binaryStat.isFile() || binaryStat.size <= 0 || binaryStat.size > NORMALIZER_MAX_BINARY_BYTES) {
+    throw new Error('invalid normalizer binary');
+  }
+  const binarySha256 = sha256(await readFile(selected.binaryPath));
+  if (binarySha256 !== selected.allowed.binarySha256) throw new Error('normalizer digest mismatch');
+  const versionResult = await executeFile(selected.binaryPath, ['-version'], {
+    encoding: 'utf8', maxBuffer: 64 * 1_024, timeout: NORMALIZER_TIMEOUT_MS, windowsHide: true,
+  });
+  const version = String(versionResult.stdout ?? '').split(/\r?\n/, 1)[0];
+  if (!/^ffmpeg version [\x20-\x7e]{1,200}$/.test(version) || version !== selected.allowed.version) {
+    throw new Error('invalid normalizer version');
+  }
+  return {
+    ...selected,
+    binarySha256,
+    version,
+  };
+}
+
+async function removePrivateNormalizerDirectory(directory) {
+  const temporaryRoot = resolve(tmpdir());
+  const target = resolve(directory);
+  const child = relative(temporaryRoot, target);
+  if (!child || isAbsolute(child) || child === '..' || child.startsWith('..\\')
+    || child.startsWith('../') || !basename(target).startsWith(NORMALIZER_TEMP_PREFIX)) {
+    throw new Error('unsafe normalizer temporary directory');
+  }
+  await rm(target, { recursive: true, force: true, maxRetries: 2 });
+}
+
+async function deriveCanonicalWav(rawCapture) {
+  const normalizer = await inspectPinnedNormalizer();
+  const directory = await mkdtemp(join(resolve(tmpdir()), NORMALIZER_TEMP_PREFIX));
+  try {
+    await chmod(directory, 0o700);
+    await writeFile(join(directory, 'capture.mp4'), rawCapture.buffer, { flag: 'wx', mode: 0o600 });
+    await executeFile(normalizer.binaryPath, [...iosVoiceEvidenceContract.normalizer.arguments], {
+      cwd: directory,
+      encoding: 'utf8',
+      maxBuffer: 1024 * 1_024,
+      timeout: NORMALIZER_TIMEOUT_MS,
+      windowsHide: true,
+    });
+    const derivedPath = join(directory, 'derived.wav');
+    await chmod(derivedPath, 0o600);
+    const wav = validateCanonicalWav(await readFile(derivedPath));
+    return {
+      wav,
+      execution: {
+        normalizerPackage: iosVoiceEvidenceContract.normalizer.package,
+        normalizerPlatform: normalizer.platform,
+        normalizerBinarySha256: normalizer.binarySha256,
+        normalizerVersion: normalizer.version,
+        normalizerArguments: [...iosVoiceEvidenceContract.normalizer.arguments],
+        normalizerExitCode: 0,
+      },
+    };
+  } finally {
+    await removePrivateNormalizerDirectory(directory);
+  }
+}
+
 function reportValid(report, facts, now) {
   const observedAt = Date.parse(report?.observedAt);
   return exactOwnKeys(report, REPORT_KEYS)
@@ -155,7 +236,6 @@ function stepsValid(steps, facts, report) {
   if (!exactOwnKeys(steps, NORMALIZATION_KEYS)
     || !exactOwnKeys(steps.rawCapture, NORMALIZATION_RAW_KEYS)
     || !exactOwnKeys(steps.normalizedWav, WAV_BINDING_KEYS)
-    || !exactOwnKeys(steps.normalizer, NORMALIZER_KEYS)
     || steps.schemaVersion !== iosVoiceEvidenceContract.normalizationStepsSchemaVersion
     || steps.source !== iosVoiceEvidenceContract.normalizationStepsSource
     || steps.deviceRunId !== report.deviceRunId
@@ -164,10 +244,6 @@ function stepsValid(steps, facts, report) {
     || !exactBinding(steps.normalizedWav, facts.wav)
     || steps.normalizedWav.durationMs !== facts.wav.durationMs
     || steps.normalizedWav.normalizerContractVersion !== 'canonical-wav-v1'
-    || steps.normalizer.tool !== iosVoiceEvidenceContract.normalizer.tool
-    || !VERSION.test(String(steps.normalizer.version ?? ''))
-    || steps.normalizer.exitCode !== 0
-    || JSON.stringify(steps.normalizer.arguments) !== JSON.stringify(iosVoiceEvidenceContract.normalizer.arguments)
     || !Array.isArray(steps.steps)
     || steps.steps.length !== iosVoiceEvidenceContract.stepIds.length) return false;
   return steps.steps.every((step, index) => (
@@ -216,6 +292,7 @@ export async function runIosVoiceEvidence({
   let wav;
   let stepsBytes;
   let steps;
+  let normalizerExecution;
   try {
     rawCapture = validateIsoBmffAudio(await readFile(selection.rawCapturePath));
     wav = validateCanonicalWav(await readFile(selection.wavPath));
@@ -233,6 +310,9 @@ export async function runIosVoiceEvidence({
     if (!reportValid(report, facts, now()) || !stepsValid(steps, facts, report)) {
       throw new Error('invalid bound device evidence');
     }
+    const derived = await deriveCanonicalWav(rawCapture);
+    if (!derived.wav.buffer.equals(wav.buffer)) throw new Error('normalized WAV does not match capture');
+    normalizerExecution = derived.execution;
   } catch {
     const output = { result: 'fail', errorCode: 'IOS_VOICE_EVIDENCE_INVALID' };
     safeOutput(writeOutput, output);
@@ -269,6 +349,7 @@ export async function runIosVoiceEvidence({
     fixtureByteLength: wav.byteLength,
     normalizationStepsSha256: sha256(stepsBytes),
     normalizationStepsByteLength: stepsBytes.length,
+    ...normalizerExecution,
     verifiedStepIds: [...iosVoiceEvidenceContract.stepIds],
     occurredAt: new Date(now()).toISOString(),
     result: 'pass',

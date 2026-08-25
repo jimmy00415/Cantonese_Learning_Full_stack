@@ -4,6 +4,8 @@ import { MPEGDecoder } from 'mpg123-decoder';
 
 const MAX_FRAME_COUNT = 100_000;
 const MAX_DECODE_DURATION_DELTA_MS = 250;
+const MIN_DECODED_PEAK = 1e-7;
+const MIN_DECODED_MEAN_SQUARE = 1e-16;
 
 const MPEG1_BITRATES = Object.freeze({
   1: Object.freeze([0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448]),
@@ -140,11 +142,25 @@ export async function decodeCanonicalMp3(value, { Decoder = MPEGDecoder } = {}) 
       || decoded.channelData.length < 1 || decoded.channelData.length > 2) {
       throw invalid('Independent MP3 decoder rejected the stream');
     }
+    let decodedPeak = 0;
+    let decodedEnergy = 0;
     for (const channel of decoded.channelData) {
       if (!ArrayBuffer.isView(channel) || channel.length !== decoded.samplesDecoded
         || channel.some((sample) => !Number.isFinite(sample))) {
         throw invalid('Independent MP3 decoder returned invalid samples');
       }
+      for (const sample of channel) {
+        const amplitude = Math.abs(sample);
+        if (amplitude > decodedPeak) decodedPeak = amplitude;
+        decodedEnergy += sample * sample;
+      }
+    }
+    const decodedMeanSquare = decodedEnergy
+      / (decoded.samplesDecoded * decoded.channelData.length);
+    if (!Number.isFinite(decodedMeanSquare)
+      || decodedPeak < MIN_DECODED_PEAK
+      || decodedMeanSquare < MIN_DECODED_MEAN_SQUARE) {
+      throw invalid('Independent MP3 decoder returned silent PCM');
     }
     const decodedDurationMs = (decoded.samplesDecoded / decoded.sampleRate) * 1_000;
     const durationDeltaMs = Math.abs(structural.durationMs - decodedDurationMs);

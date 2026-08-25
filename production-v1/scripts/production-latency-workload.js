@@ -527,11 +527,67 @@ function correlatedTimingPairs(samples, expected, operation) {
   };
 }
 
+function correlatedTextTimings(samples, expected) {
+  const operationSamples = samples.filter((sample) => sample.operation === 'text');
+  const expectedKeys = new Set();
+  const serverSamples = [];
+  const providerSamples = [];
+  const providerPairs = [];
+  let expectedProviderCount = 0;
+  for (const item of expected) {
+    const correlationId = String(item?.correlationId ?? '').toLowerCase();
+    const bindingId = String(item?.bindingId ?? '');
+    const key = `${correlationId}\0${bindingId}`;
+    if (!/^[0-9a-f-]{36}$/.test(correlationId)
+      || !/^[0-9a-z][0-9a-z._-]{0,127}$/i.test(bindingId)
+      || expectedKeys.has(key)) continue;
+    expectedKeys.add(key);
+    const providerExpected = item.expectedProvider === true;
+    if (providerExpected) expectedProviderCount += 1;
+    const matched = operationSamples.filter((sample) => (
+      sample.correlationId === correlationId && sample.bindingId === bindingId
+    ));
+    const servers = matched.filter(({ layer }) => layer === 'server');
+    const providers = matched.filter(({ layer }) => layer === 'provider');
+    const server = servers[0];
+    const provider = providers[0];
+    const serverValid = servers.length === 1
+      && server.outcome === 'success' && server.failureCode === null && server.durationMs === null;
+    const providerValid = providerExpected
+      ? providers.length === 1
+        && provider.outcome === 'success' && provider.failureCode === null && provider.durationMs === null
+      : providers.length === 0;
+    if (!serverValid || !providerValid) continue;
+    serverSamples.push(server);
+    if (providerExpected) {
+      providerSamples.push(provider);
+      providerPairs.push({
+        correlationId,
+        bindingId,
+        providerLatencyMs: provider.latencyMs,
+        serverLatencyMs: server.latencyMs,
+      });
+    }
+  }
+  return {
+    available: expectedKeys.size === expected.length
+      && serverSamples.length === expected.length
+      && providerSamples.length === expectedProviderCount
+      && operationSamples.length === expected.length + expectedProviderCount,
+    expectedServerCount: expected.length,
+    serverSamples,
+    expectedProviderCount,
+    providerSamples,
+    providerPairs,
+  };
+}
+
 function acceptanceRecord({
   commitSha, candidateOrigin, fixtureSetSha256, occurredAt,
   sessions, textResults, asrResults, ttsResults, timingSamples, timingQueryDigests,
 }) {
   const thresholds = LATENCY_ACCEPTANCE_CONTRACT.thresholdsMs;
+  const textTimings = correlatedTextTimings(timingSamples, textResults);
   const asrPairs = correlatedTimingPairs(timingSamples, asrResults, 'asr');
   const ttsPairs = correlatedTimingPairs(timingSamples, ttsResults, 'tts');
   const successfulTtsPairs = ttsPairs.pairs.filter(({ outcome }) => outcome === 'success');
@@ -583,16 +639,23 @@ function acceptanceRecord({
       pass: timingQueryDigests.length === 20 && new Set(timingQueryDigests).size === 20,
     },
     provider: {
-      text: timingObservation(timingSamples, 'text', 'provider', expectedTimingCounts.text.provider),
+      text: timingObservation(textTimings.providerSamples, 'text', 'provider', expectedTimingCounts.text.provider),
       asr: timingObservation(timingSamples, 'asr', 'provider', expectedTimingCounts.asr.provider),
       tts: timingObservation(timingSamples, 'tts', 'provider', expectedTimingCounts.tts.provider),
     },
     server: {
-      text: timingObservation(timingSamples, 'text', 'server', expectedTimingCounts.text.server),
+      text: timingObservation(textTimings.serverSamples, 'text', 'server', expectedTimingCounts.text.server),
       asr: timingObservation(timingSamples, 'asr', 'server', expectedTimingCounts.asr.server),
       tts: timingObservation(timingSamples, 'tts', 'server', expectedTimingCounts.tts.server),
     },
     pairs: {
+      text: {
+        available: textTimings.available,
+        expectedServerCount: textTimings.expectedServerCount,
+        serverBoundCount: textTimings.serverSamples.length,
+        expectedProviderCount: textTimings.expectedProviderCount,
+        providerPairedCount: textTimings.providerPairs.length,
+      },
       asr: { available: asrPairs.available, expectedCount: 30, pairedCount: asrPairs.pairs.length },
       tts: {
         available: ttsPairs.available,
@@ -612,6 +675,7 @@ function acceptanceRecord({
     && counts.ttsReady === 30
     && counts.ttsControlledProviderFailures === 1
     && observations.queryDigests.pass
+    && observations.pairs.text.available
     && observations.pairs.asr.available
     && observations.pairs.tts.available
     && ['provider', 'server'].every((layer) => Object.values(observations[layer]).every((item) => item.available));
@@ -1205,7 +1269,12 @@ export async function runLatencyAcceptance({
     }
     return turns;
   })).flat();
-  const textResults = textOperational.map((item) => item.normalized);
+  const textResults = textOperational.map((item) => ({
+    ...item.normalized,
+    correlationId: item.correlationId,
+    bindingId: item.normalized.assistantMessageId,
+    expectedProvider: item.normalized.promptClass === 'grounded',
+  }));
 
   const asrResults = await mapConcurrent(fixtureSet.samples, 5, async (sample, sampleIndex) => {
     const sessionIndex = sampleIndex % sessions.length;

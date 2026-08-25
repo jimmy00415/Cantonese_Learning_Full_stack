@@ -459,6 +459,13 @@ test('passing run executes the exact workload at concurrency five and writes one
     tts: { available: true, sampleCount: 30, p50Ms: 1_900, p95Ms: 1_900 },
   });
   assert.deepEqual(record.observations.pairs, {
+    text: {
+      available: true,
+      expectedServerCount: 200,
+      serverBoundCount: 200,
+      expectedProviderCount: 80,
+      providerPairedCount: 80,
+    },
     asr: { available: true, expectedCount: 30, pairedCount: 30 },
     tts: {
       available: true, expectedSuccessCount: 30, successPairedCount: 30,
@@ -521,6 +528,39 @@ test('nearest-rank threshold overflow or any invariant/count failure records a f
       const index = result.samples.findIndex((sample) => sample.operation === 'asr' && sample.layer === 'provider');
       if (index < 0) return result;
       const samples = result.samples.map((sample, sampleIndex) => sampleIndex === index ? { ...sample, bindingId: 'wrong-upload' } : sample);
+      return { ...result, samples };
+    }],
+    ['duplicate LLM timing cannot replace a different expected original operation', (input, result) => {
+      if (input.operation !== 'timings') return result;
+      const indexes = result.samples
+        .map((sample, index) => ({ sample, index }))
+        .filter(({ sample }) => sample.operation === 'text' && sample.layer === 'provider');
+      if (indexes.length < 2) return result;
+      const samples = result.samples.map((sample, index) => (
+        index === indexes[1].index ? { ...indexes[0].sample } : sample
+      ));
+      return { ...result, samples };
+    }],
+    ['mutated LLM correlation cannot satisfy exact provider pairing', (input, result) => {
+      if (input.operation !== 'timings') return result;
+      const index = result.samples.findIndex((sample) => (
+        sample.operation === 'text' && sample.layer === 'provider'
+      ));
+      if (index < 0) return result;
+      const samples = result.samples.map((sample, sampleIndex) => sampleIndex === index
+        ? { ...sample, correlationId: '99999999-9999-4999-8999-999999999999' }
+        : sample);
+      return { ...result, samples };
+    }],
+    ['mutated LLM binding cannot satisfy exact server pairing', (input, result) => {
+      if (input.operation !== 'timings') return result;
+      const index = result.samples.findIndex((sample) => (
+        sample.operation === 'text' && sample.layer === 'server'
+      ));
+      if (index < 0) return result;
+      const samples = result.samples.map((sample, sampleIndex) => sampleIndex === index
+        ? { ...sample, bindingId: 'assistant-mutation' }
+        : sample);
       return { ...result, samples };
     }],
     ['controlled TTS provider failure cannot be reclassified as success', (input, result) => {

@@ -37,6 +37,7 @@
     "pg": "^8.16.3"
   },
   "devDependencies": {
+    "@ffmpeg-installer/ffmpeg": "1.1.0",
     "fake-indexeddb": "6.2.5"
   }
 }

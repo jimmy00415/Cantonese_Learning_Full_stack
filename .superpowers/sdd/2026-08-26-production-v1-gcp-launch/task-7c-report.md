@@ -2,9 +2,13 @@
 
 Date: 2026-08-26
 Scope: Task 7C only. No GCP mutation and no Docker, build, release, infrastructure,
-or real-dependency acceptance changes were made by Task 7C. The only package
-manifest change is the parent-approved, exact runtime dependency
-`mpg123-decoder@1.0.3` used as the independent MP3 decode oracle.
+or real-dependency acceptance changes were made by Task 7C. The package
+manifest changes are the parent-approved exact runtime dependency
+`mpg123-decoder@1.0.3`, used as the independent MP3 decode oracle, and the
+parent-approved exact **dev-only** dependency
+`@ffmpeg-installer/ffmpeg@1.1.0`, used only by the offline iOS evidence
+generator. The production image installs with `--omit=dev` and does not copy
+the iOS generator, so it contains neither that generator nor its FFmpeg binary.
 
 ## Outcome and truth boundary
 
@@ -20,28 +24,33 @@ Task 7C is implemented and locally verified. It provides:
   remains visible when TTS synthesis fails;
 - three-language Google voice smoke evidence contracts, including generated
   LINEAR16 ASR fixture provenance and full MP3 decode evidence; and
-- a fail-closed, separate iPhone/Safari certification artifact contract.
+- a fail-closed, separate iPhone/Safari schema-v4 artifact contract whose WAV
+  is derived by the generator itself with an allowlisted binary.
 
 This report does **not** claim that a real provider smoke, candidate load run,
 or real iPhone/Safari run has occurred. Those remain release-time or
 device-time evidence gates. `iosVoiceCertified` remains false without a valid
-schema-v3 real-device artifact.
+schema-v4 real-device and operator artifact. The synthetic AAC fixture used in
+local regression tests is not physical-iPhone provenance and is not a release
+artifact.
 
-## TDD and independent-review remediation evidence
+## TDD and two-round independent-review remediation evidence
 
 The original Task 7C implementation was committed as
-`eb327328f1955eeb34421b04ad6ecc73f4c9710e`. Independent review returned
-NO-APPROVE. Each finding was reproduced with a failing test before its fix.
+`eb327328f1955eeb34421b04ad6ecc73f4c9710e`. The first remediation was
+committed as `47b7a8f`. Two independent reviews returned NO-APPROVE; every
+finding was reproduced with a failing test before its fix.
 
 | Batch | Initial RED / reproduced defect | Focused GREEN |
 | --- | --- | --- |
 | Exact language contract | legacy provider aliases could appear on the wire and tests masked the mismatch | exact wire-language assertions; language-focused set 275/275 |
 | Correlated TTS/ASR timing | TTS could be timed from a later cached `/audio` request; ASR observations were not rigorously paired to spool-complete and bucket duration | timing/failure-focused set 156/156 |
+| Exact LLM timing pairs | count-preserving duplicate, missing, correlation mutation, or binding mutation could satisfy the prior text timing count | workload plus adversarial timing set 17/17 |
 | Controlled TTS failure | artifact lacked a genuine provider-adapter rejection path | real adapter rejection plus canonical-text retention covered in the 156/156 set |
 | Strict grounding | unrelated/extra verified facts or citations could satisfy a loose oracle | grounding-focused set 6/6 |
-| MP3 integrity | decoder export was initially absent; header/pseudo-frame acceptance was insufficient | structural traversal plus independent full-buffer decode 2/2 |
-| iOS evidence v3 | legacy booleans or an unrelated WAV were not cryptographically bound to the raw device capture | generator and validator 2/2 |
-| Combined Task 7C focus | all remediation paths together | 284/284 |
+| MP3 integrity | decoder export was initially absent; header/pseudo-frame acceptance was insufficient; a decoded all-zero PCM plane still passed | structural traversal plus independent full-buffer decode, silent-plane rejection, and bounded low-amplitude retention 2/2 |
+| iOS evidence v3 to v4 | marker-only fake MP4 plus an unrelated WAV could still certify, and normalizer fields were self-attested | real decode/derivation generator 1/1 and strict validator 1/1 |
+| Combined Task 7C focus | all remediation paths together | 326/326 |
 
 Earlier TDD batches retained from the original implementation include the
 executable contract, stable-plus-candidate origin, NAT-safe bootstrap, explicit
@@ -78,6 +87,14 @@ then correlates server and provider completion to the exact assistant message.
 The workload only polls the resulting audio status; it does not manufacture a
 later synthesis request to improve the measurement.
 
+Every expected text operation is likewise keyed by its original correlation ID
+and assistant-message binding ID. Exactly one successful server observation is
+required for each of 200 text turns, and exactly one provider observation is
+required for each of the 80 turns expected to call the model. Duplicate,
+missing, extra, or mutated observations make the pair set unavailable. Text
+SLOs are computed only from those exact paired samples, never from unpaired
+count-equivalent observations.
+
 The acceptance-only failure header is accepted solely in the candidate
 acceptance context. It reaches the real configured TTS adapter with an invalid
 empty synthesis input, obtains the canonical `VOICE_SYNTHESIS_REJECTED` failure,
@@ -109,7 +126,9 @@ message ID. The full response then passes both:
 2. independent full-buffer decoding with exact
    `mpg123-decoder@1.0.3`: zero decoder errors, nonzero samples, a bounded sample
    rate and channel count, finite decoded planes, and decoded duration within a
-   bounded tolerance of structural duration.
+   bounded tolerance of structural duration. The decoded planes must also
+   exceed bounded peak-amplitude and mean-square-energy floors: all-zero PCM is
+   rejected while the regression retains valid 1e-6-amplitude samples.
 
 TTS voice evidence contract `google-tts-v3` records the pinned decoder, decoded
 sample count/rate/channel count/duration, byte length, and audio digest for each
@@ -137,7 +156,7 @@ acceptance sample.
   latencies, and digests. Failures remain diagnosable without recording speech
   content in the evidence.
 
-## iOS schema-v3 certification boundary
+## iOS schema-v4 certification boundary
 
 The generator now requires all of the following exact absolute inputs plus an
 explicit real-device confirmation flag:
@@ -145,32 +164,61 @@ explicit real-device confirmation flag:
 - a raw iPhone Safari `audio/mp4` capture;
 - its normalized canonical mono, 16 kHz, PCM16 WAV;
 - a schema-v2 device/browser report; and
-- a schema-v1 ordered normalization and UX steps report.
+- a schema-v2 ordered operator and UX steps report.
 
 It traverses the ISO-BMFF container and requires `ftyp`, a bounded audio `moov`
-track (`mp4a` or Opus), and a nonempty `mdat`. The output binds raw capture
-digest/bytes, WAV digest/bytes/duration, device report digest/bytes, steps
-digest/bytes, device run ID, and the exact normalizer contract in one aggregate
-SHA-256. Required steps are ordered and individually observed: permission,
-55-second auto-stop, track cleanup, cancel cleanup, one idempotent upload,
-editable transcript, denial fallback, and no raw-container upload.
+track (`mp4a` or Opus), and a nonempty `mdat`. Structural markers are not the
+decode oracle. The generator then:
 
-Legacy schema-v1/v2 boolean evidence, mismatched or unrelated WAV bytes,
-unbound reports, bad container bounds, missing steps, and arbitrary confirmation
-are rejected. No real device run was performed in Task 7C.
+1. selects the exact allowlisted `win32-x64` binary installed through the exact
+   dev dependency `@ffmpeg-installer/ffmpeg@1.1.0`;
+2. verifies installer version `20181217-f22fcd4`, binary SHA-256
+   `c8abc49e7be62dde8e12972af373959e0076a7b8dc8040eb45978e0608f8781e`,
+   and the exact `ffmpeg -version` first line before use;
+3. writes the bound MP4 only into a unique per-user temporary directory,
+   requests mode 0700/0600 where the OS honors POSIX modes, executes fixed argv
+   without a shell and with FFmpeg's protocol allowlist restricted to `file`,
+   derives `derived.wav` itself, validates canonical WAV bytes, and removes the
+   directory in `finally`; and
+4. requires the derived bytes to equal the separately supplied and
+   report-bound WAV byte-for-byte.
+
+Schema-v4 output binds raw capture digest/bytes, derived WAV
+digest/bytes/duration, device report digest/bytes, steps digest/bytes, device
+run ID, normalizer package/platform/binary digest/actual version/exact argv/exit,
+and the aggregate normalization binding. Normalization-step input no longer
+contains trusted normalizer fields. Required operator steps remain ordered and
+individually observed: permission, 55-second auto-stop, track cleanup, cancel
+cleanup, one idempotent upload, editable transcript, denial fallback, and no
+raw-container upload.
+
+The regression executes a genuinely decodable AAC-in-MP4 fixture and proves
+both full derivation and private-temp cleanup. A fully self-consistent
+marker-only fake MP4 bundle, a real decodable MP4 paired with an unrelated WAV,
+and self-attested normalizer fields are rejected. The AAC fixture is generated
+for deterministic engineering verification; it is not represented as a
+physical iPhone recording.
+
+Legacy schema-v1/v2/v3 evidence, unbound reports, bad container bounds, missing
+steps, and arbitrary confirmation are rejected. No real device or operator run
+was performed in Task 7C, so `iosVoiceCertified` remains false in the release.
+The wrapper package declares LGPL-2.1, while the installed optional Windows
+binary package declares GPLv3 and reports a GPL-enabled build; for that reason
+the tool remains offline/dev-only and is not shipped in the production image.
 
 ## Fresh local verification
 
-- Focused command covering the eight Task 7C suites: 284/284 passed.
-- Task 7C's pre-integration full `cmd /d /c npm.cmd test`: 1,359 tests;
-  1,358 passed; 0 failed; 1 skipped. A later shared-worktree rerun after Task
-  7A added an uncommitted release-archive test was 1,357 passed, 1 failed, and
-  1 skipped; the sole failure was that Task 7A archive test's deterministic-tar
-  hash assertion, outside Task 7C. Task 7C's 284-test focused set remained green.
-- `cmd /d /c npm.cmd run check`: exit 0.
-- `cmd /d /c npm.cmd ls mpg123-decoder@1.0.3 --depth=0`: exact dependency present.
-- Explicit syntax checks for the new MP3 module, iOS generator, and MP3 fixture:
-  exit 0.
+- Focused command covering the eight Task 7C suites: 326/326 passed.
+- Full `npm.cmd test`: 1,431 tests; 1,430 passed; 0 failed; 1 pre-existing
+  skip.
+- `npm.cmd run check`: exit 0.
+- `npm.cmd run security:dependencies`: exit 0 with the exact
+  `DEPENDENCY_SECURITY_EXCEPTION_REVIEWED` receipt; 0 high and 0 critical
+  vulnerabilities, with the separately reviewed current moderate exception.
+- `npm.cmd ls @ffmpeg-installer/ffmpeg@1.1.0 mpg123-decoder@1.0.3 --depth=0`:
+  both exact versions present in their intended dev/runtime dependency classes.
+- Explicit syntax checks for the MP3 module, iOS generator, latency workload,
+  and voice-evidence validator: exit 0.
 - `git diff --check`: exit 0; line-ending warnings only, no whitespace error.
 
 These are local deterministic checks only. Live provider, candidate load,

@@ -1362,9 +1362,21 @@ test('voice evidence rejects unknown top-level and assertion fields', async () =
     rawCaptureSha256: '1'.repeat(64), rawCaptureByteLength: 4_096,
     fixtureSha256: '2'.repeat(64), fixtureByteLength: 32_044, fixtureDurationMs: 1_000,
     normalizationStepsSha256: '3'.repeat(64), normalizationStepsByteLength: 2_048,
+    normalizerPackage: '@ffmpeg-installer/ffmpeg@1.1.0',
+    normalizerPlatform: 'win32-x64',
+    normalizerBinarySha256: 'c8abc49e7be62dde8e12972af373959e0076a7b8dc8040eb45978e0608f8781e',
+    normalizerVersion: 'ffmpeg version N-92722-gf22fcd4483 Copyright (c) 2000-2018 the FFmpeg developers',
+    normalizerArguments: [
+      '-nostdin', '-hide_banner', '-loglevel', 'error',
+      '-protocol_whitelist', 'file', '-i', 'capture.mp4',
+      '-map', '0:a:0', '-map_metadata', '-1', '-vn',
+      '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le',
+      '-flags:a', '+bitexact', '-fflags', '+bitexact', '-f', 'wav', 'derived.wav',
+    ],
+    normalizerExitCode: 0,
   };
-  const iosV3Payload = {
-    schemaVersion: 3,
+  const iosV4Payload = {
+    schemaVersion: 4,
     commitSha,
     capability: 'ios-voice',
     normalizerContractVersion: binding.normalizerContractVersion,
@@ -1379,15 +1391,23 @@ test('voice evidence rejects unknown top-level and assertion fields', async () =
     fixtureByteLength: binding.fixtureByteLength,
     normalizationStepsSha256: binding.normalizationStepsSha256,
     normalizationStepsByteLength: binding.normalizationStepsByteLength,
+    normalizerPackage: binding.normalizerPackage,
+    normalizerPlatform: binding.normalizerPlatform,
+    normalizerBinarySha256: binding.normalizerBinarySha256,
+    normalizerVersion: binding.normalizerVersion,
+    normalizerArguments: binding.normalizerArguments,
+    normalizerExitCode: binding.normalizerExitCode,
     normalizationBindingSha256: createHash('sha256').update(canonicalJson(binding)).digest('hex'),
     verifiedStepIds,
     occurredAt: now.toISOString(),
     result: 'pass',
   };
-  assert.equal(validateIos(iosV3Payload), true);
-  assert.equal(validateIos({ ...iosV3Payload, secret: 'must-not-be-accepted' }), false);
-  assert.equal(validateIos({ ...iosV3Payload, rawCaptureSha256: '5'.repeat(64) }), false);
-  assert.equal(validateIos({ ...iosV3Payload, verifiedStepIds: [...verifiedStepIds].reverse() }), false);
+  assert.equal(validateIos(iosV4Payload), true);
+  assert.equal(validateIos({ ...iosV4Payload, secret: 'must-not-be-accepted' }), false);
+  assert.equal(validateIos({ ...iosV4Payload, rawCaptureSha256: '5'.repeat(64) }), false);
+  assert.equal(validateIos({ ...iosV4Payload, normalizerBinarySha256: '5'.repeat(64) }), false);
+  assert.equal(validateIos({ ...iosV4Payload, normalizerVersion: 'ffmpeg version forged' }), false);
+  assert.equal(validateIos({ ...iosV4Payload, verifiedStepIds: [...verifiedStepIds].reverse() }), false);
 });
 
 test('voice provider smoke is inert without exact confirmations and invokes only the selected fake capability once', async () => {

@@ -50,23 +50,25 @@ const SPEECH_V2_DEFINITIONS = Object.freeze({
   }),
 });
 const SPEECH_V2_LANGUAGES = Object.freeze(Object.keys(SPEECH_V2_DEFINITIONS));
-const IOS_V3_EVIDENCE_KEYS = Object.freeze([
+const IOS_V4_EVIDENCE_KEYS = Object.freeze([
   'schemaVersion', 'commitSha', 'capability', 'normalizerContractVersion',
   'reportSource', 'deviceReportSha256', 'deviceReportByteLength', 'deviceRunId',
   'deviceModelIdentifier', 'iosVersion', 'safariVersion', 'captureMimeType',
   'deviceObservedAt', 'rawCaptureFormat', 'rawCaptureSha256', 'rawCaptureByteLength',
   'fixtureSha256', 'fixtureDurationMs', 'fixtureByteLength',
   'normalizationStepsSha256', 'normalizationStepsByteLength',
+  'normalizerPackage', 'normalizerPlatform', 'normalizerBinarySha256',
+  'normalizerVersion', 'normalizerArguments', 'normalizerExitCode',
   'normalizationBindingSha256', 'verifiedStepIds', 'occurredAt', 'result',
   'artifactSha256',
 ]);
 
 export const iosVoiceEvidenceContract = Object.freeze({
-  schemaVersion: 3,
+  schemaVersion: 4,
   reportSchemaVersion: 2,
   reportSource: 'real-iphone-safari-manual-v2',
-  normalizationStepsSchemaVersion: 1,
-  normalizationStepsSource: 'real-iphone-safari-normalization-v1',
+  normalizationStepsSchemaVersion: 2,
+  normalizationStepsSource: 'real-iphone-safari-normalization-v2',
   rawCaptureFormat: 'iso-bmff-audio-v1',
   stepIds: Object.freeze([
     'permission-prompt-granted', 'recording-auto-stopped-55s',
@@ -75,10 +77,20 @@ export const iosVoiceEvidenceContract = Object.freeze({
     'text-fallback-after-denial', 'raw-container-not-uploaded',
   ]),
   normalizer: Object.freeze({
-    tool: 'ffmpeg',
+    package: '@ffmpeg-installer/ffmpeg@1.1.0',
+    platforms: Object.freeze({
+      'win32-x64': Object.freeze({
+        installerVersion: '20181217-f22fcd4',
+        binarySha256: 'c8abc49e7be62dde8e12972af373959e0076a7b8dc8040eb45978e0608f8781e',
+        version: 'ffmpeg version N-92722-gf22fcd4483 Copyright (c) 2000-2018 the FFmpeg developers',
+      }),
+    }),
     arguments: Object.freeze([
-      '-nostdin', '-hide_banner', '-loglevel', 'error', '-i', '<raw-capture>', '-vn',
-      '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', '<canonical-wav>',
+      '-nostdin', '-hide_banner', '-loglevel', 'error',
+      '-protocol_whitelist', 'file', '-i', 'capture.mp4',
+      '-map', '0:a:0', '-map_metadata', '-1', '-vn',
+      '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le',
+      '-flags:a', '+bitexact', '-fflags', '+bitexact', '-f', 'wav', 'derived.wav',
     ]),
   }),
 });
@@ -123,6 +135,12 @@ export function iosVoiceNormalizationBinding(value) {
     fixtureDurationMs: value?.fixtureDurationMs,
     normalizationStepsSha256: value?.normalizationStepsSha256,
     normalizationStepsByteLength: value?.normalizationStepsByteLength,
+    normalizerPackage: value?.normalizerPackage,
+    normalizerPlatform: value?.normalizerPlatform,
+    normalizerBinarySha256: value?.normalizerBinarySha256,
+    normalizerVersion: value?.normalizerVersion,
+    normalizerArguments: value?.normalizerArguments,
+    normalizerExitCode: value?.normalizerExitCode,
   };
   return createHash('sha256').update(canonicalJson(binding)).digest('hex');
 }
@@ -358,7 +376,7 @@ export function validateIosVoiceEvidence(record, {
   expectedVersion, commitSha, normalizerContractVersion, now,
 }) {
   return Boolean(
-    hasExactOwnKeys(record, IOS_V3_EVIDENCE_KEYS)
+    hasExactOwnKeys(record, IOS_V4_EVIDENCE_KEYS)
     && RELEASE_SHA.test(String(commitSha ?? ''))
     && artifactValid(record, expectedVersion)
     && record.schemaVersion === iosVoiceEvidenceContract.schemaVersion
@@ -386,6 +404,15 @@ export function validateIosVoiceEvidence(record, {
     && DIGEST.test(String(record.normalizationStepsSha256 ?? ''))
     && Number.isSafeInteger(record.normalizationStepsByteLength)
     && record.normalizationStepsByteLength > 0 && record.normalizationStepsByteLength <= 64 * 1_024
+    && record.normalizerPackage === iosVoiceEvidenceContract.normalizer.package
+    && Object.hasOwn(iosVoiceEvidenceContract.normalizer.platforms, record.normalizerPlatform)
+    && record.normalizerBinarySha256
+      === iosVoiceEvidenceContract.normalizer.platforms[record.normalizerPlatform]?.binarySha256
+    && record.normalizerVersion
+      === iosVoiceEvidenceContract.normalizer.platforms[record.normalizerPlatform]?.version
+    && JSON.stringify(record.normalizerArguments)
+      === JSON.stringify(iosVoiceEvidenceContract.normalizer.arguments)
+    && record.normalizerExitCode === 0
     && DIGEST.test(String(record.normalizationBindingSha256 ?? ''))
     && record.normalizationBindingSha256 === iosVoiceNormalizationBinding(record)
     && JSON.stringify(record.verifiedStepIds) === JSON.stringify(iosVoiceEvidenceContract.stepIds)
