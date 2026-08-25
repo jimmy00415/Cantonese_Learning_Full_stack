@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { lstat, readFile, realpath, rm } from 'node:fs/promises';
+import { lstat, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
@@ -9,6 +9,9 @@ import { createGzip } from 'node:zlib';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { createDefaultGcloudExecutor } from './gcp-provision.js';
+import { finalizeReleaseEvidenceRecord } from '../src/services/release-evidence.js';
+import { finalizeEvidenceRecord } from '../src/services/voice-evidence.js';
+import { finalizeLatencyAcceptanceRecord } from './production-latency-workload.js';
 
 const PROJECT = 'hkbuddy-prod-v1-20260826';
 const REGION = 'asia-east2';
@@ -24,6 +27,7 @@ const RUNTIME_SERVICE_ACCOUNT = `hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.
 const MIGRATOR_SERVICE_ACCOUNT = `hkbuddy-migrator@${PROJECT}.iam.gserviceaccount.com`;
 const ACCEPTANCE_SERVICE_ACCOUNT = `hkbuddy-acceptance@${PROJECT}.iam.gserviceaccount.com`;
 const PROMOTION_AUTHORITY = 'admin@motionexp.com';
+const OCI_SOURCE = 'https://github.com/jimmy00415/Cantonese_Learning_Full_stack';
 const RELEASE_SHA = /^[0-9a-f]{40}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/;
@@ -33,7 +37,30 @@ const REVISION = /^hkbuddy-api-[a-z0-9](?:[a-z0-9-]{0,47}[a-z0-9])?$/;
 const BUILD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ACCEPTANCE_RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const PHASES = Object.freeze([
-  'build', 'migration', 'inventory', 'acceptance', 'collect', 'evidence', 'candidate', 'promote', 'rollback',
+  'build', 'migration', 'inventory', 'acceptance', 'collect', 'evidence', 'candidate',
+  'readiness', 'workload', 'mobile', 'candidate-cleanup', 'promote', 'rollback',
+]);
+const RECEIPT_PHASES = Object.freeze([
+  'build', 'migration', 'inventory', 'acceptance', 'collect', 'evidence', 'candidate',
+  'readiness', 'workload', 'mobile',
+]);
+const MOBILE_CHECK_IDS = Object.freeze([
+  'first-visit',
+  'response-language-mode-change',
+  'text-send',
+  'editable-voice-transcript',
+  'assistant-audio-ready-no-autoplay',
+  'verified-official-source',
+  'unsupported-honest-handoff',
+  'retry-reload-retention',
+  'consent',
+  'clear-conversation',
+  'keyboard-focus',
+  'bottom-safe-area',
+  'no-horizontal-overflow',
+]);
+const MOBILE_SCREENSHOT_IDS = Object.freeze([
+  'first-visit', 'text-source', 'voice-transcript', 'mobile-safe-area',
 ]);
 const APP_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const CLOUD_BUILD_CONFIG = resolve(APP_ROOT, 'cloudbuild.yaml');
@@ -99,10 +126,31 @@ function exact(left, right) {
   return JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
 }
 
+function canonicalSha256(value) {
+  return createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
+}
+
+export function finalizeReleasePhaseReceipt(record) {
+  const { receiptSha256: ignored, ...payload } = record ?? {};
+  void ignored;
+  return Object.freeze({ ...payload, receiptSha256: canonicalSha256(payload) });
+}
+
 function isAbsoluteFile(value) {
   return typeof value === 'string' && value.length > 3
     && (value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value))
     && !/[\u0000\r\n]/.test(value);
+}
+
+function assertTask8Evidence(value) {
+  if (!exactKeys(value, ['mobile', 'readiness', 'workload'])) throw releaseContractError();
+  return Object.freeze(Object.fromEntries(Object.entries(value).map(([key, entry]) => {
+    if (!exactKeys(entry, ['artifactSha256', 'filePath', 'objectSha256'])
+      || !isAbsoluteFile(entry.filePath)
+      || !DIGEST.test(String(entry.artifactSha256 ?? ''))
+      || !DIGEST.test(String(entry.objectSha256 ?? ''))) throw releaseContractError();
+    return [key, Object.freeze({ ...entry })];
+  })));
 }
 
 async function sha256File(filePath) {
@@ -114,6 +162,12 @@ async function sha256File(filePath) {
     stream.on('error', rejectStream);
   });
   return digest.digest('hex');
+}
+
+async function verifyReleaseArchiveBytes(filePath, expectedSha256) {
+  const metadata = await lstat(filePath);
+  return metadata.isFile() && !metadata.isSymbolicLink() && metadata.size > 0
+    && await sha256File(filePath) === expectedSha256;
 }
 
 async function gitOutput(repositoryRoot, argv) {
@@ -409,6 +463,103 @@ function operation(phase, id, argv) {
   return Object.freeze({ phase, id, argv: Object.freeze([...argv]) });
 }
 
+function candidateServiceSpec({
+  candidateRevision, candidateTag, previousRevision, releaseSha, image, environment, bindings, probes,
+}) {
+  const mountEntries = Object.entries(bindings.mounts).sort(([left], [right]) => left.localeCompare(right));
+  const volumes = mountEntries.map(([key, value]) => {
+    const separator = value.path.lastIndexOf('/');
+    return {
+      name: `evidence-${key.replace(/[A-Z]/g, (member) => `-${member.toLowerCase()}`)}`,
+      secret: {
+        secretName: value.secret,
+        items: [{ key: value.version, path: value.path.slice(separator + 1) }],
+      },
+    };
+  });
+  const volumeMounts = mountEntries.map(([key, value]) => ({
+    name: `evidence-${key.replace(/[A-Z]/g, (member) => `-${member.toLowerCase()}`)}`,
+    mountPath: value.path.slice(0, value.path.lastIndexOf('/')),
+    readOnly: true,
+  }));
+  const normalEnvironment = Object.entries(environment).sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, value]) => ({ name, value }));
+  const secretEnvironment = Object.entries(bindings.environment).sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, value]) => ({
+      name,
+      valueFrom: { secretKeyRef: { name: value.secret, key: value.version } },
+    }));
+  const normalizeProbeForSpec = (value) => ({
+    httpGet: { path: value.path, port: value.port },
+    initialDelaySeconds: value.initialDelaySeconds,
+    timeoutSeconds: value.timeoutSeconds,
+    periodSeconds: value.periodSeconds,
+    failureThreshold: value.failureThreshold,
+  });
+  return Object.freeze({
+    apiVersion: 'serving.knative.dev/v1',
+    kind: 'Service',
+    metadata: Object.freeze({
+      name: SERVICE,
+      annotations: Object.freeze({ 'run.googleapis.com/ingress': 'all' }),
+    }),
+    spec: Object.freeze({
+      template: Object.freeze({
+        metadata: Object.freeze({
+          name: candidateRevision,
+          labels: Object.freeze({ 'simplify-release-sha': releaseSha }),
+          annotations: Object.freeze({
+            'autoscaling.knative.dev/minScale': '1',
+            'autoscaling.knative.dev/maxScale': '1',
+            'run.googleapis.com/cpu-throttling': 'false',
+            'run.googleapis.com/startup-cpu-boost': 'true',
+            'run.googleapis.com/execution-environment': 'gen2',
+            'run.googleapis.com/network-interfaces': JSON.stringify([{
+              network: 'hkbuddy-prod-vpc', subnetwork: 'hkbuddy-ae2-run',
+            }]),
+            'run.googleapis.com/vpc-access-egress': 'private-ranges-only',
+          }),
+        }),
+        spec: Object.freeze({
+          serviceAccountName: RUNTIME_SERVICE_ACCOUNT,
+          containerConcurrency: 40,
+          timeoutSeconds: '60s',
+          containers: Object.freeze([Object.freeze({
+            image,
+            ports: Object.freeze([Object.freeze({ name: 'http1', containerPort: 8080 })]),
+            env: Object.freeze([...normalEnvironment, ...secretEnvironment].map(Object.freeze)),
+            resources: Object.freeze({ limits: Object.freeze({ cpu: '2', memory: '1Gi' }) }),
+            startupProbe: Object.freeze(normalizeProbeForSpec(probes.startup)),
+            livenessProbe: Object.freeze(normalizeProbeForSpec(probes.liveness)),
+            readinessProbe: Object.freeze(normalizeProbeForSpec(probes.readiness)),
+            volumeMounts: Object.freeze(volumeMounts.map(Object.freeze)),
+          })]),
+          volumes: Object.freeze(volumes.map(Object.freeze)),
+        }),
+      }),
+      traffic: Object.freeze([
+        Object.freeze({ revisionName: previousRevision, percent: 100 }),
+        Object.freeze({ revisionName: candidateRevision, tag: candidateTag, percent: 0 }),
+      ]),
+    }),
+  });
+}
+
+async function writeCandidateServiceSpecFile(plan) {
+  const contents = `${JSON.stringify(plan.candidateServiceSpec, null, 2)}\n`;
+  try {
+    const metadata = await lstat(plan.candidateServiceSpecPath);
+    if (!metadata.isFile() || metadata.isSymbolicLink()
+      || !Buffer.from(await readFile(plan.candidateServiceSpecPath)).equals(Buffer.from(contents))) {
+      throw new Error('candidate service specification drift');
+    }
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+    await writeFile(plan.candidateServiceSpecPath, contents, { encoding: 'utf8', flag: 'wx' });
+  }
+  return true;
+}
+
 export function buildReleasePlan(input = {}, { phase = null } = {}) {
   if (phase !== null && !PHASES.includes(phase)) throw releaseContractError();
   const unresolvedImage = phase === 'build' && input.imageDigest === null;
@@ -422,7 +573,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     && input.previousRevision === null;
   if (!exactKeys(input, [
     'acceptanceOutputs', 'acceptanceRunId', 'databaseSecretVersions', 'evidence', 'imageDigest', 'legacyInventory', 'previousRevision',
-    'projectNumber', 'releaseSha', 'sourceArchive', 'sourceArchiveSha256',
+    'projectNumber', 'releaseSha', 'sourceArchive', 'sourceArchiveSha256', 'task8Evidence',
   ])
     || !RELEASE_SHA.test(String(input.releaseSha ?? ''))
     || !ACCEPTANCE_RUN_ID.test(String(input.acceptanceRunId ?? ''))
@@ -459,6 +610,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     : input.databaseSecretVersions;
   const previousRevision = unresolvedPrevious ? 'hkbuddy-api-unresolved' : input.previousRevision;
   const releaseSha = input.releaseSha;
+  const task8Evidence = assertTask8Evidence(input.task8Evidence);
   const acceptanceOutputs = unresolvedAcceptanceOutputs
     ? assertAcceptanceOutputs(Object.fromEntries(Object.entries(
       expectedAcceptanceObjects(releaseSha, input.acceptanceRunId),
@@ -578,6 +730,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       environment: dependencyEnvironment,
       secretEnvironment: dependencySecrets.environment,
       secretMounts: dependencySecrets.mounts,
+      labels: Object.freeze({ 'simplify-release-sha': releaseSha }),
     }),
     'llm-smoke': Object.freeze({
       project: PROJECT, region: REGION, job: LLM_SMOKE_JOB, image,
@@ -587,6 +740,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       taskCount: 1, parallelism: 1, maxRetries: 0, timeoutSeconds: 600,
       network: 'hkbuddy-prod-vpc', subnet: 'hkbuddy-ae2-run', vpcEgress: 'private-ranges-only',
       environment: llmSmokeEnvironment, secretEnvironment: Object.freeze({}), secretMounts: Object.freeze({}),
+      labels: Object.freeze({ 'simplify-release-sha': releaseSha }),
     }),
     'asr-smoke': Object.freeze({
       project: PROJECT, region: REGION, job: ASR_SMOKE_JOB, image,
@@ -600,6 +754,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       taskCount: 1, parallelism: 1, maxRetries: 0, timeoutSeconds: 900,
       network: 'hkbuddy-prod-vpc', subnet: 'hkbuddy-ae2-run', vpcEgress: 'private-ranges-only',
       environment: asrSmokeEnvironment, secretEnvironment: Object.freeze({}), secretMounts: Object.freeze({}),
+      labels: Object.freeze({ 'simplify-release-sha': releaseSha }),
     }),
     'tts-smoke': Object.freeze({
       project: PROJECT, region: REGION, job: TTS_SMOKE_JOB, image,
@@ -609,7 +764,32 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       taskCount: 1, parallelism: 1, maxRetries: 0, timeoutSeconds: 900,
       network: 'hkbuddy-prod-vpc', subnet: 'hkbuddy-ae2-run', vpcEgress: 'private-ranges-only',
       environment: ttsSmokeEnvironment, secretEnvironment: Object.freeze({}), secretMounts: Object.freeze({}),
+      labels: Object.freeze({ 'simplify-release-sha': releaseSha }),
     }),
+  });
+  const expectedMigrationJob = Object.freeze({
+    project: PROJECT,
+    region: REGION,
+    job: MIGRATION_JOB,
+    image,
+    serviceAccount: MIGRATOR_SERVICE_ACCOUNT,
+    command: Object.freeze(['node']),
+    args: Object.freeze(['scripts/run-migrations.js']),
+    taskCount: 1,
+    parallelism: 1,
+    maxRetries: 0,
+    timeoutSeconds: 600,
+    network: 'hkbuddy-prod-vpc',
+    subnet: 'hkbuddy-ae2-run',
+    vpcEgress: 'private-ranges-only',
+    environment: Object.freeze({}),
+    secretEnvironment: Object.freeze({
+      V1_DATABASE_URL: Object.freeze({
+        secret: 'hkbuddy-db-migrator-url', version: databaseSecretVersions.migrator,
+      }),
+    }),
+    secretMounts: Object.freeze({}),
+    labels: Object.freeze({ 'simplify-release-sha': releaseSha }),
   });
   const probes = Object.freeze({
     startup: Object.freeze({
@@ -625,10 +805,24 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       timeoutSeconds: 5, periodSeconds: 5, failureThreshold: 3,
     }),
   });
-  const probeFlag = (kind) => {
-    const value = probes[kind];
-    return `--${kind}-probe=httpGet.path=${value.path},httpGet.port=${value.port},initialDelaySeconds=${value.initialDelaySeconds},timeoutSeconds=${value.timeoutSeconds},periodSeconds=${value.periodSeconds},failureThreshold=${value.failureThreshold}`;
-  };
+  const candidateServiceSpecPath = join(dirname(input.sourceArchive), `${candidateRevision}.service.yaml`);
+  const controlledCandidateServiceSpec = candidateServiceSpec({
+    candidateRevision, candidateTag, previousRevision, releaseSha,
+    image, environment, bindings, probes,
+  });
+  const releaseIdentitySha256 = canonicalSha256({
+    project: PROJECT,
+    region: REGION,
+    releaseSha,
+    sourceArchiveSha256: input.sourceArchiveSha256,
+    projectNumber: input.projectNumber,
+    acceptanceRunId,
+  });
+  const releaseReceiptDirectory = join(dirname(input.sourceArchive), `${releaseSha}-receipts`);
+  const releaseReceiptPaths = Object.freeze(Object.fromEntries(RECEIPT_PHASES.map((receiptPhase, index) => [
+    receiptPhase,
+    join(releaseReceiptDirectory, `${String(index + 1).padStart(2, '0')}-${receiptPhase}.json`),
+  ])));
   const jobDeployArgv = (contract) => [
     'run', 'jobs', 'deploy', contract.job, `--project=${PROJECT}`, `--region=${REGION}`,
     `--image=${contract.image}`, `--service-account=${contract.serviceAccount}`,
@@ -663,6 +857,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       '--command=node', '--args=scripts/run-migrations.js', '--tasks=1', '--parallelism=1',
       '--max-retries=0', '--task-timeout=600s', '--network=hkbuddy-prod-vpc',
       '--subnet=hkbuddy-ae2-run', '--vpc-egress=private-ranges-only',
+      `--labels=simplify-release-sha=${releaseSha}`,
       `--set-secrets=V1_DATABASE_URL=hkbuddy-db-migrator-url:${databaseSecretVersions.migrator}`,
       '--format=json',
     ]),
@@ -734,16 +929,17 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     `--project=${PROJECT}`, '--format=json',
   ]));
   operations.push(
+    operation('candidate', 'candidate-stable-readback', [
+      'run', 'services', 'describe', SERVICE, `--project=${PROJECT}`, `--region=${REGION}`,
+      '--format=json',
+    ]),
+    operation('candidate', 'candidate-spec-dry-run', [
+      'run', 'services', 'replace', candidateServiceSpecPath,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--dry-run', '--format=json',
+    ]),
     operation('candidate', 'candidate-deploy', [
-      'run', 'deploy', SERVICE, `--project=${PROJECT}`, `--region=${REGION}`,
-      `--image=${image}`, `--service-account=${RUNTIME_SERVICE_ACCOUNT}`,
-      '--execution-environment=gen2', '--cpu=2', '--memory=1Gi', '--concurrency=40',
-      '--min=1', '--max=1', '--no-cpu-throttling', '--cpu-boost', '--timeout=60s',
-      '--network=hkbuddy-prod-vpc', '--subnet=hkbuddy-ae2-run',
-      '--vpc-egress=private-ranges-only', '--ingress=all', '--no-traffic',
-      `--tag=${candidateTag}`, `--revision-suffix=${candidateSuffix}`,
-      probeFlag('startup'), probeFlag('liveness'), probeFlag('readiness'),
-      envFlag(environment), secretsFlag(bindings), '--format=json',
+      'run', 'services', 'replace', candidateServiceSpecPath,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
     operation('candidate', 'candidate-service-readback', [
       'run', 'services', 'describe', SERVICE, `--project=${PROJECT}`, `--region=${REGION}`,
@@ -753,7 +949,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       'run', 'revisions', 'describe', candidateRevision,
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
-    operation('candidate', 'candidate-iam-readback', [
+    operation('candidate', 'candidate-private-iam-readback', [
       'run', 'services', 'get-iam-policy', SERVICE,
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
@@ -761,12 +957,53 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       'artifacts', 'docker', 'images', 'describe', image,
       `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
     ]),
+    operation('candidate', 'candidate-public-service', [
+      'run', 'services', 'add-iam-policy-binding', SERVICE, '--member=allUsers',
+      '--role=roles/run.invoker', `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ]),
+    operation('candidate', 'candidate-iam-readback', [
+      'run', 'services', 'get-iam-policy', SERVICE,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ]),
+    operation('candidate', 'candidate-public-service-readback', [
+      'run', 'services', 'describe', SERVICE, `--project=${PROJECT}`, `--region=${REGION}`,
+      '--format=json',
+    ]),
+    operation('candidate-cleanup', 'candidate-cleanup-public-service', [
+      'run', 'services', 'remove-iam-policy-binding', SERVICE, '--member=allUsers',
+      '--role=roles/run.invoker', `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ]),
+    operation('candidate-cleanup', 'candidate-cleanup-traffic', [
+      'run', 'services', 'update-traffic', SERVICE,
+      `--remove-tags=${candidateTag}`, `--to-revisions=${previousRevision}=100`,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ]),
+    operation('candidate-cleanup', 'candidate-cleanup-iam-readback', [
+      'run', 'services', 'get-iam-policy', SERVICE,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ]),
+    operation('candidate-cleanup', 'candidate-cleanup-service-readback', [
+      'run', 'services', 'describe', SERVICE, `--project=${PROJECT}`, `--region=${REGION}`,
+      '--format=json',
+    ]),
     operation('promote', 'promote-authority-readback', [
       'auth', 'list', '--filter=status:ACTIVE', '--format=json',
     ]),
-    operation('promote', 'promote-public-service', [
-      'run', 'services', 'add-iam-policy-binding', SERVICE, '--member=allUsers',
-      '--role=roles/run.invoker', `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    operation('promote', 'promote-candidate-service-readback', [
+      'run', 'services', 'describe', SERVICE, `--project=${PROJECT}`, `--region=${REGION}`,
+      '--format=json',
+    ]),
+    operation('promote', 'promote-candidate-revision-readback', [
+      'run', 'revisions', 'describe', candidateRevision,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ]),
+    operation('promote', 'promote-candidate-iam-readback', [
+      'run', 'services', 'get-iam-policy', SERVICE,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ]),
+    operation('promote', 'promote-candidate-artifact-readback', [
+      'artifacts', 'docker', 'images', 'describe', image,
+      `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
     ]),
     operation('promote', 'promote-traffic', [
       'run', 'services', 'update-traffic', SERVICE, `--to-revisions=${candidateRevision}=100`,
@@ -811,12 +1048,13 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     secretMounts: bindings.mounts,
     probes,
     traffic: Object.freeze([Object.freeze({ revision: candidateRevision, tag: candidateTag, percent: 0 })]),
-    iam: Object.freeze([]),
+    iam: Object.freeze([Object.freeze({ role: 'roles/run.invoker', members: Object.freeze(['allUsers']) })]),
   });
   return Object.freeze({
     project: PROJECT,
     region: REGION,
     releaseSha,
+    sourceArchive: input.sourceArchive,
     sourceArchiveSha256: input.sourceArchiveSha256,
     imageDigest: input.imageDigest,
     previousRevision,
@@ -824,7 +1062,13 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     candidateTag,
     serviceOrigin,
     candidateOrigin,
+    candidateServiceSpecPath,
+    candidateServiceSpec: controlledCandidateServiceSpec,
     acceptanceRunId,
+    releaseIdentitySha256,
+    releaseReceiptDirectory,
+    releaseReceiptPaths,
+    task8Evidence,
     acceptanceOutputs,
     acceptanceEvidenceOutput: Object.freeze({
       bucket: `${PROJECT}-media`,
@@ -833,6 +1077,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     evidence,
     operations: Object.freeze(operations),
     expectedJobs,
+    expectedMigrationJob,
     expectedCandidate,
   });
 }
@@ -840,6 +1085,29 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
 export function validateBuildReceipt(value, { releaseSha, sourceArchiveSha256 } = {}) {
   const imageName = `asia-east2-docker.pkg.dev/${PROJECT}/${REPOSITORY}/${SERVICE}:${releaseSha}`;
   const image = value?.results?.images;
+  const source = value?.sourceProvenance?.resolvedStorageSource;
+  const sourceUri = exactKeys(source, ['bucket', 'generation', 'object'])
+    && typeof source.bucket === 'string' && source.bucket.length > 0
+    && typeof source.object === 'string' && source.object.length > 0
+    && NUMERIC_VERSION.test(String(source.generation ?? ''))
+    ? `gs://${source.bucket}/${source.object}#${source.generation}`
+    : null;
+  const fileHashes = value?.sourceProvenance?.fileHashes;
+  const provenanceKeys = fileHashes && typeof fileHashes === 'object' && !Array.isArray(fileHashes)
+    ? Object.keys(fileHashes) : [];
+  const hashes = sourceUri && provenanceKeys.length === 1 && provenanceKeys[0] === sourceUri
+    ? fileHashes[sourceUri]?.fileHash : null;
+  let sourceHashMatches = false;
+  if (Array.isArray(hashes) && hashes.length === 1
+    && exactKeys(hashes[0], ['type', 'value']) && hashes[0].type === 'SHA256'
+    && typeof hashes[0].value === 'string') {
+    try {
+      const decoded = Buffer.from(hashes[0].value, 'base64');
+      sourceHashMatches = decoded.length === 32
+        && decoded.toString('base64') === hashes[0].value
+        && decoded.toString('hex') === sourceArchiveSha256;
+    } catch { sourceHashMatches = false; }
+  }
   const expectedSteps = [
     'validate-release-sha', 'dependency-security-gate', 'build',
     'verify-image-contract', 'verify-oci-labels',
@@ -853,13 +1121,13 @@ export function validateBuildReceipt(value, { releaseSha, sourceArchiveSha256 } 
     && value.substitutions?._RELEASE_SHA === releaseSha
     && value.substitutions?._SOURCE_SHA256 === sourceArchiveSha256
     && value.options?.requestedVerifyOption === 'VERIFIED'
+    && exact(value.options?.sourceProvenanceHash, ['SHA256'])
     && Array.isArray(value.steps)
     && exact(value.steps.map(({ id, status } = {}) => ({ id, status })), expectedSteps.map((id) => ({
       id, status: 'SUCCESS',
     })))
-    && value.sourceProvenance && typeof value.sourceProvenance === 'object'
-    && !Array.isArray(value.sourceProvenance)
-    && Object.keys(value.sourceProvenance).length > 0
+    && exactKeys(value.sourceProvenance, ['fileHashes', 'resolvedStorageSource'])
+    && sourceHashMatches
     && Array.isArray(image) && image.length === 1
     && image[0]?.name === imageName
     && IMAGE_DIGEST.test(String(image[0]?.digest ?? ''))
@@ -869,11 +1137,13 @@ export function validateBuildReceipt(value, { releaseSha, sourceArchiveSha256 } 
     buildId: value.id,
     releaseSha,
     sourceArchiveSha256,
+    sourceProvenance: Object.freeze({ uri: sourceUri, sha256: sourceArchiveSha256 }),
     imageDigest: image[0].digest,
     provenance: 'VERIFIED',
     ociLabels: Object.freeze({
       'com.simplify.source-archive-sha256': sourceArchiveSha256,
       'org.opencontainers.image.revision': releaseSha,
+      'org.opencontainers.image.source': OCI_SOURCE,
     }),
   });
 }
@@ -1021,6 +1291,29 @@ function validateCandidateService(value, expected) {
   return true;
 }
 
+function validateStableService(value, { previousRevision, candidateTag } = {}) {
+  const normalized = normalizeCandidateService(value);
+  if (!normalized || normalized.service !== SERVICE
+    || normalized.traffic.some(({ tag }) => tag === candidateTag)) {
+    throw new Error('Cloud Run stable service readback is invalid');
+  }
+  const active = normalized.traffic.filter(({ percent }) => percent > 0)
+    .map(({ revision, percent }) => ({ revision, percent }));
+  if (!exact(active, [{ revision: previousRevision, percent: 100 }])) {
+    throw new Error('Cloud Run stable service readback is invalid');
+  }
+  return true;
+}
+
+function validateCandidateCleanupService(value, plan) {
+  validateStableService(value, plan);
+  const traffic = normalizeCandidateService(value)?.traffic ?? [];
+  if (traffic.some(({ tag }) => tag === plan.candidateTag)) {
+    throw new Error('Cloud Run candidate cleanup readback is invalid');
+  }
+  return true;
+}
+
 function validateCandidateArtifact(value, expectedImage) {
   const image = value?.image ?? value?.image_summary?.fully_qualified_digest
     ?? value?.imageSummary?.fullyQualifiedDigest;
@@ -1031,7 +1324,7 @@ function validateCandidateArtifact(value, expectedImage) {
   return true;
 }
 
-export function validateCandidateControlPlaneReadbacks(value, plan) {
+export function validateCandidateControlPlaneReadbacks(value, plan, { publicInvoker = true } = {}) {
   if (!exactKeys(value, ['artifact', 'iam', 'revision', 'service']) || !plan?.expectedCandidate) {
     throw new Error('Cloud Run candidate control-plane readback is invalid');
   }
@@ -1040,7 +1333,7 @@ export function validateCandidateControlPlaneReadbacks(value, plan) {
   if (!exact(normalizeCandidateRevision(value.revision, expected), candidateRevisionContract(expected))) {
     throw new Error('Cloud Run candidate revision readback is invalid');
   }
-  validateServiceIamReceipt(value.iam, { publicInvoker: false });
+  validateServiceIamReceipt(value.iam, { publicInvoker });
   validateCandidateArtifact(value.artifact, expected.image);
   return true;
 }
@@ -1140,6 +1433,7 @@ function normalizeV1JobReadback(value) {
     environment,
     secretEnvironment,
     secretMounts,
+    labels: { 'simplify-release-sha': value.metadata.labels?.['simplify-release-sha'] },
   };
 }
 
@@ -1149,6 +1443,39 @@ export function validateReleaseJobReadback(value, expected) {
     throw new Error('Cloud Run release Job readback is invalid');
   }
   return true;
+}
+
+export function validateMigrationExecutionReceipt(value, { releaseSha } = {}) {
+  const name = value?.name ?? value?.metadata?.name;
+  const job = value?.job ?? value?.metadata?.labels?.['run.googleapis.com/job'];
+  const status = value?.status ?? value;
+  const taskCount = positiveOrZeroInteger(value?.taskCount ?? value?.spec?.taskCount);
+  const parallelism = positiveOrZeroInteger(value?.parallelism ?? value?.spec?.parallelism);
+  const completed = value?.terminalCondition ?? (status?.conditions ?? []).find(({ type } = {}) => type === 'Completed');
+  const completionTime = value?.completionTime ?? status?.completionTime;
+  const expectedFullJob = `projects/${PROJECT}/locations/${REGION}/jobs/${MIGRATION_JOB}`;
+  const validName = typeof name === 'string' && (
+    new RegExp(`^${expectedFullJob}/executions/[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`).test(name)
+    || (job === MIGRATION_JOB && new RegExp(`^${MIGRATION_JOB}-[a-z0-9](?:[a-z0-9-]{0,48}[a-z0-9])?$`).test(name))
+  );
+  const validJob = job === MIGRATION_JOB || job === expectedFullJob;
+  const completedTrue = (completed?.type === 'Completed'
+    && (completed?.status === 'True' || completed?.state === 'CONDITION_SUCCEEDED'));
+  if (!RELEASE_SHA.test(String(releaseSha ?? '')) || !validName || !validJob
+    || taskCount !== 1 || parallelism !== 1
+    || positiveOrZeroInteger(status?.succeededCount) !== 1
+    || positiveOrZeroInteger(status?.failedCount ?? 0) !== 0
+    || positiveOrZeroInteger(status?.cancelledCount ?? 0) !== 0
+    || positiveOrZeroInteger(status?.retriedCount ?? 0) !== 0
+    || positiveOrZeroInteger(status?.runningCount ?? 0) !== 0
+    || status?.reconciling !== false || !completedTrue
+    || typeof completionTime !== 'string' || !Number.isFinite(Date.parse(completionTime))) {
+    throw new Error('Cloud Run migration execution receipt is invalid');
+  }
+  return Object.freeze({
+    name, job: MIGRATION_JOB, taskCount: 1, parallelism: 1,
+    succeededCount: 1, completionTime,
+  });
 }
 
 export function validateEvidenceVersionReceipt(value, { secret, secretVersion } = {}) {
@@ -1161,7 +1488,12 @@ export function validateEvidenceVersionReceipt(value, { secret, secretVersion } 
   return true;
 }
 
-export async function validateEvidenceArtifactFile(value, { releaseSha } = {}) {
+function semanticEvidenceFinalizer(kind) {
+  return ['asrSmoke', 'ttsSmoke', 'iosVoiceAcceptance'].includes(kind)
+    ? finalizeEvidenceRecord : finalizeReleaseEvidenceRecord;
+}
+
+export async function validateEvidenceArtifactFile(value, { releaseSha, kind = null } = {}) {
   if (!exactKeys(value, ['artifactSha256', 'filePath', 'objectSha256'])
     || !isAbsoluteFile(value.filePath)
     || !DIGEST.test(String(value.artifactSha256 ?? ''))
@@ -1185,9 +1517,14 @@ export async function validateEvidenceArtifactFile(value, { releaseSha } = {}) {
   }
   let record;
   try { record = JSON.parse(textValue); } catch { throw new Error('Evidence artifact file is invalid'); }
+  let semanticDigest;
+  try { semanticDigest = semanticEvidenceFinalizer(kind)(record).artifactSha256; } catch {
+    throw new Error('Evidence artifact file is invalid');
+  }
   if (!record || typeof record !== 'object' || Array.isArray(record)
     || record.commitSha !== releaseSha
-    || record.artifactSha256 !== value.artifactSha256) {
+    || record.artifactSha256 !== value.artifactSha256
+    || semanticDigest !== value.artifactSha256) {
     throw new Error('Evidence artifact file is invalid');
   }
   return Object.freeze({
@@ -1252,19 +1589,381 @@ export async function inspectCollectedEvidenceArtifact(filePath, { releaseSha, k
   }
   await validateEvidenceArtifactFile({
     filePath, artifactSha256, objectSha256,
-  }, { releaseSha });
+  }, { releaseSha, kind });
   return Object.freeze({ filePath, artifactSha256, objectSha256, byteLength: contents.length });
 }
 
 async function validateEvidenceArtifactSet(evidence, { releaseSha } = {}) {
-  for (const value of Object.values(evidence)) {
+  for (const [kind, value] of Object.entries(evidence)) {
     await validateEvidenceArtifactFile({
       filePath: value.filePath,
       artifactSha256: value.artifactSha256,
       objectSha256: value.objectSha256,
-    }, { releaseSha });
+    }, { releaseSha, kind });
   }
   return true;
+}
+
+function recentEvidenceTime(value, now, maximumAgeMs = 24 * 60 * 60_000) {
+  const observed = Date.parse(value);
+  const current = new Date(now).getTime();
+  return Number.isFinite(observed) && Number.isFinite(current)
+    && observed <= current + 5 * 60_000 && current - observed <= maximumAgeMs;
+}
+
+async function readExactJsonArtifact(entry, errorMessage) {
+  let metadata;
+  let bytes;
+  try {
+    metadata = await lstat(entry.filePath);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size < 2 || metadata.size > 4 * 1024 * 1024) {
+      throw new Error('invalid artifact');
+    }
+    bytes = await readFile(entry.filePath);
+  } catch { throw new Error(errorMessage); }
+  if (createHash('sha256').update(bytes).digest('hex') !== entry.objectSha256) {
+    throw new Error(errorMessage);
+  }
+  const raw = bytes.toString('utf8');
+  if (!Buffer.from(raw).equals(bytes)
+    || /-----BEGIN [A-Z ]*PRIVATE KEY-----|postgres(?:ql)?:\/\/[^/@\s:]+:[^/@\s]+@|"(?:accessToken|access_token|private_key)"\s*:/i.test(raw)) {
+    throw new Error(errorMessage);
+  }
+  let record;
+  try { record = JSON.parse(raw); } catch { throw new Error(errorMessage); }
+  if (raw !== `${JSON.stringify(record, null, 2)}\n`) throw new Error(errorMessage);
+  return { record, bytes };
+}
+
+async function validateBoundFile(value, { json = false, png = false } = {}) {
+  if (!exactKeys(value, ['byteLength', 'filePath', 'sha256'])
+    || !isAbsoluteFile(value.filePath) || !DIGEST.test(String(value.sha256 ?? ''))
+    || !Number.isSafeInteger(value.byteLength) || value.byteLength < 8 || value.byteLength > 10 * 1024 * 1024) {
+    throw new Error('Mobile evidence bound file is invalid');
+  }
+  const metadata = await lstat(value.filePath);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size !== value.byteLength) {
+    throw new Error('Mobile evidence bound file is invalid');
+  }
+  const bytes = await readFile(value.filePath);
+  if (createHash('sha256').update(bytes).digest('hex') !== value.sha256
+    || (png && !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])))) {
+    throw new Error('Mobile evidence bound file is invalid');
+  }
+  if (!json) return null;
+  const raw = bytes.toString('utf8');
+  if (!Buffer.from(raw).equals(bytes)) throw new Error('Mobile evidence trace is invalid');
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { throw new Error('Mobile evidence trace is invalid'); }
+  if (raw !== `${JSON.stringify(parsed, null, 2)}\n`) throw new Error('Mobile evidence trace is invalid');
+  return parsed;
+}
+
+async function validateTask8EvidenceArtifact(entry, phase, plan, { now }) {
+  const errorMessage = `Task 8 ${phase} evidence is invalid`;
+  const { record } = await readExactJsonArtifact(entry, errorMessage);
+  if (record?.artifactSha256 !== entry.artifactSha256) throw new Error(errorMessage);
+  if (phase === 'workload') {
+    if (record.schemaVersion !== 3 || record.commitSha !== plan.releaseSha
+      || record.candidateOrigin !== plan.candidateOrigin || record.result !== true
+      || finalizeLatencyAcceptanceRecord(record).artifactSha256 !== record.artifactSha256
+      || !recentEvidenceTime(record.occurredAt, now)) throw new Error(errorMessage);
+    return true;
+  }
+  if (finalizeReleaseEvidenceRecord(record).artifactSha256 !== record.artifactSha256
+    || record.commitSha !== plan.releaseSha || record.sourceArchiveSha256 !== plan.sourceArchiveSha256
+    || record.imageDigest !== plan.imageDigest || record.candidateRevision !== plan.candidateRevision
+    || record.candidateTag !== plan.candidateTag || record.candidateOrigin !== plan.candidateOrigin
+    || record.trafficPercent !== 0 || record.result !== 'pass'
+    || !recentEvidenceTime(record.occurredAt, now)) throw new Error(errorMessage);
+  if (phase === 'readiness') {
+    if (!exactKeys(record, [
+      'artifactSha256', 'candidateOrigin', 'candidateRevision', 'candidateTag', 'checks',
+      'commitSha', 'gate', 'imageDigest', 'occurredAt', 'result', 'schemaVersion',
+      'sourceArchiveSha256', 'trafficPercent',
+    ]) || record.schemaVersion !== 1 || record.gate !== 'readiness'
+      || !exact(record.checks, {
+        evidenceMounted: true,
+        liveStatus: 200,
+        observedReleaseSha: plan.releaseSha,
+        readyStatus: 200,
+        resourceContinuity: true,
+      })) throw new Error(errorMessage);
+    return true;
+  }
+  if (phase !== 'mobile' || !exactKeys(record, [
+    'artifactSha256', 'candidateOrigin', 'candidateRevision', 'candidateTag', 'commitSha',
+    'finalNavigationUrl', 'gate', 'imageDigest', 'occurredAt', 'result', 'schemaVersion',
+    'screenshots', 'sourceArchiveSha256', 'trace', 'trafficPercent', 'viewport',
+  ]) || record.schemaVersion !== 1 || record.gate !== 'mobile'
+    || record.finalNavigationUrl !== plan.candidateOrigin
+    || !exact(record.viewport, { width: 390, height: 844 })
+    || !Array.isArray(record.screenshots) || record.screenshots.length !== MOBILE_SCREENSHOT_IDS.length) {
+    throw new Error(errorMessage);
+  }
+  const trace = await validateBoundFile(record.trace, { json: true });
+  if (!exactKeys(trace, [
+    'candidateOrigin', 'events', 'finalNavigationUrl', 'observedReleaseSha',
+    'schemaVersion', 'source', 'trafficPercent', 'viewport',
+  ]) || trace.schemaVersion !== 1 || trace.source !== 'codex-in-app-browser'
+    || trace.candidateOrigin !== plan.candidateOrigin || trace.finalNavigationUrl !== plan.candidateOrigin
+    || trace.observedReleaseSha !== plan.releaseSha || trace.trafficPercent !== 0
+    || !exact(trace.viewport, { width: 390, height: 844 })
+    || !Array.isArray(trace.events) || trace.events.length !== MOBILE_CHECK_IDS.length
+    || !trace.events.every((event, index) => exactKeys(event, ['evidence', 'id', 'status'])
+      && event.id === MOBILE_CHECK_IDS[index] && event.status === 'passed'
+      && typeof event.evidence === 'string' && event.evidence.length >= 3 && event.evidence.length <= 240)) {
+    throw new Error(errorMessage);
+  }
+  for (const [index, screenshot] of record.screenshots.entries()) {
+    if (!exactKeys(screenshot, ['byteLength', 'filePath', 'id', 'sha256'])
+      || screenshot.id !== MOBILE_SCREENSHOT_IDS[index]) throw new Error(errorMessage);
+    const { id: ignored, ...binding } = screenshot;
+    void ignored;
+    await validateBoundFile(binding, { png: true });
+  }
+  return true;
+}
+
+function expectedReceiptCompleted(plan, phase) {
+  return plan.operations.filter((member) => member.phase === phase).map(({ id }) => id);
+}
+
+function expectedEvidenceVersions(plan) {
+  return Object.freeze(Object.fromEntries(Object.entries(plan.evidence).map(([key, value]) => [
+    key, value.secretVersion,
+  ])));
+}
+
+function expectedCollectedEvidence(plan) {
+  return Object.freeze(Object.fromEntries([
+    'dependencyAcceptance', 'llmSmoke', 'asrSmoke', 'ttsSmoke',
+  ].map((key) => [key, Object.freeze({
+    artifactSha256: plan.evidence[key].artifactSha256,
+    objectSha256: plan.evidence[key].objectSha256,
+  })])));
+}
+
+function expectedAcceptanceJobs(plan) {
+  return Object.freeze(Object.fromEntries(Object.entries(plan.expectedJobs).map(([key, value]) => [
+    key, Object.freeze({ image: value.image, serviceAccount: value.serviceAccount }),
+  ])));
+}
+
+function validateReceiptOutputs(phase, outputs, plan) {
+  const expectedLabels = {
+    'com.simplify.source-archive-sha256': plan.sourceArchiveSha256,
+    'org.opencontainers.image.revision': plan.releaseSha,
+    'org.opencontainers.image.source': OCI_SOURCE,
+  };
+  if (phase === 'build') {
+    if (!exactKeys(outputs, ['buildId', 'imageDigest', 'ociLabels', 'sourceArchiveSha256', 'sourceProvenance'])
+      || !BUILD_ID.test(String(outputs.buildId ?? ''))
+      || !IMAGE_DIGEST.test(String(outputs.imageDigest ?? ''))
+      || (plan.imageDigest !== null && outputs.imageDigest !== plan.imageDigest)
+      || outputs.sourceArchiveSha256 !== plan.sourceArchiveSha256
+      || !exact(outputs.ociLabels, expectedLabels)
+      || !exactKeys(outputs.sourceProvenance, ['sha256', 'uri'])
+      || outputs.sourceProvenance.sha256 !== plan.sourceArchiveSha256
+      || !/^gs:\/\/[^/#]+\/[^#]+#[1-9]\d*$/.test(String(outputs.sourceProvenance.uri ?? ''))) {
+      throw new Error('Release build receipt outputs are invalid');
+    }
+  } else if (phase === 'migration') {
+    if (!exactKeys(outputs, ['executionName', 'imageDigest', 'job'])
+      || outputs.imageDigest !== plan.imageDigest || outputs.job !== MIGRATION_JOB
+      || typeof outputs.executionName !== 'string' || !outputs.executionName.includes('/executions/')) {
+      throw new Error('Release migration receipt outputs are invalid');
+    }
+  } else if (phase === 'inventory') {
+    if (!exact(outputs, { evidenceSecretVersions: { legacyInventory: plan.evidence.legacyInventory.secretVersion } })) {
+      throw new Error('Release inventory receipt outputs are invalid');
+    }
+  } else if (phase === 'acceptance') {
+    if (!exact(outputs, { jobs: expectedAcceptanceJobs(plan) })) {
+      throw new Error('Release acceptance receipt outputs are invalid');
+    }
+  } else if (phase === 'collect') {
+    const unresolved = ['dependencyAcceptance', 'llmSmoke', 'asrSmoke', 'ttsSmoke']
+      .every((key) => plan.evidence[key].artifactSha256 === '0'.repeat(64)
+        && plan.evidence[key].objectSha256 === '0'.repeat(64));
+    const validUnresolved = unresolved
+      && exactKeys(outputs, ['evidence'])
+      && exactKeys(outputs.evidence, ['dependencyAcceptance', 'llmSmoke', 'asrSmoke', 'ttsSmoke'])
+      && Object.values(outputs.evidence).every((entry) => (
+        exactKeys(entry, ['artifactSha256', 'objectSha256'])
+        && DIGEST.test(String(entry.artifactSha256 ?? ''))
+        && DIGEST.test(String(entry.objectSha256 ?? ''))
+      ));
+    if (!validUnresolved && !exact(outputs, { evidence: expectedCollectedEvidence(plan) })) {
+      throw new Error('Release collect receipt outputs are invalid');
+    }
+  } else if (phase === 'evidence') {
+    if (!exact(outputs, { evidenceSecretVersions: expectedEvidenceVersions(plan), outputResidueCount: 0 })) {
+      throw new Error('Release evidence receipt outputs are invalid');
+    }
+  } else if (phase === 'candidate') {
+    if (!exactKeys(outputs, [
+      'candidateContractSha256', 'imageDigest', 'origin', 'publicInvoker',
+      'revision', 'tag', 'trafficPercent',
+    ])
+      || outputs.candidateContractSha256 !== canonicalSha256(plan.expectedCandidate)
+      || outputs.imageDigest !== plan.imageDigest || outputs.origin !== plan.candidateOrigin
+      || outputs.revision !== plan.candidateRevision || outputs.tag !== plan.candidateTag
+      || outputs.trafficPercent !== 0 || outputs.publicInvoker !== true) {
+      throw new Error('Release candidate receipt outputs are invalid');
+    }
+  } else if (['readiness', 'workload', 'mobile'].includes(phase)) {
+    const expected = plan.task8Evidence[phase];
+    const baseKeys = ['artifactSha256', 'candidateOrigin', 'candidateRevision', 'imageDigest', 'objectSha256'];
+    const expectedKeys = phase === 'mobile' ? [...baseKeys, 'viewport'] : baseKeys;
+    if (!exactKeys(outputs, expectedKeys)
+      || outputs.artifactSha256 !== expected.artifactSha256
+      || outputs.objectSha256 !== expected.objectSha256
+      || outputs.candidateOrigin !== plan.candidateOrigin
+      || outputs.candidateRevision !== plan.candidateRevision
+      || outputs.imageDigest !== plan.imageDigest
+      || (phase === 'mobile' && !exact(outputs.viewport, { width: 390, height: 844 }))) {
+      throw new Error('Task 8 release receipt outputs are invalid');
+    }
+  } else throw new Error('Release receipt phase is invalid');
+  return true;
+}
+
+export function validateReleaseReceiptChain(value, plan, { through = 'mobile' } = {}) {
+  const lastIndex = RECEIPT_PHASES.indexOf(through);
+  if (!plan || lastIndex < 0 || !Array.isArray(value) || value.length !== lastIndex + 1) {
+    throw new Error('Release receipt chain is invalid');
+  }
+  let previousReceiptSha256 = null;
+  for (let index = 0; index <= lastIndex; index += 1) {
+    const receipt = value[index];
+    const phase = RECEIPT_PHASES[index];
+    if (!exactKeys(receipt, [
+      'completed', 'outputs', 'phase', 'previousReceiptSha256', 'receiptSha256',
+      'releaseIdentitySha256', 'releaseSha', 'schemaVersion', 'sequence',
+    ])
+      || receipt.schemaVersion !== 1 || receipt.phase !== phase || receipt.sequence !== index + 1
+      || receipt.releaseSha !== plan.releaseSha
+      || receipt.releaseIdentitySha256 !== plan.releaseIdentitySha256
+      || receipt.previousReceiptSha256 !== previousReceiptSha256
+      || !exact(receipt.completed, expectedReceiptCompleted(plan, phase))
+      || finalizeReleasePhaseReceipt(receipt).receiptSha256 !== receipt.receiptSha256) {
+      throw new Error('Release receipt chain is invalid');
+    }
+    validateReceiptOutputs(phase, receipt.outputs, plan);
+    previousReceiptSha256 = receipt.receiptSha256;
+  }
+  return true;
+}
+
+async function loadReleaseReceiptFiles(plan, { through }) {
+  const lastIndex = RECEIPT_PHASES.indexOf(through);
+  if (lastIndex < 0) throw new Error('Release receipt chain is invalid');
+  const receipts = [];
+  for (let index = 0; index <= lastIndex; index += 1) {
+    const phase = RECEIPT_PHASES[index];
+    const filePath = plan.releaseReceiptPaths[phase];
+    const metadata = await lstat(filePath);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size < 2 || metadata.size > 1024 * 1024) {
+      throw new Error('Release receipt chain is invalid');
+    }
+    const bytes = await readFile(filePath);
+    const raw = bytes.toString('utf8');
+    if (!Buffer.from(raw).equals(bytes)) throw new Error('Release receipt chain is invalid');
+    const receipt = JSON.parse(raw);
+    if (raw !== `${JSON.stringify(receipt, null, 2)}\n`) throw new Error('Release receipt chain is invalid');
+    receipts.push(receipt);
+  }
+  validateReleaseReceiptChain(receipts, plan, { through });
+  return receipts;
+}
+
+async function persistReleaseReceipt(plan, receipt) {
+  const filePath = plan.releaseReceiptPaths[receipt.phase];
+  if (!filePath) throw new Error('Release receipt path is invalid');
+  try { await mkdir(plan.releaseReceiptDirectory); } catch (error) {
+    if (error?.code !== 'EEXIST') throw error;
+  }
+  const contents = `${JSON.stringify(receipt, null, 2)}\n`;
+  try {
+    await writeFile(filePath, contents, { encoding: 'utf8', flag: 'wx' });
+  } catch (error) {
+    if (error?.code !== 'EEXIST') throw error;
+    const existing = await readFile(filePath);
+    if (!existing.equals(Buffer.from(contents))) throw new Error('Release receipt already exists with different bytes');
+  }
+  return true;
+}
+
+function releasePhaseReceiptOutputs(phase, plan, context) {
+  if (phase === 'build') {
+    const value = context.buildReceipt;
+    return Object.freeze({
+      buildId: value.buildId,
+      imageDigest: value.imageDigest,
+      sourceArchiveSha256: value.sourceArchiveSha256,
+      sourceProvenance: value.sourceProvenance,
+      ociLabels: value.ociLabels,
+    });
+  }
+  if (phase === 'migration') return Object.freeze({
+    executionName: context.migrationExecutionReceipt.name,
+    job: MIGRATION_JOB,
+    imageDigest: plan.imageDigest,
+  });
+  if (phase === 'inventory') return Object.freeze({
+    evidenceSecretVersions: Object.freeze({
+      legacyInventory: plan.evidence.legacyInventory.secretVersion,
+    }),
+  });
+  if (phase === 'acceptance') return Object.freeze({ jobs: expectedAcceptanceJobs(plan) });
+  if (phase === 'collect') return Object.freeze({
+    evidence: Object.freeze(Object.fromEntries(Object.entries(context.collectedEvidence).map(([key, value]) => [
+      key, Object.freeze({ artifactSha256: value.artifactSha256, objectSha256: value.objectSha256 }),
+    ]))),
+  });
+  if (phase === 'evidence') return Object.freeze({
+    evidenceSecretVersions: expectedEvidenceVersions(plan), outputResidueCount: 0,
+  });
+  if (phase === 'candidate') return Object.freeze({
+    candidateContractSha256: canonicalSha256(plan.expectedCandidate),
+    imageDigest: plan.imageDigest,
+    origin: plan.candidateOrigin,
+    publicInvoker: true,
+    revision: plan.candidateRevision,
+    tag: plan.candidateTag,
+    trafficPercent: 0,
+  });
+  if (['readiness', 'workload', 'mobile'].includes(phase)) {
+    return Object.freeze({
+      artifactSha256: plan.task8Evidence[phase].artifactSha256,
+      objectSha256: plan.task8Evidence[phase].objectSha256,
+      candidateOrigin: plan.candidateOrigin,
+      candidateRevision: plan.candidateRevision,
+      imageDigest: plan.imageDigest,
+      ...(phase === 'mobile' ? { viewport: Object.freeze({ width: 390, height: 844 }) } : {}),
+    });
+  }
+  throw new Error('Release receipt phase is invalid');
+}
+
+function createReleasePhaseReceipt(phase, plan, completed, context, priorReceipts) {
+  const sequence = RECEIPT_PHASES.indexOf(phase) + 1;
+  if (sequence < 1 || priorReceipts.length !== sequence - 1) {
+    throw new Error('Release receipt predecessor chain is invalid');
+  }
+  const receipt = finalizeReleasePhaseReceipt({
+    schemaVersion: 1,
+    phase,
+    sequence,
+    releaseSha: plan.releaseSha,
+    releaseIdentitySha256: plan.releaseIdentitySha256,
+    previousReceiptSha256: priorReceipts.at(-1)?.receiptSha256 ?? null,
+    completed: Object.freeze([...completed]),
+    outputs: releasePhaseReceiptOutputs(phase, plan, context),
+  });
+  validateReleaseReceiptChain([...priorReceipts, receipt], plan, { through: phase });
+  return receipt;
 }
 
 async function assertCollectionDestinationsAbsent(outputs) {
@@ -1285,8 +1984,8 @@ function operationMayMutate(id) {
     || id.endsWith('-deploy') || id.endsWith('-execute')
     || id.startsWith('evidence-collect-copy:') || id.startsWith('evidence-output-delete:')
     || id === 'candidate-deploy'
-    || id === 'promote-public-service' || id === 'promote-traffic'
-    || id === 'rollback-traffic';
+    || id === 'candidate-public-service' || id.startsWith('candidate-cleanup-')
+    || id === 'promote-traffic' || id === 'rollback-traffic';
 }
 
 function parseArguments(argv, releaseSha) {
@@ -1316,6 +2015,12 @@ export async function runGcpRelease({
   execute,
   verifyEvidence = validateEvidenceArtifactSet,
   inspectCollected = inspectCollectedEvidenceArtifact,
+  verifySourceArchive = verifyReleaseArchiveBytes,
+  verifyTask8Evidence = validateTask8EvidenceArtifact,
+  writeCandidateSpec = writeCandidateServiceSpecFile,
+  loadReceipts = loadReleaseReceiptFiles,
+  persistReceipt = persistReleaseReceipt,
+  now = () => new Date(),
   environment = process.env,
   writeOutput = (line) => process.stdout.write(line),
 } = {}) {
@@ -1346,8 +2051,60 @@ export async function runGcpRelease({
       plannedOperations: selected.map(({ id }) => id),
     });
   }
+  if (selection.phase === 'build') {
+    try {
+      if (typeof verifySourceArchive !== 'function'
+        || await verifySourceArchive(plan.sourceArchive, plan.sourceArchiveSha256) !== true) {
+        throw new Error('release archive drift');
+      }
+    } catch {
+      return publish(writeOutput, 1, {
+        status: 'failed', code: 'RELEASE_SOURCE_ARCHIVE_INVALID', mutationPerformed: false,
+        releaseSha: plan.releaseSha, phase: selection.phase, completed: [],
+      });
+    }
+  }
+  let priorReceipts = [];
+  const receiptPhaseIndex = RECEIPT_PHASES.indexOf(selection.phase);
+  try {
+    if (selection.phase === 'promote') {
+      if (typeof loadReceipts !== 'function') throw new Error('receipt loader unavailable');
+      priorReceipts = await loadReceipts(plan, { through: 'mobile' });
+      validateReleaseReceiptChain(priorReceipts, plan, { through: 'mobile' });
+    } else if (receiptPhaseIndex > 0) {
+      if (typeof loadReceipts !== 'function') throw new Error('receipt loader unavailable');
+      const through = RECEIPT_PHASES[receiptPhaseIndex - 1];
+      priorReceipts = await loadReceipts(plan, { through });
+      validateReleaseReceiptChain(priorReceipts, plan, { through });
+    }
+  } catch {
+    return publish(writeOutput, 1, {
+      status: 'failed', code: 'RELEASE_RECEIPT_CHAIN_INVALID', mutationPerformed: false,
+      releaseSha: plan.releaseSha, phase: selection.phase, completed: [],
+    });
+  }
+  try {
+    const task8Phases = selection.phase === 'promote'
+      ? ['readiness', 'workload', 'mobile']
+      : (['readiness', 'workload', 'mobile'].includes(selection.phase) ? [selection.phase] : []);
+    for (const phase of task8Phases) {
+      if (typeof verifyTask8Evidence !== 'function'
+        || await verifyTask8Evidence(plan.task8Evidence[phase], phase, plan, { now: now() }) !== true) {
+        throw new Error('Task 8 evidence verification failed');
+      }
+    }
+  } catch {
+    return publish(writeOutput, 1, {
+      status: 'failed', code: 'TASK8_EVIDENCE_INVALID', mutationPerformed: false,
+      releaseSha: plan.releaseSha, phase: selection.phase, completed: [],
+    });
+  }
   let executor;
-  try { executor = execute ?? createDefaultGcloudExecutor({ environment }); } catch {
+  try {
+    executor = execute ?? (selected.length > 0
+      ? createDefaultGcloudExecutor({ environment })
+      : async () => { throw new Error('No control-plane operation is planned'); });
+  } catch {
     return publish(writeOutput, 1, {
       status: 'failed', code: 'CONTROL_PLANE_UNAVAILABLE', mutationPerformed: false,
       releaseSha: plan.releaseSha, phase: selection.phase,
@@ -1358,8 +2115,11 @@ export async function runGcpRelease({
   const collectedEvidence = {};
   const collectedObjectReceipts = new Map();
   const candidateReadbacks = {};
+  const promotionReadbacks = {};
   let buildReceipt = null;
+  let migrationExecutionReceipt = null;
   let mutationAttempted = false;
+  let candidatePublicGranted = false;
   try {
     if (selection.phase === 'collect') {
       await assertCollectionDestinationsAbsent(plan.acceptanceOutputs);
@@ -1392,23 +2152,63 @@ export async function runGcpRelease({
         if (!buildReceipt || !exact(readback, buildReceipt)) {
           throw new Error('Build readback differs from submission');
         }
+      } else if (member.id === 'migration-readback') {
+        validateReleaseJobReadback(receipt, plan.expectedMigrationJob);
+      } else if (member.id === 'migration-execute') {
+        migrationExecutionReceipt = validateMigrationExecutionReceipt(receipt, {
+          releaseSha: plan.releaseSha,
+        });
       } else if (member.id === 'promote-authority-readback') {
         if (!Array.isArray(receipt) || receipt.length !== 1
           || receipt[0]?.account !== PROMOTION_AUTHORITY
           || receipt[0]?.status !== 'ACTIVE') {
           throw new Error('Public promotion authority is not approved');
         }
-      } else if (member.id === 'candidate-iam-readback') {
+      } else if (member.id === 'promote-candidate-service-readback') {
+        promotionReadbacks.service = receipt;
+      } else if (member.id === 'promote-candidate-revision-readback') {
+        promotionReadbacks.revision = receipt;
+      } else if (member.id === 'promote-candidate-iam-readback') {
+        promotionReadbacks.iam = receipt;
+      } else if (member.id === 'promote-candidate-artifact-readback') {
+        promotionReadbacks.artifact = receipt;
+        validateCandidateControlPlaneReadbacks(promotionReadbacks, plan);
+      } else if (member.id === 'candidate-stable-readback') {
+        validateStableService(receipt, plan);
+        if (typeof writeCandidateSpec !== 'function'
+          || await writeCandidateSpec(plan) !== true) {
+          throw new Error('Candidate Service YAML is unavailable');
+        }
+      } else if (member.id === 'candidate-spec-dry-run') {
+        if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) {
+          throw new Error('Candidate Service YAML dry-run is invalid');
+        }
+      } else if (member.id === 'candidate-private-iam-readback') {
         candidateReadbacks.iam = receipt;
         validateServiceIamReceipt(receipt, { publicInvoker: false });
+      } else if (member.id === 'candidate-iam-readback') {
+        candidateReadbacks.iam = receipt;
+        validateServiceIamReceipt(receipt, { publicInvoker: true });
       } else if (member.id === 'candidate-service-readback') {
         candidateReadbacks.service = receipt;
       } else if (member.id === 'candidate-revision-readback') {
         candidateReadbacks.revision = receipt;
       } else if (member.id === 'candidate-readback') {
         candidateReadbacks.artifact = receipt;
-      } else if (member.id === 'promote-public-service') {
+        validateCandidateControlPlaneReadbacks(candidateReadbacks, plan, { publicInvoker: false });
+      } else if (member.id === 'candidate-public-service') {
         validateServiceIamReceipt(receipt, { publicInvoker: true });
+        candidatePublicGranted = true;
+      } else if (member.id === 'candidate-public-service-readback') {
+        candidateReadbacks.service = receipt;
+        validateCandidateService(receipt, plan.expectedCandidate);
+      } else if (member.id === 'candidate-cleanup-public-service'
+        || member.id === 'candidate-cleanup-iam-readback') {
+        validateServiceIamReceipt(receipt, { publicInvoker: false });
+      } else if (member.id === 'candidate-cleanup-traffic') {
+        validateTrafficReceipt(receipt, { revision: plan.previousRevision });
+      } else if (member.id === 'candidate-cleanup-service-readback') {
+        validateCandidateCleanupService(receipt, plan);
       } else if (member.id === 'promote-traffic' || member.id === 'promote-readback') {
         validateTrafficReceipt(receipt, { revision: plan.candidateRevision });
       } else if (member.id === 'rollback-traffic' || member.id === 'rollback-readback') {
@@ -1460,10 +2260,27 @@ export async function runGcpRelease({
       validateCandidateControlPlaneReadbacks(candidateReadbacks, plan);
     }
   } catch {
+    let cleanupFailed = false;
+    if (selection.phase === 'candidate' && candidatePublicGranted) {
+      try {
+        const removeReceipt = await executor([
+          'run', 'services', 'remove-iam-policy-binding', SERVICE, '--member=allUsers',
+          '--role=roles/run.invoker', `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+        ]);
+        validateServiceIamReceipt(removeReceipt, { publicInvoker: false });
+        const iamReceipt = await executor([
+          'run', 'services', 'get-iam-policy', SERVICE,
+          `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+        ]);
+        validateServiceIamReceipt(iamReceipt, { publicInvoker: false });
+      } catch { cleanupFailed = true; }
+    }
     return publish(writeOutput, 1, {
-      status: 'failed', code: 'RELEASE_PHASE_FAILED', mutationPerformed: mutationAttempted,
+      status: 'failed', code: cleanupFailed ? 'CANDIDATE_CLEANUP_FAILED' : 'RELEASE_PHASE_FAILED',
+      mutationPerformed: mutationAttempted,
       releaseSha: plan.releaseSha, phase: selection.phase, completed,
       resumeBoundary: selected[completed.length]?.id ?? null,
+      ...(selection.phase === 'candidate' && candidatePublicGranted ? { candidatePublicCleanup: !cleanupFailed } : {}),
     });
   }
   const publicReport = {
@@ -1475,6 +2292,29 @@ export async function runGcpRelease({
   }
   if (selection.phase === 'collect') publicReport.collectedEvidence = collectedEvidence;
   if (selection.phase === 'build') publicReport.buildReceipt = buildReceipt;
+  if (selection.phase === 'migration') publicReport.migrationExecutionReceipt = migrationExecutionReceipt;
+  if (receiptPhaseIndex >= 0) {
+    try {
+      const phaseReceipt = createReleasePhaseReceipt(
+        selection.phase,
+        plan,
+        completed,
+        { buildReceipt, migrationExecutionReceipt, collectedEvidence },
+        priorReceipts,
+      );
+      if (typeof persistReceipt !== 'function' || await persistReceipt(plan, phaseReceipt) !== true) {
+        throw new Error('Release receipt persistence failed');
+      }
+      publicReport.phaseReceipt = phaseReceipt;
+    } catch {
+      return publish(writeOutput, 1, {
+        status: 'failed', code: 'RELEASE_RECEIPT_WRITE_FAILED',
+        mutationPerformed: mutationAttempted,
+        releaseSha: plan.releaseSha, phase: selection.phase, completed,
+      });
+    }
+  }
+  publicReport.mutationPerformed = mutationAttempted;
   return publish(writeOutput, 0, publicReport);
 }
 

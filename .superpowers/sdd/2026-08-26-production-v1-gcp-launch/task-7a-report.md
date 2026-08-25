@@ -198,6 +198,83 @@ local Docker build was not claimed or run because this workstation has no
 Docker CLI; the real verified Cloud Build and in-image contract execution
 remain a live release prerequisite.
 
+## Independent-review remediation
+
+The first post-review focused run was intentionally RED:
+
+```text
+node --test tests/release-contract.test.js
+22 tests: 16 pass, 6 fail, 0 skip, exit 1
+- unsupported Cloud SDK readiness deployment path remained
+- release archive bytes and Cloud Build source provenance were not independently bound
+- collected evidence still trusted a self-reported semantic digest
+- migration execution was not fenced by its exact Job readback
+- OCI source-label observation was not enforced
+- direct promotion was not fenced by the complete predecessor evidence chain
+```
+
+The remediation replaces the unsupported `gcloud run deploy
+--readiness-probe` path with a deterministically generated Knative Service
+document and `gcloud run services replace`. The document preserves the stable
+route while adding the exact tagged candidate at zero percent and encodes all
+three probes, the digest-pinned image, runtime identity, numeric secrets,
+resources, and Direct VPC settings. Service, revision, IAM, and Artifact
+Registry readbacks must match before candidate acceptance and are repeated
+immediately before promotion.
+
+Before Cloud Build can be called, the frozen archive is required to be a
+regular non-symlink file and its real bytes are rehashed. Cloud Build requests
+`sourceProvenanceHash: [SHA256]`; the receipt accepts exactly one
+generation-bound source URI and one canonical base64 SHA-256 equal to those
+local bytes. The image receipt also requires observed exact revision,
+source-archive, and repository OCI labels.
+
+Evidence collection and publication now independently re-finalize each
+semantic record and separately verify the exact object-byte hash. Migration
+execution is unreachable until the deployed Job matches the exact digest,
+migrator identity, command, numeric secret, task/retry/timeout, network, and
+release label contract; its terminal execution counters and condition are also
+validated.
+
+Promotion requires one canonical, predecessor-hashed receipt chain through
+build, migration, inventory, acceptance, collection, evidence, zero-traffic
+candidate, readiness, workload, and 390x844 mobile acceptance. The three Task 8
+artifact files are re-read and revalidated before any promotion control-plane
+call. The candidate is publicly invokable only through its exact zero-traffic
+tag for real browser acceptance; candidate failure after that grant triggers
+compensating IAM removal and private readback, and an explicit cleanup phase is
+available for an abandoned candidate. Stable traffic changes to the reviewed
+revision only after a fresh public-IAM, tag-to-revision, zero-traffic,
+revision-configuration, and artifact-digest reread.
+
+A final small RED isolated the two last integration gaps before the final run:
+
+```text
+node --test tests/release-contract.test.js
+24 tests: 22 pass, 2 fail, 0 skip, exit 1
+- Task 8 artifacts were defined but not invoked by promotion
+- promotion lacked the four fresh candidate readback operations
+```
+
+Fresh remediation verification:
+
+```text
+node --test tests/release-contract.test.js
+24 tests: 24 pass, 0 fail, 0 skip, exit 0
+
+npm.cmd test
+1439 tests: 1438 pass, 0 fail, 1 approved real-PostgreSQL skip, exit 0
+
+npm.cmd run check
+exit 0
+
+git diff --check
+exit 0 (line-ending warnings only)
+```
+
+No GCP mutation, build submission, Job execution, deployment, IAM change, or
+traffic change was performed during this remediation.
+
 ## Files changed
 
 - `docs/superpowers/plans/2026-08-26-production-v1-gcp-launch.md`
