@@ -191,9 +191,20 @@ export function createSessionRouter({
       const voiceDraftId = request.body?.voiceDraftId ?? null;
       const replyLanguage = request.body?.replyLanguage;
       const replyMode = request.body?.replyMode;
+      const timing = acceptanceTimingContext({
+        windowId: request.get('x-acceptance-window-id'),
+        correlationId: request.get('x-acceptance-correlation-id'),
+      });
+      const controlledTtsFailureHeader = request.get('x-acceptance-controlled-tts-failure');
       if (!UUID.test(clientMessageId ?? '') || text.length < 1 || text.length > 4000
         || (voiceDraftId !== null && typeof voiceDraftId !== 'string')
         || !REPLY_LANGUAGES.has(replyLanguage) || !REPLY_MODES.has(replyMode)) throw httpError(400, 'INVALID_REQUEST');
+      if (controlledTtsFailureHeader !== undefined && (
+        controlledTtsFailureHeader !== 'provider-rejection-v1'
+        || replyMode !== 'voice'
+        || !timing
+        || request.get('origin') !== config.candidateOrigin
+      )) throw httpError(400, 'INVALID_REQUEST');
       const payloadHash = requestHash({ text, voiceDraftId, replyLanguage, replyMode });
       const subject = sessionData.session.id;
       const now = Date.now();
@@ -206,14 +217,11 @@ export function createSessionRouter({
         ],
       });
       if (!accepted.idempotent) {
-        const timing = acceptanceTimingContext({
-          windowId: request.get('x-acceptance-window-id'),
-          correlationId: request.get('x-acceptance-correlation-id'),
-        });
         if (timing) acceptanceTimingRecorder?.bindTurn?.({
           ...timing,
           turnId: accepted.turn.id,
           sessionId: sessionData.session.id,
+          ...(controlledTtsFailureHeader === 'provider-rejection-v1' ? { controlledTtsFailure: true } : {}),
         });
       }
       response.status(202).json({ data: { idempotent: accepted.idempotent, message: publicMessage(accepted.message), turn: publicTurn(accepted.turn) }, error: null, requestId: response.locals.requestId });

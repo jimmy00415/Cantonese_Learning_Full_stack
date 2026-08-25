@@ -119,7 +119,7 @@ test('answer service maps immutable wire locales to trusted provider instruction
       beforeProvider: async () => {},
     });
   }
-  assert.deepEqual(observed.map((input) => input.responseLanguage), ['en', 'zhHant', 'zhHans']);
+  assert.deepEqual(observed.map((input) => input.responseLanguage), ['en', 'yue-Hant-HK', 'cmn-Hans-CN']);
   assert.match(observed[0].systemPrompt, /international English/i);
   assert.match(observed[1].systemPrompt, /written Cantonese.*Traditional Chinese/i);
   assert.match(observed[2].systemPrompt, /Mandarin.*Simplified Chinese/i);

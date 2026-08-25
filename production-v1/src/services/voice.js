@@ -35,21 +35,11 @@ export const assistantAudioRecoveryIntervalMs = voiceLimits.leaseMs;
 export const defaultVoiceIngressSpoolRoot = join(tmpdir(), 'hong-kong-buddy-v1-voice-ingress');
 
 const VOICE_INGRESS_DIRECTORY = /^voice-ingress-[a-z0-9]{6}$/i;
-const PROVIDER_RESPONSE_LANGUAGE = Object.freeze({
-  en: 'en',
-  'yue-Hant-HK': 'yueHant',
-  'cmn-Hans-CN': 'zhHans',
-});
-const ASR_PROVIDER_RESPONSE_LANGUAGE = Object.freeze({
-  en: 'en',
-  zhHant: 'yueHant',
-  zhHans: 'zhHans',
-});
-
 export function providerResponseLanguage(replyLanguage) {
-  const value = PROVIDER_RESPONSE_LANGUAGE[replyLanguage];
-  if (!value) throw workError('VOICE_SYNTHESIS_REJECTED', 502, false);
-  return value;
+  if (!['en', 'yue-Hant-HK', 'cmn-Hans-CN'].includes(replyLanguage)) {
+    throw workError('VOICE_SYNTHESIS_REJECTED', 502, false);
+  }
+  return replyLanguage;
 }
 
 export function assertVoiceOutputCapability(config, at = new Date()) {
@@ -424,8 +414,10 @@ export function createVoiceService({
     const hardDeadline = addMs(startedAt, voiceLimits.voiceAttemptMs);
     const leaseToken = randomUUID();
     const attemptStorageKey = mediaStore.createAttemptKey({ kind: 'voice' });
-    const selectedResponseLanguage = responseLanguage ?? 'zhHant';
-    if (!['en', 'zhHant', 'zhHans'].includes(selectedResponseLanguage)) throw workError('INVALID_REQUEST', 400, false);
+    const selectedResponseLanguage = responseLanguage ?? 'yue-Hant-HK';
+    if (!['en', 'yue-Hant-HK', 'cmn-Hans-CN'].includes(selectedResponseLanguage)) {
+      throw workError('INVALID_REQUEST', 400, false);
+    }
     const boundMimeType = responseLanguage ? `${mimeType};asr-language=${selectedResponseLanguage}` : mimeType;
     const claim = await store.claimVoiceUploadWithRateLimits({
       sessionId, clientUploadId, requestSha256, mimeType: boundMimeType,
@@ -495,7 +487,7 @@ export function createVoiceService({
       await store.setVoiceUploadTranscribing({ uploadId: claim.upload.id, leaseToken, now: currentDate(now) });
       const transcript = await asrProvider.transcribe(spooled.buffer, {
         signal: heartbeat.signal,
-        responseLanguage: ASR_PROVIDER_RESPONSE_LANGUAGE[selectedResponseLanguage],
+        responseLanguage: selectedResponseLanguage,
       });
       const completed = await store.completeVoiceUpload({
         uploadId: claim.upload.id,
@@ -512,16 +504,24 @@ export function createVoiceService({
         acceptanceTimingRecorder?.record?.({
           ...acceptanceContext,
           sessionId,
+          bindingId: clientUploadId,
+          durationMs: wav.durationMs,
           operation: 'asr',
           layer: 'server',
           latencyMs: Math.max(0, transcriptReadyAtMs - spoolCompletedAtMs),
+          outcome: 'success',
+          failureCode: null,
         });
         acceptanceTimingRecorder?.record?.({
           ...acceptanceContext,
           sessionId,
+          bindingId: clientUploadId,
+          durationMs: wav.durationMs,
           operation: 'asr',
           layer: 'provider',
           latencyMs: transcript.latencyMs,
+          outcome: 'success',
+          failureCode: null,
         });
       }
       return { httpStatus: 201, data: uploadPublic({ ...completed.upload, mediaAsset: completed.mediaAsset }) };
@@ -576,7 +576,7 @@ export function createVoiceService({
   const generateAssistantAudio = async ({ sessionId, messageId, signal, acceptanceContext }) => {
     assertVoiceOutputCapability(config, currentDate(now));
     const current = currentDate(now);
-    const timingContext = acceptanceContext ?? acceptanceTimingRecorder?.contextForMessage?.(messageId);
+    const timingContext = acceptanceContext ?? acceptanceTimingRecorder?.beginTts?.(messageId);
     const hardDeadline = addMs(current, voiceLimits.ttsAttemptMs);
     const leaseToken = randomUUID();
     const attemptStorageKey = mediaStore.createAttemptKey({ kind: 'tts' });
@@ -600,12 +600,20 @@ export function createVoiceService({
       renew: (leaseExpiresAt, at) => store.renewMediaGenerationLease({ generationId: claim.generation.id, leaseToken, leaseExpiresAt, now: at }),
     });
     let objectWritten = false;
+    let providerAttempted = false;
+    let synthesized = null;
+    let providerStartedAtMs = null;
     try {
       if (!ttsProvider?.synthesize) throw workError('VOICE_PROVIDER_MISCONFIGURED', 503, false);
-      const synthesized = await ttsProvider.synthesize(claim.message.text, {
+      providerAttempted = true;
+      providerStartedAtMs = currentDate(now).getTime();
+      synthesized = await ttsProvider.synthesize(
+        timingContext?.controlledTtsFailure === true ? '' : claim.message.text,
+        {
         signal: heartbeat.signal,
         responseLanguage: providerResponseLanguage(claim.message.replyLanguage),
-      });
+        },
+      );
       const stored = await withOperationDeadline({
         signal: heartbeat.signal,
         deadlineMs: mediaDeadlineMs,
@@ -642,22 +650,58 @@ export function createVoiceService({
         acceptanceTimingRecorder?.record?.({
           ...timingContext,
           sessionId,
+          bindingId: messageId,
+          durationMs: null,
           operation: 'tts',
-          layer: 'server',
-          latencyMs: Math.max(0, readyAtMs - current.getTime()),
+          layer: 'provider',
+          latencyMs: synthesized.latencyMs,
+          outcome: 'success',
+          failureCode: null,
         });
         acceptanceTimingRecorder?.record?.({
           ...timingContext,
           sessionId,
+          bindingId: messageId,
+          durationMs: null,
           operation: 'tts',
-          layer: 'provider',
-          latencyMs: synthesized.latencyMs,
+          layer: 'server',
+          latencyMs: Math.max(0, readyAtMs - (timingContext.requestedAtMs ?? current.getTime())),
+          outcome: 'success',
+          failureCode: null,
         });
       }
       eventHub?.publish?.({ sessionId, conversationId: completed.message.conversationId, cursor: completed.event.cursor });
       return { httpStatus: 201, data: generationPublic(completed.generation) };
     } catch (rawError) {
       const error = normalizeWorkError(rawError, 'tts');
+      const failedAtMs = currentDate(now).getTime();
+      if (timingContext && providerAttempted) {
+        acceptanceTimingRecorder?.record?.({
+          ...timingContext,
+          sessionId,
+          bindingId: messageId,
+          durationMs: null,
+          operation: 'tts',
+          layer: 'provider',
+          latencyMs: synthesized?.latencyMs
+            ?? Math.max(0, failedAtMs - (providerStartedAtMs ?? failedAtMs)),
+          outcome: synthesized ? 'success' : 'failure',
+          failureCode: synthesized ? null : error.code,
+        });
+      }
+      if (timingContext) {
+        acceptanceTimingRecorder?.record?.({
+          ...timingContext,
+          sessionId,
+          bindingId: messageId,
+          durationMs: null,
+          operation: 'tts',
+          layer: 'server',
+          latencyMs: Math.max(0, failedAtMs - (timingContext.requestedAtMs ?? current.getTime())),
+          outcome: 'failure',
+          failureCode: error.code,
+        });
+      }
       try {
         await store.failMediaGeneration({
           generationId: claim.generation.id, leaseToken,

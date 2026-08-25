@@ -11,8 +11,13 @@ const TRUNCATED_REASONS = new Set(['length', 'max_tokens', 'max_output_tokens'])
 const FILTERED_REASONS = new Set(['content_filter', 'content_filtered', 'safety']);
 const RESPONSE_LANGUAGE_LABELS = Object.freeze({
   en: 'English',
-  zhHant: 'Traditional Chinese',
-  zhHans: 'Simplified Chinese',
+  'yue-Hant-HK': 'Traditional Chinese',
+  'cmn-Hans-CN': 'Simplified Chinese',
+});
+const RESPONSE_LANGUAGE_CONTENT_KEYS = Object.freeze({
+  en: 'en',
+  'yue-Hant-HK': 'zhHant',
+  'cmn-Hans-CN': 'zhHans',
 });
 
 export class ProviderError extends Error {
@@ -305,7 +310,7 @@ function deterministicResult(input, now) {
   const evidence = Array.isArray(input.evidenceSnapshot) ? input.evidenceSnapshot : [];
   const first = evidence[0];
   const responseLanguage = responseLanguageFor(input);
-  const text = first?.text?.[responseLanguage]
+  const text = first?.text?.[RESPONSE_LANGUAGE_CONTENT_KEYS[responseLanguage]]
     ?? first?.text?.en
     ?? first?.text?.zhHant
     ?? first?.text

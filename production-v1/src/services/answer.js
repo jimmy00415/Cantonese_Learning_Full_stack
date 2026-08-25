@@ -396,7 +396,7 @@ export function createAnswerService({ corpus, retriever, llmProvider, now = () =
       const providerResult = await llmProvider.generate({
         turnId,
         systemPrompt: modelSystemPrompt(language),
-        responseLanguage: language,
+        responseLanguage: replyLanguage,
         messages: context.map((message) => ({ role: message.role, content: message.text })),
         evidenceSnapshot: reference.evidence,
         actionSnapshot: reference.actions,

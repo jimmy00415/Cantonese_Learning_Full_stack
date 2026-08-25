@@ -13,8 +13,8 @@ const AZURE_REGION = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const NO_MATCH = new Set(['NoMatch', 'InitialSilenceTimeout', 'BabbleTimeout']);
 const GOOGLE_RESPONSE_LANGUAGES = Object.freeze({
   en: 'en-US',
-  yueHant: 'yue-Hant-HK',
-  zhHans: 'cmn-Hans-CN',
+  'yue-Hant-HK': 'yue-Hant-HK',
+  'cmn-Hans-CN': 'cmn-Hans-CN',
 });
 
 function azureAsrUrl(region) {
@@ -106,9 +106,9 @@ export function createAsrProvider({
   if (google && typeof googleAuthProvider?.fetch !== 'function') {
     throw speechError('VOICE_PROVIDER_MISCONFIGURED', 503, false, 'configuration');
   }
-  const transcribe = async (audio, { signal, responseLanguage = 'yueHant' } = {}) => {
+  const transcribe = async (audio, { signal, responseLanguage = 'yue-Hant-HK' } = {}) => {
     const buffer = Buffer.isBuffer(audio) ? audio : Buffer.from(audio ?? []);
-    if (!google && responseLanguage !== 'yueHant') {
+    if (!google && responseLanguage !== 'yue-Hant-HK') {
       throw speechError('VOICE_TRANSCRIPTION_REJECTED', 502, false, 'rejected');
     }
     const googleLanguages = google ? googleLanguageCodes(config.settings, responseLanguage) : null;

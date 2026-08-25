@@ -15,7 +15,11 @@ import { validateCanonicalWav } from '../media/canonical-wav.js';
 const AZURE_REGION = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const AZURE_VOICE = 'zh-HK-HiuMaanNeural';
 const AZURE_FORMAT = 'audio-24khz-48kbitrate-mono-mp3';
-const GOOGLE_VOICE_KEYS = new Set(['en', 'yueHant', 'zhHans']);
+const GOOGLE_VOICE_KEYS = Object.freeze({
+  en: 'en',
+  'yue-Hant-HK': 'yueHant',
+  'cmn-Hans-CN': 'zhHans',
+});
 
 export function escapeXml(value) {
   return String(value)
@@ -128,7 +132,7 @@ export function createTtsProvider({
   }
 
   const synthesizeWithEncoding = async (text, {
-    signal, responseLanguage = 'yueHant', audioEncoding = 'MP3',
+    signal, responseLanguage = 'yue-Hant-HK', audioEncoding = 'MP3',
   } = {}) => {
     const serverText = String(text ?? '');
     if (!serverText.trim()) throw speechError('VOICE_SYNTHESIS_REJECTED', 502, false, 'rejected');
@@ -137,16 +141,17 @@ export function createTtsProvider({
     if (!['MP3', 'LINEAR16'].includes(audioEncoding) || (!google && audioEncoding !== 'MP3')) {
       throw speechError('VOICE_SYNTHESIS_REJECTED', 502, false, 'rejected');
     }
-    if (!GOOGLE_VOICE_KEYS.has(responseLanguage)) {
+    const googleVoiceKey = GOOGLE_VOICE_KEYS[responseLanguage];
+    if (!googleVoiceKey) {
       throw speechError('VOICE_SYNTHESIS_REJECTED', 502, false, 'rejected');
     }
-    if (!google && responseLanguage !== 'yueHant') {
+    if (!google && responseLanguage !== 'yue-Hant-HK') {
       throw speechError('VOICE_SYNTHESIS_REJECTED', 502, false, 'rejected');
     }
     const body = google
       ? JSON.stringify({
         input: { text: serverText },
-        voice: settings.voices[responseLanguage],
+        voice: settings.voices[googleVoiceKey],
         audioConfig: audioEncoding === 'LINEAR16'
           ? { audioEncoding: 'LINEAR16', sampleRateHertz: 16_000 }
           : { audioEncoding: 'MP3' },

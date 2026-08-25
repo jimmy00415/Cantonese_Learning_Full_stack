@@ -564,7 +564,7 @@ test('automatic voice preparation fails closed when release evidence does not ve
 test('voice locale mapping is explicit and asynchronous TTS failure cannot revoke delivered text', async (t) => {
   assert.deepEqual(
     ['en', 'yue-Hant-HK', 'cmn-Hans-CN'].map(providerResponseLanguage),
-    ['en', 'yueHant', 'zhHans'],
+    ['en', 'yue-Hant-HK', 'cmn-Hans-CN'],
   );
   assert.throws(() => providerResponseLanguage('fr'), (error) => error.code === 'VOICE_SYNTHESIS_REJECTED');
 

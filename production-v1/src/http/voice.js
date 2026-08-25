@@ -117,7 +117,9 @@ export function createVoiceRouter({
       const requestSha256 = request.get('x-content-sha256');
       const responseLanguage = request.get('x-asr-language');
       if (!UUID.test(clientUploadId ?? '') || !SHA256.test(requestSha256 ?? '')) throw voiceError(400, 'INVALID_REQUEST');
-      if (!['en', 'zhHant', 'zhHans'].includes(responseLanguage)) throw voiceError(400, 'INVALID_REQUEST');
+      if (!['en', 'yue-Hant-HK', 'cmn-Hans-CN'].includes(responseLanguage)) {
+        throw voiceError(400, 'INVALID_REQUEST');
+      }
       const declared = request.get('content-length');
       if (declared !== undefined && (!/^\d+$/.test(declared) || !Number.isSafeInteger(Number(declared)))) throw voiceError(400, 'INVALID_REQUEST');
       if (declared !== undefined && Number(declared) > voiceLimits.uploadBytes) throw voiceError(413, 'VOICE_UPLOAD_TOO_LARGE');

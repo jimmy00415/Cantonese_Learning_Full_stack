@@ -4,7 +4,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { loadConfig, loadVoiceSmokeConfiguration } from '../src/config.js';
-import { validateCanonicalMp3 } from '../src/media/canonical-mp3.js';
+import { decodeCanonicalMp3 } from '../src/media/canonical-mp3.js';
 import { validateCanonicalWav } from '../src/media/canonical-wav.js';
 import { createAsrProvider } from '../src/providers/asr.js';
 import { createTtsProvider } from '../src/providers/tts.js';
@@ -20,7 +20,7 @@ const FIXED_TTS_PHRASE = '你好，這是 Hong Kong Buddy 的非敏感語音驗�
 const RUNTIME_IDENTITY = 'hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com';
 const FIXTURE_DEFINITIONS = Object.freeze([
   Object.freeze({
-    responseLanguage: 'yueHant', locale: 'yue-Hant-HK', referenceId: 'voice-smoke-yue-v1',
+    responseLanguage: 'yue-Hant-HK', locale: 'yue-Hant-HK', referenceId: 'voice-smoke-yue-v1',
     text: '我想知道點樣申請學生證', voiceName: 'yue-HK-Chirp3-HD-Achernar',
   }),
   Object.freeze({
@@ -28,7 +28,7 @@ const FIXTURE_DEFINITIONS = Object.freeze([
     text: 'How do I apply for my student card', voiceName: 'en-US-Chirp3-HD-Achernar',
   }),
   Object.freeze({
-    responseLanguage: 'zhHans', locale: 'cmn-Hans-CN', referenceId: 'voice-smoke-cmn-v1',
+    responseLanguage: 'cmn-Hans-CN', locale: 'cmn-Hans-CN', referenceId: 'voice-smoke-cmn-v1',
     text: '我想知道怎样申请学生证', voiceName: 'cmn-CN-Chirp3-HD-Achernar',
   }),
 ]);
@@ -226,7 +226,7 @@ export async function runVoiceProviderSmoke({
       samples = [];
       for (const definition of FIXTURE_DEFINITIONS) {
         const synthesized = await provider.synthesize(definition.text, { responseLanguage: definition.responseLanguage });
-        const validated = validateCanonicalMp3(synthesized.buffer);
+        const validated = await decodeCanonicalMp3(synthesized.buffer);
         samples.push({
           responseLanguage: definition.responseLanguage,
           locale: definition.locale,
@@ -234,6 +234,11 @@ export async function runVoiceProviderSmoke({
           latencyMs: Math.max(0, Number(synthesized.latencyMs) || 0),
           audioSha256: validated.sha256,
           audioByteLength: validated.byteLength,
+          decoder: validated.decoder,
+          decodedSampleCount: validated.decodedSampleCount,
+          decodedSampleRate: validated.decodedSampleRate,
+          decodedChannelCount: validated.decodedChannelCount,
+          decodedDurationMs: validated.decodedDurationMs,
           decodable: true,
         });
       }

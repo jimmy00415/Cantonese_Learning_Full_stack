@@ -243,7 +243,7 @@ test('legacy Cantonese-only TTS adapters reject English and Mandarin before prov
         throw new Error('provider transport must not run');
       },
     });
-    for (const responseLanguage of ['en', 'zhHans']) {
+    for (const responseLanguage of ['en', 'cmn-Hans-CN']) {
       await assert.rejects(
         provider.synthesize('Immutable server text', { responseLanguage }),
         (error) => error.code === 'VOICE_SYNTHESIS_REJECTED' && error.retryable === false,
@@ -345,12 +345,12 @@ test('provider binds the trusted server-selected response language instead of in
 
   await provider.generate({
     ...TURN_INPUT,
-    responseLanguage: 'zhHans',
+    responseLanguage: 'cmn-Hans-CN',
     messages: [{ role: 'user', content: 'English-looking latest student message' }],
   });
 
   const system = requestBody.messages[0].content;
-  assert.match(system, /responseLanguage=zhHans/);
+  assert.match(system, /responseLanguage=cmn-Hans-CN/);
   assert.match(system, /Simplified Chinese/);
   assert.match(system, /do not infer.*reference data/i);
   assert.equal(requestBody.messages.at(-2).content, 'English-looking latest student message');

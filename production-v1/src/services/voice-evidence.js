@@ -6,13 +6,14 @@ const DAY_MS = 24 * 60 * 60 * 1_000;
 const FUTURE_SKEW_MS = 5 * 60 * 1_000;
 const RELEASE_SHA = /^[0-9a-f]{40}$/i;
 const DIGEST = /^[0-9a-f]{64}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const AZURE_REGION = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const GOOGLE_PROJECT = 'hkbuddy-prod-v1-20260826';
 const GOOGLE_SPEECH_LOCATION = 'asia-southeast1';
 const GOOGLE_RESPONSE_LANGUAGE_CODES = Object.freeze({
   en: 'en-US',
-  yueHant: 'yue-Hant-HK',
-  zhHans: 'cmn-Hans-CN',
+  'yue-Hant-HK': 'yue-Hant-HK',
+  'cmn-Hans-CN': 'cmn-Hans-CN',
 });
 const VOICE_EVIDENCE_MAX_BYTES = 64 * 1_024;
 const SPEECH_EVIDENCE_KEYS = Object.freeze([
@@ -34,37 +35,53 @@ const ASR_V2_SAMPLE_KEYS = Object.freeze([
 ]);
 const TTS_V2_SAMPLE_KEYS = Object.freeze([
   'responseLanguage', 'locale', 'voiceName', 'latencyMs', 'audioSha256',
-  'audioByteLength', 'decodable',
+  'audioByteLength', 'decoder', 'decodedSampleCount', 'decodedSampleRate',
+  'decodedChannelCount', 'decodedDurationMs', 'decodable',
 ]);
 const SPEECH_V2_DEFINITIONS = Object.freeze({
-  yueHant: Object.freeze({
+  'yue-Hant-HK': Object.freeze({
     locale: 'yue-Hant-HK', referenceId: 'voice-smoke-yue-v1', voiceName: 'yue-HK-Chirp3-HD-Achernar',
   }),
   en: Object.freeze({
     locale: 'en-US', referenceId: 'voice-smoke-en-v1', voiceName: 'en-US-Chirp3-HD-Achernar',
   }),
-  zhHans: Object.freeze({
+  'cmn-Hans-CN': Object.freeze({
     locale: 'cmn-Hans-CN', referenceId: 'voice-smoke-cmn-v1', voiceName: 'cmn-CN-Chirp3-HD-Achernar',
   }),
 });
 const SPEECH_V2_LANGUAGES = Object.freeze(Object.keys(SPEECH_V2_DEFINITIONS));
-const IOS_ASSERTION_KEYS = Object.freeze([
-  'normalizedCanonicalWav', 'autoStop55Seconds', 'permissionCleanup', 'cancelCleanup',
-  'oneIdempotentUpload', 'editableTranscript', 'textFallback', 'noRawContainerUpload',
-]);
-const IOS_EVIDENCE_KEYS = Object.freeze([
+const IOS_V3_EVIDENCE_KEYS = Object.freeze([
   'schemaVersion', 'commitSha', 'capability', 'normalizerContractVersion',
-  'deviceModelClass', 'iosVersion', 'safariVersion', 'captureMimeType',
-  'fixtureSha256', 'fixtureDurationMs', 'assertions', 'occurredAt', 'result',
+  'reportSource', 'deviceReportSha256', 'deviceReportByteLength', 'deviceRunId',
+  'deviceModelIdentifier', 'iosVersion', 'safariVersion', 'captureMimeType',
+  'deviceObservedAt', 'rawCaptureFormat', 'rawCaptureSha256', 'rawCaptureByteLength',
+  'fixtureSha256', 'fixtureDurationMs', 'fixtureByteLength',
+  'normalizationStepsSha256', 'normalizationStepsByteLength',
+  'normalizationBindingSha256', 'verifiedStepIds', 'occurredAt', 'result',
   'artifactSha256',
 ]);
-const IOS_V2_EVIDENCE_KEYS = Object.freeze([
-  'schemaVersion', 'commitSha', 'capability', 'normalizerContractVersion',
-  'reportSource', 'deviceReportSha256', 'deviceRunId', 'deviceModelClass',
-  'iosVersion', 'safariVersion', 'captureMimeType', 'fixtureSha256',
-  'fixtureDurationMs', 'fixtureByteLength', 'assertions', 'occurredAt', 'result',
-  'artifactSha256',
-]);
+
+export const iosVoiceEvidenceContract = Object.freeze({
+  schemaVersion: 3,
+  reportSchemaVersion: 2,
+  reportSource: 'real-iphone-safari-manual-v2',
+  normalizationStepsSchemaVersion: 1,
+  normalizationStepsSource: 'real-iphone-safari-normalization-v1',
+  rawCaptureFormat: 'iso-bmff-audio-v1',
+  stepIds: Object.freeze([
+    'permission-prompt-granted', 'recording-auto-stopped-55s',
+    'permission-tracks-stopped', 'cancel-stops-tracks',
+    'single-idempotent-upload', 'transcript-editable-before-send',
+    'text-fallback-after-denial', 'raw-container-not-uploaded',
+  ]),
+  normalizer: Object.freeze({
+    tool: 'ffmpeg',
+    arguments: Object.freeze([
+      '-nostdin', '-hide_banner', '-loglevel', 'error', '-i', '<raw-capture>', '-vn',
+      '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', '<canonical-wav>',
+    ]),
+  }),
+});
 
 function hasExactOwnKeys(value, expectedKeys) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -93,6 +110,21 @@ export function finalizeEvidenceRecord(record) {
     ...withoutDigest,
     artifactSha256: createHash('sha256').update(canonicalJson(withoutDigest)).digest('hex'),
   };
+}
+
+export function iosVoiceNormalizationBinding(value) {
+  const binding = {
+    deviceRunId: value?.deviceRunId,
+    normalizerContractVersion: value?.normalizerContractVersion,
+    rawCaptureSha256: value?.rawCaptureSha256,
+    rawCaptureByteLength: value?.rawCaptureByteLength,
+    fixtureSha256: value?.fixtureSha256,
+    fixtureByteLength: value?.fixtureByteLength,
+    fixtureDurationMs: value?.fixtureDurationMs,
+    normalizationStepsSha256: value?.normalizationStepsSha256,
+    normalizationStepsByteLength: value?.normalizationStepsByteLength,
+  };
+  return createHash('sha256').update(canonicalJson(binding)).digest('hex');
 }
 
 function azureRegion(settings) {
@@ -238,6 +270,16 @@ function speechV2SamplesValid(record, capability, fixtureGeneratorConfigDigest) 
         || !finiteNonNegative(sample.latencyMs)
         || !DIGEST.test(String(sample.audioSha256 ?? ''))
         || !Number.isSafeInteger(sample.audioByteLength) || sample.audioByteLength <= 4
+        || sample.decoder !== 'mpg123-decoder@1.0.3'
+        || !Number.isSafeInteger(sample.decodedSampleCount) || sample.decodedSampleCount <= 0
+        || !Number.isSafeInteger(sample.decodedSampleRate)
+        || sample.decodedSampleRate < 8_000 || sample.decodedSampleRate > 96_000
+        || !Number.isSafeInteger(sample.decodedChannelCount)
+        || sample.decodedChannelCount < 1 || sample.decodedChannelCount > 2
+        || !Number.isFinite(sample.decodedDurationMs) || sample.decodedDurationMs <= 0
+        || sample.decodedDurationMs > 60_000
+        || Math.abs(sample.decodedDurationMs
+          - ((sample.decodedSampleCount / sample.decodedSampleRate) * 1_000)) > 1e-6
         || sample.decodable !== true) return false;
       continue;
     }
@@ -315,49 +357,41 @@ export function validateSpeechEvidence(record, {
 export function validateIosVoiceEvidence(record, {
   expectedVersion, commitSha, normalizerContractVersion, now,
 }) {
-  const assertions = record?.assertions ?? {};
-  if (record?.schemaVersion === 2) {
-    return Boolean(
-      hasExactOwnKeys(record, IOS_V2_EVIDENCE_KEYS)
-      && hasExactOwnKeys(assertions, IOS_ASSERTION_KEYS)
-      && /^[0-9a-f]{40}$/.test(String(commitSha ?? ''))
-      && artifactValid(record, expectedVersion)
-      && record.commitSha === commitSha
-      && record.capability === 'ios-voice'
-      && record.normalizerContractVersion === normalizerContractVersion
-      && record.reportSource === 'real-iphone-safari-manual-v1'
-      && DIGEST.test(String(record.deviceReportSha256 ?? ''))
-      && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(record.deviceRunId ?? ''))
-      && /^iPhone(?:\s+[A-Za-z0-9.+-]+){1,4}$/.test(String(record.deviceModelClass ?? ''))
-      && /^\d+(?:\.\d+){1,2}$/.test(String(record.iosVersion ?? ''))
-      && /^\d+(?:\.\d+){1,2}$/.test(String(record.safariVersion ?? ''))
-      && record.captureMimeType === 'audio/mp4'
-      && DIGEST.test(String(record.fixtureSha256 ?? ''))
-      && Number.isFinite(record.fixtureDurationMs) && record.fixtureDurationMs > 0
-      && Number.isSafeInteger(record.fixtureByteLength) && record.fixtureByteLength > 44
-      && IOS_ASSERTION_KEYS.every((name) => assertions[name] === true)
-      && record.result === 'pass'
-      && timeValid(record, now, 90 * DAY_MS)
-    );
-  }
   return Boolean(
-    hasExactOwnKeys(record, IOS_EVIDENCE_KEYS)
-    && hasExactOwnKeys(assertions, IOS_ASSERTION_KEYS)
+    hasExactOwnKeys(record, IOS_V3_EVIDENCE_KEYS)
     && RELEASE_SHA.test(String(commitSha ?? ''))
     && artifactValid(record, expectedVersion)
-    && record.schemaVersion === 1
+    && record.schemaVersion === iosVoiceEvidenceContract.schemaVersion
     && record.commitSha === commitSha
     && record.capability === 'ios-voice'
     && record.normalizerContractVersion === normalizerContractVersion
-    && record.result === 'pass'
-    && typeof record.deviceModelClass === 'string' && record.deviceModelClass
-    && typeof record.iosVersion === 'string' && record.iosVersion
-    && typeof record.safariVersion === 'string' && record.safariVersion
-    && typeof record.captureMimeType === 'string' && record.captureMimeType
+    && record.reportSource === iosVoiceEvidenceContract.reportSource
+    && DIGEST.test(String(record.deviceReportSha256 ?? ''))
+    && Number.isSafeInteger(record.deviceReportByteLength)
+    && record.deviceReportByteLength > 0 && record.deviceReportByteLength <= 64 * 1_024
+    && UUID.test(String(record.deviceRunId ?? ''))
+    && /^iPhone\d{1,2},\d{1,2}$/.test(String(record.deviceModelIdentifier ?? ''))
+    && /^\d+(?:\.\d+){1,2}$/.test(String(record.iosVersion ?? ''))
+    && /^\d+(?:\.\d+){1,2}$/.test(String(record.safariVersion ?? ''))
+    && record.captureMimeType === 'audio/mp4'
+    && record.rawCaptureFormat === iosVoiceEvidenceContract.rawCaptureFormat
+    && DIGEST.test(String(record.rawCaptureSha256 ?? ''))
+    && Number.isSafeInteger(record.rawCaptureByteLength)
+    && record.rawCaptureByteLength > 32 && record.rawCaptureByteLength <= 64 * 1_024 * 1_024
     && DIGEST.test(String(record.fixtureSha256 ?? ''))
-    && Number.isFinite(record.fixtureDurationMs) && record.fixtureDurationMs > 0
-    && IOS_ASSERTION_KEYS.every((name) => assertions[name] === true)
-    && timeValid(record, now, 90 * DAY_MS),
+    && Number.isFinite(record.fixtureDurationMs)
+    && record.fixtureDurationMs > 0 && record.fixtureDurationMs <= 55_500
+    && Number.isSafeInteger(record.fixtureByteLength)
+    && record.fixtureByteLength > 44 && record.fixtureByteLength <= 2 * 1_024 * 1_024
+    && DIGEST.test(String(record.normalizationStepsSha256 ?? ''))
+    && Number.isSafeInteger(record.normalizationStepsByteLength)
+    && record.normalizationStepsByteLength > 0 && record.normalizationStepsByteLength <= 64 * 1_024
+    && DIGEST.test(String(record.normalizationBindingSha256 ?? ''))
+    && record.normalizationBindingSha256 === iosVoiceNormalizationBinding(record)
+    && JSON.stringify(record.verifiedStepIds) === JSON.stringify(iosVoiceEvidenceContract.stepIds)
+    && record.result === 'pass'
+    && timeValid(record, now, 90 * DAY_MS)
+    && timeValid({ occurredAt: record.deviceObservedAt }, now, 90 * DAY_MS),
   );
 }
 
@@ -366,7 +400,7 @@ export const voiceEvidenceContracts = Object.freeze({
   googleAsr: 'google-stt-v2-v2',
   azureTts: 'azure-tts-v1',
   minimaxTts: 'minimax-tts-v1',
-  googleTts: 'google-tts-v2',
+  googleTts: 'google-tts-v3',
   googleFixtureGenerator: 'google-tts-linear16-v1',
   speechMaximumAgeMs: 30 * DAY_MS,
   iosMaximumAgeMs: 90 * DAY_MS,

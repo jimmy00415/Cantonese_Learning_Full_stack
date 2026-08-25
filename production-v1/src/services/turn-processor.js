@@ -61,7 +61,7 @@ export function createTurnProcessor({
             throw Object.assign(new Error('VOICE_NOT_RELEASE_VERIFIED'), { code: 'VOICE_NOT_RELEASE_VERIFIED' });
           }
           voiceOutputGate();
-          const acceptanceContext = acceptanceTimingRecorder?.contextForMessage?.(delivered.message.id);
+          const acceptanceContext = acceptanceTimingRecorder?.beginTts?.(delivered.message.id);
           const preparation = voiceService?.prepareAssistantAudio?.({
             sessionId: turn.sessionId,
             messageId: delivered.message.id,

@@ -8,6 +8,7 @@ import test from 'node:test';
 import {
   LATENCY_ACCEPTANCE_CONTRACT,
   createLatencyHttpRequester,
+  decodeCanonicalMp3,
   nearestRankP50,
   validateCanonicalMp3,
 } from '../scripts/production-latency-workload.js';
@@ -22,6 +23,10 @@ import {
   validateSpeechEvidence,
   voiceEvidenceContracts,
 } from '../src/services/voice-evidence.js';
+import {
+  CANONICAL_MP3_FIXTURE_SHA256,
+  canonicalMp3Fixture,
+} from './fixtures/canonical-mp3-fixture.js';
 
 const COMMIT = '1'.repeat(40);
 const PROJECT_NUMBER = '123456789012';
@@ -47,13 +52,32 @@ function canonicalWav(durationMs = 100) {
   return buffer;
 }
 
-function canonicalMp3(marker = 0) {
-  const frame = Buffer.alloc(417, marker);
-  frame[0] = 0xff;
-  frame[1] = 0xfb;
-  frame[2] = 0x90;
-  frame[3] = 0x64;
-  return frame;
+function sha256(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function mp4Box(type, payload) {
+  const header = Buffer.alloc(8);
+  header.writeUInt32BE(header.length + payload.length, 0);
+  header.write(type, 4, 'ascii');
+  return Buffer.concat([header, payload]);
+}
+
+function audioMp4Capture() {
+  const ftyp = Buffer.alloc(16);
+  ftyp.write('M4A ', 0, 'ascii');
+  ftyp.writeUInt32BE(0, 4);
+  ftyp.write('isom', 8, 'ascii');
+  ftyp.write('mp42', 12, 'ascii');
+  return Buffer.concat([
+    mp4Box('ftyp', ftyp),
+    mp4Box('moov', Buffer.from('test-track-handler-soun-codec-mp4a', 'ascii')),
+    mp4Box('mdat', Buffer.from(Array.from({ length: 64 }, (_, index) => (index % 251) + 1))),
+  ]);
+}
+
+function canonicalMp3() {
+  return canonicalMp3Fixture();
 }
 
 test('Task 7C freezes the exact percentile SLOs and multilingual workload', () => {
@@ -76,7 +100,13 @@ test('Task 7C freezes the exact percentile SLOs and multilingual workload', () =
     english: 10,
     mandarin: 10,
   });
-  assert.equal(LATENCY_ACCEPTANCE_CONTRACT.text.voiceModeTurns, 30);
+  assert.deepEqual(LATENCY_ACCEPTANCE_CONTRACT.asr.wireLanguages, [
+    'en', 'yue-Hant-HK', 'cmn-Hans-CN',
+  ]);
+  assert.equal(LATENCY_ACCEPTANCE_CONTRACT.text.voiceModeTurns, 31);
+  assert.deepEqual(LATENCY_ACCEPTANCE_CONTRACT.tts, {
+    requests: 31, successfulRequests: 30, controlledProviderFailures: 1, concurrency: 5,
+  });
 });
 
 test('preboot voice smoke configuration has no dependency or prior-evidence circularity', () => {
@@ -127,7 +157,7 @@ test('real requester serializes immutable reply tuple and exact grounding IDs', 
               evidenceId: 'evidence.ito.account.student-activation',
               sourceId: 'hkbu.ito.account',
               status: 'verified',
-              url: 'https://ito.hkbu.edu.hk/services/account/student-activation',
+              url: 'https://ito.hkbu.edu.hk/services/account-password.html',
             }],
           },
         ],
@@ -148,25 +178,29 @@ test('real requester serializes immutable reply tuple and exact grounding IDs', 
     clientMessageId: '11111111-1111-4111-8111-111111111111',
     prompt: 'How do I activate my SSOid?',
     promptClass: 'grounded',
-    replyLanguage: 'zhHant',
+    replyLanguage: 'yue-Hant-HK',
     replyMode: 'voice',
     expectedGrounding: {
+      claimId: 'evidence.ito.account.student-activation',
       evidenceId: 'evidence.ito.account.student-activation',
       sourceId: 'hkbu.ito.account',
+      url: 'https://ito.hkbu.edu.hk/services/account-password.html',
     },
     acceptanceWindowId: 'a'.repeat(64),
     correlationId: '22222222-2222-4222-8222-222222222222',
+    controlledTtsFailure: true,
   });
 
   const posted = requests.find(({ options }) => options.method === 'POST');
   assert.deepEqual(JSON.parse(posted.options.body), {
     clientMessageId: '11111111-1111-4111-8111-111111111111',
     text: 'How do I activate my SSOid?',
-    replyLanguage: 'zhHant',
+    replyLanguage: 'yue-Hant-HK',
     replyMode: 'voice',
   });
   assert.equal(posted.options.headers['X-Acceptance-Window-Id'], 'a'.repeat(64));
   assert.equal(posted.options.headers['X-Acceptance-Correlation-Id'], '22222222-2222-4222-8222-222222222222');
+  assert.equal(posted.options.headers['X-Acceptance-Controlled-TTS-Failure'], 'provider-rejection-v1');
   assert.equal(result.unsupportedVerifiedClaimCount, 0);
 });
 
@@ -191,9 +225,68 @@ test('unrelated official citation cannot satisfy the prompt-specific grounding c
     operation: 'text', session: { cookie: 'hb_v1_session=fake' },
     clientMessageId: '11111111-1111-4111-8111-111111111111', prompt: 'How do I activate my SSOid?',
     replyLanguage: 'en', replyMode: 'text',
-    expectedGrounding: { evidenceId: 'evidence.ito.account.student-activation', sourceId: 'hkbu.ito.account' },
+    expectedGrounding: {
+      claimId: 'evidence.ito.account.student-activation',
+      evidenceId: 'evidence.ito.account.student-activation', sourceId: 'hkbu.ito.account',
+      url: 'https://ito.hkbu.edu.hk/services/account-password.html',
+    },
   });
   assert.equal(result.unsupportedVerifiedClaimCount, 1);
+});
+
+test('grounding oracle rejects extra verified claims and every citation on non-grounded responses', async (t) => {
+  const correct = {
+    evidenceId: 'evidence.ito.account.student-activation', sourceId: 'hkbu.ito.account',
+    status: 'verified', url: 'https://ito.hkbu.edu.hk/services/account-password.html',
+  };
+  const expectedGrounding = {
+    claimId: correct.evidenceId, evidenceId: correct.evidenceId,
+    sourceId: correct.sourceId, url: correct.url,
+  };
+  const evaluate = async ({ promptClass, groundingStatus, citations }) => {
+    const fetchImpl = async (url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path === '/api/v1/messages' && options.method === 'POST') {
+        return new Response(JSON.stringify({ data: {
+          message: { clientMessageId: '11111111-1111-4111-8111-111111111111' }, turn: { id: 'turn-1' },
+        } }), { status: 202 });
+      }
+      return new Response(JSON.stringify({ data: { messages: [
+        { role: 'user', clientMessageId: '11111111-1111-4111-8111-111111111111' },
+        {
+          id: 'assistant-1', turnId: 'turn-1', role: 'assistant', status: 'delivered', text: 'Visible response.',
+          groundingStatus, citations,
+        },
+      ] } }), { status: 200 });
+    };
+    return createLatencyHttpRequester({ candidateOrigin: CANDIDATE_ORIGIN, fetchImpl, sleep: async () => {} })({
+      operation: 'text', session: { cookie: 'hb_v1_session=fake' },
+      clientMessageId: '11111111-1111-4111-8111-111111111111', prompt: 'test',
+      promptClass, replyLanguage: 'en', replyMode: 'text', expectedGrounding,
+    });
+  };
+
+  await t.test('one correct citation plus one extra verified citation fails', async () => {
+    const result = await evaluate({
+      promptClass: 'grounded', groundingStatus: 'verified',
+      citations: [correct, {
+        evidenceId: 'evidence.ito.duo.new-phone', sourceId: 'hkbu.ito.duo', status: 'verified',
+        url: 'https://ito.hkbu.edu.hk/services/it-security/mfa.html',
+      }],
+    });
+    assert.equal(result.unsupportedVerifiedClaimCount, 1);
+  });
+  await t.test('an unverified abstention with an official citation fails', async () => {
+    const result = await evaluate({
+      promptClass: 'abstention', groundingStatus: 'unverified',
+      citations: [{ ...correct, status: 'unverified' }],
+    });
+    assert.equal(result.unsupportedVerifiedClaimCount, 1);
+  });
+  await t.test('an uncited unverified casual response passes the non-grounded oracle', async () => {
+    const result = await evaluate({ promptClass: 'casual', groundingStatus: 'unverified', citations: [] });
+    assert.equal(result.unsupportedVerifiedClaimCount, 0);
+  });
 });
 
 test('acceptance timing recorder is revision/window/session correlated and content-free', () => {
@@ -202,15 +295,22 @@ test('acceptance timing recorder is revision/window/session correlated and conte
     windowId: 'b'.repeat(64), sessionId: 'session-1',
     correlationId: '33333333-3333-4333-8333-333333333333',
   };
-  recorder.record({ ...context, operation: 'asr', layer: 'provider', latencyMs: 420 });
-  recorder.record({ ...context, operation: 'asr', layer: 'server', latencyMs: 500 });
+  recorder.record({
+    ...context, bindingId: 'upload-1', durationMs: 10_000,
+    operation: 'asr', layer: 'provider', latencyMs: 420, outcome: 'success', failureCode: null,
+  });
+  recorder.record({
+    ...context, bindingId: 'upload-1', durationMs: 10_000,
+    operation: 'asr', layer: 'server', latencyMs: 500, outcome: 'success', failureCode: null,
+  });
   const queried = recorder.query({ windowId: context.windowId, sessionId: context.sessionId });
 
   assert.equal(queried.releaseCommitSha, COMMIT);
   assert.match(queried.queryDigest, /^[0-9a-f]{64}$/);
-  assert.deepEqual(queried.samples.map(({ operation, layer, latencyMs }) => ({ operation, layer, latencyMs })), [
-    { operation: 'asr', layer: 'provider', latencyMs: 420 },
-    { operation: 'asr', layer: 'server', latencyMs: 500 },
+  assert.equal(queried.schemaVersion, 2);
+  assert.deepEqual(queried.samples, [
+    { correlationId: context.correlationId, bindingId: 'upload-1', durationMs: 10_000, operation: 'asr', layer: 'provider', latencyMs: 420, outcome: 'success', failureCode: null },
+    { correlationId: context.correlationId, bindingId: 'upload-1', durationMs: 10_000, operation: 'asr', layer: 'server', latencyMs: 500, outcome: 'success', failureCode: null },
   ]);
   const serialized = JSON.stringify(queried);
   for (const forbidden of ['prompt', 'transcript', 'audio', 'token', 'secret']) {
@@ -226,14 +326,18 @@ test('turn timing binds one acceptance context through delivery to asynchronous 
     windowId: 'e'.repeat(64), sessionId: 'session-turn',
     correlationId: '77777777-7777-4777-8777-777777777777',
   };
-  assert.equal(recorder.bindTurn({ turnId: 'turn-1', ...context }), true);
+  assert.equal(recorder.bindTurn({ turnId: 'turn-1', ...context, controlledTtsFailure: true }), true);
   clock += 2_200;
   assert.equal(recorder.completeText({ turnId: 'turn-1', messageId: 'message-1', providerLatencyMs: 1_700 }), true);
-  assert.deepEqual(recorder.contextForMessage('message-1'), context);
+  assert.deepEqual(recorder.contextForMessage('message-1'), { ...context, controlledTtsFailure: true });
+  clock += 300;
+  assert.deepEqual(recorder.beginTts('message-1'), {
+    ...context, controlledTtsFailure: true, requestedAtMs: 12_500,
+  });
   const samples = recorder.query({ windowId: context.windowId, sessionId: context.sessionId }).samples;
-  assert.deepEqual(samples.map(({ operation, layer, latencyMs }) => ({ operation, layer, latencyMs })), [
-    { operation: 'text', layer: 'server', latencyMs: 2_200 },
-    { operation: 'text', layer: 'provider', latencyMs: 1_700 },
+  assert.deepEqual(samples.map(({ bindingId, durationMs, operation, layer, latencyMs, outcome, failureCode }) => ({ bindingId, durationMs, operation, layer, latencyMs, outcome, failureCode })), [
+    { bindingId: 'message-1', durationMs: null, operation: 'text', layer: 'server', latencyMs: 2_200, outcome: 'success', failureCode: null },
+    { bindingId: 'message-1', durationMs: null, operation: 'text', layer: 'provider', latencyMs: 1_700, outcome: 'success', failureCode: null },
   ]);
 });
 
@@ -263,12 +367,14 @@ test('timing endpoint returns only the authenticated session exact window with a
   recorder.record({
     windowId, sessionId: body.data.session.id,
     correlationId: '55555555-5555-4555-8555-555555555555',
-    operation: 'text', layer: 'server', latencyMs: 321,
+    bindingId: 'message-owned', durationMs: null,
+    operation: 'text', layer: 'server', latencyMs: 321, outcome: 'success', failureCode: null,
   });
   recorder.record({
     windowId, sessionId: 'foreign-session',
     correlationId: '66666666-6666-4666-8666-666666666666',
-    operation: 'text', layer: 'server', latencyMs: 999,
+    bindingId: 'message-foreign', durationMs: null,
+    operation: 'text', layer: 'server', latencyMs: 999, outcome: 'success', failureCode: null,
   });
 
   const response = await fetch(`${baseUrl}/api/v1/acceptance/timings?windowId=${windowId}`, { headers: { Cookie: cookie } });
@@ -282,16 +388,31 @@ test('timing endpoint returns only the authenticated session exact window with a
   assert.equal(invalid.status, 400);
 });
 
-test('canonical MP3 validation rejects magic-only bytes and accepts a complete MPEG frame', () => {
+test('canonical MP3 validation traverses every frame and rejects magic-only, pseudo-frame, and truncated bytes', async () => {
   assert.throws(() => validateCanonicalMp3(Buffer.from([0x49, 0x44, 0x33])), /MP3/i);
-  const frame = Buffer.alloc(417, 0);
-  frame[0] = 0xff;
-  frame[1] = 0xfb;
-  frame[2] = 0x90;
-  frame[3] = 0x64;
-  const validated = validateCanonicalMp3(frame);
-  assert.equal(validated.byteLength, 417);
-  assert.equal(validated.sha256, createHash('sha256').update(frame).digest('hex'));
+  const zeroPseudoFrames = Buffer.alloc(834, 0);
+  zeroPseudoFrames.set([0xff, 0xfb, 0x90, 0x64], 0);
+  zeroPseudoFrames.set([0xff, 0xfb, 0x90, 0x64], 417);
+  assert.throws(() => validateCanonicalMp3(zeroPseudoFrames), /payload|pseudo/i);
+
+  const fixture = canonicalMp3Fixture();
+  assert.throws(() => validateCanonicalMp3(fixture.subarray(0, -1)), /truncated|frame/i);
+  const validated = validateCanonicalMp3(fixture);
+  assert.equal(validated.byteLength, 940);
+  assert.equal(validated.sha256, CANONICAL_MP3_FIXTURE_SHA256);
+  assert.equal(validated.frameCount, 3);
+  assert.equal(validated.sampleRate, 44_100);
+  assert.equal(validated.channelCount, 1);
+  assert.ok(validated.durationMs > 75 && validated.durationMs < 80);
+
+  const decoded = await decodeCanonicalMp3(fixture);
+  assert.equal(decoded.decoder, 'mpg123-decoder@1.0.3');
+  assert.equal(decoded.decodedSampleCount, 1_199);
+  assert.equal(decoded.decodedChannelCount, 2);
+  assert.equal(decoded.decodedSampleRate, 44_100);
+  assert.ok(decoded.decodedDurationMs > 25 && decoded.decodedDurationMs < 30);
+  assert.ok(decoded.durationDeltaMs < 55);
+  assert.equal(decoded.sha256, createHash('sha256').update(fixture).digest('hex'));
 });
 
 test('pinned Google TTS can generate canonical LINEAR16 fixtures separately from product MP3', async () => {
@@ -324,9 +445,9 @@ test('Google speech evidence v2 requires three locales, content-free metrics, de
   const runtimeIdentity = 'hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com';
   const occurredAt = '2026-08-26T00:00:00.000Z';
   const definitions = [
-    ['yueHant', 'yue-Hant-HK', 'voice-smoke-yue-v1', 'yue-HK-Chirp3-HD-Achernar'],
+    ['yue-Hant-HK', 'yue-Hant-HK', 'voice-smoke-yue-v1', 'yue-HK-Chirp3-HD-Achernar'],
     ['en', 'en-US', 'voice-smoke-en-v1', 'en-US-Chirp3-HD-Achernar'],
-    ['zhHans', 'cmn-Hans-CN', 'voice-smoke-cmn-v1', 'cmn-CN-Chirp3-HD-Achernar'],
+    ['cmn-Hans-CN', 'cmn-Hans-CN', 'voice-smoke-cmn-v1', 'cmn-CN-Chirp3-HD-Achernar'],
   ];
   const asr = finalizeEvidenceRecord({
     schemaVersion: 2, commitSha: COMMIT, capability: 'asr', provider: 'google-stt-v2',
@@ -348,7 +469,10 @@ test('Google speech evidence v2 requires three locales, content-free metrics, de
     runtimeIdentity, occurredAt, result: 'pass',
     samples: definitions.map(([responseLanguage, locale, , voiceName], index) => ({
       responseLanguage, locale, voiceName, latencyMs: 100 + index,
-      audioSha256: String(index + 4).repeat(64), audioByteLength: 417, decodable: true,
+      audioSha256: String(index + 4).repeat(64), audioByteLength: 940,
+      decoder: 'mpg123-decoder@1.0.3', decodedSampleCount: 1_199,
+      decodedSampleRate: 44_100, decodedChannelCount: 2,
+      decodedDurationMs: (1_199 / 44_100) * 1_000, decodable: true,
     })),
   });
   const common = { commitSha: COMMIT, runtimeIdentity, now: new Date(occurredAt) };
@@ -361,6 +485,16 @@ test('Google speech evidence v2 requires three locales, content-free metrics, de
     ...common, expectedVersion: tts.artifactSha256, capability: 'tts', provider: 'google-tts',
     contractVersion: voiceEvidenceContracts.googleTts, configDigest: 'b'.repeat(64),
   }), true);
+  const fakeDecode = finalizeEvidenceRecord({
+    ...tts,
+    samples: tts.samples.map((sample, index) => (index === 0
+      ? { ...sample, decodedSampleCount: 0, decodedDurationMs: 0 }
+      : sample)),
+  });
+  assert.equal(validateSpeechEvidence(fakeDecode, {
+    ...common, expectedVersion: fakeDecode.artifactSha256, capability: 'tts', provider: 'google-tts',
+    contractVersion: voiceEvidenceContracts.googleTts, configDigest: 'b'.repeat(64),
+  }), false);
   const leaked = finalizeEvidenceRecord({ ...asr, samples: asr.samples.map((sample, index) => (
     index === 0 ? { ...sample, transcript: 'must not enter evidence' } : sample
   )) });
@@ -385,9 +519,9 @@ test('Google ASR smoke generates three pinned non-sensitive LINEAR16 fixtures be
     V1_GOOGLE_CREDENTIAL_VERSION: 'runtime-sa-rotation-v1',
   };
   const references = {
-    yueHant: '我想知道點樣申請學生證',
+    'yue-Hant-HK': '我想知道點樣申請學生證',
     en: 'How do I apply for my student card',
-    zhHans: '我想知道怎样申请学生证',
+    'cmn-Hans-CN': '我想知道怎样申请学生证',
   };
   const generated = [];
   const transcribed = [];
@@ -417,8 +551,8 @@ test('Google ASR smoke generates three pinned non-sensitive LINEAR16 fixtures be
     now: () => new Date('2026-08-26T00:00:00.000Z'),
   });
   assert.equal(result.exitCode, 0);
-  assert.deepEqual(generated.map(({ responseLanguage }) => responseLanguage), ['yueHant', 'en', 'zhHans']);
-  assert.deepEqual(transcribed, ['yueHant', 'en', 'zhHans']);
+  assert.deepEqual(generated.map(({ responseLanguage }) => responseLanguage), ['yue-Hant-HK', 'en', 'cmn-Hans-CN']);
+  assert.deepEqual(transcribed, ['yue-Hant-HK', 'en', 'cmn-Hans-CN']);
   assert.equal(written.schemaVersion, 2);
   assert.equal(written.runtimeIdentity, runtimeIdentity);
   assert.equal(written.samples.length, 3);
@@ -444,8 +578,15 @@ test('Google ASR smoke generates three pinned non-sensitive LINEAR16 fixtures be
     now: () => new Date('2026-08-26T00:00:00.000Z'),
   });
   assert.equal(ttsResult.exitCode, 0);
-  assert.deepEqual(ttsLanguages, ['yueHant', 'en', 'zhHans']);
+  assert.deepEqual(ttsLanguages, ['yue-Hant-HK', 'en', 'cmn-Hans-CN']);
   assert.equal(ttsWritten.samples.every((sample) => sample.decodable === true), true);
+  assert.equal(ttsWritten.samples.every((sample) => (
+    sample.decoder === 'mpg123-decoder@1.0.3'
+      && sample.decodedSampleCount === 1_199
+      && sample.decodedSampleRate === 44_100
+      && sample.decodedChannelCount === 2
+      && sample.decodedDurationMs > 0
+  )), true);
 });
 
 test('candidate URL shape is SHA bound rather than an arbitrary HTTPS or run.app tag', () => {
@@ -453,47 +594,117 @@ test('candidate URL shape is SHA bound rather than an arbitrary HTTPS or run.app
   assert.equal(STABLE_ORIGIN, 'https://hkbuddy-api-123456789012.asia-east2.run.app');
 });
 
-test('iOS evidence generator is inert without confirmation and only signs a real-device report plus canonical WAV', async (t) => {
+test('iOS evidence generator binds the exact raw capture, normalized WAV, device report, and structured steps', async () => {
   const { runIosVoiceEvidence } = await import('../scripts/ios-voice-evidence.js');
   const directory = await mkdtemp(join(tmpdir(), 'hb-ios-real-device-'));
   const reportPath = join(directory, 'real-device-report.json');
+  const rawCapturePath = join(directory, 'iphone-safari-capture.mp4');
   const wavPath = join(directory, 'captured-canonical.wav');
-  const assertions = {
-    normalizedCanonicalWav: true, autoStop55Seconds: true, permissionCleanup: true,
-    cancelCleanup: true, oneIdempotentUpload: true, editableTranscript: true,
-    textFallback: true, noRawContainerUpload: true,
-  };
-  await writeFile(reportPath, JSON.stringify({
+  const stepsPath = join(directory, 'normalization-and-device-steps.json');
+  const deviceRunId = '88888888-8888-4888-8888-888888888888';
+  const observedAt = '2026-08-26T00:00:00.000Z';
+  const rawCapture = audioMp4Capture();
+  const wavBytes = canonicalWav(1_000);
+  const stepIds = [
+    'permission-prompt-granted', 'recording-auto-stopped-55s',
+    'permission-tracks-stopped', 'cancel-stops-tracks',
+    'single-idempotent-upload', 'transcript-editable-before-send',
+    'text-fallback-after-denial', 'raw-container-not-uploaded',
+  ];
+  const steps = {
     schemaVersion: 1,
-    reportSource: 'real-iphone-safari-manual-v1',
-    deviceRunId: '88888888-8888-4888-8888-888888888888',
-    deviceModelClass: 'iPhone 15 Pro', iosVersion: '19.0', safariVersion: '19.0',
-    captureMimeType: 'audio/mp4', observedAt: '2026-08-26T00:00:00.000Z', assertions,
-  }));
-  await writeFile(wavPath, canonicalWav(1_000));
+    source: 'real-iphone-safari-normalization-v1',
+    deviceRunId,
+    rawCapture: { sha256: sha256(rawCapture), byteLength: rawCapture.length, mimeType: 'audio/mp4' },
+    normalizedWav: {
+      sha256: sha256(wavBytes), byteLength: wavBytes.length, durationMs: 1_000,
+      normalizerContractVersion: 'canonical-wav-v1',
+    },
+    normalizer: {
+      tool: 'ffmpeg', version: '7.1.1', exitCode: 0,
+      arguments: [
+        '-nostdin', '-hide_banner', '-loglevel', 'error', '-i', '<raw-capture>', '-vn',
+        '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', '<canonical-wav>',
+      ],
+    },
+    steps: stepIds.map((id) => ({ id, outcome: 'pass', observedAt })),
+  };
+  const stepsBytes = Buffer.from(JSON.stringify(steps));
+  const report = {
+    schemaVersion: 2,
+    reportSource: 'real-iphone-safari-manual-v2',
+    deviceRunId,
+    deviceModelIdentifier: 'iPhone16,1', iosVersion: '19.0', safariVersion: '19.0',
+    captureMimeType: 'audio/mp4', observedAt,
+    rawCapture: { sha256: sha256(rawCapture), byteLength: rawCapture.length },
+    normalizedWav: {
+      sha256: sha256(wavBytes), byteLength: wavBytes.length, durationMs: 1_000,
+      normalizerContractVersion: 'canonical-wav-v1',
+    },
+    normalizationSteps: { sha256: sha256(stepsBytes), byteLength: stepsBytes.length },
+  };
+  const reportBytes = Buffer.from(JSON.stringify(report));
+  await writeFile(rawCapturePath, rawCapture);
+  await writeFile(wavPath, wavBytes);
+  await writeFile(stepsPath, stepsBytes);
+  await writeFile(reportPath, reportBytes);
   let gitCalls = 0;
-  let written;
+  const written = [];
   const dependencies = {
     environment: { V1_RELEASE_COMMIT_SHA: COMMIT },
     inspectGit: async () => { gitCalls += 1; return { commitSha: COMMIT, clean: true }; },
-    writeEvidence: async (record) => { written = record; },
+    writeEvidence: async (record) => { written.push(record); },
     writeOutput: () => undefined,
     now: () => new Date('2026-08-26T00:01:00.000Z'),
   };
   const inert = await runIosVoiceEvidence({ argv: [], ...dependencies });
   assert.equal(inert.exitCode, 2);
   assert.equal(gitCalls, 0);
-  const result = await runIosVoiceEvidence({
+  const legacyArguments = await runIosVoiceEvidence({
     argv: ['--device-report', reportPath, '--canonical-wav', wavPath, '--confirm-real-iphone-safari'],
+    ...dependencies,
+  });
+  assert.equal(legacyArguments.exitCode, 2);
+  assert.equal(gitCalls, 0);
+  const result = await runIosVoiceEvidence({
+    argv: [
+      '--device-report', reportPath,
+      '--raw-capture', rawCapturePath,
+      '--canonical-wav', wavPath,
+      '--normalization-steps', stepsPath,
+      '--confirm-real-iphone-safari',
+    ],
     ...dependencies,
   });
   assert.equal(result.exitCode, 0);
   assert.equal(gitCalls, 2);
-  assert.equal(written.schemaVersion, 2);
-  assert.equal(written.deviceRunId, '88888888-8888-4888-8888-888888888888');
-  assert.match(written.deviceReportSha256, /^[0-9a-f]{64}$/);
-  assert.equal(written.fixtureByteLength, canonicalWav(1_000).length);
-  t.after(() => undefined);
+  assert.equal(written.length, 1);
+  assert.equal(written[0].schemaVersion, 3);
+  assert.equal(written[0].deviceRunId, deviceRunId);
+  assert.equal(written[0].deviceReportSha256, sha256(reportBytes));
+  assert.equal(written[0].rawCaptureSha256, sha256(rawCapture));
+  assert.equal(written[0].rawCaptureByteLength, rawCapture.length);
+  assert.equal(written[0].fixtureSha256, sha256(wavBytes));
+  assert.equal(written[0].fixtureByteLength, wavBytes.length);
+  assert.equal(written[0].normalizationStepsSha256, sha256(stepsBytes));
+  assert.deepEqual(written[0].verifiedStepIds, stepIds);
+  assert.match(written[0].normalizationBindingSha256, /^[0-9a-f]{64}$/);
+
+  const unrelatedWavPath = join(directory, 'unrelated.wav');
+  await writeFile(unrelatedWavPath, canonicalWav(2_000));
+  const unrelated = await runIosVoiceEvidence({
+    argv: [
+      '--device-report', reportPath,
+      '--raw-capture', rawCapturePath,
+      '--canonical-wav', unrelatedWavPath,
+      '--normalization-steps', stepsPath,
+      '--confirm-real-iphone-safari',
+    ],
+    ...dependencies,
+  });
+  assert.equal(unrelated.exitCode, 1);
+  assert.equal(unrelated.errorCode, 'IOS_VOICE_EVIDENCE_INVALID');
+  assert.equal(written.length, 1);
 });
 
 test('smoke evidence upload is immutable, generation-bound, and returns only a content digest receipt', async () => {

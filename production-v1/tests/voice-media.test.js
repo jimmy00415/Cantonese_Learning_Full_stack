@@ -87,6 +87,7 @@ async function startVoiceApp(t, {
     store,
     mediaStore,
     cleanupService,
+    config,
   };
 }
 
@@ -1278,6 +1279,7 @@ test('speech evidence requires exact ASR fixture facts and keeps TTS free of ASR
 
 test('voice evidence rejects unknown top-level and assertion fields', async () => {
   const {
+    canonicalJson,
     finalizeEvidenceRecord,
     validateIosVoiceEvidence,
     validateSpeechEvidence,
@@ -1346,9 +1348,46 @@ test('voice evidence rejects unknown top-level and assertion fields', async () =
       now,
     });
   };
-  assert.equal(validateIos(iosPayload), true);
-  assert.equal(validateIos({ ...iosPayload, secret: 'must-not-be-accepted' }), false);
-  assert.equal(validateIos({ ...iosPayload, assertions: { ...assertions, privateUrl: true } }), false);
+  assert.equal(validateIos(iosPayload), false);
+
+  const verifiedStepIds = [
+    'permission-prompt-granted', 'recording-auto-stopped-55s',
+    'permission-tracks-stopped', 'cancel-stops-tracks',
+    'single-idempotent-upload', 'transcript-editable-before-send',
+    'text-fallback-after-denial', 'raw-container-not-uploaded',
+  ];
+  const binding = {
+    deviceRunId: '88888888-8888-4888-8888-888888888888',
+    normalizerContractVersion: 'canonical-wav-v1',
+    rawCaptureSha256: '1'.repeat(64), rawCaptureByteLength: 4_096,
+    fixtureSha256: '2'.repeat(64), fixtureByteLength: 32_044, fixtureDurationMs: 1_000,
+    normalizationStepsSha256: '3'.repeat(64), normalizationStepsByteLength: 2_048,
+  };
+  const iosV3Payload = {
+    schemaVersion: 3,
+    commitSha,
+    capability: 'ios-voice',
+    normalizerContractVersion: binding.normalizerContractVersion,
+    reportSource: 'real-iphone-safari-manual-v2',
+    deviceReportSha256: '4'.repeat(64), deviceReportByteLength: 1_024,
+    deviceRunId: binding.deviceRunId,
+    deviceModelIdentifier: 'iPhone16,1',
+    iosVersion: '19.0', safariVersion: '19.0', captureMimeType: 'audio/mp4',
+    deviceObservedAt: now.toISOString(), rawCaptureFormat: 'iso-bmff-audio-v1',
+    rawCaptureSha256: binding.rawCaptureSha256, rawCaptureByteLength: binding.rawCaptureByteLength,
+    fixtureSha256: binding.fixtureSha256, fixtureDurationMs: binding.fixtureDurationMs,
+    fixtureByteLength: binding.fixtureByteLength,
+    normalizationStepsSha256: binding.normalizationStepsSha256,
+    normalizationStepsByteLength: binding.normalizationStepsByteLength,
+    normalizationBindingSha256: createHash('sha256').update(canonicalJson(binding)).digest('hex'),
+    verifiedStepIds,
+    occurredAt: now.toISOString(),
+    result: 'pass',
+  };
+  assert.equal(validateIos(iosV3Payload), true);
+  assert.equal(validateIos({ ...iosV3Payload, secret: 'must-not-be-accepted' }), false);
+  assert.equal(validateIos({ ...iosV3Payload, rawCaptureSha256: '5'.repeat(64) }), false);
+  assert.equal(validateIos({ ...iosV3Payload, verifiedStepIds: [...verifiedStepIds].reverse() }), false);
 });
 
 test('voice provider smoke is inert without exact confirmations and invokes only the selected fake capability once', async () => {
@@ -2699,7 +2738,7 @@ test('late-rejecting ASR and TTS writes return bounded HTTP 503 and rearm cleanu
         'Content-Length': String(audio.length),
         'X-Client-Upload-Id': 'dededede-0000-4000-8000-000000000000',
         'X-Content-SHA256': createHash('sha256').update(audio).digest('hex'),
-        'X-ASR-Language': 'zhHant',
+        'X-ASR-Language': 'yue-Hant-HK',
       },
       body: audio,
     }),
@@ -2793,7 +2832,7 @@ test('post-body ASR client disconnect aborts provider work and durably fails wit
       'Content-Length': String(audio.length),
       'X-Client-Upload-Id': uploadId,
       'X-Content-SHA256': createHash('sha256').update(audio).digest('hex'),
-      'X-ASR-Language': 'zhHant',
+      'X-ASR-Language': 'yue-Hant-HK',
     },
   });
   client.request.end(audio);
@@ -2960,7 +2999,7 @@ test('normal canonical ASR and TTS responses reuse keep-alive without false prov
       'Content-Length': String(audio.length),
       'X-Client-Upload-Id': 'aaaaaaaa-2222-4222-8222-222222222222',
       'X-Content-SHA256': createHash('sha256').update(audio).digest('hex'),
-      'X-ASR-Language': 'zhHant',
+      'X-ASR-Language': 'yue-Hant-HK',
     },
     body: audio,
   });
@@ -3002,7 +3041,7 @@ test('mid-body ASR disconnect remains a durable retryable abort without provider
       'Content-Length': String(audio.length),
       'X-Client-Upload-Id': uploadId,
       'X-Content-SHA256': createHash('sha256').update(audio).digest('hex'),
-      'X-ASR-Language': 'zhHant',
+      'X-ASR-Language': 'yue-Hant-HK',
     },
   });
   client.request.write(audio.subarray(0, 44));
@@ -3057,7 +3096,7 @@ test('voice HTTP transcription is owned, idempotent, editable, status-recoverabl
     Origin: origin, Cookie: cookie, 'Content-Type': 'audio/wav',
     'X-Client-Upload-Id': uploadId,
     'X-Content-SHA256': requestSha256,
-    'X-ASR-Language': 'zhHant',
+    'X-ASR-Language': 'yue-Hant-HK',
     'Content-Length': String(audio.length),
   };
   const created = await fetchJson(`${baseUrl}/api/v1/voice/transcriptions`, { method: 'POST', headers, body: audio });
@@ -3116,7 +3155,7 @@ test('voice HTTP binds Cantonese English and Mandarin selection to the durable c
   const audio = canonicalWav(25);
   const requestSha256 = createHash('sha256').update(audio).digest('hex');
   const results = [];
-  for (const [index, asrLanguage] of ['zhHant', 'en', 'zhHans'].entries()) {
+  for (const [index, asrLanguage] of ['yue-Hant-HK', 'en', 'cmn-Hans-CN'].entries()) {
     const clientUploadId = `d${index + 1}d${index + 1}d${index + 1}d${index + 1}-0000-4000-8000-000000000000`;
     results.push(await fetchJson(`${baseUrl}/api/v1/voice/transcriptions`, {
       method: 'POST',
@@ -3129,7 +3168,7 @@ test('voice HTTP binds Cantonese English and Mandarin selection to the durable c
     }));
   }
   assert.deepEqual(results.map(({ response }) => response.status), [201, 201, 201]);
-  assert.deepEqual(observed, ['yueHant', 'en', 'zhHans']);
+  assert.deepEqual(observed, ['yue-Hant-HK', 'en', 'cmn-Hans-CN']);
 
   const rejected = await fetchJson(`${baseUrl}/api/v1/voice/transcriptions`, {
     method: 'POST',
@@ -3142,7 +3181,7 @@ test('voice HTTP binds Cantonese English and Mandarin selection to the durable c
   });
   assert.equal(rejected.response.status, 400);
   assert.equal(rejected.body.error.code, 'INVALID_REQUEST');
-  assert.deepEqual(observed, ['yueHant', 'en', 'zhHans']);
+  assert.deepEqual(observed, ['yue-Hant-HK', 'en', 'cmn-Hans-CN']);
 });
 
 test('missing ASR provider durably records one permanent upload failure for POST replay and GET recovery', async (t) => {
@@ -3159,7 +3198,7 @@ test('missing ASR provider durably records one permanent upload failure for POST
     'Content-Length': String(audio.length),
     'X-Client-Upload-Id': clientUploadId,
     'X-Content-SHA256': requestSha256,
-    'X-ASR-Language': 'zhHant',
+    'X-ASR-Language': 'yue-Hant-HK',
   };
 
   const first = await fetchJson(`${baseUrl}/api/v1/voice/transcriptions`, {
@@ -3219,7 +3258,7 @@ test('voice transcription rejects missing or malformed upload identity headers b
     Cookie: cookie,
     'Content-Type': 'audio/wav',
     'Content-Length': String(audio.length),
-    'X-ASR-Language': 'zhHant',
+    'X-ASR-Language': 'yue-Hant-HK',
   };
   const cases = [
     ['missing X-Client-Upload-Id', { ...baseHeaders, 'X-Content-SHA256': requestSha256 }],
@@ -3263,7 +3302,7 @@ test('oversized chunked voice upload exposes one public 413 code and keeps its d
     'Content-Type': 'audio/wav',
     'X-Client-Upload-Id': clientUploadId,
     'X-Content-SHA256': requestSha256,
-    'X-ASR-Language': 'zhHant',
+    'X-ASR-Language': 'yue-Hant-HK',
   };
   const upload = () => fetchJson(`${baseUrl}/api/v1/voice/transcriptions`, {
     method: 'POST', headers, body: Readable.from([bytes]), duplex: 'half',
@@ -3334,7 +3373,7 @@ test('voice upload DELETE is owned, capability-independent, idempotent, and perm
     'Content-Length': String(audio.length),
     'X-Client-Upload-Id': clientUploadId,
     'X-Content-SHA256': requestSha256,
-    'X-ASR-Language': 'zhHant',
+    'X-ASR-Language': 'yue-Hant-HK',
   };
   const posting = fetchJson(`${baseUrl}/api/v1/voice/transcriptions`, {
     method: 'POST', headers, body: audio,
@@ -3465,7 +3504,7 @@ test('voice upload DELETE removes a ready draft but returns 409 when message att
       'Content-Length': String(audio.length),
       'X-Client-Upload-Id': clientUploadId,
       'X-Content-SHA256': requestSha256,
-      'X-ASR-Language': 'zhHant',
+      'X-ASR-Language': 'yue-Hant-HK',
     },
     body: audio,
   });
@@ -3618,6 +3657,61 @@ test('missing TTS provider durably records one permanent generation for POST rep
   assert.equal(replay.response.status, 503);
   assert.equal(replay.body.error.code, 'VOICE_PROVIDER_MISCONFIGURED');
   assert.equal(await readFile(filePath, 'utf8'), beforeReplay, 'permanent replay never reclaims quota or creates another generation');
+});
+
+test('candidate-controlled TTS provider rejection preserves canonical text and emits paired failure timing', async (t) => {
+  const {
+    baseUrl, origin, store, mediaStore, cleanupService, config,
+  } = await startVoiceApp(t);
+  const session = await fetchJson(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin } });
+  const assistant = await createDeliveredAssistant(store, session.body.data.session, session.body.data.conversation);
+  const { createTtsProvider } = await import('../src/providers/tts.js');
+  const { createVoiceService } = await import('../src/services/voice.js');
+  const { createAcceptanceTimingRecorder } = await import('../src/telemetry/acceptance-timings.js');
+  let clock = new Date('2026-08-25T00:00:10.000Z').getTime();
+  let providerFetches = 0;
+  const recorder = createAcceptanceTimingRecorder({ releaseCommitSha: 'a'.repeat(40), now: () => clock });
+  const provider = createTtsProvider({
+    config: config.tts,
+    now: () => { clock += 5; return clock; },
+    fetchImpl: async () => { providerFetches += 1; throw new Error('must reject before transport'); },
+  });
+  const service = createVoiceService({
+    config, store, mediaStore, cleanupService, ttsProvider: provider,
+    now: () => new Date(clock += 5),
+    acceptanceTimingRecorder: recorder,
+    spoolParentDirectory: join((await mkdtemp(join(tmpdir(), 'hb-controlled-tts-'))), 'voice-spool'),
+  });
+  const timingContext = {
+    windowId: 'c'.repeat(64), sessionId: session.body.data.session.id,
+    correlationId: '99999999-9999-4999-8999-999999999999',
+    controlledTtsFailure: true, requestedAtMs: clock,
+  };
+
+  await assert.rejects(
+    service.generateAssistantAudio({
+      sessionId: session.body.data.session.id, messageId: assistant.id, acceptanceContext: timingContext,
+    }),
+    (error) => error.code === 'VOICE_SYNTHESIS_REJECTED',
+  );
+  assert.equal(providerFetches, 0, 'the real provider adapter must reject the controlled empty input before transport');
+  const canonical = await store.getOwnedAssistantMessage({ sessionId: session.body.data.session.id, messageId: assistant.id });
+  assert.equal(canonical.status, 'delivered');
+  assert.equal(canonical.text, 'Durable assistant text survives TTS.');
+  const status = await service.getAssistantAudioStatus({ sessionId: session.body.data.session.id, messageId: assistant.id });
+  assert.deepEqual(status.data, {
+    messageId: assistant.id, state: 'failed', mediaId: null,
+    failureCode: 'VOICE_SYNTHESIS_REJECTED', retryable: false,
+  });
+  assert.deepEqual(
+    recorder.query({ windowId: timingContext.windowId, sessionId: timingContext.sessionId }).samples
+      .filter(({ operation }) => operation === 'tts')
+      .map(({ bindingId, durationMs, layer, outcome, failureCode }) => ({ bindingId, durationMs, layer, outcome, failureCode })),
+    [
+      { bindingId: assistant.id, durationMs: null, layer: 'provider', outcome: 'failure', failureCode: 'VOICE_SYNTHESIS_REJECTED' },
+      { bindingId: assistant.id, durationMs: null, layer: 'server', outcome: 'failure', failureCode: 'VOICE_SYNTHESIS_REJECTED' },
+    ],
+  );
 });
 
 test('text-mode assistant audio is rejected before HTTP provider work and by the atomic claim fence', async (t) => {
@@ -3882,7 +3976,7 @@ test('voice draft and session deletion revoke ownership first and durably delete
       'Content-Type': 'audio/wav',
       'X-Client-Upload-Id': clientUploadId,
       'X-Content-SHA256': createHash('sha256').update(audio).digest('hex'),
-      'X-ASR-Language': 'zhHant',
+      'X-ASR-Language': 'yue-Hant-HK',
       'Content-Length': String(audio.length),
     },
     body: audio,

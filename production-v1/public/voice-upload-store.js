@@ -292,8 +292,8 @@ export function createVoiceUploadStore({
       throw new TypeError('audio must be a canonical audio/wav Blob');
     }
     if (!Number.isFinite(durationMs) || durationMs < 0) throw new TypeError('durationMs must be non-negative');
-    if (asrLanguage !== undefined && !['en', 'zhHant', 'zhHans'].includes(asrLanguage)) {
-      throw new TypeError('asrLanguage must be en, zhHant, or zhHans');
+    if (asrLanguage !== undefined && !REPLY_LANGUAGES.has(asrLanguage)) {
+      throw new TypeError('asrLanguage must be en, yue-Hant-HK, or cmn-Hans-CN');
     }
 
     const createdAt = requireTime(now(), 'createdAt');

@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import test from 'node:test';
 
+import { canonicalMp3Fixture } from './fixtures/canonical-mp3-fixture.js';
+
 import {
   LATENCY_ACCEPTANCE_CONTRACT,
   createLatencyHttpRequester,
@@ -144,10 +146,12 @@ function createHarness({
       };
     }
     return {
-      ready: true,
-      readyMs: 2_000,
+      ready: input.expectedProviderFailure !== true,
+      providerFailureObserved: input.expectedProviderFailure === true,
+      failureCode: input.expectedProviderFailure === true ? 'VOICE_SYNTHESIS_REJECTED' : null,
       textAvailable: true,
-      mediaValidated: true,
+      mediaValidated: input.expectedProviderFailure !== true,
+      messageIdMatches: true,
       providerLatencyMs: 3_500,
       serverLatencyMs: 200,
       audio: 'private audio must not enter artifact',
@@ -166,19 +170,21 @@ function createHarness({
         .map(([, item]) => item);
       const samples = [];
       for (const item of completed.filter(({ operation }) => operation === 'text')) {
-        samples.push({ correlationId: item.correlationId, operation: 'text', layer: 'server', latencyMs: 2_300 });
-        if (item.promptClass === 'grounded') samples.push({ correlationId: item.correlationId, operation: 'text', layer: 'provider', latencyMs: 1_800 });
+        const bindingId = `assistant-${item.sessionIndex}-${item.turnIndex}`;
+        samples.push({ correlationId: item.correlationId, bindingId, durationMs: null, operation: 'text', layer: 'server', latencyMs: 2_300, outcome: 'success', failureCode: null });
+        if (item.promptClass === 'grounded') samples.push({ correlationId: item.correlationId, bindingId, durationMs: null, operation: 'text', layer: 'provider', latencyMs: 1_800, outcome: 'success', failureCode: null });
       }
       for (const item of completed.filter(({ operation }) => operation === 'asr')) {
-        samples.push({ correlationId: item.correlationId, operation: 'asr', layer: 'provider', latencyMs: 1_800 });
-        samples.push({ correlationId: item.correlationId, operation: 'asr', layer: 'server', latencyMs: 2_000 });
+        samples.push({ correlationId: item.correlationId, bindingId: item.clientUploadId, durationMs: item.sample.durationMs, operation: 'asr', layer: 'provider', latencyMs: 1_800, outcome: 'success', failureCode: null });
+        samples.push({ correlationId: item.correlationId, bindingId: item.clientUploadId, durationMs: item.sample.durationMs, operation: 'asr', layer: 'server', latencyMs: item.sample.durationBucketSeconds === 10 ? 2_000 : 5_000, outcome: 'success', failureCode: null });
       }
       for (const item of completed.filter(({ operation }) => operation === 'tts')) {
-        samples.push({ correlationId: item.correlationId, operation: 'tts', layer: 'provider', latencyMs: 1_700 });
-        samples.push({ correlationId: item.correlationId, operation: 'tts', layer: 'server', latencyMs: 1_900 });
+        const failure = item.expectedProviderFailure === true;
+        samples.push({ correlationId: item.correlationId, bindingId: item.assistantMessageId, durationMs: null, operation: 'tts', layer: 'provider', latencyMs: 1_700, outcome: failure ? 'failure' : 'success', failureCode: failure ? 'VOICE_SYNTHESIS_REJECTED' : null });
+        samples.push({ correlationId: item.correlationId, bindingId: item.assistantMessageId, durationMs: null, operation: 'tts', layer: 'server', latencyMs: 1_900, outcome: failure ? 'failure' : 'success', failureCode: failure ? 'VOICE_SYNTHESIS_REJECTED' : null });
       }
       const fallback = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         releaseCommitSha: COMMIT,
         windowId: input.acceptanceWindowId,
         queryDigest: acceptanceTimingQueryDigest({
@@ -232,22 +238,23 @@ test('nearest-rank percentiles are deterministic and the acceptance contract fix
   assert.throws(() => nearestRankP95([1, Number.NaN]), /finite/i);
 
   assert.deepEqual(LATENCY_ACCEPTANCE_CONTRACT, {
-    schemaVersion: 2,
+    schemaVersion: 3,
     text: {
       sessions: 20,
       turns: 200,
       turnsPerSession: 10,
       concurrency: 5,
       promptMix: { grounded: 80, abstention: 60, casual: 60 },
-      voiceModeTurns: 30,
+      voiceModeTurns: 31,
     },
     asr: {
       requests: 30,
       concurrency: 5,
       durationBucketsSeconds: { 10: 10, 30: 10, 55: 10 },
       languages: { cantonese: 10, english: 10, mandarin: 10 },
+      wireLanguages: ['en', 'yue-Hant-HK', 'cmn-Hans-CN'],
     },
-    tts: { requests: 30, concurrency: 5 },
+    tts: { requests: 31, successfulRequests: 30, controlledProviderFailures: 1, concurrency: 5 },
     thresholdsMs: {
       sendAckP95: 300,
       processingVisibleP95: 500,
@@ -378,7 +385,7 @@ test('passing run executes the exact workload at concurrency five and writes one
   assert.equal(requests.filter(({ operation }) => operation === 'bootstrap').length, 20);
   assert.equal(requests.filter(({ operation }) => operation === 'text').length, 200);
   assert.equal(requests.filter(({ operation }) => operation === 'asr').length, 30);
-  assert.equal(requests.filter(({ operation }) => operation === 'tts').length, 30);
+  assert.equal(requests.filter(({ operation }) => operation === 'tts').length, 31);
   assert.equal(requests.filter(({ operation }) => operation === 'timings').length, 20);
   assert.equal(requests.filter(({ operation }) => operation === 'verifyCandidate').length, 1);
   assert.deepEqual(
@@ -394,12 +401,16 @@ test('passing run executes the exact workload at concurrency five and writes one
     { cantonese: 10, english: 10, mandarin: 10 },
   );
   const textRequests = requests.filter(({ operation }) => operation === 'text');
-  assert.deepEqual([...new Set(textRequests.map(({ replyLanguage }) => replyLanguage))].sort(), ['en', 'zhHans', 'zhHant']);
-  assert.equal(textRequests.filter(({ replyMode }) => replyMode === 'voice').length, 30);
+  assert.deepEqual([...new Set(textRequests.map(({ replyLanguage }) => replyLanguage))].sort(), ['cmn-Hans-CN', 'en', 'yue-Hant-HK']);
+  assert.equal(textRequests.filter(({ replyMode }) => replyMode === 'voice').length, 31);
+  assert.equal(textRequests.filter(({ controlledTtsFailure }) => controlledTtsFailure === true).length, 1);
   assert.equal(requests.filter(({ operation }) => operation === 'tts').every(({ assistantMessageId }) => {
     const source = textRequests.find(({ sessionIndex, turnIndex }) => assistantMessageId === `assistant-${sessionIndex}-${turnIndex}`);
     return source?.replyMode === 'voice';
   }), true);
+  assert.equal(requests.filter(({ operation, expectedProviderFailure }) => (
+    operation === 'tts' && expectedProviderFailure === true
+  )).length, 1);
   const ttsBySession = new Map();
   for (const request of requests.filter(({ operation }) => operation === 'tts')) {
     ttsBySession.set(request.sessionIndex, (ttsBySession.get(request.sessionIndex) ?? 0) + 1);
@@ -422,7 +433,7 @@ test('passing run executes the exact workload at concurrency five and writes one
     asr10: { sampleCount: 10, p50Ms: 2_000, p50ThresholdMs: 2_500, p95Ms: 2_000, p95ThresholdMs: 4_000, pass: true },
     asr30: { sampleCount: 10, p95Ms: 5_000, p95ThresholdMs: 6_000, pass: true },
     asr55: { sampleCount: 10, p95Ms: 5_000, p95ThresholdMs: 6_000, pass: true },
-    ttsReady: { sampleCount: 30, p50Ms: 2_000, p50ThresholdMs: 2_500, p95Ms: 2_000, p95ThresholdMs: 5_000, pass: true },
+    ttsReady: { sampleCount: 30, p50Ms: 1_900, p50ThresholdMs: 2_500, p95Ms: 1_900, p95ThresholdMs: 5_000, pass: true },
   });
   assert.deepEqual(record.invariants, {
     acknowledgedMessageLossCount: 0,
@@ -430,6 +441,8 @@ test('passing run executes the exact workload at concurrency five and writes one
     unsupportedVerifiedClaimCount: 0,
     ttsFailureTextLossCount: 0,
     ttsMediaValidationFailureCount: 0,
+    ttsMessageBindingMismatchCount: 0,
+    controlledTtsProviderFailureMismatchCount: 0,
   });
   assert.equal(record.observations.releaseCommitSha, COMMIT);
   assert.equal(record.observations.queryDigests.sampleCount, 20);
@@ -442,8 +455,15 @@ test('passing run executes the exact workload at concurrency five and writes one
   });
   assert.deepEqual(record.observations.server, {
     text: { available: true, sampleCount: 200, p50Ms: 2_300, p95Ms: 2_300 },
-    asr: { available: true, sampleCount: 30, p50Ms: 2_000, p95Ms: 2_000 },
+    asr: { available: true, sampleCount: 30, p50Ms: 5_000, p95Ms: 5_000 },
     tts: { available: true, sampleCount: 30, p50Ms: 1_900, p95Ms: 1_900 },
+  });
+  assert.deepEqual(record.observations.pairs, {
+    asr: { available: true, expectedCount: 30, pairedCount: 30 },
+    tts: {
+      available: true, expectedSuccessCount: 30, successPairedCount: 30,
+      expectedFailureCount: 1, failurePairedCount: 1,
+    },
   });
   assert.deepEqual(record.counts, {
     sessionsCreated: 20,
@@ -452,8 +472,9 @@ test('passing run executes the exact workload at concurrency five and writes one
     textTurnsDelivered: 200,
     asrRequestsAttempted: 30,
     asrReady: 30,
-    ttsRequestsAttempted: 30,
+    ttsRequestsAttempted: 31,
     ttsReady: 30,
+    ttsControlledProviderFailures: 1,
   });
   assert.equal(record.commitSha, COMMIT);
   assert.equal(record.candidateOrigin, ORIGIN);
@@ -488,6 +509,27 @@ test('nearest-rank threshold overflow or any invariant/count failure records a f
     ['TTS failure loses text', (input, result) => input.operation === 'tts' && input.requestIndex === 0 ? { ...result, ready: false, readyMs: null, textAvailable: false } : result],
     ['TTS media is not structurally validated', (input, result) => input.operation === 'tts' && input.requestIndex === 0 ? { ...result, mediaValidated: false } : result],
     ['timing observation is missing', (input, result) => input.operation === 'timings' && input.sessionIndex === 0 ? { ...result, samples: [] } : result],
+    ['ASR server timing exceeds its correlated 10-second bucket SLO', (input, result) => {
+      if (input.operation !== 'timings') return result;
+      const index = result.samples.findIndex((sample) => sample.operation === 'asr' && sample.layer === 'server' && sample.durationMs === 10_000);
+      if (index < 0) return result;
+      const samples = result.samples.map((sample, sampleIndex) => sampleIndex === index ? { ...sample, latencyMs: 4_001 } : sample);
+      return { ...result, samples };
+    }],
+    ['ASR timing binding cannot be paired to its accepted upload', (input, result) => {
+      if (input.operation !== 'timings') return result;
+      const index = result.samples.findIndex((sample) => sample.operation === 'asr' && sample.layer === 'provider');
+      if (index < 0) return result;
+      const samples = result.samples.map((sample, sampleIndex) => sampleIndex === index ? { ...sample, bindingId: 'wrong-upload' } : sample);
+      return { ...result, samples };
+    }],
+    ['controlled TTS provider failure cannot be reclassified as success', (input, result) => {
+      if (input.operation !== 'timings') return result;
+      const index = result.samples.findIndex((sample) => sample.operation === 'tts' && sample.outcome === 'failure');
+      if (index < 0) return result;
+      const samples = result.samples.map((sample, sampleIndex) => sampleIndex === index ? { ...sample, outcome: 'success', failureCode: null } : sample);
+      return { ...result, samples };
+    }],
     ['timing query digest is wrong', (input, result) => input.operation === 'timings' && input.sessionIndex === 0 ? { ...result, queryDigest: '0'.repeat(64) } : result],
   ];
 
@@ -504,6 +546,20 @@ test('nearest-rank threshold overflow or any invariant/count failure records a f
       assert.equal(fixture.artifacts[0].record.artifactSha256, result.publicReport.artifactSha256);
     });
   }
+});
+
+test('ASR and TTS thresholds ignore later client polling elapsed values and use only paired server timings', async () => {
+  const fixture = createHarness({
+    resultFor(input, fallback) {
+      if (input.operation === 'asr') return { ...fallback, transcriptMs: 999_999 };
+      if (input.operation === 'tts') return { ...fallback, readyMs: 999_999 };
+      return fallback;
+    },
+  });
+  const result = await fixture.run();
+  assert.equal(result.exitCode, 0);
+  assert.equal(fixture.artifacts[0].record.metrics.asr10.p95Ms, 2_000);
+  assert.equal(fixture.artifacts[0].record.metrics.ttsReady.p95Ms, 1_900);
 });
 
 test('a release SHA or tracked-cleanliness change during the workload blocks artifact publication', async () => {
@@ -544,12 +600,13 @@ test('a candidate redeploy during the workload is detected with the existing ses
   assert.equal(fixture.artifacts.length, 0);
 });
 
-test('real HTTP requester measures ASR after body consumption and validates TTS HEAD range GET and canonical MP3 outside ready timing', async () => {
+test('real HTTP requester never re-synthesizes cached TTS and binds status/media to the requested message', async () => {
   let clock = 0;
-  const mp3 = Buffer.alloc(417, 0);
-  mp3.set([0xff, 0xfb, 0x90, 0x64]);
+  const requests = [];
+  const mp3 = canonicalMp3Fixture();
   const fetchImpl = async (url, options = {}) => {
     const path = new URL(url).pathname;
+    requests.push({ path, method: options.method ?? 'GET' });
     if (path === '/api/v1/voice/transcriptions') {
       for await (const ignored of options.body) {
         void ignored;
@@ -558,9 +615,11 @@ test('real HTTP requester measures ASR after body consumption and validates TTS 
       clock += 5_000;
       return new Response(JSON.stringify({ data: { state: 'ready' }, error: null }), { status: 201 });
     }
-    if (path.endsWith('/audio')) {
+    if (path.endsWith('/audio/status')) {
       clock += 4_000;
-      return new Response(JSON.stringify({ data: { state: 'ready', mediaId: '99999999-9999-4999-8999-999999999999' }, error: null }), { status: 201 });
+      return new Response(JSON.stringify({ data: {
+        messageId: 'assistant-1', state: 'ready', mediaId: '99999999-9999-4999-8999-999999999999',
+      }, error: null }), { status: 200 });
     }
     if (path.endsWith('/media/99999999-9999-4999-8999-999999999999')) {
       const baseHeaders = { 'content-type': 'audio/mpeg', 'accept-ranges': 'bytes' };
@@ -608,9 +667,29 @@ test('real HTTP requester measures ASR after body consumption and validates TTS 
     session: { cookie: 'hb_v1_session=fake-local-cookie' },
     assistantMessageId: 'assistant-1',
   });
-  assert.equal(tts.readyMs, 4_000, 'the 2-second text-survival GET must not enter TTS-ready timing');
   assert.equal(tts.textAvailable, true);
   assert.equal(tts.mediaValidated, true);
+  assert.equal(tts.messageIdMatches, true);
+  assert.equal(requests.some(({ path, method }) => path.endsWith('/audio') && method === 'POST'), false);
+
+  const mismatchedRequester = createLatencyHttpRequester({
+    candidateOrigin: ORIGIN,
+    sleep: async () => {},
+    fetchImpl: async (url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith('/audio/status')) {
+        return new Response(JSON.stringify({ data: {
+          messageId: 'different-assistant', state: 'ready', mediaId: '99999999-9999-4999-8999-999999999999',
+        }, error: null }), { status: 200 });
+      }
+      return fetchImpl(url, options);
+    },
+  });
+  const mismatched = await mismatchedRequester({
+    operation: 'tts', session: { cookie: 'hb_v1_session=fake-local-cookie' }, assistantMessageId: 'assistant-1',
+  });
+  assert.equal(mismatched.messageIdMatches, false);
+  assert.equal(mismatched.mediaValidated, false);
 });
 
 test('real HTTP requester stops and cancels an oversized streamed JSON body before buffering it all', async () => {
