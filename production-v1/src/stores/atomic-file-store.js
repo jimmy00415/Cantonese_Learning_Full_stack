@@ -15,6 +15,7 @@ const LEGACY_COLLECTIONS = ['sessions', 'conversations', 'messages', 'turns', 'e
 const COLLECTIONS = [...LEGACY_COLLECTIONS, 'voiceUploads', 'mediaGenerations', 'mediaDeletionJobs'];
 const NO_CHANGE = Symbol('atomic-store-no-change');
 const NONTERMINAL_TRANSITIONS = Object.freeze({ accepted: 'retrieving', retrieving: 'generating' });
+const ATTEMPT_CLEANUP_GRACE_MS = 60_000;
 
 function noChange(value) { return { [NO_CHANGE]: true, value }; }
 
@@ -1084,11 +1085,17 @@ export class AtomicFileStore {
     });
   }
 
-  async isStorageKeyLive({ storageKey }) {
+  async isStorageKeyLive({ storageKey, now }) {
+    const nowMs = instant(now);
+    const liveAttemptReference = (operation) => {
+      if (operation.attemptStorageKey !== storageKey) return false;
+      const deadlineMs = new Date(operation.attemptDeadlineAt).getTime();
+      return !Number.isFinite(deadlineMs) || nowMs <= deadlineMs + ATTEMPT_CLEANUP_GRACE_MS;
+    };
     return this.#read((snapshot) => (
       snapshot.mediaAssets.some((asset) => asset.storageKey === storageKey)
-      || snapshot.voiceUploads.some((upload) => upload.attemptStorageKey === storageKey)
-      || snapshot.mediaGenerations.some((generation) => generation.attemptStorageKey === storageKey)
+      || snapshot.voiceUploads.some(liveAttemptReference)
+      || snapshot.mediaGenerations.some(liveAttemptReference)
     ));
   }
 

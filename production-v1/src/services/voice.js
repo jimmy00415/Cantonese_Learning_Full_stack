@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp, open, readFile, rmdir, unlink } from 'node:fs/promises';
+import {
+  chmod, lstat, mkdir, mkdtemp, open, opendir, readFile, rmdir, unlink,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, parse, resolve } from 'node:path';
 
 import { validateCanonicalWav } from '../media/canonical-wav.js';
 import { providerConfigDigest } from './voice-evidence.js';
@@ -18,6 +20,96 @@ export const voiceLimits = Object.freeze({
   leaseMs: 15_000,
   cleanupGraceMs: 60_000,
 });
+
+export const voiceIngressSpoolLimits = Object.freeze({
+  directoryPrefix: 'voice-ingress-',
+  fileName: 'body.wav',
+  staleAfterMs: 5 * 60_000,
+  recoveryLimit: 100,
+  recoveryScanMultiplier: 8,
+});
+
+export const defaultVoiceIngressSpoolRoot = join(tmpdir(), 'hong-kong-buddy-v1-voice-ingress');
+
+const VOICE_INGRESS_DIRECTORY = /^voice-ingress-[a-z0-9]{6}$/i;
+
+function resolvePrivateSpoolRoot(parentDirectory) {
+  const root = resolve(parentDirectory ?? defaultVoiceIngressSpoolRoot);
+  if (root === parse(root).root || root === resolve(tmpdir())) {
+    throw new Error('Voice ingress spool root must be a private subdirectory');
+  }
+  return root;
+}
+
+async function ensurePrivateSpoolRoot(parentDirectory) {
+  const root = resolvePrivateSpoolRoot(parentDirectory);
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  const details = await lstat(root);
+  if (!details.isDirectory() || details.isSymbolicLink()) {
+    throw new Error('Voice ingress spool root must be a private directory');
+  }
+  await chmod(root, 0o700).catch((error) => {
+    if (!['ENOSYS', 'EPERM'].includes(error?.code)) throw error;
+  });
+  return root;
+}
+
+async function exactStaleSpoolContents(directory, staleBeforeMs) {
+  const entries = [];
+  const handle = await opendir(directory);
+  for await (const entry of handle) {
+    entries.push(entry);
+    if (entries.length > 1) return null;
+  }
+  if (entries.length === 0) return { bodyPath: null };
+  const entry = entries[0];
+  if (entry.name !== voiceIngressSpoolLimits.fileName || !entry.isFile() || entry.isSymbolicLink()) return null;
+  const bodyPath = join(directory, voiceIngressSpoolLimits.fileName);
+  const details = await lstat(bodyPath);
+  if (!details.isFile() || details.isSymbolicLink() || details.mtimeMs >= staleBeforeMs) return null;
+  return { bodyPath };
+}
+
+export async function recoverStaleVoiceIngressSpools({
+  parentDirectory = defaultVoiceIngressSpoolRoot,
+  now = () => new Date(),
+  staleAfterMs = voiceIngressSpoolLimits.staleAfterMs,
+  limit = voiceIngressSpoolLimits.recoveryLimit,
+} = {}) {
+  const root = await ensurePrivateSpoolRoot(parentDirectory);
+  const nowMs = new Date(now()).getTime();
+  if (!Number.isFinite(nowMs)) throw new Error('Voice ingress recovery requires a valid clock');
+  const safeAgeMs = Math.max(Number(staleAfterMs) || 0, voiceIngressSpoolLimits.staleAfterMs);
+  const maximum = Math.max(1, Math.min(Number(limit) || voiceIngressSpoolLimits.recoveryLimit, voiceIngressSpoolLimits.recoveryLimit));
+  const scanLimit = maximum * voiceIngressSpoolLimits.recoveryScanMultiplier;
+  const staleBeforeMs = nowMs - safeAgeMs;
+  let scanned = 0;
+  let recovered = 0;
+  const rootHandle = await opendir(root);
+  for await (const entry of rootHandle) {
+    if (scanned >= scanLimit || recovered >= maximum) break;
+    scanned += 1;
+    if (!entry.isDirectory() || entry.isSymbolicLink() || !VOICE_INGRESS_DIRECTORY.test(entry.name)) continue;
+    const directory = join(root, entry.name);
+    try {
+      const details = await lstat(directory);
+      if (!details.isDirectory() || details.isSymbolicLink() || details.mtimeMs >= staleBeforeMs) continue;
+      const contents = await exactStaleSpoolContents(directory, staleBeforeMs);
+      if (!contents) continue;
+      if (contents.bodyPath) await unlink(contents.bodyPath);
+      await rmdir(directory);
+      recovered += 1;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') continue;
+    }
+  }
+  return {
+    scanned,
+    recovered,
+    limit: maximum,
+    staleBefore: new Date(staleBeforeMs).toISOString(),
+  };
+}
 
 function workError(code, status, retryable) {
   const error = new Error(code);
@@ -55,7 +147,9 @@ function normalizeWorkError(error, capability) {
     : workError('VOICE_SYNTHESIS_FAILED', 502, true);
 }
 
-async function withOperationDeadline({ signal, deadlineMs, timeoutError, operation }) {
+async function withOperationDeadline({
+  signal, deadlineMs, timeoutError, operation, onLateSuccess,
+}) {
   const controller = new AbortController();
   const abortFromParent = () => controller.abort(
     signal?.reason ?? workError('VOICE_UPLOAD_ABORTED', 408, true),
@@ -74,10 +168,26 @@ async function withOperationDeadline({ signal, deadlineMs, timeoutError, operati
   const timer = setTimeout(() => controller.abort(timeoutError), Math.max(1, Number(deadlineMs)));
   timer.unref?.();
   try {
-    return await Promise.race([
-      Promise.resolve().then(() => operation(controller.signal)),
-      aborted,
+    const operationPromise = Promise.resolve().then(() => operation(controller.signal));
+    const outcome = await Promise.race([
+      operationPromise.then(
+        (value) => ({ source: 'operation', value }),
+        (error) => ({ source: 'operation', error }),
+      ),
+      aborted.then(
+        (value) => ({ source: 'abort', value }),
+        (error) => ({ source: 'abort', error }),
+      ),
     ]);
+    if (outcome.source === 'abort') {
+      void operationPromise.then(
+        (value) => onLateSuccess?.(value),
+        () => undefined,
+      ).catch(() => undefined);
+      throw outcome.error;
+    }
+    if (outcome.error) throw outcome.error;
+    return outcome.value;
   } finally {
     clearTimeout(timer);
     removeAbortListener();
@@ -141,8 +251,12 @@ async function spoolIngress({
   let handle = null;
   let closed = false;
   try {
-    directory = await mkdtemp(join(parentDirectory, 'voice-ingress-'));
-    filePath = join(directory, 'body.wav');
+    const root = await ensurePrivateSpoolRoot(parentDirectory);
+    directory = await mkdtemp(join(root, voiceIngressSpoolLimits.directoryPrefix));
+    await chmod(directory, 0o700).catch((error) => {
+      if (!['ENOSYS', 'EPERM'].includes(error?.code)) throw error;
+    });
+    filePath = join(directory, voiceIngressSpoolLimits.fileName);
     handle = await open(filePath, 'wx', 0o600);
     const hash = createHash('sha256');
     let byteLength = 0;
@@ -254,7 +368,7 @@ export function createVoiceService({
   eventHub,
   now = () => new Date(),
   mediaDeadlineMs = voiceLimits.mediaDeadlineMs,
-  spoolParentDirectory = tmpdir(),
+  spoolParentDirectory = defaultVoiceIngressSpoolRoot,
 } = {}) {
   if (!config || !store || !mediaStore) throw new Error('Voice service requires config, store, and mediaStore');
   const secret = config.sessionSecret ?? 'local-development-session-secret';
@@ -328,6 +442,16 @@ export function createVoiceService({
           signal: mediaSignal,
           contentType: 'audio/wav',
         }),
+        onLateSuccess: async () => {
+          const current = currentDate(now);
+          await store.rearmMediaDeletionAfterWrite({
+            storageKey: attemptStorageKey,
+            reason: 'voice-late-write-after-deadline',
+            notBefore: current,
+            now: current,
+          });
+          await drainCleanup();
+        },
       });
       objectWritten = true;
       if (stored.byteLength !== wav.byteLength || stored.sha256 !== wav.sha256) {
@@ -425,6 +549,16 @@ export function createVoiceService({
           signal: mediaSignal,
           contentType: 'audio/mpeg',
         }),
+        onLateSuccess: async () => {
+          const lateAt = currentDate(now);
+          await store.rearmMediaDeletionAfterWrite({
+            storageKey: attemptStorageKey,
+            reason: 'tts-late-write-after-deadline',
+            notBefore: lateAt,
+            now: lateAt,
+          });
+          await drainCleanup();
+        },
       });
       objectWritten = true;
       const completed = await store.completeMediaGeneration({

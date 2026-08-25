@@ -12,6 +12,10 @@ import { createDispatcher } from './services/dispatcher.js';
 import { EventHub } from './services/events.js';
 import { createMediaCleanupService } from './services/media-cleanup.js';
 import { createTurnProcessor } from './services/turn-processor.js';
+import {
+  defaultVoiceIngressSpoolRoot,
+  recoverStaleVoiceIngressSpools,
+} from './services/voice.js';
 import { AtomicFileStore } from './stores/atomic-file-store.js';
 import { AzureBlobMediaStore } from './stores/azure-blob-media-store.js';
 import { LocalMediaStore } from './stores/local-media-store.js';
@@ -46,6 +50,9 @@ export async function startServer({
   azureCredential,
   dispatcherOptions = {},
   now = () => new Date(),
+  spoolParentDirectory = defaultVoiceIngressSpoolRoot,
+  spoolRecoveryLimit,
+  spoolStaleAfterMs,
 } = {}) {
   const config = loadConfig(environment, { now });
   if (config.storeDriver !== 'atomic-file') throw new Error(`Store driver ${config.storeDriver} is not available in this build`);
@@ -53,6 +60,12 @@ export async function startServer({
   await store.init();
   const mediaStore = suppliedMediaStore ?? createMediaStore({ config, azureCredential });
   await mediaStore.init();
+  const spoolRecovery = await recoverStaleVoiceIngressSpools({
+    parentDirectory: spoolParentDirectory,
+    now,
+    limit: spoolRecoveryLimit,
+    staleAfterMs: spoolStaleAfterMs,
+  });
   const corpus = suppliedCorpus ?? await loadDefaultCorpus();
   const retriever = createRetriever({ corpus, now });
   const llmProvider = suppliedLlmProvider ?? createLlmProvider({ config: config.llm, totalDeadlineMs: config.llm.timeoutMs });
@@ -76,6 +89,7 @@ export async function startServer({
     asrProvider,
     ttsProvider,
     cleanupService,
+    spoolParentDirectory,
     now,
   });
   const server = host ? app.listen(port, host) : app.listen(port);
@@ -111,6 +125,7 @@ export async function startServer({
     asrProvider,
     ttsProvider,
     cleanupService,
+    spoolRecovery,
     shutdown,
   };
   return server;

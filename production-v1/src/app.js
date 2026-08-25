@@ -17,7 +17,8 @@ function envelope(response, data, error = null) {
 
 export function createApp({
   config, store, mediaStore, answerService, eventHub, dispatcher,
-  asrProvider, ttsProvider, cleanupService, voiceService, now = () => new Date(),
+  asrProvider, ttsProvider, cleanupService, voiceService, spoolParentDirectory,
+  now = () => new Date(),
 } = {}) {
   void answerService;
 
@@ -38,7 +39,7 @@ export function createApp({
   if (store && mediaStore) {
     app.use('/api/v1', createVoiceRouter({
       config, store, mediaStore, asrProvider, ttsProvider, cleanupService,
-      eventHub: selectedEventHub, now, voiceService,
+      eventHub: selectedEventHub, now, voiceService, spoolParentDirectory,
     }));
   }
   app.use(express.json({ limit: '64kb', type: ['application/json', 'application/*+json'] }));

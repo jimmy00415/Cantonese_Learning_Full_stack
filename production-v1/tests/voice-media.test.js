@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -105,6 +105,16 @@ async function readableBuffer(readable) {
   const chunks = [];
   for await (const chunk of readable) chunks.push(Buffer.from(chunk));
   return Buffer.concat(chunks);
+}
+
+async function pathExists(path) {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  }
 }
 
 async function createStore(t, prefix = 'hb-v1-voice-store-') {
@@ -543,6 +553,7 @@ test('Azure ASR maps every fixed, transient, malformed, and deadline outcome wit
     { name: 'no match', response: () => new Response(JSON.stringify({ RecognitionStatus: 'NoMatch' }), { status: 200, headers: { 'Content-Type': 'application/json' } }), code: 'VOICE_SPEECH_NOT_RECOGNIZED', status: 422, retryable: false },
     { name: 'initial silence', response: () => new Response(JSON.stringify({ RecognitionStatus: 'InitialSilenceTimeout' }), { status: 200, headers: { 'Content-Type': 'application/json' } }), code: 'VOICE_SPEECH_NOT_RECOGNIZED', status: 422, retryable: false },
     { name: 'babble timeout', response: () => new Response(JSON.stringify({ RecognitionStatus: 'BabbleTimeout' }), { status: 200, headers: { 'Content-Type': 'application/json' } }), code: 'VOICE_SPEECH_NOT_RECOGNIZED', status: 422, retryable: false },
+    { name: 'unknown recognition status drift', response: () => new Response(JSON.stringify({ RecognitionStatus: 'FutureProviderStatus' }), { status: 200, headers: { 'Content-Type': 'application/json' } }), code: 'VOICE_PROVIDER_INVALID_RESPONSE', status: 502, retryable: false },
     { name: 'auth', response: () => new Response('private', { status: 401 }), code: 'VOICE_PROVIDER_MISCONFIGURED', status: 503, retryable: false },
     { name: 'fixed 4xx', response: () => new Response('private', { status: 400 }), code: 'VOICE_TRANSCRIPTION_REJECTED', status: 502, retryable: false },
     { name: 'upstream timeout', response: () => new Response('private', { status: 408 }), code: 'VOICE_TRANSCRIPTION_FAILED', status: 502, retryable: true },
@@ -1009,6 +1020,175 @@ test('media cleanup worker durably completes not-found/deletes, retries failures
   await cleanup.stop();
 });
 
+test('crashed voice and TTS attempt keys stop being live after hard deadline plus cleanup grace', async (t) => {
+  const { store } = await createStore(t, 'hb-v1-expired-attempt-liveness-');
+  const owner = await store.createOrResumeSession({ tokenHash: 'expired-attempt-owner', now: '2026-08-25T03:00:00.000Z' });
+  const assistant = await createDeliveredAssistant(store, owner.session, owner.conversation);
+  const voiceKey = 'attempts/voice/11111111-1111-4111-8111-111111111111';
+  const ttsKey = 'attempts/tts/22222222-2222-4222-8222-222222222222';
+  const assetKey = 'attempts/voice/33333333-3333-4333-8333-333333333333';
+  await store.claimVoiceUploadWithRateLimits({
+    sessionId: owner.session.id,
+    clientUploadId: '11111111-0000-4000-8000-000000000000',
+    requestSha256: '1'.repeat(64),
+    mimeType: 'audio/wav',
+    leaseToken: 'voice-expired-lease',
+    attemptStorageKey: voiceKey,
+    leaseExpiresAt: '2026-08-25T03:00:15.000Z',
+    attemptDeadlineAt: '2026-08-25T03:01:00.000Z',
+    now: '2026-08-25T03:00:00.000Z',
+  });
+  await store.claimAssistantAudioWithRateLimits({
+    sessionId: owner.session.id,
+    messageId: assistant.id,
+    kind: 'assistant_voice',
+    leaseToken: 'tts-expired-lease',
+    attemptStorageKey: ttsKey,
+    configVersion: 'tts-test-v1',
+    leaseExpiresAt: '2026-08-25T03:00:15.000Z',
+    attemptDeadlineAt: '2026-08-25T03:00:30.000Z',
+    now: '2026-08-25T03:00:00.000Z',
+  });
+  const ready = await store.claimVoiceUploadWithRateLimits({
+    sessionId: owner.session.id,
+    clientUploadId: '33333333-0000-4000-8000-000000000000',
+    requestSha256: '3'.repeat(64),
+    mimeType: 'audio/wav',
+    leaseToken: 'voice-ready-lease',
+    attemptStorageKey: assetKey,
+    leaseExpiresAt: '2026-08-25T03:00:15.000Z',
+    attemptDeadlineAt: '2026-08-25T03:01:00.000Z',
+    now: '2026-08-25T03:00:00.000Z',
+  });
+  await store.setVoiceUploadTranscribing({ uploadId: ready.upload.id, leaseToken: 'voice-ready-lease', now: '2026-08-25T03:00:01.000Z' });
+  await store.completeVoiceUpload({
+    uploadId: ready.upload.id,
+    leaseToken: 'voice-ready-lease',
+    mediaAsset: { storageKey: assetKey, mimeType: 'audio/wav', byteLength: 44, durationMs: 0, sha256: '3'.repeat(64) },
+    transcript: 'current asset',
+    now: '2026-08-25T03:00:02.000Z',
+  });
+
+  assert.equal(await store.isStorageKeyLive({ storageKey: voiceKey, now: '2026-08-25T03:01:59.999Z' }), true);
+  assert.equal(await store.isStorageKeyLive({ storageKey: ttsKey, now: '2026-08-25T03:01:29.999Z' }), true);
+  assert.equal(await store.isStorageKeyLive({ storageKey: voiceKey, now: '2026-08-25T03:02:00.001Z' }), false);
+  assert.equal(await store.isStorageKeyLive({ storageKey: ttsKey, now: '2026-08-25T03:01:30.001Z' }), false);
+  assert.equal(await store.isStorageKeyLive({ storageKey: assetKey, now: '2027-08-25T03:00:00.000Z' }), true);
+});
+
+test('scheduled media cleanup bounds and paginates both attempt-prefix sweeps until orphans are deleted', async (t) => {
+  const { createMediaCleanupService } = await import('../src/services/media-cleanup.js');
+  const { store } = await createStore(t, 'hb-v1-scheduled-attempt-sweep-');
+  const oldModified = '2026-08-25T03:00:00.000Z';
+  const objects = new Map([
+    ['attempts/voice/11111111-1111-4111-8111-111111111111', { lastModified: oldModified }],
+    ['attempts/voice/22222222-2222-4222-8222-222222222222', { lastModified: oldModified }],
+    ['attempts/tts/33333333-3333-4333-8333-333333333333', { lastModified: oldModified }],
+  ]);
+  const listCalls = [];
+  const mediaStore = {
+    listAttemptKeys: async ({ prefix, before, limit, cursor }) => {
+      listCalls.push({ prefix, before: new Date(before).toISOString(), limit, cursor: cursor ?? null });
+      const keys = [...objects.entries()]
+        .filter(([storageKey, entry]) => storageKey.startsWith(prefix)
+          && (!cursor || storageKey > cursor)
+          && new Date(entry.lastModified) < new Date(before))
+        .map(([storageKey, entry]) => ({ storageKey, lastModified: entry.lastModified, byteLength: 1 }))
+        .sort((left, right) => left.storageKey.localeCompare(right.storageKey))
+        .slice(0, limit);
+      return { keys, cursor: keys.length === limit ? keys.at(-1).storageKey : null };
+    },
+    delete: async ({ storageKey }) => {
+      const deleted = objects.delete(storageKey);
+      return { deleted, notFound: !deleted };
+    },
+  };
+  const cleanup = createMediaCleanupService({
+    store,
+    mediaStore,
+    now: () => new Date('2026-08-25T04:00:00.000Z'),
+    pollMs: 5,
+    sweepLimit: 1,
+    sweepMinimumAgeMs: 120_000,
+  });
+  t.after(() => cleanup.stop());
+  cleanup.start();
+  const deadline = Date.now() + 500;
+  while (objects.size > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  await cleanup.stop();
+
+  assert.equal(objects.size, 0);
+  assert.deepEqual(new Set(listCalls.map((call) => call.prefix)), new Set(['attempts/voice/', 'attempts/tts/']));
+  assert.ok(listCalls.every((call) => call.limit === 1));
+  assert.ok(listCalls.every((call) => call.before === '2026-08-25T03:58:00.000Z'));
+  assert.ok(listCalls.some((call) => call.prefix === 'attempts/voice/'
+    && call.cursor === 'attempts/voice/11111111-1111-4111-8111-111111111111'));
+});
+
+test('server restart recovers only bounded stale private ingress spools and preserves recent and nonmatching paths', async (t) => {
+  const { startServer } = await import('../src/server.js');
+  const directory = await mkdtemp(join(tmpdir(), 'hb-v1-spool-restart-'));
+  const spoolRoot = join(directory, 'private-spool-root');
+  await mkdir(spoolRoot, { recursive: true });
+  const staleDirectories = [
+    join(spoolRoot, 'voice-ingress-aaaaaa'),
+    join(spoolRoot, 'voice-ingress-bbbbbb'),
+  ];
+  const recentDirectory = join(spoolRoot, 'voice-ingress-cccccc');
+  const nonmatchingDirectory = join(spoolRoot, 'other-ingress-dddddd');
+  for (const candidate of [...staleDirectories, recentDirectory, nonmatchingDirectory]) {
+    await mkdir(candidate);
+    await writeFile(join(candidate, 'body.wav'), Buffer.from('private-spool-fixture'));
+  }
+  const staleAt = new Date('2026-08-25T04:50:00.000Z');
+  const recentAt = new Date('2026-08-25T04:59:30.000Z');
+  for (const candidate of [...staleDirectories, nonmatchingDirectory]) {
+    await utimes(join(candidate, 'body.wav'), staleAt, staleAt);
+    await utimes(candidate, staleAt, staleAt);
+  }
+  await utimes(join(recentDirectory, 'body.wav'), recentAt, recentAt);
+  await utimes(recentDirectory, recentAt, recentAt);
+
+  const mediaStore = {
+    init: async () => undefined,
+    close: async () => undefined,
+    createAttemptKey: () => 'attempts/voice/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+  };
+  const cleanupService = {
+    start: () => undefined,
+    stop: async () => undefined,
+    drainOnce: async () => ({ idle: true }),
+  };
+  const server = await startServer({
+    environment: {
+      NODE_ENV: 'test',
+      V1_PUBLIC_ORIGIN: 'https://voice.example.test',
+      V1_SESSION_SECRET: 'r'.repeat(32),
+      V1_ATOMIC_FILE_PATH: join(directory, 'store.json'),
+      V1_LOCAL_MEDIA_PATH: join(directory, 'media'),
+      V1_LLM_PROVIDER: 'deterministic',
+    },
+    host: '127.0.0.1',
+    port: 0,
+    mediaStore,
+    cleanupService,
+    llmProvider: { provider: 'restart-test', generate: async () => { throw new Error('must not run'); } },
+    now: () => new Date('2026-08-25T05:00:00.000Z'),
+    spoolParentDirectory: spoolRoot,
+    spoolRecoveryLimit: 1,
+    spoolStaleAfterMs: 5 * 60_000,
+  });
+  t.after(() => server.shutdown());
+
+  const staleSurvivors = (await Promise.all(staleDirectories.map(pathExists))).filter(Boolean).length;
+  assert.equal(staleSurvivors, 1, 'startup recovery is bounded to one stale matching spool');
+  assert.equal(await pathExists(join(recentDirectory, 'body.wav')), true);
+  assert.equal(await pathExists(join(nonmatchingDirectory, 'body.wav')), true);
+  await server.shutdown();
+});
+
 test('voice ingress idle and absolute deadlines release the source with the stable retryable 408 outcome', async () => {
   const { withIngressDeadlines } = await import('../src/services/voice.js');
   for (const limits of [{ idleMs: 10, absoluteMs: 100 }, { idleMs: 100, absoluteMs: 10 }]) {
@@ -1194,6 +1374,96 @@ test('voice media writes have an independent deadline and persist retryable 503 
   assert.equal(status.retryable, true);
 });
 
+test('abort-ignoring ASR and TTS media writes rearm completed cleanup after timeout and leave no orphan', async (t) => {
+  const { createMediaCleanupService } = await import('../src/services/media-cleanup.js');
+  const { createVoiceService } = await import('../src/services/voice.js');
+  const { filePath, store } = await createStore(t, 'hb-v1-late-media-write-');
+  const owner = await store.createOrResumeSession({ tokenHash: 'late-media-owner', now: '2026-08-25T02:45:00.000Z' });
+  const assistant = await createDeliveredAssistant(store, owner.session, owner.conversation);
+  const keys = {
+    voice: 'attempts/voice/bcbcbcbc-bcbc-4bcb-8bcb-bcbcbcbcbcbc',
+    tts: 'attempts/tts/cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd',
+  };
+  const objects = new Map();
+  const pendingWrites = [];
+  const mediaStore = {
+    createAttemptKey: ({ kind }) => keys[kind],
+    putAttempt: ({ storageKey, readable }) => new Promise((resolve) => {
+      pendingWrites.push({
+        storageKey,
+        finish: async () => {
+          const bytes = await readableBuffer(Readable.from(readable));
+          objects.set(storageKey, bytes);
+          resolve({
+            storageKey,
+            byteLength: bytes.length,
+            sha256: createHash('sha256').update(bytes).digest('hex'),
+          });
+        },
+      });
+    }),
+    delete: async ({ storageKey }) => {
+      const deleted = objects.delete(storageKey);
+      return { deleted, notFound: !deleted };
+    },
+  };
+  const now = () => new Date('2026-08-25T02:45:00.000Z');
+  const cleanupService = createMediaCleanupService({ store, mediaStore, now, retryDelayMs: 1 });
+  t.after(() => cleanupService.stop());
+  let asrCalls = 0;
+  const service = createVoiceService({
+    config: loadConfig({
+      NODE_ENV: 'test', V1_SESSION_SECRET: 'l'.repeat(32),
+      V1_ASR_PROVIDER: 'azure', V1_TTS_PROVIDER: 'azure',
+      AZURE_SPEECH_KEY: 'fake-only', AZURE_SPEECH_REGION: 'eastasia',
+    }),
+    store,
+    mediaStore,
+    cleanupService,
+    asrProvider: { transcribe: async () => { asrCalls += 1; return { transcript: 'must not run' }; } },
+    ttsProvider: { synthesize: async () => ({ buffer: Buffer.from([0x49, 0x44, 0x33, 0x04]), mimeType: 'audio/mpeg' }) },
+    now,
+    mediaDeadlineMs: 10,
+  });
+  const audio = canonicalWav(10);
+  const operations = [
+    service.transcribe({
+      sessionId: owner.session.id,
+      clientUploadId: 'bcbcbcbc-0000-4000-8000-000000000000',
+      requestSha256: createHash('sha256').update(audio).digest('hex'),
+      mimeType: 'audio/wav',
+      readable: Readable.from([audio]),
+    }),
+    service.generateAssistantAudio({ sessionId: owner.session.id, messageId: assistant.id }),
+  ];
+  const promptFailures = Promise.all(operations.map((operation) => assert.rejects(operation, (error) => (
+    error.code === 'VOICE_MEDIA_UNAVAILABLE' && error.status === 503 && error.retryable === true
+  ))));
+  await Promise.race([
+    promptFailures,
+    new Promise((resolve, reject) => {
+      void resolve;
+      setTimeout(() => reject(new Error('media timeout held the service response')), 250).unref?.();
+    }),
+  ]);
+  assert.equal(asrCalls, 0);
+  assert.deepEqual(pendingWrites.map((entry) => entry.storageKey).sort(), Object.values(keys).sort());
+
+  await Promise.all(pendingWrites.map((entry) => entry.finish()));
+  const deadline = Date.now() + 500;
+  while (objects.size > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(objects.size, 0, 'late successful writes are durably rearmed and deleted');
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  const persisted = JSON.parse(await readFile(filePath, 'utf8'));
+  for (const storageKey of Object.values(keys)) {
+    const job = persisted.mediaDeletionJobs.find((entry) => entry.storageKey === storageKey);
+    assert.equal(job?.state, 'completed', storageKey);
+    assert.ok(job?.generation >= 2, storageKey);
+  }
+});
+
 test('voice HTTP transcription is owned, idempotent, editable, status-recoverable, and permanent failures do no ASR retry', async (t) => {
   let asrCalls = 0;
   const { baseUrl, origin, directory } = await startVoiceApp(t, {
@@ -1352,6 +1622,9 @@ test('voice draft and session deletion revoke ownership first and durably delete
     method: 'DELETE', headers: { Origin: origin, Cookie: cookie },
   });
   assert.equal(draftDeleted.response.status, 200);
+  const deletedRetry = await upload('dddddddd-0000-4000-8000-000000000000');
+  assert.equal(deletedRetry.response.status, 404);
+  assert.equal(deletedRetry.body.error.code, 'VOICE_DRAFT_DELETED');
   await assert.rejects(mediaStore.open({ storageKey: disposableAsset.storageKey }), { code: 'MEDIA_NOT_FOUND' });
 
   const retainedDraft = await upload('eeeeeeee-0000-4000-8000-000000000000');

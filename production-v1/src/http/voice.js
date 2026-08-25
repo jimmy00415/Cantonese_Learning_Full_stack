@@ -76,11 +76,13 @@ export function createVoiceRouter({
   eventHub,
   now = () => new Date(),
   voiceService,
+  spoolParentDirectory,
 } = {}) {
   const router = express.Router();
   const resolveSession = createSessionResolver({ store });
   const service = voiceService ?? createVoiceService({
     config, store, mediaStore, asrProvider, ttsProvider, cleanupService, eventHub, now,
+    spoolParentDirectory,
   });
 
   router.post('/voice/transcriptions', async (request, response) => {

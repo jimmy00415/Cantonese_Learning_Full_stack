@@ -67,6 +67,7 @@ export function createSessionRouter({ config, store, eventHub, dispatcher, clean
   const limits = config.rateLimits ?? { bootstrap: 20, message5m: 30, messageDaily: 300 };
 
   const sessionFromRequest = createSessionResolver({ store });
+  const currentCapabilities = () => config.getPublicStatus?.(now()) ?? config.publicStatus ?? {};
 
   router.post('/session', async (request, response) => {
     try {
@@ -78,7 +79,7 @@ export function createSessionRouter({ config, store, eventHub, dispatcher, clean
           const conversation = await store.getConversationForSession({ sessionId: resumed.id });
           if (!conversation) throw httpError(401, 'SESSION_NOT_FOUND');
           const messages = await store.listMessages({ sessionId: resumed.id, conversationId: conversation.id, after: 0 });
-          return response.json({ data: { session: { id: resumed.id }, clientSessionScope: resumed.clientScopeId, conversation, messages: messages.map(publicMessage), capabilities: config.publicStatus, knowledgeSnapshotDate: config.knowledgeSnapshotDate ?? null }, error: null, requestId: response.locals.requestId });
+          return response.json({ data: { session: { id: resumed.id }, clientSessionScope: resumed.clientScopeId, conversation, messages: messages.map(publicMessage), capabilities: currentCapabilities(), knowledgeSnapshotDate: config.knowledgeSnapshotDate ?? null }, error: null, requestId: response.locals.requestId });
         }
       }
       const bootstrap = await limiter.consume({ subject: request.ip, quota: 'session-bootstrap', limit: limits.bootstrap, durationMs: 10 * 60 * 1000 });
@@ -86,7 +87,7 @@ export function createSessionRouter({ config, store, eventHub, dispatcher, clean
       const token = randomBytes(32).toString('base64url');
       const sessionData = await store.createOrResumeSession({ tokenHash: tokenHash(token) });
       response.cookie(COOKIE_NAME, token, cookieOptions(config));
-      return response.status(201).json({ data: { session: { id: sessionData.session.id }, clientSessionScope: sessionData.session.clientScopeId, conversation: sessionData.conversation, messages: [], capabilities: config.publicStatus, knowledgeSnapshotDate: config.knowledgeSnapshotDate ?? null }, error: null, requestId: response.locals.requestId });
+      return response.status(201).json({ data: { session: { id: sessionData.session.id }, clientSessionScope: sessionData.session.clientScopeId, conversation: sessionData.conversation, messages: [], capabilities: currentCapabilities(), knowledgeSnapshotDate: config.knowledgeSnapshotDate ?? null }, error: null, requestId: response.locals.requestId });
     } catch (error) { return sendError(response, error); }
   });
 

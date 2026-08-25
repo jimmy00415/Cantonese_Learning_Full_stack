@@ -24,7 +24,8 @@ function normalizeError(error = {}) {
     VOICE_PROVIDER_INVALID_RESPONSE: 502, VOICE_TRANSCRIPTION_REJECTED: 502,
     VOICE_SYNTHESIS_REJECTED: 502, VOICE_TRANSCRIPTION_FAILED: 502,
     VOICE_SYNTHESIS_FAILED: 502, VOICE_PROVIDER_TIMEOUT: 504,
-    VOICE_MEDIA_UNAVAILABLE: 503, RANGE_NOT_SATISFIABLE: 416,
+    VOICE_MEDIA_UNAVAILABLE: 503, VOICE_DRAFT_DELETED: 404,
+    RANGE_NOT_SATISFIABLE: 416,
   };
   if (error.code in known) {
     const allowedStoredStatus = Number.isInteger(error.status) && [408, 413, 415, 422, 429, 502, 503, 504].includes(error.status)
@@ -61,6 +62,7 @@ function safeMessage(code) {
     VOICE_SYNTHESIS_FAILED: 'Generated voice is temporarily unavailable.',
     VOICE_PROVIDER_TIMEOUT: 'The voice provider timed out.',
     VOICE_MEDIA_UNAVAILABLE: 'Voice media storage is temporarily unavailable.',
+    VOICE_DRAFT_DELETED: 'The voice draft was deleted.',
     RANGE_NOT_SATISFIABLE: 'The requested byte range is not satisfiable.',
   };
   return messages[code] ?? 'The service could not process this request.';

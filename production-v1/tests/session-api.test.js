@@ -8,12 +8,16 @@ import { createApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
 import { AtomicFileStore } from '../src/stores/atomic-file-store.js';
 
-async function startApp(t, configOverrides = {}) {
+async function startApp(t, configOverrides = {}, {
+  now = () => new Date(),
+  configTransform = (value) => value,
+} = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'hb-v1-api-'));
   const store = new AtomicFileStore({ filePath: join(directory, 'store.json') });
   await store.init();
   const origin = 'https://v1.example.test';
-  const app = createApp({ config: loadConfig({ NODE_ENV: 'test', V1_PUBLIC_ORIGIN: origin, V1_SESSION_SECRET: 'x'.repeat(32), ...configOverrides }), store });
+  const baseConfig = loadConfig({ NODE_ENV: 'test', V1_PUBLIC_ORIGIN: origin, V1_SESSION_SECRET: 'x'.repeat(32), ...configOverrides });
+  const app = createApp({ config: configTransform(baseConfig), store, now });
   const server = app.listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
   t.after(async () => {
@@ -85,6 +89,45 @@ test('session api resumes an existing cookie without calling a mutating session 
   assert.equal(resumed.response.status, 200);
   assert.equal(createCalls, 0);
   assert.equal(resumed.body.data.session.id, created.body.data.session.id);
+});
+
+test('session api recomputes expiring voice and iOS capabilities for new and resumed sessions', async (t) => {
+  let clock = new Date('2026-08-25T00:00:00.000Z');
+  const capabilityAt = (base, at) => {
+    const current = new Date(at);
+    const valid = current < new Date('2026-08-25T00:01:00.000Z');
+    return {
+      ...base.publicStatus,
+      voiceInput: valid,
+      voiceOutput: valid,
+      asrEvidenceVersion: valid ? 'asr-current' : null,
+      ttsEvidenceVersion: valid ? 'tts-current' : null,
+      iosVoiceAcceptanceVersion: valid ? 'ios-current' : null,
+    };
+  };
+  const { baseUrl, origin } = await startApp(t, {}, {
+    now: () => new Date(clock),
+    configTransform: (base) => ({
+      ...base,
+      publicStatus: capabilityAt(base, new Date('2026-08-25T00:00:00.000Z')),
+      getPublicStatus: (at) => capabilityAt(base, at),
+    }),
+  });
+  const created = await json(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin } });
+  const cookie = created.response.headers.getSetCookie()[0].split(';')[0];
+  assert.equal(created.body.data.capabilities.voiceInput, true);
+  assert.equal(created.body.data.capabilities.iosVoiceAcceptanceVersion, 'ios-current');
+
+  clock = new Date('2026-08-25T00:01:00.001Z');
+  const resumed = await json(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin, Cookie: cookie } });
+  const newAfterExpiry = await json(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin } });
+  for (const response of [resumed, newAfterExpiry]) {
+    assert.equal(response.body.data.capabilities.voiceInput, false);
+    assert.equal(response.body.data.capabilities.voiceOutput, false);
+    assert.equal(response.body.data.capabilities.asrEvidenceVersion, null);
+    assert.equal(response.body.data.capabilities.ttsEvidenceVersion, null);
+    assert.equal(response.body.data.capabilities.iosVoiceAcceptanceVersion, null);
+  }
 });
 
 test('session api uses a 30-day secure production cookie without weakening production config validation', async (t) => {

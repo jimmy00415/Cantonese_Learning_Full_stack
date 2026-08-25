@@ -29,7 +29,7 @@ function parseAzurePayload(buffer) {
     throw speechError('VOICE_PROVIDER_INVALID_RESPONSE', 502, false, 'invalid_response');
   }
   if (payload.RecognitionStatus !== 'Success') {
-    if (NO_MATCH.has(payload.RecognitionStatus) || typeof payload.RecognitionStatus === 'string') {
+    if (NO_MATCH.has(payload.RecognitionStatus)) {
       throw speechError('VOICE_SPEECH_NOT_RECOGNIZED', 422, false, 'not_recognized');
     }
     throw speechError('VOICE_PROVIDER_INVALID_RESPONSE', 502, false, 'invalid_response');
