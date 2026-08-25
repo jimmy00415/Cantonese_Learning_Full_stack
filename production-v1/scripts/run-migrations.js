@@ -4,6 +4,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { Pool } from 'pg';
 
+import { assertSecurePostgresRuntimeUrl } from '../src/services/release-evidence.js';
+
 const MIGRATION_FILE = /^(\d{3})_[a-z0-9][a-z0-9_-]*\.sql$/;
 const ADVISORY_LOCK = 'hong-kong-buddy-production-v1-migrations';
 
@@ -63,8 +65,8 @@ export async function runMigrations({
   readDirectory,
   readFile: readMigration,
 } = {}) {
-  if (typeof databaseUrl !== 'string' || !databaseUrl.trim()) {
-    throw new Error('V1_DATABASE_URL is required for migrations');
+  try { assertSecurePostgresRuntimeUrl(databaseUrl); } catch {
+    throw new Error('V1_DATABASE_URL is invalid for secure migrations');
   }
   if (typeof poolFactory !== 'function') throw new Error('Migration pool factory is invalid');
   const migrations = await discoverMigrations({
@@ -75,6 +77,7 @@ export async function runMigrations({
   const expected = migrations.map(({ version }) => version);
   const pool = poolFactory({
     connectionString: databaseUrl,
+    options: '-c search_path=public',
     connectionTimeoutMillis: 30_000,
     query_timeout: 60_000,
     statement_timeout: 60_000,

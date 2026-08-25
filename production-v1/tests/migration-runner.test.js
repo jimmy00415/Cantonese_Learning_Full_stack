@@ -57,6 +57,7 @@ test('one-shot migration runner applies every missing migration and verifies the
     poolFactory(options) {
       assert.deepEqual(options, {
         connectionString: 'postgresql://private.example.test/v1?sslmode=require',
+        options: '-c search_path=public',
         connectionTimeoutMillis: 30_000,
         query_timeout: 60_000,
         statement_timeout: 60_000,
@@ -71,6 +72,36 @@ test('one-shot migration runner applies every missing migration and verifies the
   assert.deepEqual(result, { applied: [1], verified: [1] });
   assert.equal(calls.some((call) => /pg_advisory_unlock/.test(call.text ?? '')), true);
   assert.deepEqual(calls.slice(-2), [{ release: true }, { end: true }]);
+});
+
+test('migration runner rejects insecure or overridden URLs before discovery and pool construction', async () => {
+  for (const databaseUrl of [
+    'postgresql://private-user:private-password@v1-db.example.test/campus',
+    'postgresql://private-user:private-password@v1-db.example.test/campus?sslmode=disable',
+    'postgresql://private-user:private-password@v1-db.example.test/campus?sslmode=require&options=-c%20search_path%3Dlegacy',
+    'postgresql://private-user:private-password@v1-db.example.test/campus?sslmode=require&search_path=legacy',
+  ]) {
+    let discoveryCalls = 0;
+    let poolFactoryCalls = 0;
+    await assert.rejects(runMigrations({
+      databaseUrl,
+      readDirectory: async () => {
+        discoveryCalls += 1;
+        return ['001_initial.sql'];
+      },
+      readFile: async () => 'INSERT INTO schema_migrations (version) VALUES (1);',
+      poolFactory: () => {
+        poolFactoryCalls += 1;
+        throw new Error('pool must not be constructed');
+      },
+    }), (error) => {
+      assert.equal(error.message.includes('private-password'), false);
+      assert.match(error.message, /V1_DATABASE_URL|PostgreSQL|migration/i);
+      return true;
+    });
+    assert.equal(discoveryCalls, 0, databaseUrl);
+    assert.equal(poolFactoryCalls, 0, databaseUrl);
+  }
 });
 
 test('migration runner fails closed when the database version set is missing or ahead and still closes', async () => {
