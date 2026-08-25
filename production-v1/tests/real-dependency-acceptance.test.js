@@ -1,31 +1,55 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
+import { Readable, Writable } from 'node:stream';
 import test from 'node:test';
 
 import {
-  blobIdentitySha256,
   finalizeReleaseEvidenceRecord,
+  gcsIdentitySha256,
   postgresIdentitySha256,
   validateDependencyAcceptanceEvidence,
+  validateReleaseEvidenceBundle,
 } from '../src/services/release-evidence.js';
 import {
+  attestGcpExecutionIdentity,
   createRealAcceptanceRuntime,
   runRealDependencyAcceptance,
 } from '../scripts/real-dependencies-acceptance.js';
-import * as acceptanceCli from '../scripts/real-dependencies-acceptance.js';
 
-const NOW = new Date('2026-08-25T12:00:00.000Z');
+const NOW = new Date('2026-08-26T12:00:00.000Z');
 const COMMIT = '1'.repeat(40);
+const SOURCE_ARCHIVE_SHA256 = '2'.repeat(64);
 const RUN_ID = '123e4567-e89b-42d3-a456-426614174000';
 const SCHEMA = `v1_accept_${RUN_ID.replaceAll('-', '')}`;
-const BLOB_PREFIX = `v1-accept/${RUN_ID}/`;
+const GCS_PREFIX = `v1-accept/${RUN_ID}/`;
+const PROJECT_ID = 'hkbuddy-prod-v1-20260826';
+const BUCKET_NAME = 'hkbuddy-prod-v1-20260826-media';
+const GCS_RESOURCE_ID = `//storage.googleapis.com/projects/_/buckets/${BUCKET_NAME}`;
+const POSTGRES_RESOURCE_ID = `//sqladmin.googleapis.com/projects/${PROJECT_ID}/instances/hkbuddy-pg/databases/hkbuddy_v1`;
+const DATABASE_URL = 'postgresql://hkbuddy_app:private-password@10.25.0.3:5432/hkbuddy_v1?sslmode=require';
+const MIGRATOR_DATABASE_URL = 'postgresql://hkbuddy_migrator:private-migrator-password@10.25.0.3:5432/hkbuddy_v1?sslmode=require';
 const INVENTORY_FILE = resolve('approved-legacy-inventory.json');
-const CWD = resolve('..');
-const DATABASE_URL = 'postgresql://v1-user:private-password@v1-db.postgres.database.azure.com:5432/hkbu_buddy?sslmode=require';
-const BLOB_ACCOUNT_URL = 'https://v1buddyblob.blob.core.windows.net/';
-const BLOB_CONTAINER = 'private-v1-media';
-const POSTGRES_RESOURCE_ID = '/subscriptions/new-sub/resourceGroups/v1-rg/providers/Microsoft.DBforPostgreSQL/flexibleServers/v1-db';
-const BLOB_RESOURCE_ID = '/subscriptions/new-sub/resourceGroups/v1-rg/providers/Microsoft.Storage/storageAccounts/v1buddyblob';
+const RELEASE_MANIFEST_FILE = '/app/release-manifest.json';
+const OUTPUT_OBJECT = `release-evidence/${COMMIT}/dependency-acceptance/${RUN_ID}.json`;
+const ACCEPTANCE_SERVICE_ACCOUNT = `hkbuddy-acceptance@${PROJECT_ID}.iam.gserviceaccount.com`;
+
+const CORE_CHECKS = Object.freeze([
+  'postgres-migration-health',
+  'postgres-concurrency-recovery',
+  'postgres-integrity-events',
+  'postgres-rate-window-fencing',
+  'gcs-private-full-range-head',
+  'postgres-media-fencing',
+]);
+
+const REQUIRED_GCS_PERMISSIONS = Object.freeze([
+  'storage.objects.create',
+  'storage.objects.delete',
+  'storage.objects.get',
+  'storage.objects.list',
+  'storage.objects.update',
+]);
 
 function legacyInventory(overrides = {}) {
   return finalizeReleaseEvidenceRecord({
@@ -43,25 +67,351 @@ function legacyInventory(overrides = {}) {
   });
 }
 
+function releaseManifest(overrides = {}) {
+  return {
+    schemaVersion: 1,
+    releaseSha: COMMIT,
+    sourceArchiveSha256: SOURCE_ARCHIVE_SHA256,
+    sourcePath: 'git-archive:production-v1',
+    ...overrides,
+  };
+}
+
+function sha256(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
 function validEnvironment(inventory = legacyInventory()) {
   return {
     V1_ACCEPTANCE_CONFIRM_EPHEMERAL: 'true',
     V1_RELEASE_COMMIT_SHA: COMMIT,
+    V1_RELEASE_MANIFEST_FILE: RELEASE_MANIFEST_FILE,
+    V1_DEPENDENCY_ACCEPTANCE_OUTPUT_OBJECT: OUTPUT_OBJECT,
     V1_ACCEPTANCE_DATABASE_URL: DATABASE_URL,
-    V1_ACCEPTANCE_BLOB_ACCOUNT_URL: BLOB_ACCOUNT_URL,
-    V1_ACCEPTANCE_BLOB_CONTAINER: BLOB_CONTAINER,
+    V1_ACCEPTANCE_MIGRATOR_DATABASE_URL: MIGRATOR_DATABASE_URL,
     V1_ACCEPTANCE_SCHEMA: SCHEMA,
-    V1_ACCEPTANCE_BLOB_PREFIX: BLOB_PREFIX,
+    V1_ACCEPTANCE_GCS_PREFIX: GCS_PREFIX,
     V1_ACCEPTANCE_POSTGRES_RESOURCE_ID: POSTGRES_RESOURCE_ID,
-    V1_ACCEPTANCE_BLOB_RESOURCE_ID: BLOB_RESOURCE_ID,
+    V1_ACCEPTANCE_GOOGLE_CLOUD_PROJECT: PROJECT_ID,
+    V1_ACCEPTANCE_GCS_BUCKET: BUCKET_NAME,
+    V1_ACCEPTANCE_GCS_RESOURCE_ID: GCS_RESOURCE_ID,
     V1_DATABASE_URL: DATABASE_URL,
     V1_POSTGRES_RESOURCE_ID: POSTGRES_RESOURCE_ID,
-    V1_BLOB_ACCOUNT_URL: BLOB_ACCOUNT_URL,
-    V1_BLOB_CONTAINER: BLOB_CONTAINER,
-    V1_BLOB_RESOURCE_ID: BLOB_RESOURCE_ID,
+    V1_GOOGLE_CLOUD_PROJECT: PROJECT_ID,
+    V1_GCS_BUCKET: BUCKET_NAME,
+    V1_GCS_RESOURCE_ID: GCS_RESOURCE_ID,
     V1_LEGACY_RESOURCE_INVENTORY_FILE: INVENTORY_FILE,
     V1_LEGACY_RESOURCE_INVENTORY_VERSION: inventory.artifactSha256,
     V1_LEGACY_RESOURCE_INVENTORY_APPROVED: 'true',
+  };
+}
+
+function passChecks() {
+  return CORE_CHECKS.map((name, index) => ({ name, status: 'pass', latencyMs: index + 1 }));
+}
+
+function instrumentedRun(overrides = {}) {
+  const inventory = overrides.inventory ?? legacyInventory();
+  const manifest = overrides.manifest ?? releaseManifest();
+  const calls = [];
+  const output = [];
+  const artifacts = [];
+  const runtimeOverrides = overrides.runtime ?? {};
+  const runtime = {
+    async runChecks(...args) {
+      calls.push(['run']);
+      return runtimeOverrides.runChecks
+        ? runtimeOverrides.runChecks.call(runtime, ...args)
+        : passChecks();
+    },
+    async cleanupGcsPrefix(prefix, ...args) {
+      calls.push(['gcs-cleanup', prefix]);
+      return runtimeOverrides.cleanupGcsPrefix
+        ? runtimeOverrides.cleanupGcsPrefix.call(runtime, prefix, ...args)
+        : 0;
+    },
+    async dropSchema(schema, ...args) {
+      calls.push(['schema-cleanup', schema]);
+      return runtimeOverrides.dropSchema
+        ? runtimeOverrides.dropSchema.call(runtime, schema, ...args)
+        : true;
+    },
+    async close(...args) {
+      calls.push(['close']);
+      if (runtimeOverrides.close) return runtimeOverrides.close.call(runtime, ...args);
+      return undefined;
+    },
+    async writeEvidenceObject(input, ...args) {
+      calls.push(['evidence-write', input.objectName]);
+      artifacts.push(input);
+      if (runtimeOverrides.writeEvidenceObject) {
+        return runtimeOverrides.writeEvidenceObject.call(runtime, input, ...args);
+      }
+      return {
+        objectName: input.objectName,
+        generation: '42',
+        artifactSha256: input.artifactSha256,
+        objectSha256: input.objectSha256,
+      };
+    },
+  };
+  const options = {
+    argv: [`--release-sha=${COMMIT}`],
+    environment: validEnvironment(inventory),
+    now: () => NOW,
+    readTextFile: async (filePath) => {
+      calls.push(['read', filePath]);
+      if (filePath === RELEASE_MANIFEST_FILE) return JSON.stringify(manifest);
+      return JSON.stringify(inventory);
+    },
+    openDependencies: async (input) => {
+      calls.push(['open', input]);
+      return runtime;
+    },
+    writeOutput: (line) => output.push(line),
+    ...overrides,
+  };
+  delete options.inventory;
+  delete options.manifest;
+  delete options.runtime;
+  return { calls, output, artifacts, run: () => runRealDependencyAcceptance(options) };
+}
+
+function providerError(code, message = 'private provider detail') {
+  const error = new Error(message);
+  error.code = code;
+  error.statusCode = code;
+  return error;
+}
+
+function permissionMap(overrides = {}) {
+  return {
+    'storage.objects.create': true,
+    'storage.objects.delete': true,
+    'storage.objects.get': true,
+    'storage.objects.list': true,
+    'storage.objects.update': true,
+    'storage.buckets.delete': false,
+    'storage.buckets.getIamPolicy': false,
+    'storage.buckets.setIamPolicy': false,
+    'storage.buckets.update': false,
+    'storage.objects.getIamPolicy': false,
+    'storage.objects.setIamPolicy': false,
+    'storage.objects.overrideUnlockedRetention': false,
+    'storage.objects.setRetention': false,
+    ...overrides,
+  };
+}
+
+function createFakeBucket({
+  initialObjects = [],
+  permissions = permissionMap(),
+  publicStatus = 403,
+  hangList = false,
+  malformedListName = null,
+  malformedListPrefix = null,
+  malformedMetadata = null,
+} = {}) {
+  const objects = new Map(initialObjects.map(([name, bytes]) => [name, {
+    bytes: Buffer.from(bytes),
+    updated: NOW.toISOString(),
+    generation: '1',
+    contentType: 'application/octet-stream',
+  }]));
+  const calls = {
+    writes: [], reads: [], metadata: [], deletes: [], lists: [], permissions: [],
+    publicFetches: [], storageOptions: [], signedUrls: 0,
+  };
+  let generation = objects.size;
+
+  const bucket = {
+    name: BUCKET_NAME,
+    iam: {
+      async testPermissions(requested) {
+        calls.permissions.push([...requested]);
+        return [{ ...permissions }, { permissions: Object.entries(permissions)
+          .filter(([, allowed]) => allowed).map(([name]) => name) }];
+      },
+    },
+    file(name) {
+      return {
+        name,
+        getSignedUrl() {
+          calls.signedUrls += 1;
+          throw new Error('signed URLs are forbidden');
+        },
+        createWriteStream(options = {}) {
+          const chunks = [];
+          calls.writes.push({ name, options, chunks });
+          return new Writable({
+            write(chunk, _encoding, callback) {
+              chunks.push(Buffer.from(chunk));
+              callback();
+            },
+            final(callback) {
+              if (options?.preconditionOpts?.ifGenerationMatch === 0 && objects.has(name)) {
+                callback(providerError(412));
+                return;
+              }
+              generation += 1;
+              objects.set(name, {
+                bytes: Buffer.concat(chunks),
+                updated: NOW.toISOString(),
+                generation: String(generation),
+                contentType: options?.metadata?.contentType ?? 'application/octet-stream',
+              });
+              callback();
+            },
+          });
+        },
+        async getMetadata(options) {
+          calls.metadata.push({ name, options });
+          const object = objects.get(name);
+          if (!object) throw providerError(404);
+          if (malformedMetadata) return [malformedMetadata];
+          return [{
+            name,
+            size: String(object.bytes.length),
+            updated: object.updated,
+            generation: object.generation,
+            contentType: object.contentType,
+          }];
+        },
+        createReadStream(options = {}) {
+          calls.reads.push({ name, options });
+          const object = objects.get(name);
+          if (!object) return Readable.from((async function* missing() { throw providerError(404); }()));
+          const start = options.start ?? 0;
+          const end = options.end ?? (object.bytes.length - 1);
+          return Readable.from([object.bytes.subarray(start, end + 1)]);
+        },
+        async delete(options) {
+          calls.deletes.push({ name, options });
+          if (!objects.delete(name)) throw providerError(404);
+          return [{}];
+        },
+      };
+    },
+    getFiles(options) {
+      calls.lists.push({ ...options });
+      if (hangList) return new Promise(() => {});
+      const matches = [...objects.entries()]
+        .filter(([name]) => name.startsWith(options.prefix))
+        .sort(([left], [right]) => left.localeCompare(right));
+      const offset = options.pageToken ? Number(options.pageToken.slice('page-'.length)) : 0;
+      const selected = matches.slice(offset, offset + options.maxResults).map(([name, object]) => ({
+        name,
+        metadata: {
+          name,
+          size: String(object.bytes.length),
+          updated: object.updated,
+          generation: object.generation,
+        },
+      }));
+      if (malformedListName && options.prefix === malformedListPrefix && selected.length > 0) {
+        selected[0].name = malformedListName;
+      }
+      const nextOffset = offset + selected.length;
+      const nextQuery = nextOffset < matches.length ? { pageToken: `page-${nextOffset}` } : null;
+      return Promise.resolve([selected, nextQuery, { nextPageToken: nextQuery?.pageToken }]);
+    },
+  };
+
+  const fetchImpl = async (url, options = {}) => {
+    calls.publicFetches.push({ url, options });
+    return new Response(publicStatus === 200 ? 'private-object-content' : 'not public', {
+      status: publicStatus,
+    });
+  };
+
+  class StorageClass {
+    constructor(options) {
+      calls.storageOptions.push(options);
+    }
+
+    bucket(name) {
+      assert.equal(name, BUCKET_NAME);
+      return bucket;
+    }
+  }
+
+  return { bucket, calls, fetchImpl, objects, StorageClass };
+}
+
+function createFakePoolClass({ schemaInitiallyExists = false, serverVersion = '160004' } = {}) {
+  const state = { schemaExists: schemaInitiallyExists, ended: [], options: [], sql: [] };
+  let poolIndex = 0;
+  class PoolClass {
+    constructor(options) {
+      this.index = poolIndex;
+      poolIndex += 1;
+      this.user = new URL(options.connectionString).username;
+      state.options.push(options);
+    }
+
+    async query(text, values) {
+      state.sql.push([this.index, text, values]);
+      if (/SHOW server_version_num/i.test(text)) {
+        return { rows: [{ server_version_num: serverVersion }], rowCount: 1 };
+      }
+      if (/current_user AS current_user/i.test(text)) {
+        return {
+          rows: [{
+            current_user: this.user,
+            can_create_schema: this.user === 'hkbuddy_migrator',
+            can_create_database: this.user === 'hkbuddy_migrator',
+          }],
+          rowCount: 1,
+        };
+      }
+      if (/pg_namespace/i.test(text)) {
+        return { rows: [{ count: state.schemaExists ? 1 : 0 }], rowCount: 1 };
+      }
+      if (/CREATE SCHEMA/i.test(text)) state.schemaExists = true;
+      if (/DROP SCHEMA/i.test(text)) state.schemaExists = false;
+      return { rows: [], rowCount: 0 };
+    }
+
+    async connect() {
+      return { query: async () => ({ rows: [], rowCount: 0 }), release() {} };
+    }
+
+    async end() {
+      state.ended.push(this.index);
+    }
+  }
+  return { PoolClass, state };
+}
+
+function realRuntimeOptions({
+  provider = createFakeBucket(),
+  postgres = createFakePoolClass(),
+  exerciseChecks = async () => [{ name: 'injected-contract', status: 'pass', latencyMs: 1 }],
+  operationDeadlineMs = 30_000,
+  attestExecutionIdentity = async () => ACCEPTANCE_SERVICE_ACCOUNT,
+} = {}) {
+  return {
+    provider,
+    postgres,
+    options: {
+      databaseUrl: DATABASE_URL,
+      migratorDatabaseUrl: MIGRATOR_DATABASE_URL,
+      projectId: PROJECT_ID,
+      bucketName: BUCKET_NAME,
+      releaseSha: COMMIT,
+      evidenceOutputObject: OUTPUT_OBJECT,
+      gcsPrefix: GCS_PREFIX,
+      schema: SCHEMA,
+      runId: RUN_ID,
+      occurredAt: NOW.toISOString(),
+      PoolClass: postgres.PoolClass,
+      StorageClass: provider.StorageClass,
+      fetchImpl: provider.fetchImpl,
+      operationDeadlineMs,
+      attestExecutionIdentity,
+      readMigration: async () => 'BEGIN; COMMIT;',
+      exerciseChecks,
+    },
   };
 }
 
@@ -81,1388 +431,614 @@ function observeSettlement(promise) {
   return observation;
 }
 
-function instrumentedRun(overrides = {}) {
-  const inventory = overrides.inventory ?? legacyInventory();
-  const calls = [];
-  const output = [];
-  const artifacts = [];
-  const runtimeOverrides = overrides.runtime ?? {};
-  const runtime = {
-    async runChecks(...args) {
-      calls.push(['run']);
-      if (runtimeOverrides.runChecks) return runtimeOverrides.runChecks.call(runtime, ...args);
-      return [
-        { name: 'postgres-migration-health', status: 'pass', latencyMs: 1 },
-        { name: 'postgres-concurrency-recovery', status: 'pass', latencyMs: 2 },
-        { name: 'postgres-integrity-events', status: 'pass', latencyMs: 3 },
-        { name: 'postgres-rate-window-fencing', status: 'pass', latencyMs: 4 },
-        { name: 'blob-private-full-range-head', status: 'pass', latencyMs: 5 },
-        { name: 'postgres-media-fencing', status: 'pass', latencyMs: 6 },
-      ];
-    },
-    async cleanupBlobPrefix(prefix, ...args) {
-      calls.push(['blob-cleanup', prefix]);
-      if (runtimeOverrides.cleanupBlobPrefix) {
-        return runtimeOverrides.cleanupBlobPrefix.call(runtime, prefix, ...args);
-      }
-      return 0;
-    },
-    async dropSchema(schema, ...args) {
-      calls.push(['schema-cleanup', schema]);
-      if (runtimeOverrides.dropSchema) return runtimeOverrides.dropSchema.call(runtime, schema, ...args);
-      return true;
-    },
-    async close(...args) {
-      calls.push(['close']);
-      if (runtimeOverrides.close) return runtimeOverrides.close.call(runtime, ...args);
-    },
-  };
-  const options = {
-    argv: [],
-    environment: validEnvironment(inventory),
-    cwd: CWD,
-    now: () => NOW,
-    readTextFile: async (filePath) => {
-      calls.push(['read', filePath]);
-      return JSON.stringify(inventory);
-    },
-    inspectGit: async (cwd) => {
-      calls.push(['git', cwd]);
-      return { head: COMMIT, clean: true };
-    },
-    openDependencies: async (input) => {
-      calls.push(['open', input]);
-      return runtime;
-    },
-    writeArtifact: async (input) => {
-      calls.push(['write', input.filePath]);
-      artifacts.push(input);
-    },
-    writeOutput: (line) => output.push(line),
-    ...overrides,
-  };
-  delete options.inventory;
-  delete options.runtime;
-  return {
-    calls,
-    output,
-    artifacts,
-    run: () => runRealDependencyAcceptance(options),
-  };
-}
-
-test('command is inert without the exact ephemeral confirmation and no command arguments', async (t) => {
+test('command is inert unless the exact ephemeral contract and frozen SHA are supplied', async (t) => {
   const cases = [
-    ['missing confirmation', { V1_ACCEPTANCE_CONFIRM_EPHEMERAL: undefined }, []],
-    ['false confirmation', { V1_ACCEPTANCE_CONFIRM_EPHEMERAL: 'false' }, []],
-    ['case-varied confirmation', { V1_ACCEPTANCE_CONFIRM_EPHEMERAL: 'TRUE' }, []],
-    ['unexpected argument', {}, ['--force']],
+    ['missing confirmation', { V1_ACCEPTANCE_CONFIRM_EPHEMERAL: undefined }, 'EPHEMERAL_CONFIRMATION_REQUIRED'],
+    ['case-varied confirmation', { V1_ACCEPTANCE_CONFIRM_EPHEMERAL: 'TRUE' }, 'EPHEMERAL_CONFIRMATION_REQUIRED'],
+    ['malformed commit', { V1_RELEASE_COMMIT_SHA: 'A'.repeat(40) }, 'RELEASE_COMMIT_INVALID'],
   ];
-
-  for (const [name, environmentPatch, argv] of cases) {
-    await t.test(name, async () => {
-      const environment = { ...validEnvironment(), ...environmentPatch };
-      const fixture = instrumentedRun({ environment, argv });
-      const result = await fixture.run();
-
-      assert.equal(result.exitCode, 2);
-      assert.equal(result.publicReport.status, 'not-run');
-      assert.deepEqual(fixture.calls, []);
-      assert.equal(fixture.artifacts.length, 0);
-    });
-  }
-});
-
-test('missing or malformed frozen commit fails before evidence, git, or dependency access', async (t) => {
-  for (const commit of [undefined, '', 'A'.repeat(40), '1'.repeat(39), 'release-v1']) {
-    await t.test(String(commit), async () => {
-      const fixture = instrumentedRun({
-        environment: { ...validEnvironment(), V1_RELEASE_COMMIT_SHA: commit },
-      });
-      const result = await fixture.run();
-
-      assert.equal(result.exitCode, 2);
-      assert.equal(result.publicReport.code, 'RELEASE_COMMIT_INVALID');
-      assert.deepEqual(fixture.calls, []);
-    });
-  }
-});
-
-test('all isolated and intended V1 settings are mandatory and malformed input never opens dependencies', async (t) => {
-  const cases = [
-    ['acceptance database', 'V1_ACCEPTANCE_DATABASE_URL', undefined],
-    ['acceptance blob auth', 'V1_ACCEPTANCE_BLOB_ACCOUNT_URL', undefined],
-    ['acceptance container', 'V1_ACCEPTANCE_BLOB_CONTAINER', undefined],
-    ['acceptance postgres resource', 'V1_ACCEPTANCE_POSTGRES_RESOURCE_ID', undefined],
-    ['acceptance blob resource', 'V1_ACCEPTANCE_BLOB_RESOURCE_ID', undefined],
-    ['intended database', 'V1_DATABASE_URL', undefined],
-    ['intended postgres resource', 'V1_POSTGRES_RESOURCE_ID', undefined],
-    ['intended blob auth', 'V1_BLOB_ACCOUNT_URL', undefined],
-    ['intended container', 'V1_BLOB_CONTAINER', undefined],
-    ['intended blob resource', 'V1_BLOB_RESOURCE_ID', undefined],
-    ['inventory file', 'V1_LEGACY_RESOURCE_INVENTORY_FILE', 'relative.json'],
-    ['inventory digest', 'V1_LEGACY_RESOURCE_INVENTORY_VERSION', 'A'.repeat(64)],
-    ['inventory approval', 'V1_LEGACY_RESOURCE_INVENTORY_APPROVED', 'false'],
-  ];
-
-  for (const [name, key, value] of cases) {
-    await t.test(name, async () => {
-      const fixture = instrumentedRun({ environment: { ...validEnvironment(), [key]: value } });
-      const result = await fixture.run();
-
-      assert.equal(result.exitCode, 2);
-      assert.equal(result.publicReport.status, 'not-run');
-      assert.equal(fixture.calls.some(([kind]) => kind === 'open'), false);
-      assert.equal(fixture.artifacts.length, 0);
-    });
-  }
-});
-
-test('acceptance and production identities must be exact matches on the intended physical resources', async (t) => {
-  const cases = [
-    ['database URL differs', { V1_ACCEPTANCE_DATABASE_URL: DATABASE_URL.replace('v1-user', 'other-user') }],
-    ['postgres resource differs', { V1_ACCEPTANCE_POSTGRES_RESOURCE_ID: `${POSTGRES_RESOURCE_ID}-other` }],
-    ['blob host differs', { V1_ACCEPTANCE_BLOB_ACCOUNT_URL: 'https://otherblob.blob.core.windows.net/' }],
-    ['blob container differs', { V1_ACCEPTANCE_BLOB_CONTAINER: 'other-private-media' }],
-    ['blob resource differs', { V1_ACCEPTANCE_BLOB_RESOURCE_ID: `${BLOB_RESOURCE_ID}other` }],
-    ['ambiguous acceptance blob auth', { V1_ACCEPTANCE_BLOB_CONNECTION_STRING: 'DefaultEndpointsProtocol=https;AccountName=v1buddyblob;EndpointSuffix=core.windows.net' }],
-    ['ambiguous intended blob auth', { V1_BLOB_CONNECTION_STRING: 'DefaultEndpointsProtocol=https;AccountName=v1buddyblob;EndpointSuffix=core.windows.net' }],
-    ['empty extra acceptance blob auth', { V1_ACCEPTANCE_BLOB_CONNECTION_STRING: '' }],
-    ['empty extra intended blob auth', { V1_BLOB_CONNECTION_STRING: '' }],
-  ];
-
-  for (const [name, patch] of cases) {
+  for (const [name, patch, code] of cases) {
     await t.test(name, async () => {
       const fixture = instrumentedRun({ environment: { ...validEnvironment(), ...patch } });
       const result = await fixture.run();
-
       assert.equal(result.exitCode, 2);
-      assert.equal(result.publicReport.code, 'RESOURCE_IDENTITY_MISMATCH');
-      assert.equal(fixture.calls.some(([kind]) => kind === 'open'), false);
-    });
-  }
-});
-
-test('PostgreSQL URL overrides fail before evidence, git, or dependency construction', async (t) => {
-  const hostOverride = `${DATABASE_URL}&host=legacy-db.example.test&port=6543`;
-  const optionsOverride = `${DATABASE_URL}&options=-c%20search_path%3Dpublic`;
-  const missingTlsMode = DATABASE_URL.replace('?sslmode=require', '');
-  const cases = [
-    ['V1 database override', {
-      V1_DATABASE_URL: hostOverride,
-      V1_ACCEPTANCE_DATABASE_URL: hostOverride,
-    }],
-    ['acceptance search_path override', {
-      V1_ACCEPTANCE_DATABASE_URL: optionsOverride,
-      V1_DATABASE_URL: optionsOverride,
-    }],
-    ['intended-only override', { V1_DATABASE_URL: hostOverride }],
-    ['acceptance-only override', { V1_ACCEPTANCE_DATABASE_URL: optionsOverride }],
-    ['both production URLs omit sslmode', {
-      V1_DATABASE_URL: missingTlsMode,
-      V1_ACCEPTANCE_DATABASE_URL: missingTlsMode,
-    }],
-    ['intended production URL omits sslmode', { V1_DATABASE_URL: missingTlsMode }],
-    ['acceptance URL omits sslmode', { V1_ACCEPTANCE_DATABASE_URL: missingTlsMode }],
-    ['legacy compatibility override', {
-      DATABASE_URL: 'postgresql://legacy-user@legacy-db.example.test/legacy?host=v1-db.postgres.database.azure.com&port=5432&dbname=hkbu_buddy',
-    }],
-  ];
-
-  for (const [name, patch] of cases) {
-    await t.test(name, async () => {
-      const fixture = instrumentedRun({ environment: { ...validEnvironment(), ...patch } });
-      const result = await fixture.run();
-
-      assert.equal(result.exitCode, 2);
-      assert.equal(result.publicReport.status, 'not-run');
+      assert.equal(result.publicReport.code, code);
       assert.deepEqual(fixture.calls, []);
       assert.equal(fixture.artifacts.length, 0);
     });
   }
+
+  for (const argv of [[], ['--force'], [`--release-sha=${COMMIT}`, '--extra']]) {
+    const unexpectedArg = instrumentedRun({ argv });
+    assert.equal((await unexpectedArg.run()).publicReport.code, 'EXACT_INVOCATION_REQUIRED');
+    assert.deepEqual(unexpectedArg.calls, []);
+  }
 });
 
-test('real runtime rejects PostgreSQL URL options or missing TLS mode before constructing dependencies', async () => {
-  class ForbiddenPool {
-    constructor() {
-      throw new Error('pool must not be constructed');
-    }
+test('immutable image manifest and release-scoped GCS evidence output are mandatory', async (t) => {
+  const configurationCases = [
+    [{ V1_RELEASE_MANIFEST_FILE: undefined }, 'RELEASE_MANIFEST_INVALID'],
+    [{ V1_RELEASE_MANIFEST_FILE: '/tmp/copied-manifest.json' }, 'RELEASE_MANIFEST_INVALID'],
+    [{ V1_DEPENDENCY_ACCEPTANCE_OUTPUT_OBJECT: undefined }, 'EVIDENCE_OUTPUT_INVALID'],
+    [{ V1_DEPENDENCY_ACCEPTANCE_OUTPUT_OBJECT: `release-evidence/${'2'.repeat(40)}/dependency-acceptance/${RUN_ID}.json` }, 'EVIDENCE_OUTPUT_INVALID'],
+    [{ V1_DEPENDENCY_ACCEPTANCE_OUTPUT_OBJECT: `release-evidence/${COMMIT}/dependency-acceptance/123e4567-e89b-42d3-a456-426614174001.json` }, 'EVIDENCE_OUTPUT_INVALID'],
+    [{ V1_DEPENDENCY_ACCEPTANCE_OUTPUT_OBJECT: OUTPUT_OBJECT.toUpperCase() }, 'EVIDENCE_OUTPUT_INVALID'],
+  ];
+  for (const [patch, code] of configurationCases) {
+    await t.test(code, async () => {
+      const fixture = instrumentedRun({ environment: { ...validEnvironment(), ...patch } });
+      const result = await fixture.run();
+      assert.equal(result.exitCode, 2);
+      assert.equal(result.publicReport.code, code);
+      assert.deepEqual(fixture.calls, []);
+    });
   }
-  class ForbiddenBlobServiceClient {
-    constructor() {
-      throw new Error('Blob client must not be constructed');
-    }
-  }
-  class FakeCredential {}
 
-  for (const databaseUrl of [
-    `${DATABASE_URL}&options=-c%20search_path%3Dpublic`,
-    DATABASE_URL.replace('?sslmode=require', ''),
+  for (const manifest of [
+    releaseManifest({ releaseSha: '2'.repeat(40) }),
+    releaseManifest({ sourceArchiveSha256: 'A'.repeat(64) }),
+    releaseManifest({ sourcePath: 'working-tree' }),
+    { ...releaseManifest(), extra: true },
   ]) {
-    let poolConstructions = 0;
-    let blobConstructions = 0;
-    class CountingForbiddenPool extends ForbiddenPool {
-      constructor(options) {
-        poolConstructions += 1;
-        super(options);
-      }
-    }
-    class CountingForbiddenBlobServiceClient extends ForbiddenBlobServiceClient {
-      constructor(...args) {
-        blobConstructions += 1;
-        super(...args);
-      }
-    }
-
-    await assert.rejects(createRealAcceptanceRuntime({
-      databaseUrl,
-      blob: { accountUrl: BLOB_ACCOUNT_URL },
-      blobContainer: BLOB_CONTAINER,
-      blobPrefix: BLOB_PREFIX,
-      schema: SCHEMA,
-      runId: RUN_ID,
-      occurredAt: NOW.toISOString(),
-      PoolClass: CountingForbiddenPool,
-      BlobServiceClientClass: CountingForbiddenBlobServiceClient,
-      DefaultAzureCredentialClass: FakeCredential,
-    }), /configuration is invalid/i);
-    assert.equal(poolConstructions, 0, databaseUrl);
-    assert.equal(blobConstructions, 0, databaseUrl);
-  }
-});
-
-test('resource IDs must identify the exact PostgreSQL and Storage Azure resource types', async (t) => {
-  const cases = [
-    ['storage account cannot stand in for PostgreSQL', {
-      V1_ACCEPTANCE_POSTGRES_RESOURCE_ID: BLOB_RESOURCE_ID,
-      V1_POSTGRES_RESOURCE_ID: BLOB_RESOURCE_ID,
-    }],
-    ['PostgreSQL server cannot stand in for Blob Storage', {
-      V1_ACCEPTANCE_BLOB_RESOURCE_ID: POSTGRES_RESOURCE_ID,
-      V1_BLOB_RESOURCE_ID: POSTGRES_RESOURCE_ID,
-    }],
-  ];
-
-  for (const [name, patch] of cases) {
-    await t.test(name, async () => {
-      const fixture = instrumentedRun({ environment: { ...validEnvironment(), ...patch } });
+    await t.test(JSON.stringify(manifest).slice(0, 40), async () => {
+      const fixture = instrumentedRun({ manifest });
       const result = await fixture.run();
-
       assert.equal(result.exitCode, 2);
-      assert.equal(result.publicReport.code, 'CONFIGURATION_INVALID');
-      assert.equal(fixture.calls.some(([kind]) => kind === 'open'), false);
+      assert.equal(result.publicReport.code, 'RELEASE_MANIFEST_INVALID');
+      assert.deepEqual(fixture.calls, [['read', RELEASE_MANIFEST_FILE]]);
+      assert.equal(fixture.artifacts.length, 0);
     });
   }
 });
 
-test('schema and Blob prefix require the same isolated UUIDv4 run identity', async (t) => {
+test('GCP identities, attached ADC, and matching UUID scopes are mandatory before any dependency opens', async (t) => {
   const cases = [
-    ['schema has uppercase', { V1_ACCEPTANCE_SCHEMA: SCHEMA.toUpperCase() }],
-    ['schema is not isolated', { V1_ACCEPTANCE_SCHEMA: 'public' }],
-    ['prefix is broad', { V1_ACCEPTANCE_BLOB_PREFIX: 'v1-accept/' }],
-    ['prefix uses non-v4 UUID', { V1_ACCEPTANCE_BLOB_PREFIX: 'v1-accept/123e4567-e89b-12d3-a456-426614174000/' }],
-    ['run identities differ', { V1_ACCEPTANCE_BLOB_PREFIX: 'v1-accept/123e4567-e89b-42d3-a456-426614174001/' }],
+    ['wrong acceptance project', { V1_ACCEPTANCE_GOOGLE_CLOUD_PROJECT: 'other-project-12345' }],
+    ['wrong production project', { V1_GOOGLE_CLOUD_PROJECT: 'other-project-12345' }],
+    ['wrong bucket', { V1_ACCEPTANCE_GCS_BUCKET: 'other-private-bucket' }],
+    ['wrong GCS resource', { V1_GCS_RESOURCE_ID: `gs://${BUCKET_NAME}` }],
+    ['wrong database resource', { V1_ACCEPTANCE_POSTGRES_RESOURCE_ID: `${POSTGRES_RESOURCE_ID}-other` }],
+    ['different database URL', { V1_ACCEPTANCE_DATABASE_URL: DATABASE_URL.replace('hkbuddy_app', 'other_user') }],
+    ['same app and migrator identity', { V1_ACCEPTANCE_MIGRATOR_DATABASE_URL: DATABASE_URL }],
+    ['wrong migrator identity', { V1_ACCEPTANCE_MIGRATOR_DATABASE_URL: MIGRATOR_DATABASE_URL.replace('hkbuddy_migrator', 'postgres') }],
+    ['wrong migrator resource', { V1_ACCEPTANCE_MIGRATOR_DATABASE_URL: MIGRATOR_DATABASE_URL.replace('10.25.0.3', '10.25.0.4') }],
+    ['broad prefix', { V1_ACCEPTANCE_GCS_PREFIX: 'v1-accept/' }],
+    ['different UUID', { V1_ACCEPTANCE_GCS_PREFIX: 'v1-accept/123e4567-e89b-42d3-a456-426614174001/' }],
+    ['key file ADC', { GOOGLE_APPLICATION_CREDENTIALS: 'C:\\private\\service-account.json' }],
+    ['credential JSON', { V1_ACCEPTANCE_GCS_CREDENTIALS_JSON: '{"private_key":"secret"}' }],
+    ['API key', { GOOGLE_API_KEY: 'private-api-key' }],
   ];
-
   for (const [name, patch] of cases) {
     await t.test(name, async () => {
       const fixture = instrumentedRun({ environment: { ...validEnvironment(), ...patch } });
       const result = await fixture.run();
-
       assert.equal(result.exitCode, 2);
-      assert.equal(result.publicReport.code, 'ISOLATION_SCOPE_INVALID');
+      assert.equal(result.publicReport.status, 'not-run');
       assert.equal(fixture.calls.some(([kind]) => kind === 'open'), false);
+      assert.equal(fixture.artifacts.length, 0);
     });
   }
 });
 
-test('invalid, stale, unbound, or colliding owner inventory fails before git and dependency access', async (t) => {
+test('Azure-only or mixed Azure acceptance configuration fails closed instead of selecting legacy storage', async () => {
+  const azure = {
+    V1_ACCEPTANCE_BLOB_ACCOUNT_URL: 'https://legacy.blob.core.windows.net/',
+    V1_ACCEPTANCE_BLOB_CONTAINER: 'legacy-media',
+    V1_BLOB_ACCOUNT_URL: 'https://legacy.blob.core.windows.net/',
+    V1_BLOB_CONTAINER: 'legacy-media',
+  };
+  for (const environment of [
+    {
+      ...validEnvironment(),
+      V1_ACCEPTANCE_GOOGLE_CLOUD_PROJECT: undefined,
+      V1_ACCEPTANCE_GCS_BUCKET: undefined,
+      V1_ACCEPTANCE_GCS_RESOURCE_ID: undefined,
+      ...azure,
+    },
+    { ...validEnvironment(), ...azure },
+  ]) {
+    const fixture = instrumentedRun({ environment });
+    const result = await fixture.run();
+    assert.equal(result.exitCode, 2);
+    assert.equal(result.publicReport.code, 'ACCIDENTAL_AZURE_CONFIGURATION');
+    assert.deepEqual(fixture.calls, []);
+  }
+});
+
+test('approved legacy inventory remains the read-only collision boundary for Cloud SQL and GCS', async (t) => {
   const postgresIdentity = postgresIdentitySha256(DATABASE_URL);
-  const blobIdentity = blobIdentitySha256({ accountUrl: BLOB_ACCOUNT_URL, container: BLOB_CONTAINER });
+  const gcsIdentity = gcsIdentitySha256({ projectId: PROJECT_ID, bucket: BUCKET_NAME });
   const cases = [
-    ['malformed JSON', legacyInventory(), '{'],
-    ['wrong commit', legacyInventory({ commitSha: '2'.repeat(40) })],
-    ['stale review', legacyInventory({ reviewedAt: '2026-08-01T00:00:00.000Z' })],
-    ['postgres id collision', legacyInventory({
+    legacyInventory({
       postgresResources: [{ resourceId: POSTGRES_RESOURCE_ID, identitySha256: 'a'.repeat(64) }],
       declaresNoLegacyPostgres: false,
-    })],
-    ['postgres id case-variant collision with different identity', legacyInventory({
-      postgresResources: [{
-        resourceId: POSTGRES_RESOURCE_ID.toUpperCase(),
-        identitySha256: 'c'.repeat(64),
-      }],
+    }),
+    legacyInventory({
+      postgresResources: [{ resourceId: 'legacy-postgres', identitySha256: postgresIdentity }],
       declaresNoLegacyPostgres: false,
-    })],
-    ['postgres identity collision', legacyInventory({
-      postgresResources: [{ resourceId: `${POSTGRES_RESOURCE_ID}-legacy`, identitySha256: postgresIdentity }],
-      declaresNoLegacyPostgres: false,
-    })],
-    ['blob id collision', legacyInventory({
-      blobResources: [{ resourceId: BLOB_RESOURCE_ID, identitySha256: 'b'.repeat(64) }],
+    }),
+    legacyInventory({
+      blobResources: [{ resourceId: GCS_RESOURCE_ID, identitySha256: 'b'.repeat(64) }],
       declaresNoLegacyBlob: false,
-    })],
-    ['blob id case-variant collision with different identity', legacyInventory({
-      blobResources: [{
-        resourceId: BLOB_RESOURCE_ID.toUpperCase(),
-        identitySha256: 'd'.repeat(64),
-      }],
+    }),
+    legacyInventory({
+      blobResources: [{ resourceId: 'legacy-object-store', identitySha256: gcsIdentity }],
       declaresNoLegacyBlob: false,
-    })],
-    ['blob identity collision', legacyInventory({
-      blobResources: [{ resourceId: `${BLOB_RESOURCE_ID}legacy`, identitySha256: blobIdentity }],
-      declaresNoLegacyBlob: false,
-    })],
+    }),
   ];
-
-  for (const [name, inventory, raw] of cases) {
-    await t.test(name, async () => {
-      const fixture = instrumentedRun({
-        inventory,
-        environment: validEnvironment(inventory),
-        readTextFile: async (filePath) => {
-          fixture.calls.push(['read', filePath]);
-          return raw ?? JSON.stringify(inventory);
-        },
-      });
+  for (const inventory of cases) {
+    await t.test(inventory.artifactSha256.slice(0, 8), async () => {
+      const fixture = instrumentedRun({ inventory, environment: validEnvironment(inventory) });
       const result = await fixture.run();
-
-      assert.equal(result.exitCode, 2);
-      assert.equal(result.publicReport.status, 'not-run');
-      assert.deepEqual(fixture.calls.map(([kind]) => kind), ['read']);
+      assert.equal(result.publicReport.code, 'LEGACY_INVENTORY_INVALID');
+      assert.equal(fixture.calls.some(([kind]) => ['git', 'open'].includes(kind)), false);
     });
   }
 });
 
-test('legacy compatibility values are only defense-in-depth and matching or ambiguous values fail closed', async (t) => {
-  const cases = [
-    ['same legacy database', { DATABASE_URL }],
-    ['malformed legacy database', { DATABASE_URL: 'private-not-a-url' }],
-    ['same legacy blob', { AZURE_BLOB_ACCOUNT_URL: BLOB_ACCOUNT_URL, AZURE_BLOB_CONTAINER: BLOB_CONTAINER }],
-    ['partial legacy blob', { AZURE_BLOB_CONTAINER: BLOB_CONTAINER }],
-    ['empty extra legacy auth', {
-      AZURE_STORAGE_CONNECTION_STRING: '',
-      AZURE_BLOB_ACCOUNT_URL: 'https://legacy.blob.core.windows.net/',
-      AZURE_BLOB_CONTAINER: 'legacy-media',
-    }],
-    ['ambiguous legacy blob container', {
-      AZURE_BLOB_ACCOUNT_URL: 'https://legacy.blob.core.windows.net/',
-      AZURE_BLOB_CONTAINER: 'legacy-one',
-      AZURE_STORAGE_CONTAINER: 'legacy-two',
-    }],
-  ];
-
-  for (const [name, patch] of cases) {
-    await t.test(name, async () => {
-      const fixture = instrumentedRun({ environment: { ...validEnvironment(), ...patch } });
+test('explicit image release SHA must exactly equal the immutable configured release SHA', async (t) => {
+  for (const argv of [
+    [`--release-sha=${'2'.repeat(40)}`],
+    [`--release-sha=${'A'.repeat(40)}`],
+    ['--release-sha=release-v1'],
+  ]) {
+    await t.test(argv[0], async () => {
+      const fixture = instrumentedRun({ argv });
       const result = await fixture.run();
-
-      assert.equal(result.exitCode, 2);
-      assert.equal(result.publicReport.code, 'LEGACY_COMPATIBILITY_COLLISION');
+      assert.equal(result.publicReport.code, 'RELEASE_SHA_MISMATCH');
       assert.equal(fixture.calls.some(([kind]) => kind === 'open'), false);
     });
   }
 });
 
-test('clean HEAD must exactly equal the frozen commit before dependency access', async (t) => {
-  for (const gitState of [
-    { head: COMMIT, clean: false },
-    { head: '2'.repeat(40), clean: true },
-    { head: `${COMMIT}\n`, clean: true },
-  ]) {
-    await t.test(JSON.stringify(gitState), async () => {
-      const fixture = instrumentedRun({
-        inspectGit: async (cwd) => {
-          fixture.calls.push(['git', cwd]);
-          return gitState;
-        },
-      });
-      const result = await fixture.run();
-
-      assert.equal(result.exitCode, 2);
-      assert.equal(result.publicReport.code, 'RELEASE_GIT_STATE_INVALID');
-      assert.deepEqual(fixture.calls.map(([kind]) => kind), ['read', 'git']);
-    });
-  }
-});
-
-test('valid run opens only after evidence and git checks, cleans both scopes in finally, and writes safe evidence', async () => {
-  const fixture = instrumentedRun();
+test('successful acceptance writes a validator-compatible immutable GCS evidence record without secrets', async () => {
+  const inventory = legacyInventory();
+  const fixture = instrumentedRun({ inventory, environment: validEnvironment(inventory) });
   const result = await fixture.run();
 
   assert.equal(result.exitCode, 0);
   assert.deepEqual(fixture.calls.map(([kind]) => kind), [
-    'read', 'git', 'open', 'run', 'blob-cleanup', 'schema-cleanup', 'close', 'git', 'write',
+    'read', 'read', 'open', 'run', 'gcs-cleanup', 'schema-cleanup', 'close', 'evidence-write',
   ]);
-  assert.equal(fixture.artifacts.length, 1);
-  const { record, contents } = fixture.artifacts[0];
+  const [{ record, contents, objectName, artifactSha256, objectSha256 }] = fixture.artifacts;
   assert.deepEqual(Object.keys(record).sort(), [
-    'artifactSha256', 'blobIdentitySha256', 'blobPrefix', 'blobPrefixObjectCount',
-    'blobResourceId', 'checks', 'commitSha', 'legacyInventoryDigest', 'occurredAt',
-    'postgresIdentitySha256', 'postgresResourceId', 'result', 'schema',
-    'schemaAbsent', 'schemaVersion',
+    'artifactSha256', 'checks', 'commitSha', 'gcsIdentitySha256', 'gcsPrefix',
+    'gcsPrefixObjectCount', 'gcsResourceId', 'legacyInventoryDigest', 'occurredAt',
+    'postgresIdentitySha256', 'postgresResourceId', 'result', 'schema', 'schemaAbsent',
+    'schemaVersion',
   ]);
+  assert.equal(record.schemaVersion, 1);
   assert.equal(record.commitSha, COMMIT);
-  assert.equal(record.schema, SCHEMA);
-  assert.equal(record.blobPrefix, BLOB_PREFIX);
   assert.equal(record.postgresResourceId, POSTGRES_RESOURCE_ID);
   assert.equal(record.postgresIdentitySha256, postgresIdentitySha256(DATABASE_URL));
-  assert.equal(record.blobResourceId, BLOB_RESOURCE_ID);
-  assert.equal(record.blobIdentitySha256, blobIdentitySha256({ accountUrl: BLOB_ACCOUNT_URL, container: BLOB_CONTAINER }));
+  assert.equal(record.gcsResourceId, GCS_RESOURCE_ID);
+  assert.equal(record.gcsIdentitySha256, gcsIdentitySha256({ projectId: PROJECT_ID, bucket: BUCKET_NAME }));
+  assert.equal(record.gcsPrefix, GCS_PREFIX);
   assert.equal(record.schemaAbsent, true);
-  assert.equal(record.blobPrefixObjectCount, 0);
+  assert.equal(record.gcsPrefixObjectCount, 0);
   assert.equal(record.result, true);
-  assert.match(record.artifactSha256, /^[0-9a-f]{64}$/);
-  assert.equal(JSON.parse(contents).artifactSha256, record.artifactSha256);
+  assert.equal(objectName, OUTPUT_OBJECT);
+  assert.equal(artifactSha256, record.artifactSha256);
+  assert.equal(objectSha256, sha256(contents));
+  assert.notEqual(objectSha256, artifactSha256);
   assert.equal(validateDependencyAcceptanceEvidence(record, {
     expectedVersion: record.artifactSha256,
     commitSha: COMMIT,
-    inventory: legacyInventory(),
+    inventory,
     postgresResourceId: POSTGRES_RESOURCE_ID,
     postgresIdentitySha256: postgresIdentitySha256(DATABASE_URL),
-    blobResourceId: BLOB_RESOURCE_ID,
-    blobIdentitySha256: blobIdentitySha256({ accountUrl: BLOB_ACCOUNT_URL, container: BLOB_CONTAINER }),
+    gcsResourceId: GCS_RESOURCE_ID,
+    gcsIdentitySha256: gcsIdentitySha256({ projectId: PROJECT_ID, bucket: BUCKET_NAME }),
     now: NOW,
   }).valid, true);
+  assert.equal(validateReleaseEvidenceBundle({
+    inventoryFile: 'inventory',
+    inventoryVersion: inventory.artifactSha256,
+    inventoryApproved: true,
+    dependencyFile: 'dependency',
+    dependencyVersion: record.artifactSha256,
+    commitSha: COMMIT,
+    postgresResourceId: POSTGRES_RESOURCE_ID,
+    postgresIdentitySha256: postgresIdentitySha256(DATABASE_URL),
+    gcsResourceId: GCS_RESOURCE_ID,
+    gcsIdentitySha256: gcsIdentitySha256({ projectId: PROJECT_ID, bucket: BUCKET_NAME }),
+    now: NOW,
+    readRecord: (file) => (file === 'inventory' ? inventory : record),
+  }).valid, true);
 
-  const serialized = `${fixture.output.join('')}\n${contents}`;
-  for (const secret of [DATABASE_URL, 'private-password', BLOB_ACCOUNT_URL, INVENTORY_FILE]) {
-    assert.equal(serialized.includes(secret), false);
-  }
-  assert.deepEqual(result.publicReport, {
-    status: 'recorded',
-    code: 'DEPENDENCY_ACCEPTANCE_RECORDED',
-    artifactSha256: record.artifactSha256,
-    checks: record.checks,
-    cleanup: {
-      schemaAbsent: true,
-      blobPrefixObjectCount: 0,
-    },
+  const openInput = fixture.calls.find(([kind]) => kind === 'open')[1];
+  assert.deepEqual({
+    projectId: openInput.projectId,
+    bucketName: openInput.bucketName,
+    migratorDatabaseUrl: openInput.migratorDatabaseUrl,
+    releaseSha: openInput.releaseSha,
+    evidenceOutputObject: openInput.evidenceOutputObject,
+    gcsPrefix: openInput.gcsPrefix,
+    schema: openInput.schema,
+  }, {
+    projectId: PROJECT_ID,
+    bucketName: BUCKET_NAME,
+    migratorDatabaseUrl: MIGRATOR_DATABASE_URL,
+    releaseSha: COMMIT,
+    evidenceOutputObject: OUTPUT_OBJECT,
+    gcsPrefix: GCS_PREFIX,
+    schema: SCHEMA,
   });
-
-  const opened = fixture.calls.find(([kind]) => kind === 'open')[1];
-  assert.equal(opened.schema, SCHEMA);
-  assert.equal(opened.blobPrefix, BLOB_PREFIX);
-  assert.equal(opened.databaseUrl, DATABASE_URL);
-  assert.equal(opened.blob.accountUrl, BLOB_ACCOUNT_URL);
-});
-
-test('success is rebound to the frozen clean Git state after cleanup and before artifact write', async (t) => {
-  const finalStates = [
-    { head: COMMIT, clean: false },
-    { head: '2'.repeat(40), clean: true },
-    new Error('private final Git failure'),
-  ];
-  for (const finalState of finalStates) {
-    await t.test(finalState instanceof Error ? 'inspection failure' : JSON.stringify(finalState), async () => {
-      let inspections = 0;
-      const fixture = instrumentedRun({
-        inspectGit: async (cwd) => {
-          fixture.calls.push(['git', cwd]);
-          inspections += 1;
-          if (inspections === 1) return { head: COMMIT, clean: true };
-          if (finalState instanceof Error) throw finalState;
-          return finalState;
-        },
-      });
-      const result = await fixture.run();
-
-      assert.equal(result.exitCode, 1);
-      assert.equal(result.publicReport.code, 'DEPENDENCY_ACCEPTANCE_FAILED');
-      assert.deepEqual(fixture.calls.map(([kind]) => kind), [
-        'read', 'git', 'open', 'run', 'blob-cleanup', 'schema-cleanup', 'close', 'git', 'write',
-      ]);
-      assert.equal(fixture.artifacts[0].record.result, false);
-      assert.equal(fixture.output.join('').includes('private final Git failure'), false);
-    });
+  assert.equal(result.publicReport.output.objectName, OUTPUT_OBJECT);
+  assert.equal(result.publicReport.output.generation, '42');
+  assert.equal(result.publicReport.output.objectSha256, objectSha256);
+  const serialized = `${contents}\n${JSON.stringify(result.publicReport)}`;
+  for (const forbidden of [
+    'private-password', 'private-migrator-password', DATABASE_URL, MIGRATOR_DATABASE_URL,
+    'private-object-content', 'Authorization', 'Bearer',
+  ]) {
+    assert.equal(serialized.includes(forbidden), false, forbidden);
   }
+  assert.equal(fixture.output.join('').includes('"schemaVersion"'), false);
+  assert.equal(fixture.output.join('').includes('"commitSha"'), false);
 });
 
-test('outbox recovery constructs a fresh store and drains only durable post-restart jobs', async () => {
-  assert.equal(typeof acceptanceCli.drainRestartedMediaDeletionOutbox, 'function');
-  const events = [];
-  const pool = { durableJobs: [
-    { id: 'job-one', generation: 2, storageKey: `${BLOB_PREFIX}restart/one` },
-    { id: 'job-two', generation: 4, storageKey: `${BLOB_PREFIX}restart/two` },
-  ] };
-  class RestartedStore {
-    constructor(options) {
-      events.push(['construct', options]);
-      this.pool = options.pool;
-    }
-
-    async init() {
-      events.push(['init']);
-    }
-
-    async claimNextMediaDeletion(input) {
-      events.push(['claim', input.workerId]);
-      const job = this.pool.durableJobs.shift() ?? null;
-      return job ? { ...job, leaseToken: input.leaseToken } : null;
-    }
-
-    async completeMediaDeletion(input) {
-      events.push(['complete', input.jobId, input.generation, input.leaseToken]);
-    }
-  }
-  const deleted = [];
-  const processed = await acceptanceCli.drainRestartedMediaDeletionOutbox({
-    pool,
-    containerClient: {
-      getBlockBlobClient(storageKey) {
-        return { async deleteIfExists() { deleted.push(storageKey); } };
-      },
-    },
-    blobPrefix: BLOB_PREFIX,
-    cleanupNow: NOW.toISOString(),
-    StoreClass: RestartedStore,
-  });
-
-  assert.equal(processed, 2);
-  assert.deepEqual(deleted, [`${BLOB_PREFIX}restart/one`, `${BLOB_PREFIX}restart/two`]);
-  assert.deepEqual(events[0], ['construct', { pool, ownsPool: false }]);
-  assert.deepEqual(events.filter(([kind]) => kind === 'complete').map((event) => event.slice(1, 3)), [
-    ['job-one', 2], ['job-two', 4],
-  ]);
-});
-
-test('connection-string auth is identity-matched without persisting or printing credentials', async () => {
-  const connectionString = [
-    'DefaultEndpointsProtocol=https',
-    'AccountName=v1buddyblob',
-    'AccountKey=not-a-real-secret-key',
-    'EndpointSuffix=core.windows.net',
-  ].join(';');
-  const environment = {
-    ...validEnvironment(),
-    V1_ACCEPTANCE_BLOB_ACCOUNT_URL: undefined,
-    V1_ACCEPTANCE_BLOB_CONNECTION_STRING: connectionString,
-    V1_BLOB_ACCOUNT_URL: undefined,
-    V1_BLOB_CONNECTION_STRING: connectionString,
-  };
-  const fixture = instrumentedRun({ environment });
-  const result = await fixture.run();
-
-  assert.equal(result.exitCode, 0);
-  const opened = fixture.calls.find(([kind]) => kind === 'open')[1];
-  assert.equal(opened.blob.connectionString, connectionString);
-  assert.equal(opened.blob.accountUrl, null);
-  assert.equal(fixture.output.join('').includes('not-a-real-secret-key'), false);
-  assert.equal(fixture.artifacts[0].contents.includes('not-a-real-secret-key'), false);
-  assert.equal(
-    fixture.artifacts[0].record.blobIdentitySha256,
-    blobIdentitySha256({ connectionString, container: BLOB_CONTAINER }),
-  );
-});
-
-test('development-storage directives cannot be hidden beside a production Blob endpoint', async () => {
-  const mixedConnectionString = [
-    'UseDevelopmentStorage=true',
-    'DevelopmentStorageProxyUri=http://127.0.0.1',
-    'BlobEndpoint=https://v1buddyblob.blob.core.windows.net/',
-    'AccountName=v1buddyblob',
-    'AccountKey=not-a-real-secret-key',
-  ].join(';');
-  const fixture = instrumentedRun({
-    environment: {
-      ...validEnvironment(),
-      V1_ACCEPTANCE_BLOB_ACCOUNT_URL: undefined,
-      V1_ACCEPTANCE_BLOB_CONNECTION_STRING: mixedConnectionString,
-      V1_BLOB_ACCOUNT_URL: undefined,
-      V1_BLOB_CONNECTION_STRING: mixedConnectionString,
-    },
-  });
-
-  const result = await fixture.run();
-  assert.equal(result.exitCode, 2);
-  assert.equal(result.publicReport.status, 'not-run');
-  assert.deepEqual(fixture.calls, []);
-  assert.equal(fixture.artifacts.length, 0);
-  assert.equal(fixture.output.join('').includes('127.0.0.1'), false);
-  assert.equal(fixture.output.join('').includes('not-a-real-secret-key'), false);
-});
-
-test('functional failure still cleans both isolated scopes and records only a safe failed artifact', async () => {
+test('GCS evidence handoff is fail closed and reports no canonical JSON on write failure', async () => {
   const fixture = instrumentedRun({
     runtime: {
-      async runChecks() {
-        throw new Error(`private runtime failure ${DATABASE_URL}`);
-      },
+      writeEvidenceObject: async () => { throw new Error(`private output ${DATABASE_URL}`); },
     },
   });
   const result = await fixture.run();
-
   assert.equal(result.exitCode, 1);
-  assert.equal(result.publicReport.code, 'DEPENDENCY_ACCEPTANCE_FAILED');
-  assert.deepEqual(fixture.calls.map(([kind]) => kind), [
-    'read', 'git', 'open', 'run', 'blob-cleanup', 'schema-cleanup', 'close', 'write',
-  ]);
-  assert.equal(fixture.artifacts[0].record.result, false);
-  assert.equal(fixture.output.join('').includes(DATABASE_URL), false);
-  assert.equal(fixture.artifacts[0].contents.includes(DATABASE_URL), false);
+  assert.equal(result.publicReport.code, 'ACCEPTANCE_ARTIFACT_WRITE_FAILED');
+  assert.equal(result.publicReport.outputObject, OUTPUT_OBJECT);
+  const output = fixture.output.join('');
+  assert.equal(output.includes('"schemaVersion"'), false);
+  assert.equal(output.includes('private output'), false);
+  assert.equal(output.includes(DATABASE_URL), false);
 });
 
-test('every cleanup branch is attempted and any cleanup or close failure forces result false', async (t) => {
+test('cleanup is exhaustive and any partial GCS, schema, or close failure invalidates evidence', async (t) => {
   const cases = [
-    ['blob cleanup residual', {
-      async cleanupBlobPrefix(prefix) { this.calls?.push?.(prefix); return 1; },
-    }],
-    ['blob cleanup throws', {
-      async cleanupBlobPrefix() { throw new Error(`private Blob failure ${BLOB_ACCOUNT_URL}`); },
-    }],
-    ['schema cleanup false', {
-      async dropSchema() { return false; },
-    }],
-    ['schema cleanup throws', {
-      async dropSchema() { throw new Error(`private SQL failure ${DATABASE_URL}`); },
-    }],
-    ['close throws', {
-      async close() { throw new Error('private close failure'); },
-    }],
+    ['objects remain', { cleanupGcsPrefix: async () => 1 }],
+    ['object cleanup throws', { cleanupGcsPrefix: async () => { throw new Error('private cleanup error'); } }],
+    ['schema remains', { dropSchema: async () => false }],
+    ['schema cleanup throws', { dropSchema: async () => { throw new Error('private schema error'); } }],
+    ['close fails', { close: async () => { throw new Error('private close error'); } }],
   ];
-
   for (const [name, runtime] of cases) {
     await t.test(name, async () => {
       const fixture = instrumentedRun({ runtime });
       const result = await fixture.run();
-
       assert.equal(result.exitCode, 1);
       assert.equal(result.publicReport.code, 'DEPENDENCY_ACCEPTANCE_FAILED');
-      assert.equal(fixture.calls.some(([kind]) => kind === 'blob-cleanup'), true);
-      assert.equal(fixture.calls.some(([kind]) => kind === 'schema-cleanup'), true);
-      assert.equal(fixture.calls.some(([kind]) => kind === 'close'), true);
-      assert.equal(fixture.calls.at(-1)[0], 'write');
-      assert.equal(fixture.artifacts[0].record.result, false);
-      const serialized = fixture.output.join('');
-      for (const secret of [
-        DATABASE_URL,
-        BLOB_ACCOUNT_URL,
-        'private Blob failure',
-        'private SQL failure',
-        'private close failure',
-      ]) assert.equal(serialized.includes(secret), false);
+      assert.deepEqual(fixture.calls.filter(([kind]) => (
+        ['gcs-cleanup', 'schema-cleanup', 'close'].includes(kind)
+      )).map(([kind]) => kind), ['gcs-cleanup', 'schema-cleanup', 'close']);
+      assert.equal(fixture.artifacts.length, 0);
+      assert.equal(JSON.stringify(result).includes('private cleanup error'), false);
+      assert.equal(JSON.stringify(result).includes('private schema error'), false);
+      assert.equal(JSON.stringify(result).includes('private close error'), false);
     });
   }
 });
 
-test('dependency opening failure never skips safe failure evidence and never leaks the provider error', async () => {
-  const fixture = instrumentedRun({
-    openDependencies: async (input) => {
-      fixture.calls.push(['open', input]);
-      throw new Error(`cannot connect ${DATABASE_URL}`);
-    },
-  });
-  const result = await fixture.run();
-
-  assert.equal(result.exitCode, 1);
-  assert.equal(result.publicReport.code, 'DEPENDENCY_ACCEPTANCE_FAILED');
-  assert.deepEqual(fixture.calls.map(([kind]) => kind), ['read', 'git', 'open', 'write']);
-  assert.equal(fixture.artifacts[0].record.schemaAbsent, false);
-  assert.equal(fixture.artifacts[0].record.blobPrefixObjectCount, null);
-  assert.equal(fixture.output.join('').includes(DATABASE_URL), false);
-  assert.equal(fixture.artifacts[0].contents.includes(DATABASE_URL), false);
-});
-
-test('main command expiry aborts hung checks while cleanup runs on an independent budget and remains secret-safe', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
-  let mainSignal = null;
-  const cleanupSignals = [];
-  const fixture = instrumentedRun({
-    commandDeadlineMs: 50,
-    operationDeadlineMs: 1_000,
-    cleanupDeadlineMs: 100,
-    cleanupOperationDeadlineMs: 20,
-    runtime: {
-      async runChecks(context) {
-        mainSignal = context?.signal ?? null;
-        return new Promise(() => {});
-      },
-      async cleanupBlobPrefix(_prefix, context) {
-        cleanupSignals.push(['blob', context?.signal, context?.signal?.aborted]);
-        return 0;
-      },
-      async dropSchema(_schema, context) {
-        cleanupSignals.push(['schema', context?.signal, context?.signal?.aborted]);
-        return true;
-      },
-      async close(context) {
-        cleanupSignals.push(['close', context?.signal, context?.signal?.aborted]);
-      },
-    },
-  });
-  const pending = fixture.run();
-  const observation = observeSettlement(pending);
-
-  await flushAsyncWork();
-  assert.ok(mainSignal instanceof AbortSignal);
-  t.mock.timers.tick(50);
-  await flushAsyncWork();
-
-  assert.equal(mainSignal.aborted, true, 'the main signal must be aborted before cleanup starts');
-  assert.equal(observation.settled, true, JSON.stringify(fixture.calls.map(([kind]) => kind)));
-  assert.equal(observation.status, 'fulfilled');
-  assert.equal(observation.value.exitCode, 1);
-  assert.equal(observation.value.publicReport.code, 'DEPENDENCY_ACCEPTANCE_FAILED');
-  assert.deepEqual(cleanupSignals.map(([name]) => name), ['blob', 'schema', 'close']);
-  for (const [, signal, wasAbortedAtCall] of cleanupSignals) {
-    assert.ok(signal instanceof AbortSignal);
-    assert.notEqual(signal, mainSignal);
-    assert.equal(wasAbortedAtCall, false);
-  }
-  assert.equal(fixture.artifacts.length, 1);
-  const serialized = `${fixture.output.join('')}\n${fixture.artifacts[0].contents}`;
-  for (const secret of [DATABASE_URL, BLOB_ACCOUNT_URL, INVENTORY_FILE, 'private-password']) {
-    assert.equal(serialized.includes(secret), false);
-  }
-});
-
-test('a hung cleanup operation times out without preventing the remaining cleanup branches', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
-  let blobCleanupSignal = null;
-  const fixture = instrumentedRun({
-    commandDeadlineMs: 1_000,
-    operationDeadlineMs: 100,
-    cleanupDeadlineMs: 100,
-    cleanupOperationDeadlineMs: 20,
-    runtime: {
-      async runChecks() {
-        throw new Error(`private main failure ${DATABASE_URL}`);
-      },
-      async cleanupBlobPrefix(_prefix, context) {
-        blobCleanupSignal = context?.signal ?? null;
-        return new Promise(() => {});
-      },
-    },
-  });
-  const pending = fixture.run();
-  const observation = observeSettlement(pending);
-
-  await flushAsyncWork();
-  assert.ok(blobCleanupSignal instanceof AbortSignal);
-  t.mock.timers.tick(20);
-  await flushAsyncWork();
-
-  assert.equal(blobCleanupSignal.aborted, true, 'the hung cleanup branch must be aborted');
-  assert.equal(observation.settled, true, JSON.stringify(fixture.calls.map(([kind]) => kind)));
-  assert.equal(observation.value.exitCode, 1);
-  assert.equal(fixture.calls.some(([kind]) => kind === 'schema-cleanup'), true);
-  assert.equal(fixture.calls.some(([kind]) => kind === 'close'), true);
-  const serialized = `${fixture.output.join('')}\n${fixture.artifacts[0].contents}`;
-  assert.equal(serialized.includes(DATABASE_URL), false);
-  assert.equal(serialized.includes(BLOB_ACCOUNT_URL), false);
-  assert.equal(serialized.includes('private main failure'), false);
-});
-
-test('cleanup branches share one hard total budget instead of extending it serially', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
-  const cleanupSignals = [];
-  const hang = (name, context) => {
-    cleanupSignals.push([name, context?.signal ?? null]);
-    return new Promise(() => {});
-  };
-  const fixture = instrumentedRun({
-    commandDeadlineMs: 1_000,
-    operationDeadlineMs: 100,
-    cleanupDeadlineMs: 30,
-    cleanupOperationDeadlineMs: 100,
-    runtime: {
-      async runChecks() { throw new Error('private functional failure'); },
-      cleanupBlobPrefix(_prefix, context) { return hang('blob', context); },
-      dropSchema(_schema, context) { return hang('schema', context); },
-      close(context) { return hang('close', context); },
-    },
-  });
-  const observation = observeSettlement(fixture.run());
-
-  await flushAsyncWork();
-  assert.deepEqual(cleanupSignals.map(([name]) => name), ['blob']);
-  t.mock.timers.tick(10);
-  await flushAsyncWork();
-  assert.deepEqual(cleanupSignals.map(([name]) => name), ['blob', 'schema']);
-  t.mock.timers.tick(10);
-  await flushAsyncWork();
-  assert.deepEqual(cleanupSignals.map(([name]) => name), ['blob', 'schema', 'close']);
-  t.mock.timers.tick(10);
-  await flushAsyncWork();
-
-  assert.equal(observation.settled, true);
-  assert.equal(observation.value.exitCode, 1);
-  assert.equal(cleanupSignals.every(([, signal]) => signal instanceof AbortSignal && signal.aborted), true);
-  assert.equal(fixture.artifacts.length, 1);
-  assert.equal(fixture.output.join('').includes('private functional failure'), false);
-});
-
-test('real runtime bounds hung PostgreSQL query and connect operations', async (t) => {
-  await t.test('query', async (queryTest) => {
-    queryTest.mock.timers.enable({ apis: ['setTimeout'] });
-    class HungQueryPool {
-      query() { return new Promise(() => {}); }
-      connect() { return Promise.resolve({ query: async () => ({ rows: [] }), release() {} }); }
-      end() { return Promise.resolve(); }
-    }
-    class FakeBlobServiceClient {
-      getContainerClient() {
-        return {
-          listBlobsFlat() {
-            return {
-              async *[Symbol.asyncIterator]() {
-                throw new Error('Blob iteration must not be reached after a hung PostgreSQL query');
-              },
-              byPage() { return { async *[Symbol.asyncIterator]() {} }; },
-            };
-          },
-          getBlockBlobClient() {
-            throw new Error('Blob client must not be reached after a hung PostgreSQL query');
-          },
-        };
-      }
-    }
-    class FakeCredential {}
-    const runtime = await createRealAcceptanceRuntime({
-      databaseUrl: DATABASE_URL,
-      blob: { accountUrl: BLOB_ACCOUNT_URL },
-      blobContainer: BLOB_CONTAINER,
-      blobPrefix: BLOB_PREFIX,
-      schema: SCHEMA,
-      runId: RUN_ID,
-      occurredAt: NOW.toISOString(),
-      PoolClass: HungQueryPool,
-      BlobServiceClientClass: FakeBlobServiceClient,
-      DefaultAzureCredentialClass: FakeCredential,
-      operationDeadlineMs: 25,
+test('provider opening and functional failures still produce only safe failed evidence', async (t) => {
+  await t.test('opening failure has no cleanup proof and cannot publish evidence', async () => {
+    const fixture = instrumentedRun({
+      openDependencies: async () => { throw new Error(`token=private-token ${DATABASE_URL}`); },
     });
-    const observation = observeSettlement(runtime.runChecks());
-
-    await flushAsyncWork();
-    queryTest.mock.timers.tick(25);
-    await flushAsyncWork();
-
-    assert.equal(observation.settled, true);
-    assert.equal(observation.status, 'rejected');
-    assert.equal(observation.error?.code, 'DEPENDENCY_OPERATION_DEADLINE_EXCEEDED');
-    assert.equal(String(observation.error).includes(DATABASE_URL), false);
+    const result = await fixture.run();
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.publicReport.code, 'DEPENDENCY_ACCEPTANCE_FAILED');
+    assert.equal(fixture.artifacts.length, 0);
+    assert.equal(JSON.stringify(result).includes('private-token'), false);
+    assert.equal(JSON.stringify(result).includes(DATABASE_URL), false);
   });
 
-  await t.test('connect', async (connectTest) => {
-    connectTest.mock.timers.enable({ apis: ['setTimeout'] });
-    let schemaExists = false;
-    class HungConnectPool {
-      async query(text) {
-        if (/pg_namespace/i.test(text)) return { rows: [{ count: schemaExists ? 1 : 0 }], rowCount: 1 };
-        if (/CREATE SCHEMA/i.test(text)) schemaExists = true;
-        return { rows: [], rowCount: 0 };
-      }
-      connect() { return new Promise(() => {}); }
-      end() { return Promise.resolve(); }
-    }
-    const containerClient = {
-      listBlobsFlat() {
-        return {
-          async *[Symbol.asyncIterator]() {},
-          byPage() { return { async *[Symbol.asyncIterator]() {} }; },
-        };
-      },
-      getBlockBlobClient() {
-        return { async uploadData() {}, async deleteIfExists() {} };
-      },
-    };
-    class FakeBlobServiceClient { getContainerClient() { return containerClient; } }
-    class FakeCredential {}
-    const runtime = await createRealAcceptanceRuntime({
-      databaseUrl: DATABASE_URL,
-      blob: { accountUrl: BLOB_ACCOUNT_URL },
-      blobContainer: BLOB_CONTAINER,
-      blobPrefix: BLOB_PREFIX,
-      schema: SCHEMA,
-      runId: RUN_ID,
-      occurredAt: NOW.toISOString(),
-      PoolClass: HungConnectPool,
-      BlobServiceClientClass: FakeBlobServiceClient,
-      DefaultAzureCredentialClass: FakeCredential,
-      operationDeadlineMs: 25,
-      readMigration: async () => 'BEGIN; COMMIT;',
-      exerciseChecks: async ({ pools }) => pools[0].connect(),
+  await t.test('functional failure is recorded only after complete cleanup', async () => {
+    const fixture = instrumentedRun({
+      runtime: { runChecks: async () => { throw new Error('private object content'); } },
     });
-    const observation = observeSettlement(runtime.runChecks());
-
-    await flushAsyncWork();
-    connectTest.mock.timers.tick(25);
-    await flushAsyncWork();
-
-    assert.equal(observation.settled, true);
-    assert.equal(observation.status, 'rejected');
-    assert.equal(observation.error?.code, 'DEPENDENCY_OPERATION_DEADLINE_EXCEEDED');
+    const result = await fixture.run();
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.publicReport.code, 'DEPENDENCY_ACCEPTANCE_FAILED');
+    assert.equal(fixture.artifacts.length, 1);
+    assert.equal(fixture.artifacts[0].record.result, false);
+    const serialized = JSON.stringify({ result, record: fixture.artifacts[0].record });
+    assert.equal(serialized.includes('private object content'), false);
+    assert.equal(serialized.includes(DATABASE_URL), false);
   });
+});
 
-  for (const trigger of ['deadline', 'parent abort']) {
-    await t.test(`late connect is destroyed after ${trigger}`, async (lateTest) => {
-      lateTest.mock.timers.enable({ apis: ['setTimeout'] });
-      let schemaExists = false;
-      let resolveConnect = null;
-      const releaseArguments = [];
-      class LateConnectPool {
-        async query(text) {
-          if (/pg_namespace/i.test(text)) return { rows: [{ count: schemaExists ? 1 : 0 }], rowCount: 1 };
-          if (/CREATE SCHEMA/i.test(text)) schemaExists = true;
-          return { rows: [], rowCount: 0 };
-        }
-        connect() {
-          return new Promise((resolveConnection) => {
-            resolveConnect = () => resolveConnection({
-              query: async () => ({ rows: [], rowCount: 0 }),
-              release: (argument) => releaseArguments.push(argument),
-            });
-          });
-        }
-        end() { return Promise.resolve(); }
-      }
-      const containerClient = {
-        listBlobsFlat() {
-          return {
-            async *[Symbol.asyncIterator]() {},
-            byPage() { return { async *[Symbol.asyncIterator]() {} }; },
-          };
-        },
-        getBlockBlobClient() {
-          return { async uploadData() {}, async deleteIfExists() {} };
-        },
-      };
-      class FakeBlobServiceClient { getContainerClient() { return containerClient; } }
-      class FakeCredential {}
-      const runtime = await createRealAcceptanceRuntime({
-        databaseUrl: DATABASE_URL,
-        blob: { accountUrl: BLOB_ACCOUNT_URL },
-        blobContainer: BLOB_CONTAINER,
-        blobPrefix: BLOB_PREFIX,
-        schema: SCHEMA,
-        runId: RUN_ID,
-        occurredAt: NOW.toISOString(),
-        PoolClass: LateConnectPool,
-        BlobServiceClientClass: FakeBlobServiceClient,
-        DefaultAzureCredentialClass: FakeCredential,
-        operationDeadlineMs: 25,
-        readMigration: async () => 'BEGIN; COMMIT;',
-        exerciseChecks: async ({ pools }) => pools[0].connect(),
+test('metadata attestation requires the exact dedicated acceptance service account', async (t) => {
+  const calls = [];
+  const email = await attestGcpExecutionIdentity({
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return new Response(`${ACCEPTANCE_SERVICE_ACCOUNT}\n`, {
+        status: 200,
+        headers: { 'Metadata-Flavor': 'Google' },
       });
-      const parent = new AbortController();
-      const pending = runtime.runChecks({ signal: parent.signal });
-      const observation = observeSettlement(pending);
+    },
+  });
+  assert.equal(email, ACCEPTANCE_SERVICE_ACCOUNT);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.headers['Metadata-Flavor'], 'Google');
+  assert.equal(calls[0].options.method, 'GET');
+  assert.equal(calls[0].options.redirect, 'error');
+  assert.equal(Object.hasOwn(calls[0].options.headers, 'Authorization'), false);
 
+  for (const response of [
+    new Response('wrong@example.invalid', { status: 200, headers: { 'Metadata-Flavor': 'Google' } }),
+    new Response(ACCEPTANCE_SERVICE_ACCOUNT, { status: 403 }),
+    new Response('x'.repeat(513), { status: 200, headers: { 'Metadata-Flavor': 'Google' } }),
+  ]) {
+    await t.test(String(response.status), async () => {
+      await assert.rejects(
+        attestGcpExecutionIdentity({ fetchImpl: async () => response }),
+        (error) => error?.code === 'DEPENDENCY_GCP_IDENTITY_INVALID'
+          && !String(error).includes('wrong@example.invalid'),
+      );
+    });
+  }
+});
+
+test('real acceptance rejects unavailable or wrong execution identity before touching either scope', async (t) => {
+  for (const attestExecutionIdentity of [
+    async () => 'hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com',
+    async () => { throw new Error('private metadata failure'); },
+  ]) {
+    await t.test(String(attestExecutionIdentity).slice(0, 30), async () => {
+      const fixture = realRuntimeOptions({ attestExecutionIdentity });
+      const runtime = await createRealAcceptanceRuntime(fixture.options);
+      await assert.rejects(
+        runtime.runChecks(),
+        (error) => error?.code === 'DEPENDENCY_GCP_IDENTITY_INVALID'
+          && !String(error).includes('private metadata failure'),
+      );
+      assert.equal(fixture.postgres.state.sql.length, 0);
+      assert.equal(fixture.provider.calls.writes.length, 0);
+      await runtime.close();
+    });
+  }
+});
+
+test('real acceptance rejects every PostgreSQL major other than 16 before acquiring either scope', async () => {
+  const fixture = realRuntimeOptions({
+    postgres: createFakePoolClass({ serverVersion: '150012' }),
+  });
+  const runtime = await createRealAcceptanceRuntime(fixture.options);
+  await assert.rejects(runtime.runChecks(), (error) => (
+    error?.code === 'DEPENDENCY_POSTGRES_VERSION_INVALID'
+      && error.message === 'DEPENDENCY_POSTGRES_VERSION_INVALID'
+  ));
+  assert.equal(fixture.provider.calls.writes.length, 0);
+  assert.equal(fixture.postgres.state.sql.some(([, sql]) => /CREATE SCHEMA/i.test(sql)), false);
+  await runtime.close();
+});
+
+test('real runtime uses project-scoped attached ADC and proves intended GCS lifecycle and access', async () => {
+  const fixture = realRuntimeOptions({
+    exerciseChecks: async ({ gcsClient, gcsPrefix }) => {
+      assert.equal(gcsPrefix, GCS_PREFIX);
+      await gcsClient.assertIntendedAccess();
+      const first = `${gcsPrefix}probe/one.bin`;
+      const second = `${gcsPrefix}probe/two.bin`;
+      const firstBytes = Buffer.from('acceptance-one', 'utf8');
+      await gcsClient.putObject({
+        name: first, bytes: firstBytes, contentType: 'application/octet-stream', ifAbsent: true,
+      });
+      await gcsClient.putObject({
+        name: second, bytes: Buffer.from('acceptance-two'), contentType: 'application/octet-stream', ifAbsent: true,
+      });
+      const metadata = await gcsClient.headObject({ name: first });
+      assert.equal(metadata.size, firstBytes.length);
+      assert.deepEqual(await gcsClient.readObject({ name: first }), firstBytes);
+      assert.deepEqual(await gcsClient.readObject({ name: first, start: 1, end: 4 }), firstBytes.subarray(1, 5));
+      const firstPage = await gcsClient.listObjectsPage({ prefix: `${gcsPrefix}probe/`, limit: 1 });
+      assert.deepEqual(firstPage.names, [first]);
+      assert.ok(firstPage.cursor);
+      const secondPage = await gcsClient.listObjectsPage({
+        prefix: `${gcsPrefix}probe/`, limit: 1, cursor: firstPage.cursor,
+      });
+      assert.deepEqual(secondPage.names, [second]);
+      assert.equal(secondPage.cursor, null);
+      await gcsClient.assertObjectPrivate(first);
+      assert.equal(await gcsClient.deleteObject({ name: first }), true);
+      assert.equal(await gcsClient.deleteObject({ name: first }), false);
+      return passChecks();
+    },
+  });
+  const runtime = await createRealAcceptanceRuntime(fixture.options);
+  const checks = await runtime.runChecks();
+  assert.deepEqual(checks.slice(-passChecks().length), passChecks());
+  assert.equal(checks.some(({ name, status }) => (
+    name === 'gcp-execution-identity' && status === 'pass'
+  )), true);
+  assert.equal(checks.some(({ name, status }) => (
+    name === `gcp-identity-${sha256(ACCEPTANCE_SERVICE_ACCOUNT)}` && status === 'pass'
+  )), true);
+  assert.equal(await runtime.cleanupGcsPrefix(GCS_PREFIX), 0);
+  assert.equal(await runtime.dropSchema(SCHEMA), true);
+  await runtime.close();
+
+  assert.deepEqual(fixture.provider.calls.storageOptions, [{ projectId: PROJECT_ID }]);
+  assert.deepEqual(
+    fixture.provider.calls.permissions[0].filter((name) => REQUIRED_GCS_PERMISSIONS.includes(name)),
+    REQUIRED_GCS_PERMISSIONS,
+  );
+  assert.equal(fixture.provider.calls.signedUrls, 0);
+  assert.equal(fixture.provider.calls.publicFetches.length, 1);
+  assert.equal(Object.hasOwn(fixture.provider.calls.publicFetches[0].options.headers ?? {}, 'Authorization'), false);
+  assert.deepEqual([...fixture.provider.objects], []);
+  assert.equal(fixture.postgres.state.schemaExists, false);
+  assert.deepEqual(fixture.postgres.state.ended.sort(), [0, 1, 2, 3]);
+});
+
+test('real runtime uses migrator only for isolated DDL and publishes canonical evidence create-only after cleanup', async () => {
+  const fixture = realRuntimeOptions();
+  const runtime = await createRealAcceptanceRuntime(fixture.options);
+  const record = legacyInventory();
+  const contents = `${JSON.stringify(record, null, 2)}\n`;
+  const artifactSha256 = record.artifactSha256;
+  const objectSha256 = sha256(contents);
+  assert.notEqual(artifactSha256, objectSha256);
+
+  await runtime.runChecks();
+  await assert.rejects(
+    runtime.writeEvidenceObject({
+      objectName: OUTPUT_OBJECT, contents, artifactSha256, objectSha256,
+    }),
+    (error) => error?.code === 'DEPENDENCY_EVIDENCE_OUTPUT_NOT_READY',
+  );
+  assert.equal(await runtime.cleanupGcsPrefix(GCS_PREFIX), 0);
+  assert.equal(await runtime.dropSchema(SCHEMA), true);
+  await runtime.close();
+  const published = await runtime.writeEvidenceObject({
+    objectName: OUTPUT_OBJECT, contents, artifactSha256, objectSha256,
+  });
+  assert.deepEqual(published, {
+    objectName: OUTPUT_OBJECT,
+    generation: '2',
+    artifactSha256,
+    objectSha256,
+  });
+  assert.deepEqual(fixture.provider.objects.get(OUTPUT_OBJECT).bytes, Buffer.from(contents));
+  assert.equal([...fixture.provider.objects.keys()].some((name) => name.startsWith(GCS_PREFIX)), false);
+  assert.equal(fixture.provider.calls.publicFetches.length, 1);
+  assert.equal(fixture.provider.calls.publicFetches[0].options.headers?.Authorization, undefined);
+  await assert.rejects(runtime.writeEvidenceObject({
+    objectName: OUTPUT_OBJECT, contents, artifactSha256, objectSha256,
+  }));
+
+  const migratorSql = fixture.postgres.state.sql
+    .filter(([index]) => [0, 1].includes(index)).map(([, sql]) => sql).join('\n');
+  const appSql = fixture.postgres.state.sql
+    .filter(([index]) => [2, 3].includes(index)).map(([, sql]) => sql).join('\n');
+  assert.match(migratorSql, /CREATE SCHEMA/);
+  assert.match(migratorSql, /GRANT USAGE ON SCHEMA/);
+  assert.match(migratorSql, /DROP SCHEMA/);
+  assert.equal(/CREATE SCHEMA|DROP SCHEMA|GRANT USAGE ON SCHEMA/.test(appSql), false);
+});
+
+test('hostile GCS permissions, public access, metadata, and list responses fail closed without provider detail', async (t) => {
+  const cases = [
+    ['forbidden permission', createFakeBucket({ permissions: permissionMap({ 'storage.buckets.setIamPolicy': true }) }),
+      async (client) => client.assertIntendedAccess()],
+    ['missing object permission', createFakeBucket({ permissions: permissionMap({ 'storage.objects.delete': false }) }),
+      async (client) => client.assertIntendedAccess()],
+    ['public object', createFakeBucket({ publicStatus: 200 }), async (client, prefix) => {
+      const name = `${prefix}public.bin`;
+      await client.putObject({ name, bytes: Buffer.from('secret'), contentType: 'application/octet-stream' });
+      return client.assertObjectPrivate(name);
+    }],
+    ['malformed metadata', createFakeBucket({ malformedMetadata: { name: `${GCS_PREFIX}bad.bin`, size: 'NaN' } }),
+      async (client, prefix) => {
+        const name = `${prefix}bad.bin`;
+        await client.putObject({ name, bytes: Buffer.from('x'), contentType: 'application/octet-stream' });
+        return client.headObject({ name });
+      }],
+    ['escaped list', createFakeBucket({
+      malformedListName: 'outside/private-object',
+      malformedListPrefix: `${GCS_PREFIX}probe/`,
+    }), async (client, prefix) => {
+      await client.putObject({
+        name: `${prefix}probe/item.bin`,
+        bytes: Buffer.from('x'),
+        contentType: 'application/octet-stream',
+      });
+      return client.listObjectsPage({ prefix: `${prefix}probe/`, limit: 1 });
+    }],
+  ];
+  for (const [name, provider, operation] of cases) {
+    await t.test(name, async () => {
+      const fixture = realRuntimeOptions({ provider, exerciseChecks: async ({ gcsClient, gcsPrefix }) => {
+        await operation(gcsClient, gcsPrefix);
+        return passChecks();
+      } });
+      const runtime = await createRealAcceptanceRuntime(fixture.options);
+      await assert.rejects(runtime.runChecks(), (error) => (
+        ['DEPENDENCY_GCS_ACCESS_INVALID', 'DEPENDENCY_GCS_RESPONSE_INVALID'].includes(error?.code)
+          && error.message === error.code
+          && !String(error.stack).includes('private-object-content')
+      ));
+      await runtime.cleanupGcsPrefix(GCS_PREFIX);
+      await runtime.dropSchema(SCHEMA);
+      await runtime.close();
+    });
+  }
+});
+
+test('hung GCS provider work is bounded by both operation deadline and parent cancellation', async (t) => {
+  for (const trigger of ['deadline', 'parent']) {
+    await t.test(trigger, async (child) => {
+      child.mock.timers.enable({ apis: ['setTimeout'] });
+      const provider = createFakeBucket({ hangList: true });
+      const fixture = realRuntimeOptions({ provider, operationDeadlineMs: 25 });
+      const runtime = await createRealAcceptanceRuntime(fixture.options);
+      const parent = new AbortController();
+      const observation = observeSettlement(runtime.runChecks({ signal: parent.signal }));
       await flushAsyncWork();
-      assert.equal(typeof resolveConnect, 'function');
-      if (trigger === 'deadline') lateTest.mock.timers.tick(25);
-      else parent.abort(new Error('safe parent stop'));
+      if (trigger === 'deadline') child.mock.timers.tick(25);
+      else parent.abort(Object.assign(new Error('DEPENDENCY_OPERATION_CANCELLED'), {
+        code: 'DEPENDENCY_OPERATION_CANCELLED',
+      }));
       await flushAsyncWork();
       assert.equal(observation.settled, true);
       assert.equal(observation.status, 'rejected');
-      assert.equal(releaseArguments.length, 0);
-
-      resolveConnect();
-      await flushAsyncWork();
-      assert.deepEqual(releaseArguments, [true]);
+      assert.ok(['DEPENDENCY_OPERATION_DEADLINE_EXCEEDED', 'DEPENDENCY_OPERATION_CANCELLED']
+        .includes(observation.error?.code));
     });
   }
 });
 
-test('real runtime aborts a hung Blob operation through the Azure AbortSignal', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
-  let uploadSignal = null;
-  let schemaExists = false;
-  class FakePool {
-    async query(text) {
-      if (/pg_namespace/i.test(text)) return { rows: [{ count: schemaExists ? 1 : 0 }], rowCount: 1 };
-      if (/CREATE SCHEMA/i.test(text)) schemaExists = true;
-      return { rows: [], rowCount: 0 };
-    }
-    async connect() { return { query: async () => ({ rows: [] }), release() {} }; }
-    async end() {}
-  }
-  const containerClient = {
-    listBlobsFlat() {
-      return {
-        async *[Symbol.asyncIterator]() {},
-        byPage() { return { async *[Symbol.asyncIterator]() {} }; },
-      };
-    },
-    getBlockBlobClient() {
-      return {
-        uploadData(_body, options) {
-          uploadSignal = options?.abortSignal ?? null;
-          return new Promise(() => {});
-        },
-        async deleteIfExists() {},
-      };
-    },
-  };
-  class FakeBlobServiceClient { getContainerClient() { return containerClient; } }
-  class FakeCredential {}
-  const runtime = await createRealAcceptanceRuntime({
-    databaseUrl: DATABASE_URL,
-    blob: { accountUrl: BLOB_ACCOUNT_URL },
-    blobContainer: BLOB_CONTAINER,
-    blobPrefix: BLOB_PREFIX,
-    schema: SCHEMA,
-    runId: RUN_ID,
-    occurredAt: NOW.toISOString(),
-    PoolClass: FakePool,
-    BlobServiceClientClass: FakeBlobServiceClient,
-    DefaultAzureCredentialClass: FakeCredential,
-    operationDeadlineMs: 25,
-    readMigration: async () => 'BEGIN; COMMIT;',
-    exerciseChecks: async () => [],
+test('pre-existing PostgreSQL schema or GCS prefix is never acquired, swept, or dropped', async (t) => {
+  await t.test('schema', async () => {
+    const fixture = realRuntimeOptions({ postgres: createFakePoolClass({ schemaInitiallyExists: true }) });
+    const runtime = await createRealAcceptanceRuntime(fixture.options);
+    await assert.rejects(runtime.runChecks());
+    assert.equal(await runtime.cleanupGcsPrefix(GCS_PREFIX), 0);
+    assert.equal(await runtime.dropSchema(SCHEMA), false);
+    await runtime.close();
+    assert.equal(fixture.provider.calls.deletes.length, 0);
+    assert.equal(fixture.postgres.state.sql.some(([, sql]) => /DROP SCHEMA/i.test(sql)), false);
   });
-  const observation = observeSettlement(runtime.runChecks());
 
-  await flushAsyncWork();
-  assert.ok(uploadSignal instanceof AbortSignal);
-  t.mock.timers.tick(25);
-  await flushAsyncWork();
-
-  assert.equal(observation.settled, true);
-  assert.equal(observation.status, 'rejected');
-  assert.equal(observation.error?.code, 'DEPENDENCY_OPERATION_DEADLINE_EXCEEDED');
-  assert.equal(uploadSignal.aborted, true);
-  assert.equal(String(observation.error).includes(BLOB_ACCOUNT_URL), false);
+  await t.test('prefix', async () => {
+    const existing = `${GCS_PREFIX}existing-object`;
+    const fixture = realRuntimeOptions({ provider: createFakeBucket({
+      initialObjects: [[existing, Buffer.from('legacy')]],
+    }) });
+    const runtime = await createRealAcceptanceRuntime(fixture.options);
+    await assert.rejects(runtime.runChecks());
+    assert.equal(await runtime.cleanupGcsPrefix(GCS_PREFIX), 1);
+    assert.equal(await runtime.dropSchema(SCHEMA), true);
+    await runtime.close();
+    assert.equal(fixture.provider.objects.has(existing), true);
+    assert.equal(fixture.provider.calls.deletes.length, 0);
+    assert.equal(fixture.postgres.state.sql.some(([, sql]) => /CREATE SCHEMA/i.test(sql)), false);
+  });
 });
 
-test('real runtime aborts a hung Blob listing request at the iterator operation deadline', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
-  let listSignal = null;
-  class FakePool {
-    async query(text) {
-      if (/pg_namespace/i.test(text)) return { rows: [{ count: 0 }], rowCount: 1 };
-      return { rows: [], rowCount: 0 };
-    }
-    async connect() { return { query: async () => ({ rows: [] }), release() {} }; }
-    async end() {}
-  }
-  const containerClient = {
-    listBlobsFlat(options) {
-      listSignal = options?.abortSignal ?? null;
-      return {
-        [Symbol.asyncIterator]() {
-          return {
-            next() { return new Promise(() => {}); },
-          };
-        },
-        byPage() { return { async *[Symbol.asyncIterator]() {} }; },
-      };
+test('owned cleanup deletes every paginated object and proves zero schema objects and zero prefix objects', async () => {
+  const fixture = realRuntimeOptions({
+    exerciseChecks: async ({ gcsClient, gcsPrefix }) => {
+      for (let index = 0; index < 205; index += 1) {
+        await gcsClient.putObject({
+          name: `${gcsPrefix}cleanup/${String(index).padStart(3, '0')}.bin`,
+          bytes: Buffer.from([index % 251]),
+          contentType: 'application/octet-stream',
+          ifAbsent: true,
+        });
+      }
+      return [{ name: 'injected-cleanup-contract', status: 'pass', latencyMs: 1 }];
     },
-    getBlockBlobClient() {
-      throw new Error('owner marker must not be reached after a hung listing request');
-    },
-  };
-  class FakeBlobServiceClient { getContainerClient() { return containerClient; } }
-  class FakeCredential {}
-  const runtime = await createRealAcceptanceRuntime({
-    databaseUrl: DATABASE_URL,
-    blob: { accountUrl: BLOB_ACCOUNT_URL },
-    blobContainer: BLOB_CONTAINER,
-    blobPrefix: BLOB_PREFIX,
-    schema: SCHEMA,
-    runId: RUN_ID,
-    occurredAt: NOW.toISOString(),
-    PoolClass: FakePool,
-    BlobServiceClientClass: FakeBlobServiceClient,
-    DefaultAzureCredentialClass: FakeCredential,
-    operationDeadlineMs: 25,
   });
-  const observation = observeSettlement(runtime.runChecks());
-
-  await flushAsyncWork();
-  assert.ok(listSignal instanceof AbortSignal);
-  t.mock.timers.tick(25);
-  await flushAsyncWork();
-
-  assert.equal(observation.settled, true);
-  assert.equal(observation.error?.code, 'DEPENDENCY_OPERATION_DEADLINE_EXCEEDED');
-  assert.equal(listSignal.aborted, true);
-});
-
-test('a reused schema is never acquired or dropped by this run', async () => {
-  const sql = [];
-  const deletedBlobs = [];
-  let poolIndex = 0;
-  class FakePool {
-    constructor() {
-      this.index = poolIndex;
-      poolIndex += 1;
-    }
-
-    async query(text, values) {
-      sql.push([this.index, text, values]);
-      if (/CREATE SCHEMA/i.test(text)) throw new Error('schema already exists');
-      if (/pg_namespace/i.test(text)) return { rows: [{ count: 1 }], rowCount: 1 };
-      return { rows: [], rowCount: 0 };
-    }
-
-    async connect() {
-      throw new Error('store connection should not be reached');
-    }
-
-    async end() {}
-  }
-  const existingName = `${BLOB_PREFIX}existing-object`;
-  const containerClient = {
-    listBlobsFlat({ prefix }) {
-      assert.equal(prefix, BLOB_PREFIX);
-      return {
-        async *[Symbol.asyncIterator]() {
-          yield { name: existingName };
-        },
-        byPage() {
-          return {
-            async *[Symbol.asyncIterator]() {
-              yield { segment: { blobItems: [{ name: existingName }] } };
-            },
-          };
-        },
-      };
-    },
-    getBlockBlobClient(name) {
-      return {
-        async deleteIfExists() {
-          deletedBlobs.push(name);
-        },
-      };
-    },
-  };
-  class FakeBlobServiceClient {
-    getContainerClient(container) {
-      assert.equal(container, BLOB_CONTAINER);
-      return containerClient;
-    }
-  }
-  class FakeCredential {}
-
-  const runtime = await createRealAcceptanceRuntime({
-    databaseUrl: DATABASE_URL,
-    blob: { accountUrl: BLOB_ACCOUNT_URL },
-    blobContainer: BLOB_CONTAINER,
-    blobPrefix: BLOB_PREFIX,
-    schema: SCHEMA,
-    runId: RUN_ID,
-    occurredAt: NOW.toISOString(),
-    PoolClass: FakePool,
-    BlobServiceClientClass: FakeBlobServiceClient,
-    DefaultAzureCredentialClass: FakeCredential,
-    readMigration: async () => 'BEGIN; COMMIT;',
-    exerciseChecks: async () => [{ name: 'should-not-run', status: 'pass' }],
-  });
-
-  await assert.rejects(runtime.runChecks());
-  assert.equal(await runtime.cleanupBlobPrefix(BLOB_PREFIX), 1);
-  assert.equal(await runtime.dropSchema(SCHEMA), false);
-  await runtime.close();
-
-  assert.deepEqual(deletedBlobs, []);
-  assert.equal(sql.some(([, text]) => /DROP SCHEMA/i.test(text)), false);
-});
-
-test('a reused Blob prefix is never acquired or swept by this run', async () => {
-  let createdSchema = false;
-  const deleted = [];
-  class FakePool {
-    async query(text) {
-      if (/pg_namespace/i.test(text)) return { rows: [{ count: 0 }], rowCount: 1 };
-      if (/CREATE SCHEMA/i.test(text)) createdSchema = true;
-      return { rows: [], rowCount: 0 };
-    }
-
-    async connect() {
-      throw new Error('store connection should not be reached');
-    }
-
-    async end() {}
-  }
-  const existingName = `${BLOB_PREFIX}existing-object`;
-  const containerClient = {
-    listBlobsFlat() {
-      return {
-        async *[Symbol.asyncIterator]() {
-          yield { name: existingName };
-        },
-        byPage() {
-          return {
-            async *[Symbol.asyncIterator]() {
-              yield { segment: { blobItems: [{ name: existingName }] } };
-            },
-          };
-        },
-      };
-    },
-    getBlockBlobClient(name) {
-      return {
-        async deleteIfExists() {
-          deleted.push(name);
-        },
-      };
-    },
-  };
-  class FakeBlobServiceClient {
-    getContainerClient() {
-      return containerClient;
-    }
-  }
-  class FakeCredential {}
-  const runtime = await createRealAcceptanceRuntime({
-    databaseUrl: DATABASE_URL,
-    blob: { accountUrl: BLOB_ACCOUNT_URL },
-    blobContainer: BLOB_CONTAINER,
-    blobPrefix: BLOB_PREFIX,
-    schema: SCHEMA,
-    runId: RUN_ID,
-    occurredAt: NOW.toISOString(),
-    PoolClass: FakePool,
-    BlobServiceClientClass: FakeBlobServiceClient,
-    DefaultAzureCredentialClass: FakeCredential,
-    readMigration: async () => 'BEGIN; COMMIT;',
-    exerciseChecks: async () => [{ name: 'should-not-run', status: 'pass' }],
-  });
-
-  await assert.rejects(runtime.runChecks());
-  assert.equal(await runtime.cleanupBlobPrefix(BLOB_PREFIX), 1);
+  const runtime = await createRealAcceptanceRuntime(fixture.options);
+  await runtime.runChecks();
+  assert.equal(fixture.provider.objects.size, 206, '205 probes plus the owner marker');
+  assert.equal(await runtime.cleanupGcsPrefix(GCS_PREFIX), 0);
   assert.equal(await runtime.dropSchema(SCHEMA), true);
   await runtime.close();
-  assert.equal(createdSchema, false);
-  assert.deepEqual(deleted, []);
-});
-
-test('real runtime reserves only its fresh marker and proves both owned scopes absent after cleanup', async () => {
-  const sql = [];
-  const ended = [];
-  const poolOptions = [];
-  let poolIndex = 0;
-  let schemaExists = false;
-  class FakePool {
-    constructor(options) {
-      this.index = poolIndex;
-      poolIndex += 1;
-      poolOptions.push(options);
-    }
-
-    async query(text, values) {
-      sql.push([this.index, text, values]);
-      if (/SELECT count\(\*\)::int AS count FROM pg_namespace/i.test(text)) {
-        return { rows: [{ count: schemaExists ? 1 : 0 }], rowCount: 1 };
-      }
-      if (/CREATE SCHEMA/i.test(text)) {
-        assert.equal(schemaExists, false);
-        schemaExists = true;
-      }
-      if (/DROP SCHEMA/i.test(text)) schemaExists = false;
-      return { rows: [], rowCount: 0 };
-    }
-
-    async connect() {
-      throw new Error('injected exercise does not use store connections');
-    }
-
-    async end() {
-      ended.push(this.index);
-    }
-  }
-  const blobs = new Set();
-  const uploads = [];
-  const containerClient = {
-    listBlobsFlat({ prefix }) {
-      const names = () => [...blobs].filter((name) => name.startsWith(prefix));
-      return {
-        async *[Symbol.asyncIterator]() {
-          for (const name of names()) yield { name };
-        },
-        byPage() {
-          return {
-            async *[Symbol.asyncIterator]() {
-              yield { segment: { blobItems: names().map((name) => ({ name })) } };
-            },
-          };
-        },
-      };
-    },
-    getBlockBlobClient(name) {
-      return {
-        async uploadData(body, options) {
-          uploads.push({ name, body: Buffer.from(body).toString('utf8'), options });
-          if (options?.conditions?.ifNoneMatch === '*' && blobs.has(name)) throw new Error('condition failed');
-          blobs.add(name);
-        },
-        async deleteIfExists() {
-          blobs.delete(name);
-        },
-      };
-    },
-  };
-  class FakeBlobServiceClient {
-    getContainerClient() {
-      return containerClient;
-    }
-  }
-  class FakeCredential {}
-  let exercised = 0;
-  const runtime = await createRealAcceptanceRuntime({
-    databaseUrl: DATABASE_URL,
-    blob: { accountUrl: BLOB_ACCOUNT_URL },
-    blobContainer: BLOB_CONTAINER,
-    blobPrefix: BLOB_PREFIX,
-    schema: SCHEMA,
-    runId: RUN_ID,
-    occurredAt: NOW.toISOString(),
-    PoolClass: FakePool,
-    BlobServiceClientClass: FakeBlobServiceClient,
-    DefaultAzureCredentialClass: FakeCredential,
-    readMigration: async () => 'BEGIN; COMMIT;',
-    exerciseChecks: async () => {
-      exercised += 1;
-      return [{ name: 'injected-real-contract', status: 'pass', latencyMs: 1 }];
-    },
-  });
-
-  assert.deepEqual(await runtime.runChecks(), [
-    { name: 'injected-real-contract', status: 'pass', latencyMs: 1 },
-  ]);
-  assert.equal(exercised, 1);
-  assert.equal(uploads.length, 1);
-  const [{ options: { abortSignal, ...uploadOptions }, ...upload }] = uploads;
-  assert.ok(abortSignal instanceof AbortSignal);
-  assert.deepEqual({ ...upload, options: uploadOptions }, {
-    name: `${BLOB_PREFIX}.acceptance-owner`,
-    body: RUN_ID,
-    options: {
-      blobHTTPHeaders: { blobContentType: 'application/octet-stream' },
-      conditions: { ifNoneMatch: '*' },
-    },
-  });
-  assert.equal(await runtime.cleanupBlobPrefix(BLOB_PREFIX), 0);
-  assert.equal(await runtime.dropSchema(SCHEMA), true);
-  await runtime.close();
-
-  assert.deepEqual([...blobs], []);
-  assert.equal(schemaExists, false);
-  assert.deepEqual(ended.sort(), [0, 1, 2]);
-  assert.deepEqual(poolOptions, [
-    {
-      connectionString: DATABASE_URL,
-      options: '-c statement_timeout=30000',
-      connectionTimeoutMillis: 30_000,
-      query_timeout: 30_000,
-      statement_timeout: 30_000,
-    },
-    {
-      connectionString: DATABASE_URL,
-      options: `-c search_path=${SCHEMA} -c statement_timeout=30000`,
-      connectionTimeoutMillis: 30_000,
-      query_timeout: 30_000,
-      statement_timeout: 30_000,
-    },
-    {
-      connectionString: DATABASE_URL,
-      options: `-c search_path=${SCHEMA} -c statement_timeout=30000`,
-      connectionTimeoutMillis: 30_000,
-      query_timeout: 30_000,
-      statement_timeout: 30_000,
-    },
-  ]);
-  assert.equal(sql.some(([, text]) => text === `CREATE SCHEMA "${SCHEMA}"`), true);
-  assert.equal(sql.some(([, text]) => text === `DROP SCHEMA IF EXISTS "${SCHEMA}" CASCADE`), true);
+  assert.equal(fixture.provider.objects.size, 0);
+  assert.equal(fixture.postgres.state.schemaExists, false);
+  assert.ok(fixture.provider.calls.lists.some(({ maxResults }) => maxResults === 100));
+  assert.equal(fixture.provider.calls.deletes.length, 206);
 });

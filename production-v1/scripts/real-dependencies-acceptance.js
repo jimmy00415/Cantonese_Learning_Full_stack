@@ -1,35 +1,69 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { execFile } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
-import { promisify } from 'node:util';
+import { readFile } from 'node:fs/promises';
+import { isAbsolute, resolve } from 'node:path';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 
 import {
   assertSecurePostgresRuntimeUrl,
-  blobIdentitySha256,
-  DEPENDENCY_ACCEPTANCE_CORE_CHECK_NAMES,
   finalizeReleaseEvidenceRecord,
+  gcsIdentitySha256,
   postgresIdentitySha256,
   validateLegacyResourceInventory,
 } from '../src/services/release-evidence.js';
 import { PostgresStore } from '../src/stores/postgres-store.js';
 
-const execFileAsync = promisify(execFile);
 const RELEASE_SHA = /^[0-9a-f]{40}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 const SCHEMA = /^v1_accept_([0-9a-f]{32})$/;
-const BLOB_PREFIX = /^v1-accept\/([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/$/;
+const GCS_PREFIX = /^v1-accept\/([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/$/;
+const EVIDENCE_OUTPUT_OBJECT = /^release-evidence\/([0-9a-f]{40})\/dependency-acceptance\/([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.json$/;
 const CHECK_NAME = /^[a-z0-9][a-z0-9-]{0,79}$/;
-const CONTAINER = /^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$/;
+const PROJECT_ID = 'hkbuddy-prod-v1-20260826';
+const BUCKET_NAME = 'hkbuddy-prod-v1-20260826-media';
+const APP_DATABASE_USER = 'hkbuddy_app';
+const MIGRATOR_DATABASE_USER = 'hkbuddy_migrator';
+const RELEASE_MANIFEST_FILE = '/app/release-manifest.json';
+const ACCEPTANCE_SERVICE_ACCOUNT = `hkbuddy-acceptance@${PROJECT_ID}.iam.gserviceaccount.com`;
+const SERVICE_ACCOUNT_METADATA_URL = 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email';
+const GCS_RESOURCE_ID = `//storage.googleapis.com/projects/_/buckets/${BUCKET_NAME}`;
+const POSTGRES_RESOURCE_ID = `//sqladmin.googleapis.com/projects/${PROJECT_ID}/instances/hkbuddy-pg/databases/hkbuddy_v1`;
+const GCS_REQUIRED_PERMISSIONS = Object.freeze([
+  'storage.objects.create',
+  'storage.objects.delete',
+  'storage.objects.get',
+  'storage.objects.list',
+  'storage.objects.update',
+]);
+const GCS_FORBIDDEN_PERMISSIONS = Object.freeze([
+  'storage.buckets.delete',
+  'storage.buckets.getIamPolicy',
+  'storage.buckets.setIamPolicy',
+  'storage.buckets.update',
+  'storage.objects.getIamPolicy',
+  'storage.objects.setIamPolicy',
+  'storage.objects.overrideUnlockedRetention',
+  'storage.objects.setRetention',
+]);
+const GCS_TEST_PERMISSIONS = Object.freeze([
+  ...GCS_REQUIRED_PERMISSIONS,
+  ...GCS_FORBIDDEN_PERMISSIONS,
+]);
+const GCS_CORE_CHECK_NAMES = Object.freeze([
+  'postgres-migration-health',
+  'postgres-concurrency-recovery',
+  'postgres-integrity-events',
+  'postgres-rate-window-fencing',
+  'gcs-private-full-range-head',
+  'postgres-media-fencing',
+]);
 const DEFAULT_OPERATION_DEADLINE_MS = 30_000;
 const DEFAULT_COMMAND_DEADLINE_MS = 15 * 60_000;
 const DEFAULT_CLEANUP_DEADLINE_MS = 90_000;
 const DEFAULT_CLEANUP_OPERATION_DEADLINE_MS = 20_000;
 const MAX_DEADLINE_MS = 60 * 60_000;
-const productionRoot = fileURLToPath(new URL('../', import.meta.url));
 const migrationFile = fileURLToPath(new URL('../migrations/001_initial.sql', import.meta.url));
-const defaultArtifactDirectory = join(productionRoot, 'reports', 'acceptance');
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
@@ -123,138 +157,201 @@ function createBoundedPool(rawPool, { getParentSignal, operationDeadlineMs }) {
   };
 }
 
-function createBoundedListIterable(
-  rawContainerClient,
-  options,
-  { getParentSignal, operationDeadlineMs },
-  pageSettings = null,
-) {
-  const createIterator = () => {
-    const parentSignal = getParentSignal();
-    const iteratorController = new AbortController();
-    const abortFromParent = () => iteratorController.abort(deadlineReason(
-      parentSignal,
-      'DEPENDENCY_OPERATION_DEADLINE_EXCEEDED',
-    ));
-    if (parentSignal?.aborted) abortFromParent();
-    else parentSignal?.addEventListener('abort', abortFromParent, { once: true });
-    const listed = rawContainerClient.listBlobsFlat({
-      ...options,
-      abortSignal: iteratorController.signal,
+function gcsError(code) {
+  const error = new Error(code);
+  error.code = code;
+  return error;
+}
+
+function isGcsNotFound(error) {
+  return Number(error?.code) === 404 || Number(error?.statusCode) === 404
+    || error?.errors?.some?.((entry) => entry?.reason === 'notFound');
+}
+
+function scopedGcsName(value, gcsPrefix, { allowPrefix = false } = {}) {
+  return typeof value === 'string' && value.length > gcsPrefix.length
+    && value.length <= 1_024 && value.startsWith(gcsPrefix)
+    && !/[\u0000-\u001f\u007f]/.test(value)
+    && !value.includes('..') && (allowPrefix || !value.endsWith('/'));
+}
+
+async function boundedStreamBuffer(source, maximumBytes, signal) {
+  const chunks = [];
+  let size = 0;
+  const abort = () => source.destroy?.(
+    deadlineReason(signal, 'DEPENDENCY_OPERATION_DEADLINE_EXCEEDED'),
+  );
+  if (signal?.aborted) abort();
+  else signal?.addEventListener('abort', abort, { once: true });
+  try {
+    for await (const value of source) {
+      if (signal?.aborted) throw deadlineReason(signal, 'DEPENDENCY_OPERATION_DEADLINE_EXCEEDED');
+      const chunk = Buffer.from(value);
+      size += chunk.length;
+      if (size > maximumBytes) throw gcsError('DEPENDENCY_GCS_RESPONSE_INVALID');
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks, size);
+  } finally {
+    signal?.removeEventListener('abort', abort);
+  }
+}
+
+export async function attestGcpExecutionIdentity({
+  fetchImpl = fetch,
+  signal = null,
+} = {}) {
+  try {
+    if (typeof fetchImpl !== 'function') throw new Error('invalid metadata client');
+    const response = await fetchImpl(SERVICE_ACCOUNT_METADATA_URL, {
+      method: 'GET',
+      redirect: 'error',
+      headers: { 'Metadata-Flavor': 'Google' },
+      signal,
     });
-    const iterable = pageSettings === null ? listed : listed.byPage(pageSettings);
-    const source = iterable[Symbol.asyncIterator]();
-    const dispose = () => parentSignal?.removeEventListener('abort', abortFromParent);
-    const invoke = async (method, args) => {
-      try {
-        const result = await withDeadline(async (signal) => {
-          const abortIterator = () => iteratorController.abort(deadlineReason(
-            signal,
-            'DEPENDENCY_OPERATION_DEADLINE_EXCEEDED',
-          ));
-          if (signal.aborted) abortIterator();
-          else signal.addEventListener('abort', abortIterator, { once: true });
-          try {
-            return await source[method](...args);
-          } finally {
-            signal.removeEventListener('abort', abortIterator);
-          }
-        }, {
-          timeoutMs: operationDeadlineMs,
-          code: 'DEPENDENCY_OPERATION_DEADLINE_EXCEEDED',
-          parentSignal,
-        });
-        if (result?.done) dispose();
-        return result;
-      } catch (error) {
-        dispose();
-        throw error;
+    if (response?.status !== 200 || response.headers?.get?.('Metadata-Flavor') !== 'Google'
+      || !response.body) throw new Error('invalid metadata response');
+    const body = await boundedStreamBuffer(response.body, 512, signal);
+    const value = body.toString('utf8');
+    if (![ACCEPTANCE_SERVICE_ACCOUNT, `${ACCEPTANCE_SERVICE_ACCOUNT}\n`,
+      `${ACCEPTANCE_SERVICE_ACCOUNT}\r\n`].includes(value)) {
+      throw new Error('invalid execution identity');
+    }
+    return ACCEPTANCE_SERVICE_ACCOUNT;
+  } catch {
+    throw deadlineError('DEPENDENCY_GCP_IDENTITY_INVALID');
+  }
+}
+
+function createBoundedGcsClient(rawBucket, {
+  getParentSignal,
+  operationDeadlineMs,
+  gcsPrefix,
+  fetchImpl,
+  additionalExactNames = [],
+}) {
+  const exactNames = new Set(additionalExactNames);
+  const bounded = (operation) => withDeadline(operation, {
+    timeoutMs: operationDeadlineMs,
+    code: 'DEPENDENCY_OPERATION_DEADLINE_EXCEEDED',
+    parentSignal: getParentSignal(),
+  });
+  const normalize = async (operation, code = 'DEPENDENCY_GCS_RESPONSE_INVALID') => {
+    try {
+      return await bounded(operation);
+    } catch (error) {
+      if (['DEPENDENCY_OPERATION_DEADLINE_EXCEEDED', 'DEPENDENCY_OPERATION_CANCELLED']
+        .includes(error?.code)) throw error;
+      throw gcsError(code);
+    }
+  };
+  const validateName = (name) => {
+    if (!scopedGcsName(name, gcsPrefix) && !exactNames.has(name)) {
+      throw gcsError('DEPENDENCY_GCS_RESPONSE_INVALID');
+    }
+  };
+  return {
+    async assertIntendedAccess() {
+      const result = await normalize(() => rawBucket.iam.testPermissions(GCS_TEST_PERMISSIONS),
+        'DEPENDENCY_GCS_ACCESS_INVALID');
+      const granted = result?.[0];
+      if (!granted || typeof granted !== 'object' || Array.isArray(granted)
+        || Object.keys(granted).sort().join('\0') !== [...GCS_TEST_PERMISSIONS].sort().join('\0')
+        || GCS_REQUIRED_PERMISSIONS.some((permission) => granted[permission] !== true)
+        || GCS_FORBIDDEN_PERMISSIONS.some((permission) => granted[permission] !== false)) {
+        throw gcsError('DEPENDENCY_GCS_ACCESS_INVALID');
       }
-    };
-    return {
-      next: (...args) => invoke('next', args),
-      async return(...args) {
-        iteratorController.abort(deadlineError('DEPENDENCY_ITERATOR_CLOSED'));
-        if (typeof source.return !== 'function') {
-          dispose();
-          return { done: true };
-        }
-        return invoke('return', args);
-      },
-      async throw(...args) {
-        if (typeof source.throw !== 'function') {
-          dispose();
-          throw args[0];
-        }
-        return invoke('throw', args);
-      },
-      [Symbol.asyncIterator]() { return this; },
-    };
-  };
-  return {
-    [Symbol.asyncIterator]: createIterator,
-    byPage(settings) {
-      return createBoundedListIterable(
-        rawContainerClient,
-        options,
-        { getParentSignal, operationDeadlineMs },
-        settings,
-      );
     },
-  };
-}
-
-function createBoundedBlobClient(rawBlobClient, { getParentSignal, operationDeadlineMs }) {
-  const bounded = (operation) => withDeadline(operation, {
-    timeoutMs: operationDeadlineMs,
-    code: 'DEPENDENCY_OPERATION_DEADLINE_EXCEEDED',
-    parentSignal: getParentSignal(),
-  });
-  return {
-    uploadData(data, options = {}) {
-      return bounded((signal) => rawBlobClient.uploadData(data, { ...options, abortSignal: signal }));
+    async assertObjectPrivate(name) {
+      validateName(name);
+      const encodedName = name.split('/').map(encodeURIComponent).join('/');
+      const response = await normalize((signal) => fetchImpl(
+        `https://storage.googleapis.com/${BUCKET_NAME}/${encodedName}`,
+        { method: 'GET', redirect: 'manual', signal },
+      ), 'DEPENDENCY_GCS_ACCESS_INVALID');
+      if (![401, 403, 404].includes(Number(response?.status))) {
+        throw gcsError('DEPENDENCY_GCS_ACCESS_INVALID');
+      }
     },
-    deleteIfExists(options = {}) {
-      return bounded((signal) => rawBlobClient.deleteIfExists({ ...options, abortSignal: signal }));
-    },
-    getProperties(options = {}) {
-      return bounded((signal) => rawBlobClient.getProperties({ ...options, abortSignal: signal }));
-    },
-    downloadToBuffer(offset, count, options = {}) {
-      return bounded((signal) => rawBlobClient.downloadToBuffer(
-        offset,
-        count,
-        { ...options, abortSignal: signal },
-      ));
-    },
-  };
-}
-
-function createBoundedContainerClient(rawContainerClient, { getParentSignal, operationDeadlineMs }) {
-  const bounded = (operation) => withDeadline(operation, {
-    timeoutMs: operationDeadlineMs,
-    code: 'DEPENDENCY_OPERATION_DEADLINE_EXCEEDED',
-    parentSignal: getParentSignal(),
-  });
-  return {
-    getProperties(options = {}) {
-      return bounded((signal) => rawContainerClient.getProperties({ ...options, abortSignal: signal }));
-    },
-    getAccessPolicy(options = {}) {
-      return bounded((signal) => rawContainerClient.getAccessPolicy({ ...options, abortSignal: signal }));
-    },
-    getBlockBlobClient(name) {
-      return createBoundedBlobClient(rawContainerClient.getBlockBlobClient(name), {
-        getParentSignal,
-        operationDeadlineMs,
+    async putObject({ name, bytes, contentType, ifAbsent = false } = {}) {
+      validateName(name);
+      const body = Buffer.from(bytes ?? []);
+      if (body.length < 1 || body.length > 8 * 1024 * 1024
+        || typeof contentType !== 'string' || !contentType || contentType.length > 255) {
+        throw gcsError('DEPENDENCY_GCS_RESPONSE_INVALID');
+      }
+      await normalize(async (signal) => {
+        const options = {
+          resumable: false,
+          validation: 'crc32c',
+          metadata: { contentType, cacheControl: 'private, no-store' },
+        };
+        if (ifAbsent) options.preconditionOpts = { ifGenerationMatch: 0 };
+        await pipeline(Readable.from([body]), rawBucket.file(name).createWriteStream(options), { signal });
       });
     },
-    listBlobsFlat(options = {}) {
-      return createBoundedListIterable(
-        rawContainerClient,
-        options,
-        { getParentSignal, operationDeadlineMs },
-      );
+    async headObject({ name } = {}) {
+      validateName(name);
+      const result = await normalize(() => rawBucket.file(name).getMetadata());
+      const metadata = result?.[0];
+      const size = Number(metadata?.size);
+      if (metadata?.name !== name || !Number.isSafeInteger(size) || size < 1
+        || String(size) !== String(metadata.size)) {
+        throw gcsError('DEPENDENCY_GCS_RESPONSE_INVALID');
+      }
+      return { size, generation: metadata.generation ?? null, contentType: metadata.contentType ?? null };
+    },
+    async readObject({ name, start, end } = {}) {
+      validateName(name);
+      const { size } = await this.headObject({ name });
+      const first = start === undefined ? 0 : Number(start);
+      const last = end === undefined ? size - 1 : Number(end);
+      if (!Number.isSafeInteger(first) || !Number.isSafeInteger(last)
+        || first < 0 || last < first || last >= size) {
+        throw gcsError('DEPENDENCY_GCS_RESPONSE_INVALID');
+      }
+      const expected = last - first + 1;
+      const body = await normalize((signal) => boundedStreamBuffer(
+        rawBucket.file(name).createReadStream({ start: first, end: last, validation: false }),
+        expected,
+        signal,
+      ));
+      if (body.length !== expected) throw gcsError('DEPENDENCY_GCS_RESPONSE_INVALID');
+      return body;
+    },
+    async listObjectsPage({ prefix, limit = 100, cursor = null } = {}) {
+      if (typeof prefix !== 'string' || !prefix.startsWith(gcsPrefix) || !prefix.endsWith('/')
+        || prefix.length > 1_024 || prefix.includes('..')
+        || !Number.isSafeInteger(limit) || limit < 1 || limit > 1_000
+        || (cursor !== null && (!nonEmpty(cursor, 4_096)))) {
+        throw gcsError('DEPENDENCY_GCS_RESPONSE_INVALID');
+      }
+      const options = { prefix, maxResults: limit, autoPaginate: false };
+      if (cursor) options.pageToken = cursor;
+      const result = await normalize(() => rawBucket.getFiles(options));
+      const files = result?.[0];
+      const next = result?.[1]?.pageToken ?? result?.[2]?.nextPageToken ?? null;
+      if (!Array.isArray(files) || (next !== null && !nonEmpty(next, 4_096))) {
+        throw gcsError('DEPENDENCY_GCS_RESPONSE_INVALID');
+      }
+      const names = files.map((file) => file?.name);
+      if (new Set(names).size !== names.length
+        || names.some((name) => !scopedGcsName(name, gcsPrefix) || !name.startsWith(prefix))) {
+        throw gcsError('DEPENDENCY_GCS_RESPONSE_INVALID');
+      }
+      return { names, cursor: next };
+    },
+    async deleteObject({ name } = {}) {
+      validateName(name);
+      try {
+        await bounded(() => rawBucket.file(name).delete());
+        return true;
+      } catch (error) {
+        if (isGcsNotFound(error)) return false;
+        if (['DEPENDENCY_OPERATION_DEADLINE_EXCEEDED', 'DEPENDENCY_OPERATION_CANCELLED']
+          .includes(error?.code)) throw error;
+        throw gcsError('DEPENDENCY_GCS_RESPONSE_INVALID');
+      }
     },
   };
 }
@@ -267,40 +364,30 @@ function nonEmpty(value, maximum = 8_192) {
     && !/[\u0000-\u001f\u007f]/.test(value);
 }
 
-function validResourceId(value, provider, resourceType) {
-  if (!nonEmpty(value, 1_024)) return false;
-  const segments = value.split('/');
-  return segments.length === 9
-    && segments[0] === ''
-    && segments[1].toLowerCase() === 'subscriptions'
-    && segments[2].length > 0
-    && segments[3].toLowerCase() === 'resourcegroups'
-    && segments[4].length > 0
-    && segments[5].toLowerCase() === 'providers'
-    && segments[6].toLowerCase() === provider.toLowerCase()
-    && segments[7].toLowerCase() === resourceType.toLowerCase()
-    && segments.slice(6).every((segment) => /^[a-z0-9._()-]+$/i.test(segment));
+function postgresUser(databaseUrl) {
+  try {
+    return decodeURIComponent(new URL(databaseUrl).username);
+  } catch {
+    return null;
+  }
 }
 
-function selectBlob(environment, prefix) {
-  const connectionString = environment?.[`${prefix}_CONNECTION_STRING`];
-  const accountUrl = environment?.[`${prefix}_ACCOUNT_URL`];
-  const hasConnectionString = connectionString !== undefined;
-  const hasAccountUrl = accountUrl !== undefined;
-  if (hasConnectionString === hasAccountUrl) return null;
-  if (hasConnectionString && !nonEmpty(connectionString, 32_768)) return null;
-  if (hasAccountUrl && !nonEmpty(accountUrl, 4_096)) return null;
-  return hasConnectionString
-    ? { mode: 'connection-string', connectionString, accountUrl: null }
-    : { mode: 'account-url', connectionString: null, accountUrl };
+function validateReleaseManifest(value, releaseSha) {
+  const expectedKeys = ['releaseSha', 'schemaVersion', 'sourceArchiveSha256', 'sourcePath'];
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).sort().join('\0') === expectedKeys.sort().join('\0')
+    && value.schemaVersion === 1
+    && value.releaseSha === releaseSha
+    && DIGEST.test(String(value.sourceArchiveSha256 ?? ''))
+    && value.sourcePath === 'git-archive:production-v1');
 }
 
 function validateIsolation(schema, prefix) {
   const schemaMatch = SCHEMA.exec(String(schema ?? ''));
-  const prefixMatch = BLOB_PREFIX.exec(String(prefix ?? ''));
+  const prefixMatch = GCS_PREFIX.exec(String(prefix ?? ''));
   if (!schemaMatch || !prefixMatch) return null;
   const runId = prefixMatch[1];
-  return schemaMatch[1] === runId.replaceAll('-', '') ? { runId, schema, blobPrefix: prefix } : null;
+  return schemaMatch[1] === runId.replaceAll('-', '') ? { runId, schema, gcsPrefix: prefix } : null;
 }
 
 function inventoryContains(inventory, resourceId, identitySha256, field) {
@@ -311,7 +398,7 @@ function inventoryContains(inventory, resourceId, identitySha256, field) {
   ));
 }
 
-function legacyCompatibilityCollides(environment, postgresIdentity, blobIdentity) {
+function legacyCompatibilityCollides(environment, postgresIdentity) {
   if (environment?.DATABASE_URL !== undefined) {
     try {
       if (postgresIdentitySha256(environment.DATABASE_URL) === postgresIdentity) return true;
@@ -320,33 +407,7 @@ function legacyCompatibilityCollides(environment, postgresIdentity, blobIdentity
     }
   }
 
-  const connectionString = environment?.AZURE_STORAGE_CONNECTION_STRING;
-  const accountUrl = environment?.AZURE_BLOB_ACCOUNT_URL;
-  const hasConnectionString = connectionString !== undefined;
-  const hasAccountUrl = accountUrl !== undefined;
-  const suppliedContainers = [
-    environment?.AZURE_BLOB_CONTAINER,
-    environment?.AZURE_STORAGE_CONTAINER,
-  ].filter((value) => value !== undefined);
-  const hasLegacyBlobValue = connectionString !== undefined
-    || accountUrl !== undefined
-    || suppliedContainers.length > 0;
-  if (!hasLegacyBlobValue) return false;
-  if (hasConnectionString === hasAccountUrl) return true;
-  if ((hasConnectionString && !nonEmpty(connectionString, 32_768))
-    || (hasAccountUrl && !nonEmpty(accountUrl, 4_096))) return true;
-  if (suppliedContainers.length === 0 || suppliedContainers.some((value) => !nonEmpty(value))) return true;
-  if (new Set(suppliedContainers).size !== 1) return true;
-  try {
-    const identity = blobIdentitySha256({
-      connectionString: hasConnectionString ? connectionString : undefined,
-      accountUrl: hasAccountUrl ? accountUrl : undefined,
-      container: suppliedContainers[0],
-    });
-    return identity === blobIdentity;
-  } catch {
-    return true;
-  }
+  return false;
 }
 
 function safeChecks(value) {
@@ -371,7 +432,7 @@ function safeChecks(value) {
 
 function hasCoreChecks(checks) {
   const names = new Set((checks ?? []).map(({ name }) => name));
-  return DEPENDENCY_ACCEPTANCE_CORE_CHECK_NAMES.every((name) => names.has(name));
+  return GCS_CORE_CHECK_NAMES.every((name) => names.has(name));
 }
 
 function safeFailureChecks(checks, cleanup) {
@@ -381,7 +442,7 @@ function safeFailureChecks(checks, cleanup) {
     if (!names.has(name)) completed.push({ name, status });
   };
   append('acceptance-execution', 'fail');
-  append('blob-prefix-cleanup', cleanup.blobPrefixObjectCount === 0 ? 'pass' : 'fail');
+  append('gcs-prefix-cleanup', cleanup.gcsPrefixObjectCount === 0 ? 'pass' : 'fail');
   append('postgres-schema-cleanup', cleanup.schemaAbsent === true ? 'pass' : 'fail');
   append('dependency-close', cleanup.closed === true ? 'pass' : 'fail');
   return completed;
@@ -390,32 +451,6 @@ function safeFailureChecks(checks, cleanup) {
 function publish(writeOutput, exitCode, publicReport) {
   writeOutput(`${JSON.stringify(publicReport)}\n`);
   return { exitCode, publicReport };
-}
-
-async function defaultInspectGit(cwd, { signal } = {}) {
-  const headResult = await execFileAsync('git', ['rev-parse', '--verify', 'HEAD'], {
-    cwd,
-    encoding: 'utf8',
-    windowsHide: true,
-    maxBuffer: 64 * 1_024,
-    signal,
-  });
-  const statusResult = await execFileAsync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
-    cwd,
-    encoding: 'utf8',
-    windowsHide: true,
-    maxBuffer: 1024 * 1_024,
-    signal,
-  });
-  return {
-    head: headResult.stdout.replace(/[\r\n]+$/, ''),
-    clean: statusResult.stdout.length === 0,
-  };
-}
-
-async function defaultWriteArtifact({ filePath, contents }, { signal } = {}) {
-  await mkdir(dirname(filePath), { recursive: true });
-  await writeFile(filePath, contents, { encoding: 'utf8', flag: 'wx', signal });
 }
 
 function addMs(value, milliseconds) {
@@ -476,13 +511,13 @@ async function deliverClaimedTurn(store, claim, baseTime, text) {
 
 export async function drainRestartedMediaDeletionOutbox({
   pool,
-  containerClient,
-  blobPrefix,
+  gcsClient,
+  gcsPrefix,
   cleanupNow,
   StoreClass = PostgresStore,
 } = {}) {
-  if (!pool || !containerClient || typeof containerClient.getBlockBlobClient !== 'function'
-    || !BLOB_PREFIX.test(String(blobPrefix ?? ''))
+  if (!pool || !gcsClient || typeof gcsClient.deleteObject !== 'function'
+    || !GCS_PREFIX.test(String(gcsPrefix ?? ''))
     || !Number.isFinite(Date.parse(cleanupNow)) || typeof StoreClass !== 'function') {
     throw new Error('Restarted outbox configuration is invalid');
   }
@@ -503,8 +538,8 @@ export async function drainRestartedMediaDeletionOutbox({
       now: cleanupNow,
     });
     if (!job) break;
-    requireInvariant(typeof job.storageKey === 'string' && job.storageKey.startsWith(blobPrefix));
-    await containerClient.getBlockBlobClient(job.storageKey).deleteIfExists();
+    requireInvariant(typeof job.storageKey === 'string' && job.storageKey.startsWith(gcsPrefix));
+    await gcsClient.deleteObject({ name: job.storageKey });
     await restartedStore.completeMediaDeletion({
       jobId: job.id,
       generation: job.generation,
@@ -517,11 +552,11 @@ export async function drainRestartedMediaDeletionOutbox({
   return processed;
 }
 
-async function runPostgresAndBlobChecks({
+async function runPostgresAndGcsChecks({
   stores,
   pools,
-  containerClient,
-  blobPrefix,
+  gcsClient,
+  gcsPrefix,
   runId,
   occurredAt,
 }) {
@@ -548,6 +583,8 @@ async function runPostgresAndBlobChecks({
         clientMessageId: randomUUID(),
         requestHash: sha256(`first:${runId}`),
         text: 'acceptance first turn',
+        replyLanguage: 'yue-Hant-HK',
+        replyMode: 'voice',
         now: addMs(occurredAt, 10),
       },
       {
@@ -556,6 +593,8 @@ async function runPostgresAndBlobChecks({
         clientMessageId: randomUUID(),
         requestHash: sha256(`second:${runId}`),
         text: 'acceptance second turn',
+        replyLanguage: 'en',
+        replyMode: 'text',
         now: addMs(occurredAt, 11),
       },
     ];
@@ -564,8 +603,25 @@ async function runPostgresAndBlobChecks({
       storeTwo.acceptMessage(messages[1]),
     ]);
     requireInvariant(new Set(accepted.map(({ message }) => message.sequence)).size === 2);
+    requireInvariant(accepted[0].message.replyLanguage === 'yue-Hant-HK'
+      && accepted[0].turn.replyMode === 'voice'
+      && accepted[1].message.replyLanguage === 'en'
+      && accepted[1].turn.replyMode === 'text');
     const replay = await storeTwo.acceptMessage(messages[0]);
-    requireInvariant(replay.idempotent === true && replay.message.id === accepted[0].message.id);
+    requireInvariant(replay.idempotent === true && replay.message.id === accepted[0].message.id
+      && replay.message.replyLanguage === 'yue-Hant-HK' && replay.turn.replyMode === 'voice');
+    let conflictRejected = false;
+    try {
+      await storeTwo.acceptMessage({
+        ...messages[0],
+        requestHash: sha256(`first-conflict:${runId}`),
+        replyLanguage: 'cmn-Hans-CN',
+        replyMode: 'text',
+      });
+    } catch (error) {
+      conflictRejected = error?.code === 'IDEMPOTENCY_CONFLICT';
+    }
+    requireInvariant(conflictRejected);
 
     const firstNow = addMs(occurredAt, 100);
     const first = await storeOne.claimNextTurn({
@@ -730,7 +786,7 @@ async function runPostgresAndBlobChecks({
       clientUploadId: randomUUID(),
       rateLimits: [asrWindows[1], asrWindows[0]],
       leaseToken: randomUUID(),
-      attemptStorageKey: `${blobPrefix}rate/asr/${randomUUID()}`,
+      attemptStorageKey: `${gcsPrefix}rate/asr/${randomUUID()}`,
     });
     requireInvariant(firstAsr.status === 'claimed');
     for (const rateLimits of [asrWindows, [...asrWindows].reverse()]) {
@@ -739,7 +795,7 @@ async function runPostgresAndBlobChecks({
         clientUploadId: randomUUID(),
         rateLimits,
         leaseToken: randomUUID(),
-        attemptStorageKey: `${blobPrefix}rate/asr/${randomUUID()}`,
+        attemptStorageKey: `${gcsPrefix}rate/asr/${randomUUID()}`,
       });
       requireInvariant(blocked.status === 'rate_limited'
         && blocked.blockingExpiresAt === dailyExpiry);
@@ -752,7 +808,7 @@ async function runPostgresAndBlobChecks({
       kind: 'assistant_voice',
       rateLimits: [ttsWindows[1], ttsWindows[0]],
       leaseToken: randomUUID(),
-      attemptStorageKey: `${blobPrefix}rate/tts/${randomUUID()}`,
+      attemptStorageKey: `${gcsPrefix}rate/tts/${randomUUID()}`,
       configVersion: 'acceptance-rate-v1',
       leaseExpiresAt: addMs(occurredAt, 40_000),
       attemptDeadlineAt: addMs(occurredAt, 50_000),
@@ -767,7 +823,7 @@ async function runPostgresAndBlobChecks({
         kind: 'assistant_voice',
         rateLimits: ttsOrders[index],
         leaseToken: randomUUID(),
-        attemptStorageKey: `${blobPrefix}rate/tts/${randomUUID()}`,
+        attemptStorageKey: `${gcsPrefix}rate/tts/${randomUUID()}`,
         configVersion: 'acceptance-rate-v1',
         leaseExpiresAt: addMs(occurredAt, 40_000),
         attemptDeadlineAt: addMs(occurredAt, 50_000),
@@ -778,26 +834,40 @@ async function runPostgresAndBlobChecks({
     }
   });
 
-  await measure(checks, 'blob-private-full-range-head', async () => {
-    await containerClient.getProperties();
-    const access = await containerClient.getAccessPolicy();
-    requireInvariant(!access?.blobPublicAccess && !access?.publicAccess);
-    const key = `${blobPrefix}probe.bin`;
+  await measure(checks, 'gcs-private-full-range-head', async () => {
+    await gcsClient.assertIntendedAccess();
+    const key = `${gcsPrefix}probe/full-range.bin`;
+    const pageKey = `${gcsPrefix}probe/pagination.bin`;
     const body = Buffer.from(`acceptance:${runId}`, 'utf8');
-    const blob = containerClient.getBlockBlobClient(key);
-    await blob.uploadData(body, { blobHTTPHeaders: { blobContentType: 'application/octet-stream' } });
-    const properties = await blob.getProperties();
-    const full = await blob.downloadToBuffer();
-    const range = await blob.downloadToBuffer(1, Math.min(4, body.length - 1));
-    requireInvariant(Number(properties.contentLength) === body.length);
+    await gcsClient.putObject({
+      name: key, bytes: body, contentType: 'application/octet-stream', ifAbsent: true,
+    });
+    await gcsClient.putObject({
+      name: pageKey, bytes: Buffer.from('page'), contentType: 'application/octet-stream', ifAbsent: true,
+    });
+    const properties = await gcsClient.headObject({ name: key });
+    const full = await gcsClient.readObject({ name: key });
+    const last = Math.min(4, body.length - 1);
+    const range = await gcsClient.readObject({ name: key, start: 1, end: last });
+    requireInvariant(Number(properties.size) === body.length);
     requireInvariant(Buffer.compare(full, body) === 0);
-    requireInvariant(Buffer.compare(range, body.subarray(1, 1 + range.length)) === 0);
+    requireInvariant(Buffer.compare(range, body.subarray(1, last + 1)) === 0);
+    const firstPage = await gcsClient.listObjectsPage({ prefix: `${gcsPrefix}probe/`, limit: 1 });
+    const secondPage = await gcsClient.listObjectsPage({
+      prefix: `${gcsPrefix}probe/`, limit: 1, cursor: firstPage.cursor,
+    });
+    requireInvariant(firstPage.names.length === 1 && firstPage.cursor
+      && secondPage.names.length === 1 && secondPage.cursor === null
+      && new Set([...firstPage.names, ...secondPage.names]).size === 2);
+    await gcsClient.assertObjectPrivate(key);
+    requireInvariant(await gcsClient.deleteObject({ name: pageKey }) === true);
+    requireInvariant(await gcsClient.deleteObject({ name: pageKey }) === false);
   });
 
   await measure(checks, 'postgres-media-fencing', async () => {
     const voiceId = randomUUID();
-    const firstVoiceKey = `${blobPrefix}attempts/voice/${randomUUID()}`;
-    const secondVoiceKey = `${blobPrefix}attempts/voice/${randomUUID()}`;
+    const firstVoiceKey = `${gcsPrefix}attempts/voice/${randomUUID()}`;
+    const secondVoiceKey = `${gcsPrefix}attempts/voice/${randomUUID()}`;
     const firstNow = addMs(occurredAt, 1_000);
     const firstToken = randomUUID();
     const claimDeleteSubject = sha256(`claim-delete:${runId}`);
@@ -905,8 +975,8 @@ async function runPostgresAndBlobChecks({
       now: addMs(recoveryNow, 2),
     });
     const voiceBody = Buffer.from('RIFF-acceptance-voice', 'utf8');
-    await containerClient.getBlockBlobClient(secondVoiceKey).uploadData(voiceBody, {
-      blobHTTPHeaders: { blobContentType: 'audio/wav' },
+    await gcsClient.putObject({
+      name: secondVoiceKey, bytes: voiceBody, contentType: 'audio/wav', ifAbsent: true,
     });
     const completedVoice = await storeTwo.completeVoiceUpload({
       uploadId: recovered.upload.id,
@@ -931,8 +1001,8 @@ async function runPostgresAndBlobChecks({
       now: addMs(recoveryNow, 4),
     });
 
-    const ttsKeyOne = `${blobPrefix}attempts/tts/${randomUUID()}`;
-    const ttsKeyTwo = `${blobPrefix}attempts/tts/${randomUUID()}`;
+    const ttsKeyOne = `${gcsPrefix}attempts/tts/${randomUUID()}`;
+    const ttsKeyTwo = `${gcsPrefix}attempts/tts/${randomUUID()}`;
     const ttsNow = addMs(occurredAt, 2_000);
     const claims = await Promise.all([
       storeOne.claimAssistantAudioWithRateLimits({
@@ -962,7 +1032,7 @@ async function runPostgresAndBlobChecks({
     ]);
     const winner = claims.find(({ status }) => status === 'claimed');
     requireInvariant(winner && claims.filter(({ status }) => status === 'live').length === 1);
-    const recoveredTtsKey = `${blobPrefix}attempts/tts/${randomUUID()}`;
+    const recoveredTtsKey = `${gcsPrefix}attempts/tts/${randomUUID()}`;
     const recoveredTtsToken = randomUUID();
     const recoveredTts = await storeTwo.claimAssistantAudioWithRateLimits({
       sessionId: owner.session.id,
@@ -980,8 +1050,8 @@ async function runPostgresAndBlobChecks({
       && recoveredTts.generation.id === winner.generation.id
       && recoveredTts.generation.attempt === winner.generation.attempt + 1);
     const ttsBody = Buffer.from('acceptance-tts', 'utf8');
-    await containerClient.getBlockBlobClient(recoveredTtsKey).uploadData(ttsBody, {
-      blobHTTPHeaders: { blobContentType: 'audio/mpeg' },
+    await gcsClient.putObject({
+      name: recoveredTtsKey, bytes: ttsBody, contentType: 'audio/mpeg', ifAbsent: true,
     });
     let staleTtsRejected = false;
     try {
@@ -1012,7 +1082,7 @@ async function runPostgresAndBlobChecks({
       now: addMs(ttsNow, 8),
     });
 
-    const lifecycleKey = `${blobPrefix}lifecycle/${randomUUID()}`;
+    const lifecycleKey = `${gcsPrefix}lifecycle/${randomUUID()}`;
     const queued = await storeOne.enqueueMediaDeletion({
       storageKey: lifecycleKey,
       reason: 'acceptance',
@@ -1084,7 +1154,7 @@ async function runPostgresAndBlobChecks({
       now: addMs(ttsNow, 7),
     });
     requireInvariant(completedFinal.state === 'completed');
-    const pendingLifecycleKey = `${blobPrefix}lifecycle/${randomUUID()}`;
+    const pendingLifecycleKey = `${gcsPrefix}lifecycle/${randomUUID()}`;
     const pendingLifecycle = await storeOne.enqueueMediaDeletion({
       storageKey: pendingLifecycleKey,
       reason: 'acceptance-pending',
@@ -1114,7 +1184,7 @@ async function runPostgresAndBlobChecks({
       leaseToken: pendingToken,
       now: addMs(ttsNow, 23),
     });
-    const dedupKey = `${blobPrefix}lifecycle/${randomUUID()}`;
+    const dedupKey = `${gcsPrefix}lifecycle/${randomUUID()}`;
     const deduplicated = await Promise.all([
       storeOne.enqueueMediaDeletion({
         storageKey: dedupKey,
@@ -1150,7 +1220,7 @@ async function runPostgresAndBlobChecks({
       tokenHash: sha256(`provider-before-write:${runId}`),
       now: addMs(ttsNow, 40),
     });
-    const beforeWriteKey = `${blobPrefix}provider-before-write/${randomUUID()}`;
+    const beforeWriteKey = `${gcsPrefix}provider-before-write/${randomUUID()}`;
     await storeOne.claimVoiceUploadWithRateLimits({
       sessionId: beforeWriteOwner.session.id,
       clientUploadId: randomUUID(),
@@ -1173,7 +1243,7 @@ async function runPostgresAndBlobChecks({
       tokenHash: sha256(`provider-before-attach:${runId}`),
       now: addMs(ttsNow, 50),
     });
-    const beforeAttachKey = `${blobPrefix}provider-before-attach/${randomUUID()}`;
+    const beforeAttachKey = `${gcsPrefix}provider-before-attach/${randomUUID()}`;
     const beforeAttachToken = randomUUID();
     const beforeAttach = await storeTwo.claimVoiceUploadWithRateLimits({
       sessionId: beforeAttachOwner.session.id,
@@ -1193,8 +1263,8 @@ async function runPostgresAndBlobChecks({
       now: addMs(ttsNow, 52),
     });
     const beforeAttachBody = Buffer.from('provider-before-attach', 'utf8');
-    await containerClient.getBlockBlobClient(beforeAttachKey).uploadData(beforeAttachBody, {
-      blobHTTPHeaders: { blobContentType: 'audio/wav' },
+    await gcsClient.putObject({
+      name: beforeAttachKey, bytes: beforeAttachBody, contentType: 'audio/wav', ifAbsent: true,
     });
     await storeOne.revokeSessionAndEnqueueMedia({
       sessionId: beforeAttachOwner.session.id,
@@ -1247,7 +1317,7 @@ async function runPostgresAndBlobChecks({
           expiresAt: addMs(occurredAt, 86_400_000),
         }],
         leaseToken: randomUUID(),
-        attemptStorageKey: `${blobPrefix}delete-first/${randomUUID()}`,
+        attemptStorageKey: `${gcsPrefix}delete-first/${randomUUID()}`,
         leaseExpiresAt: addMs(ttsNow, 30_000),
         attemptDeadlineAt: addMs(ttsNow, 60_000),
         now: addMs(ttsNow, 72),
@@ -1277,11 +1347,14 @@ async function runPostgresAndBlobChecks({
     requireInvariant(claimFirstQuota.rowCount === 1
       && Number(claimFirstQuota.rows[0].count) === 1);
     const lateBody = Buffer.from('late-provider-write', 'utf8');
-    await containerClient.getBlockBlobClient(firstVoiceKey).uploadData(lateBody, {
-      blobHTTPHeaders: { blobContentType: 'audio/wav' },
+    await gcsClient.putObject({
+      name: firstVoiceKey, bytes: lateBody, contentType: 'audio/wav', ifAbsent: true,
     });
-    await containerClient.getBlockBlobClient(winner.generation.attemptStorageKey).uploadData(lateBody, {
-      blobHTTPHeaders: { blobContentType: 'audio/mpeg' },
+    await gcsClient.putObject({
+      name: winner.generation.attemptStorageKey,
+      bytes: lateBody,
+      contentType: 'audio/mpeg',
+      ifAbsent: true,
     });
     const cleanupNow = addMs(occurredAt, 180_000);
     await storeTwo.rearmMediaDeletionAfterWrite({
@@ -1298,8 +1371,8 @@ async function runPostgresAndBlobChecks({
     });
     const processed = await drainRestartedMediaDeletionOutbox({
       pool: pools[0],
-      containerClient,
-      blobPrefix,
+      gcsClient,
+      gcsPrefix,
       cleanupNow,
     });
     requireInvariant(processed >= 3);
@@ -1309,9 +1382,12 @@ async function runPostgresAndBlobChecks({
     `);
     requireInvariant(Number(pending.rows[0]?.count) === 0);
     const accessible = new Set();
-    for await (const item of containerClient.listBlobsFlat({ prefix: blobPrefix })) {
-      accessible.add(item.name);
-    }
+    let cursor = null;
+    do {
+      const page = await gcsClient.listObjectsPage({ prefix: gcsPrefix, limit: 100, cursor });
+      page.names.forEach((name) => accessible.add(name));
+      cursor = page.cursor;
+    } while (cursor);
     requireInvariant(!accessible.has(firstVoiceKey)
       && !accessible.has(secondVoiceKey)
       && !accessible.has(winner.generation.attemptStorageKey)
@@ -1326,32 +1402,47 @@ async function runPostgresAndBlobChecks({
 
 export async function createRealAcceptanceRuntime({
   databaseUrl,
-  blob,
-  blobContainer,
-  blobPrefix,
+  migratorDatabaseUrl,
+  projectId,
+  bucketName,
+  releaseSha,
+  evidenceOutputObject,
+  gcsPrefix,
   schema,
   runId,
   occurredAt,
   PoolClass,
-  BlobServiceClientClass,
-  DefaultAzureCredentialClass,
+  StorageClass,
+  fetchImpl = fetch,
   operationDeadlineMs = DEFAULT_OPERATION_DEADLINE_MS,
   readMigration = ({ signal } = {}) => readFile(migrationFile, { encoding: 'utf8', signal }),
-  exerciseChecks = runPostgresAndBlobChecks,
+  exerciseChecks = runPostgresAndGcsChecks,
+  attestExecutionIdentity = attestGcpExecutionIdentity,
 } = {}) {
-  let databaseIdentityValid = false;
+  let databaseIdentitiesValid = false;
   try {
     assertSecurePostgresRuntimeUrl(databaseUrl);
-    databaseIdentityValid = true;
+    assertSecurePostgresRuntimeUrl(migratorDatabaseUrl);
+    databaseIdentitiesValid = postgresIdentitySha256(databaseUrl)
+      === postgresIdentitySha256(migratorDatabaseUrl);
   } catch {
-    databaseIdentityValid = false;
+    databaseIdentitiesValid = false;
   }
-  if (!SCHEMA.test(String(schema ?? '')) || !BLOB_PREFIX.test(String(blobPrefix ?? ''))
-    || !nonEmpty(databaseUrl, 32_768) || !CONTAINER.test(String(blobContainer ?? ''))
-    || !databaseIdentityValid
-    || !PoolClass || !BlobServiceClientClass || !DefaultAzureCredentialClass
+  const isolation = validateIsolation(schema, gcsPrefix);
+  const outputMatch = EVIDENCE_OUTPUT_OBJECT.exec(String(evidenceOutputObject ?? ''));
+  if (!isolation || isolation.runId !== runId
+    || projectId !== PROJECT_ID || bucketName !== BUCKET_NAME
+    || !RELEASE_SHA.test(String(releaseSha ?? ''))
+    || !outputMatch || outputMatch[1] !== releaseSha || outputMatch[2] !== runId
+    || !nonEmpty(databaseUrl, 32_768) || !nonEmpty(migratorDatabaseUrl, 32_768)
+    || databaseUrl === migratorDatabaseUrl || !databaseIdentitiesValid
+    || postgresUser(databaseUrl) !== APP_DATABASE_USER
+    || postgresUser(migratorDatabaseUrl) !== MIGRATOR_DATABASE_USER
+    || typeof PoolClass !== 'function' || typeof StorageClass !== 'function'
+    || typeof fetchImpl !== 'function'
     || deadlineValue(operationDeadlineMs, null) === null
-    || typeof readMigration !== 'function' || typeof exerciseChecks !== 'function') {
+    || typeof readMigration !== 'function' || typeof exerciseChecks !== 'function'
+    || typeof attestExecutionIdentity !== 'function') {
     throw new Error('Real acceptance runtime configuration is invalid');
   }
   const postgresDeadlineOptions = {
@@ -1359,44 +1450,72 @@ export async function createRealAcceptanceRuntime({
     query_timeout: operationDeadlineMs,
     statement_timeout: operationDeadlineMs,
   };
-  const poolOptions = {
+  const appPoolOptions = {
     connectionString: databaseUrl,
     options: `-c search_path=${schema} -c statement_timeout=${operationDeadlineMs}`,
     ...postgresDeadlineOptions,
   };
+  const migratorPoolOptions = {
+    connectionString: migratorDatabaseUrl,
+    options: `-c search_path=${schema} -c statement_timeout=${operationDeadlineMs}`,
+    ...postgresDeadlineOptions,
+  };
   const rawAdminPool = new PoolClass({
-    connectionString: databaseUrl,
+    connectionString: migratorDatabaseUrl,
     options: `-c statement_timeout=${operationDeadlineMs}`,
     ...postgresDeadlineOptions,
   });
-  const rawPoolOne = new PoolClass(poolOptions);
-  const rawPoolTwo = new PoolClass(poolOptions);
+  const rawMigratorPool = new PoolClass(migratorPoolOptions);
+  const rawPoolOne = new PoolClass(appPoolOptions);
+  const rawPoolTwo = new PoolClass(appPoolOptions);
   let activeSignal = null;
   const getParentSignal = () => activeSignal;
   const adminPool = createBoundedPool(rawAdminPool, { getParentSignal, operationDeadlineMs });
+  const migratorPool = createBoundedPool(rawMigratorPool, { getParentSignal, operationDeadlineMs });
   const poolOne = createBoundedPool(rawPoolOne, { getParentSignal, operationDeadlineMs });
   const poolTwo = createBoundedPool(rawPoolTwo, { getParentSignal, operationDeadlineMs });
   const storeOne = new PostgresStore({ pool: poolOne, ownsPool: false });
   const storeTwo = new PostgresStore({ pool: poolTwo, ownsPool: false });
-  const serviceClient = blob.connectionString
-    ? BlobServiceClientClass.fromConnectionString(blob.connectionString)
-    : new BlobServiceClientClass(blob.accountUrl, new DefaultAzureCredentialClass());
-  const containerClient = createBoundedContainerClient(
-    serviceClient.getContainerClient(blobContainer),
-    { getParentSignal, operationDeadlineMs },
-  );
+  const storage = new StorageClass({ projectId });
+  const rawBucket = storage.bucket(bucketName);
+  if (!rawBucket || (rawBucket.name !== undefined && rawBucket.name !== bucketName)
+    || !rawBucket.iam || typeof rawBucket.iam.testPermissions !== 'function'
+    || typeof rawBucket.file !== 'function' || typeof rawBucket.getFiles !== 'function') {
+    throw new Error('Real acceptance runtime configuration is invalid');
+  }
+  const gcsClient = createBoundedGcsClient(rawBucket, {
+    getParentSignal,
+    operationDeadlineMs,
+    gcsPrefix,
+    fetchImpl,
+  });
+  const evidenceGcsClient = createBoundedGcsClient(rawBucket, {
+    getParentSignal,
+    operationDeadlineMs,
+    gcsPrefix,
+    fetchImpl,
+    additionalExactNames: [evidenceOutputObject],
+  });
   let schemaOwned = false;
-  let blobPrefixOwned = false;
+  let gcsPrefixOwned = false;
+  let gcsCleanupVerified = false;
+  let schemaCleanupVerified = false;
+  let closed = false;
 
   const prefixObjectCount = async ({ stopAfterFirst = false } = {}) => {
     let count = 0;
-    for await (const item of containerClient.listBlobsFlat({ prefix: blobPrefix })) {
-      if (typeof item.name !== 'string' || !item.name.startsWith(blobPrefix)) {
-        throw new Error('Blob verification escaped its prefix');
+    let cursor = null;
+    const seen = new Set();
+    do {
+      const page = await gcsClient.listObjectsPage({ prefix: gcsPrefix, limit: 100, cursor });
+      count += page.names.length;
+      if (stopAfterFirst && count > 0) return count;
+      if (count > 10_000 || (page.cursor && seen.has(page.cursor))) {
+        throw gcsError('DEPENDENCY_GCS_RESPONSE_INVALID');
       }
-      count += 1;
-      if (stopAfterFirst) break;
-    }
+      if (page.cursor) seen.add(page.cursor);
+      cursor = page.cursor;
+    } while (cursor);
     return count;
   };
 
@@ -1404,6 +1523,45 @@ export async function createRealAcceptanceRuntime({
     async runChecks({ signal = null } = {}) {
       activeSignal = signal;
       try {
+        const identityStartedAt = performance.now();
+        let executionIdentity;
+        try {
+          executionIdentity = await withDeadline(
+            (identitySignal) => attestExecutionIdentity({ signal: identitySignal }),
+            {
+              timeoutMs: operationDeadlineMs,
+              code: 'DEPENDENCY_OPERATION_DEADLINE_EXCEEDED',
+              parentSignal: activeSignal,
+            },
+          );
+        } catch {
+          throw deadlineError('DEPENDENCY_GCP_IDENTITY_INVALID');
+        }
+        if (executionIdentity !== ACCEPTANCE_SERVICE_ACCOUNT) {
+          throw deadlineError('DEPENDENCY_GCP_IDENTITY_INVALID');
+        }
+        const identityLatencyMs = Math.max(0, performance.now() - identityStartedAt);
+        const identityChecks = [
+          { name: 'gcp-execution-identity', status: 'pass', latencyMs: identityLatencyMs },
+          {
+            name: `gcp-identity-${sha256(ACCEPTANCE_SERVICE_ACCOUNT)}`,
+            status: 'pass',
+            latencyMs: identityLatencyMs,
+          },
+        ];
+        const version = await adminPool.query('SHOW server_version_num');
+        const versionNumber = Number(version.rows[0]?.server_version_num);
+        if (!Number.isSafeInteger(versionNumber) || versionNumber < 160_000 || versionNumber >= 170_000) {
+          throw deadlineError('DEPENDENCY_POSTGRES_VERSION_INVALID');
+        }
+        const migratorIdentity = await adminPool.query(`
+          SELECT current_user AS current_user,
+            has_schema_privilege(current_user, 'public', 'CREATE') AS can_create_schema,
+            has_database_privilege(current_user, current_database(), 'CREATE') AS can_create_database
+        `);
+        if (migratorIdentity.rows[0]?.current_user !== MIGRATOR_DATABASE_USER) {
+          throw deadlineError('DEPENDENCY_POSTGRES_IDENTITY_INVALID');
+        }
         const existingSchema = await adminPool.query(
           'SELECT count(*)::int AS count FROM pg_namespace WHERE nspname = $1',
           [schema],
@@ -1412,14 +1570,15 @@ export async function createRealAcceptanceRuntime({
           throw new Error('Acceptance schema is not fresh');
         }
         if (await prefixObjectCount({ stopAfterFirst: true }) !== 0) {
-          throw new Error('Acceptance Blob prefix is not fresh');
+          throw new Error('Acceptance GCS prefix is not fresh');
         }
-        const ownerMarker = containerClient.getBlockBlobClient(`${blobPrefix}.acceptance-owner`);
-        await ownerMarker.uploadData(Buffer.from(runId, 'utf8'), {
-          blobHTTPHeaders: { blobContentType: 'application/octet-stream' },
-          conditions: { ifNoneMatch: '*' },
+        await gcsClient.putObject({
+          name: `${gcsPrefix}.acceptance-owner`,
+          bytes: Buffer.from(runId, 'utf8'),
+          contentType: 'application/octet-stream',
+          ifAbsent: true,
         });
-        blobPrefixOwned = true;
+        gcsPrefixOwned = true;
         await adminPool.query(`CREATE SCHEMA "${schema}"`);
         schemaOwned = true;
         const migration = await withDeadline((operationSignal) => readMigration({ signal: operationSignal }), {
@@ -1430,36 +1589,59 @@ export async function createRealAcceptanceRuntime({
         if (typeof migration !== 'string' || migration.length < 1 || migration.length > 4 * 1024 * 1024) {
           throw new Error('Migration is unavailable');
         }
-        await poolOne.query(migration);
-        return await exerciseChecks({
+        await migratorPool.query(migration);
+        await migratorPool.query(`GRANT USAGE ON SCHEMA "${schema}" TO "${APP_DATABASE_USER}"`);
+        await migratorPool.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA "${schema}" TO "${APP_DATABASE_USER}"`);
+        await migratorPool.query(`GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA "${schema}" TO "${APP_DATABASE_USER}"`);
+        const appIdentity = await poolOne.query(`
+          SELECT current_user AS current_user,
+            has_schema_privilege(current_user, $1, 'CREATE') AS can_create_schema,
+            has_database_privilege(current_user, current_database(), 'CREATE') AS can_create_database
+        `, [schema]);
+        if (appIdentity.rows[0]?.current_user !== APP_DATABASE_USER
+          || appIdentity.rows[0]?.can_create_schema !== false
+          || appIdentity.rows[0]?.can_create_database !== false) {
+          throw deadlineError('DEPENDENCY_POSTGRES_IDENTITY_INVALID');
+        }
+        const dependencyChecks = await exerciseChecks({
           stores: [storeOne, storeTwo],
           pools: [poolOne, poolTwo],
-          containerClient,
-          blobPrefix,
+          gcsClient,
+          gcsPrefix,
           runId,
           occurredAt,
           signal: activeSignal,
         });
+        return [...identityChecks, ...dependencyChecks];
       } finally {
         activeSignal = null;
       }
     },
-    async cleanupBlobPrefix(prefix, { signal = null } = {}) {
+    async cleanupGcsPrefix(prefix, { signal = null } = {}) {
       activeSignal = signal;
       try {
-      if (prefix !== blobPrefix || !BLOB_PREFIX.test(prefix)) throw new Error('Blob cleanup scope is invalid');
-      if (!blobPrefixOwned) return prefixObjectCount({ stopAfterFirst: true });
-      for await (const page of containerClient.listBlobsFlat({ prefix }).byPage({ maxPageSize: 100 })) {
-        for (const item of page.segment?.blobItems ?? []) {
-          if (typeof item.name !== 'string' || !item.name.startsWith(prefix)) {
-            throw new Error('Blob cleanup escaped its prefix');
-          }
-          await containerClient.getBlockBlobClient(item.name).deleteIfExists();
+        if (prefix !== gcsPrefix || !GCS_PREFIX.test(prefix)) {
+          throw new Error('GCS cleanup scope is invalid');
         }
-      }
-      const remaining = await prefixObjectCount();
-      if (remaining === 0) blobPrefixOwned = false;
-      return remaining;
+        if (!gcsPrefixOwned) {
+          const remaining = await prefixObjectCount({ stopAfterFirst: true });
+          gcsCleanupVerified = remaining === 0;
+          return remaining;
+        }
+        let deleted = 0;
+        while (true) {
+          const page = await gcsClient.listObjectsPage({ prefix, limit: 100 });
+          if (page.names.length === 0) break;
+          for (const name of page.names) {
+            await gcsClient.deleteObject({ name });
+            deleted += 1;
+            if (deleted > 10_000) throw gcsError('DEPENDENCY_GCS_RESPONSE_INVALID');
+          }
+        }
+        const remaining = await prefixObjectCount();
+        gcsCleanupVerified = remaining === 0;
+        if (gcsCleanupVerified) gcsPrefixOwned = false;
+        return remaining;
       } finally {
         activeSignal = null;
       }
@@ -1467,19 +1649,24 @@ export async function createRealAcceptanceRuntime({
     async dropSchema(scope, { signal = null } = {}) {
       activeSignal = signal;
       try {
-      if (scope !== schema || !SCHEMA.test(scope)) throw new Error('Schema cleanup scope is invalid');
-      if (!schemaOwned) {
-        const existing = await adminPool.query(
+        if (scope !== schema || !SCHEMA.test(scope)) throw new Error('Schema cleanup scope is invalid');
+        if (!schemaOwned) {
+          const existing = await adminPool.query(
+            'SELECT count(*)::int AS count FROM pg_namespace WHERE nspname = $1',
+            [schema],
+          );
+          schemaCleanupVerified = Number(existing.rows[0]?.count) === 0;
+          return schemaCleanupVerified;
+        }
+        await adminPool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+        const result = await adminPool.query(
           'SELECT count(*)::int AS count FROM pg_namespace WHERE nspname = $1',
           [schema],
         );
-        return Number(existing.rows[0]?.count) === 0;
-      }
-      await adminPool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
-      const result = await adminPool.query('SELECT count(*)::int AS count FROM pg_namespace WHERE nspname = $1', [schema]);
-      const absent = Number(result.rows[0]?.count) === 0;
-      if (absent) schemaOwned = false;
-      return absent;
+        const absent = Number(result.rows[0]?.count) === 0;
+        schemaCleanupVerified = absent;
+        if (absent) schemaOwned = false;
+        return absent;
       } finally {
         activeSignal = null;
       }
@@ -1487,25 +1674,78 @@ export async function createRealAcceptanceRuntime({
     async close({ signal = null } = {}) {
       activeSignal = signal;
       const results = await Promise.allSettled([
-        poolOne.end(), poolTwo.end(), adminPool.end(),
+        poolOne.end(), poolTwo.end(), migratorPool.end(), adminPool.end(),
       ]);
       activeSignal = null;
       if (results.some(({ status }) => status === 'rejected')) throw new Error('Dependency close failed');
+      closed = true;
+    },
+    async writeEvidenceObject({
+      objectName,
+      contents,
+      artifactSha256,
+      objectSha256,
+    } = {}, { signal = null } = {}) {
+      activeSignal = signal;
+      try {
+        if (!gcsCleanupVerified || !schemaCleanupVerified || !closed) {
+          throw deadlineError('DEPENDENCY_EVIDENCE_OUTPUT_NOT_READY');
+        }
+        const body = Buffer.from(contents ?? '', 'utf8');
+        let parsedRecord = null;
+        try {
+          parsedRecord = JSON.parse(contents);
+        } catch {
+          parsedRecord = null;
+        }
+        if (objectName !== evidenceOutputObject || typeof contents !== 'string'
+          || contents.length < 1 || contents.length > 1024 * 1024
+          || !contents.endsWith('\n')
+          || body.length !== Buffer.byteLength(contents, 'utf8')
+          || !DIGEST.test(String(artifactSha256 ?? ''))
+          || !DIGEST.test(String(objectSha256 ?? ''))
+          || sha256(body) !== objectSha256
+          || parsedRecord?.artifactSha256 !== artifactSha256
+          || finalizeReleaseEvidenceRecord(parsedRecord ?? {}).artifactSha256 !== artifactSha256) {
+          throw deadlineError('DEPENDENCY_EVIDENCE_OUTPUT_INVALID');
+        }
+        await evidenceGcsClient.putObject({
+          name: objectName,
+          bytes: body,
+          contentType: 'application/json',
+          ifAbsent: true,
+        });
+        const metadata = await evidenceGcsClient.headObject({ name: objectName });
+        const readback = await evidenceGcsClient.readObject({ name: objectName });
+        await evidenceGcsClient.assertObjectPrivate(objectName);
+        if (!/^[1-9]\d*$/.test(String(metadata.generation ?? ''))
+          || metadata.size !== body.length
+          || Buffer.compare(readback, body) !== 0
+          || sha256(readback) !== objectSha256) {
+          throw deadlineError('DEPENDENCY_EVIDENCE_OUTPUT_INVALID');
+        }
+        return {
+          objectName,
+          generation: String(metadata.generation),
+          artifactSha256,
+          objectSha256,
+        };
+      } finally {
+        activeSignal = null;
+      }
     },
   };
 }
 
 async function defaultOpenDependencies(input) {
-  const [{ Pool }, { BlobServiceClient }, { DefaultAzureCredential }] = await Promise.all([
+  const [{ Pool }, { Storage }] = await Promise.all([
     import('pg'),
-    import('@azure/storage-blob'),
-    import('@azure/identity'),
+    import('@google-cloud/storage'),
   ]);
   return createRealAcceptanceRuntime({
     ...input,
     PoolClass: Pool,
-    BlobServiceClientClass: BlobServiceClient,
-    DefaultAzureCredentialClass: DefaultAzureCredential,
+    StorageClass: Storage,
   });
 }
 
@@ -1514,52 +1754,74 @@ function validateConfiguration(environment) {
   if (!RELEASE_SHA.test(String(commitSha ?? ''))) {
     return { error: 'RELEASE_COMMIT_INVALID' };
   }
+  if (environment?.V1_RELEASE_MANIFEST_FILE !== RELEASE_MANIFEST_FILE) {
+    return { error: 'RELEASE_MANIFEST_INVALID' };
+  }
+  const outputObject = environment?.V1_DEPENDENCY_ACCEPTANCE_OUTPUT_OBJECT;
+  const outputMatch = EVIDENCE_OUTPUT_OBJECT.exec(String(outputObject ?? ''));
   const isolation = validateIsolation(
     environment?.V1_ACCEPTANCE_SCHEMA,
-    environment?.V1_ACCEPTANCE_BLOB_PREFIX,
+    environment?.V1_ACCEPTANCE_GCS_PREFIX,
   );
   if (!isolation) return { error: 'ISOLATION_SCOPE_INVALID' };
-
-  const acceptanceBlob = selectBlob(environment, 'V1_ACCEPTANCE_BLOB');
-  const intendedBlob = selectBlob(environment, 'V1_BLOB');
-  if (!acceptanceBlob || !intendedBlob) {
-    return { error: 'RESOURCE_IDENTITY_MISMATCH' };
+  if (!outputMatch || outputMatch[1] !== commitSha || outputMatch[2] !== isolation.runId) {
+    return { error: 'EVIDENCE_OUTPUT_INVALID' };
+  }
+  const azureKeys = [
+    'V1_ACCEPTANCE_BLOB_CONNECTION_STRING',
+    'V1_ACCEPTANCE_BLOB_ACCOUNT_URL',
+    'V1_ACCEPTANCE_BLOB_CONTAINER',
+    'V1_ACCEPTANCE_BLOB_RESOURCE_ID',
+    'V1_ACCEPTANCE_BLOB_PREFIX',
+    'V1_BLOB_CONNECTION_STRING',
+    'V1_BLOB_ACCOUNT_URL',
+    'V1_BLOB_CONTAINER',
+    'V1_BLOB_RESOURCE_ID',
+    'AZURE_STORAGE_CONNECTION_STRING',
+    'AZURE_BLOB_ACCOUNT_URL',
+    'AZURE_BLOB_CONTAINER',
+    'AZURE_STORAGE_CONTAINER',
+  ];
+  if (azureKeys.some((key) => environment?.[key] !== undefined)
+    || environment?.V1_MEDIA_DRIVER === 'azure') {
+    return { error: 'ACCIDENTAL_AZURE_CONFIGURATION' };
+  }
+  const credentialKeys = [
+    'GOOGLE_APPLICATION_CREDENTIALS',
+    'GOOGLE_API_KEY',
+    'GCP_API_KEY',
+    'V1_GCS_API_KEY',
+    'V1_GCS_CREDENTIALS_JSON',
+    'V1_ACCEPTANCE_GCS_CREDENTIALS_JSON',
+    'V1_ACCEPTANCE_GOOGLE_APPLICATION_CREDENTIALS',
+  ];
+  if (credentialKeys.some((key) => environment?.[key] !== undefined)) {
+    return { error: 'ADC_CONFIGURATION_INVALID' };
   }
   const required = [
     environment?.V1_ACCEPTANCE_DATABASE_URL,
-    environment?.V1_ACCEPTANCE_BLOB_CONTAINER,
+    environment?.V1_ACCEPTANCE_MIGRATOR_DATABASE_URL,
     environment?.V1_ACCEPTANCE_POSTGRES_RESOURCE_ID,
-    environment?.V1_ACCEPTANCE_BLOB_RESOURCE_ID,
+    environment?.V1_ACCEPTANCE_GOOGLE_CLOUD_PROJECT,
+    environment?.V1_ACCEPTANCE_GCS_BUCKET,
+    environment?.V1_ACCEPTANCE_GCS_RESOURCE_ID,
     environment?.V1_DATABASE_URL,
     environment?.V1_POSTGRES_RESOURCE_ID,
-    environment?.V1_BLOB_CONTAINER,
-    environment?.V1_BLOB_RESOURCE_ID,
+    environment?.V1_GOOGLE_CLOUD_PROJECT,
+    environment?.V1_GCS_BUCKET,
+    environment?.V1_GCS_RESOURCE_ID,
   ];
   const inventoryFile = environment?.V1_LEGACY_RESOURCE_INVENTORY_FILE;
   const inventoryVersion = environment?.V1_LEGACY_RESOURCE_INVENTORY_VERSION;
   if (required.some((value) => !nonEmpty(value, 32_768))
-    || !CONTAINER.test(String(environment.V1_ACCEPTANCE_BLOB_CONTAINER ?? ''))
-    || !CONTAINER.test(String(environment.V1_BLOB_CONTAINER ?? ''))
-    || !validResourceId(
-      environment.V1_ACCEPTANCE_POSTGRES_RESOURCE_ID,
-      'Microsoft.DBforPostgreSQL',
-      'flexibleServers',
-    )
-    || !validResourceId(
-      environment.V1_ACCEPTANCE_BLOB_RESOURCE_ID,
-      'Microsoft.Storage',
-      'storageAccounts',
-    )
-    || !validResourceId(
-      environment.V1_POSTGRES_RESOURCE_ID,
-      'Microsoft.DBforPostgreSQL',
-      'flexibleServers',
-    )
-    || !validResourceId(
-      environment.V1_BLOB_RESOURCE_ID,
-      'Microsoft.Storage',
-      'storageAccounts',
-    )) {
+    || environment.V1_ACCEPTANCE_POSTGRES_RESOURCE_ID !== POSTGRES_RESOURCE_ID
+    || environment.V1_POSTGRES_RESOURCE_ID !== POSTGRES_RESOURCE_ID
+    || environment.V1_ACCEPTANCE_GOOGLE_CLOUD_PROJECT !== PROJECT_ID
+    || environment.V1_GOOGLE_CLOUD_PROJECT !== PROJECT_ID
+    || environment.V1_ACCEPTANCE_GCS_BUCKET !== BUCKET_NAME
+    || environment.V1_GCS_BUCKET !== BUCKET_NAME
+    || environment.V1_ACCEPTANCE_GCS_RESOURCE_ID !== GCS_RESOURCE_ID
+    || environment.V1_GCS_RESOURCE_ID !== GCS_RESOURCE_ID) {
     return { error: 'CONFIGURATION_INVALID' };
   }
   if (!isAbsolute(String(inventoryFile ?? ''))
@@ -1570,52 +1832,59 @@ function validateConfiguration(environment) {
   }
 
   let acceptancePostgresIdentity;
+  let migratorPostgresIdentity;
   let intendedPostgresIdentity;
-  let acceptanceBlobIdentity;
-  let intendedBlobIdentity;
+  let acceptanceGcsIdentity;
+  let intendedGcsIdentity;
   try {
     assertSecurePostgresRuntimeUrl(environment.V1_ACCEPTANCE_DATABASE_URL);
+    assertSecurePostgresRuntimeUrl(environment.V1_ACCEPTANCE_MIGRATOR_DATABASE_URL);
     assertSecurePostgresRuntimeUrl(environment.V1_DATABASE_URL);
     acceptancePostgresIdentity = postgresIdentitySha256(environment.V1_ACCEPTANCE_DATABASE_URL);
+    migratorPostgresIdentity = postgresIdentitySha256(
+      environment.V1_ACCEPTANCE_MIGRATOR_DATABASE_URL,
+    );
     intendedPostgresIdentity = postgresIdentitySha256(environment.V1_DATABASE_URL);
-    acceptanceBlobIdentity = blobIdentitySha256({
-      accountUrl: acceptanceBlob.accountUrl || undefined,
-      connectionString: acceptanceBlob.connectionString || undefined,
-      container: environment.V1_ACCEPTANCE_BLOB_CONTAINER,
+    acceptanceGcsIdentity = gcsIdentitySha256({
+      projectId: environment.V1_ACCEPTANCE_GOOGLE_CLOUD_PROJECT,
+      bucket: environment.V1_ACCEPTANCE_GCS_BUCKET,
     });
-    intendedBlobIdentity = blobIdentitySha256({
-      accountUrl: intendedBlob.accountUrl || undefined,
-      connectionString: intendedBlob.connectionString || undefined,
-      container: environment.V1_BLOB_CONTAINER,
+    intendedGcsIdentity = gcsIdentitySha256({
+      projectId: environment.V1_GOOGLE_CLOUD_PROJECT,
+      bucket: environment.V1_GCS_BUCKET,
     });
   } catch {
     return { error: 'RESOURCE_IDENTITY_MISMATCH' };
   }
-  const exactAccountUrl = acceptanceBlob.mode !== 'account-url'
-    || intendedBlob.mode !== 'account-url'
-    || acceptanceBlob.accountUrl === intendedBlob.accountUrl;
   if (environment.V1_ACCEPTANCE_DATABASE_URL !== environment.V1_DATABASE_URL
+    || environment.V1_ACCEPTANCE_MIGRATOR_DATABASE_URL === environment.V1_ACCEPTANCE_DATABASE_URL
+    || postgresUser(environment.V1_ACCEPTANCE_DATABASE_URL) !== APP_DATABASE_USER
+    || postgresUser(environment.V1_ACCEPTANCE_MIGRATOR_DATABASE_URL) !== MIGRATOR_DATABASE_USER
     || environment.V1_ACCEPTANCE_POSTGRES_RESOURCE_ID !== environment.V1_POSTGRES_RESOURCE_ID
-    || environment.V1_ACCEPTANCE_BLOB_RESOURCE_ID !== environment.V1_BLOB_RESOURCE_ID
-    || environment.V1_ACCEPTANCE_BLOB_CONTAINER !== environment.V1_BLOB_CONTAINER
+    || environment.V1_ACCEPTANCE_GOOGLE_CLOUD_PROJECT !== environment.V1_GOOGLE_CLOUD_PROJECT
+    || environment.V1_ACCEPTANCE_GCS_BUCKET !== environment.V1_GCS_BUCKET
+    || environment.V1_ACCEPTANCE_GCS_RESOURCE_ID !== environment.V1_GCS_RESOURCE_ID
     || acceptancePostgresIdentity !== intendedPostgresIdentity
-    || acceptanceBlobIdentity !== intendedBlobIdentity
-    || !exactAccountUrl) {
+    || migratorPostgresIdentity !== intendedPostgresIdentity
+    || acceptanceGcsIdentity !== intendedGcsIdentity) {
     return { error: 'RESOURCE_IDENTITY_MISMATCH' };
   }
-  if (legacyCompatibilityCollides(environment, intendedPostgresIdentity, intendedBlobIdentity)) {
+  if (legacyCompatibilityCollides(environment, intendedPostgresIdentity)) {
     return { error: 'LEGACY_COMPATIBILITY_COLLISION' };
   }
   return {
     commitSha,
     ...isolation,
     databaseUrl: environment.V1_ACCEPTANCE_DATABASE_URL,
-    blob: acceptanceBlob,
-    blobContainer: environment.V1_ACCEPTANCE_BLOB_CONTAINER,
+    migratorDatabaseUrl: environment.V1_ACCEPTANCE_MIGRATOR_DATABASE_URL,
+    releaseManifestFile: RELEASE_MANIFEST_FILE,
+    evidenceOutputObject: outputObject,
+    projectId: PROJECT_ID,
+    bucketName: BUCKET_NAME,
     postgresResourceId: environment.V1_POSTGRES_RESOURCE_ID,
     postgresIdentitySha256: intendedPostgresIdentity,
-    blobResourceId: environment.V1_BLOB_RESOURCE_ID,
-    blobIdentitySha256: intendedBlobIdentity,
+    gcsResourceId: environment.V1_GCS_RESOURCE_ID,
+    gcsIdentitySha256: intendedGcsIdentity,
     inventoryFile,
     inventoryVersion,
   };
@@ -1624,20 +1893,17 @@ function validateConfiguration(environment) {
 export async function runRealDependencyAcceptance({
   argv = process.argv.slice(2),
   environment = process.env,
-  cwd = productionRoot,
-  artifactDirectory = defaultArtifactDirectory,
   now = () => new Date(),
   readTextFile = (filePath, { signal } = {}) => readFile(filePath, { encoding: 'utf8', signal }),
-  inspectGit = defaultInspectGit,
   openDependencies = defaultOpenDependencies,
-  writeArtifact = defaultWriteArtifact,
   writeOutput = (line) => process.stdout.write(line),
   operationDeadlineMs = DEFAULT_OPERATION_DEADLINE_MS,
   commandDeadlineMs = DEFAULT_COMMAND_DEADLINE_MS,
   cleanupDeadlineMs = DEFAULT_CLEANUP_DEADLINE_MS,
   cleanupOperationDeadlineMs = DEFAULT_CLEANUP_OPERATION_DEADLINE_MS,
 } = {}) {
-  if (!Array.isArray(argv) || argv.length !== 0) {
+  if (!Array.isArray(argv) || argv.length !== 1
+    || typeof argv[0] !== 'string' || !argv[0].startsWith('--release-sha=')) {
     return publish(writeOutput, 2, { status: 'not-run', code: 'EXACT_INVOCATION_REQUIRED' });
   }
   if (environment?.V1_ACCEPTANCE_CONFIRM_EPHEMERAL !== 'true') {
@@ -1647,6 +1913,10 @@ export async function runRealDependencyAcceptance({
   if (config.error) {
     return publish(writeOutput, 2, { status: 'not-run', code: config.error });
   }
+  const requestedReleaseSha = argv[0].slice('--release-sha='.length);
+  if (!RELEASE_SHA.test(requestedReleaseSha) || requestedReleaseSha !== config.commitSha) {
+    return publish(writeOutput, 2, { status: 'not-run', code: 'RELEASE_SHA_MISMATCH' });
+  }
   operationDeadlineMs = deadlineValue(operationDeadlineMs, DEFAULT_OPERATION_DEADLINE_MS);
   commandDeadlineMs = deadlineValue(commandDeadlineMs, DEFAULT_COMMAND_DEADLINE_MS);
   cleanupDeadlineMs = deadlineValue(cleanupDeadlineMs, DEFAULT_CLEANUP_DEADLINE_MS);
@@ -1654,9 +1924,7 @@ export async function runRealDependencyAcceptance({
     cleanupOperationDeadlineMs,
     DEFAULT_CLEANUP_OPERATION_DEADLINE_MS,
   );
-  if (!isAbsolute(String(cwd ?? '')) || !isAbsolute(String(artifactDirectory ?? ''))
-    || typeof readTextFile !== 'function' || typeof inspectGit !== 'function'
-    || typeof openDependencies !== 'function' || typeof writeArtifact !== 'function'
+  if (typeof readTextFile !== 'function' || typeof openDependencies !== 'function'
     || operationDeadlineMs === null || commandDeadlineMs === null
     || cleanupDeadlineMs === null || cleanupOperationDeadlineMs === null) {
     return publish(writeOutput, 2, { status: 'not-run', code: 'COMMAND_CONTEXT_INVALID' });
@@ -1679,6 +1947,26 @@ export async function runRealDependencyAcceptance({
     parentSignal: commandBudget.signal,
   });
 
+  let releaseManifest;
+  try {
+    const text = await mainOperation((signal) => readTextFile(config.releaseManifestFile, { signal }));
+    if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > 1_024) {
+      throw new Error('invalid release manifest');
+    }
+    releaseManifest = JSON.parse(text);
+  } catch {
+    const timedOut = commandBudget.signal.aborted;
+    commandBudget.dispose();
+    return publish(writeOutput, timedOut ? 1 : 2, {
+      status: timedOut ? 'failed' : 'not-run',
+      code: timedOut ? 'DEPENDENCY_COMMAND_DEADLINE_EXCEEDED' : 'RELEASE_MANIFEST_INVALID',
+    });
+  }
+  if (!validateReleaseManifest(releaseManifest, config.commitSha)) {
+    commandBudget.dispose();
+    return publish(writeOutput, 2, { status: 'not-run', code: 'RELEASE_MANIFEST_INVALID' });
+  }
+
   let inventory;
   try {
     const text = await mainOperation((signal) => readTextFile(config.inventoryFile, { signal }));
@@ -1699,40 +1987,28 @@ export async function runRealDependencyAcceptance({
   });
   if (!inventoryResult.valid
     || inventoryContains(inventory, config.postgresResourceId, config.postgresIdentitySha256, 'postgresResources')
-    || inventoryContains(inventory, config.blobResourceId, config.blobIdentitySha256, 'blobResources')) {
+    || inventoryContains(inventory, config.gcsResourceId, config.gcsIdentitySha256, 'blobResources')) {
     commandBudget.dispose();
     return publish(writeOutput, 2, { status: 'not-run', code: 'LEGACY_INVENTORY_INVALID' });
-  }
-
-  let gitState;
-  try {
-    gitState = await mainOperation((signal) => inspectGit(cwd, { signal }));
-  } catch {
-    gitState = null;
-  }
-  if (!gitState || gitState.head !== config.commitSha || gitState.clean !== true) {
-    const timedOut = commandBudget.signal.aborted;
-    commandBudget.dispose();
-    return publish(writeOutput, timedOut ? 1 : 2, {
-      status: timedOut ? 'failed' : 'not-run',
-      code: timedOut ? 'DEPENDENCY_COMMAND_DEADLINE_EXCEEDED' : 'RELEASE_GIT_STATE_INVALID',
-    });
   }
 
   let runtime = null;
   let checks = [];
   let functionalSuccess = false;
   const cleanup = {
-    blobPrefixObjectCount: null,
+    gcsPrefixObjectCount: null,
     schemaAbsent: false,
     closed: false,
   };
   try {
     runtime = await mainOperation((signal) => openDependencies({
       databaseUrl: config.databaseUrl,
-      blob: config.blob,
-      blobContainer: config.blobContainer,
-      blobPrefix: config.blobPrefix,
+      migratorDatabaseUrl: config.migratorDatabaseUrl,
+      projectId: config.projectId,
+      bucketName: config.bucketName,
+      releaseSha: config.commitSha,
+      evidenceOutputObject: config.evidenceOutputObject,
+      gcsPrefix: config.gcsPrefix,
       schema: config.schema,
       runId: config.runId,
       occurredAt: currentTime.toISOString(),
@@ -1740,9 +2016,12 @@ export async function runRealDependencyAcceptance({
       signal,
     }));
     if (!runtime || typeof runtime.runChecks !== 'function'
-      || typeof runtime.cleanupBlobPrefix !== 'function'
+      || typeof runtime.cleanupGcsPrefix !== 'function'
       || typeof runtime.dropSchema !== 'function'
-      || typeof runtime.close !== 'function') throw new Error('Invalid acceptance runtime');
+      || typeof runtime.close !== 'function'
+      || typeof runtime.writeEvidenceObject !== 'function') {
+      throw new Error('Invalid acceptance runtime');
+    }
     checks = await mainOperation(
       (signal) => runtime.runChecks({ signal }),
       commandDeadlineMs,
@@ -1767,14 +2046,14 @@ export async function runRealDependencyAcceptance({
         parentSignal: cleanupBudget.signal,
       });
       try {
-        cleanup.blobPrefixObjectCount = await cleanupOperation(
-          (signal) => runtime.cleanupBlobPrefix(config.blobPrefix, { signal }),
+        cleanup.gcsPrefixObjectCount = await cleanupOperation(
+          (signal) => runtime.cleanupGcsPrefix(config.gcsPrefix, { signal }),
         );
-        if (!Number.isSafeInteger(cleanup.blobPrefixObjectCount) || cleanup.blobPrefixObjectCount < 0) {
-          cleanup.blobPrefixObjectCount = null;
+        if (!Number.isSafeInteger(cleanup.gcsPrefixObjectCount) || cleanup.gcsPrefixObjectCount < 0) {
+          cleanup.gcsPrefixObjectCount = null;
         }
       } catch {
-        cleanup.blobPrefixObjectCount = null;
+        cleanup.gcsPrefixObjectCount = null;
       }
       try {
         cleanup.schemaAbsent = await cleanupOperation(
@@ -1793,61 +2072,65 @@ export async function runRealDependencyAcceptance({
     }
   }
 
-  const cleanupSuccess = functionalSuccess
-    && cleanup.blobPrefixObjectCount === 0
+  const cleanupSuccess = cleanup.gcsPrefixObjectCount === 0
     && cleanup.schemaAbsent === true
     && cleanup.closed === true;
-  let finalGitValid = false;
-  if (cleanupSuccess) {
-    let finalGitState;
-    try {
-      finalGitState = await withDeadline((signal) => inspectGit(cwd, { signal }), {
-        timeoutMs: operationDeadlineMs,
-        code: 'DEPENDENCY_OPERATION_DEADLINE_EXCEEDED',
-      });
-    } catch {
-      finalGitState = null;
-    }
-    finalGitValid = Boolean(finalGitState
-      && finalGitState.head === config.commitSha
-      && finalGitState.clean === true);
-  }
-  const result = cleanupSuccess && finalGitValid;
+  const result = functionalSuccess && cleanupSuccess;
   const record = finalizeReleaseEvidenceRecord({
     schemaVersion: 1,
     commitSha: config.commitSha,
     legacyInventoryDigest: inventory.artifactSha256,
     postgresResourceId: config.postgresResourceId,
     postgresIdentitySha256: config.postgresIdentitySha256,
-    blobResourceId: config.blobResourceId,
-    blobIdentitySha256: config.blobIdentitySha256,
+    gcsResourceId: config.gcsResourceId,
+    gcsIdentitySha256: config.gcsIdentitySha256,
     schema: config.schema,
-    blobPrefix: config.blobPrefix,
+    gcsPrefix: config.gcsPrefix,
     checks: result ? safeChecks(checks) : safeFailureChecks(checks, cleanup),
     schemaAbsent: cleanup.schemaAbsent,
-    blobPrefixObjectCount: cleanup.blobPrefixObjectCount,
+    gcsPrefixObjectCount: cleanup.gcsPrefixObjectCount,
     result,
     occurredAt: currentTime.toISOString(),
   });
-  const filePath = join(artifactDirectory, `${config.runId}.json`);
   const contents = `${JSON.stringify(record, null, 2)}\n`;
-  try {
-    await withDeadline(
-      (signal) => writeArtifact({ filePath, contents, record }, { signal }),
-      { timeoutMs: operationDeadlineMs, code: 'DEPENDENCY_OPERATION_DEADLINE_EXCEEDED' },
-    );
-  } catch {
-    return publish(writeOutput, 1, { status: 'failed', code: 'ACCEPTANCE_ARTIFACT_WRITE_FAILED' });
+  const objectSha256 = sha256(Buffer.from(contents, 'utf8'));
+  let output = null;
+  if (cleanupSuccess && runtime) {
+    try {
+      output = await withDeadline(
+        (signal) => runtime.writeEvidenceObject({
+          objectName: config.evidenceOutputObject,
+          contents,
+          record,
+          artifactSha256: record.artifactSha256,
+          objectSha256,
+        }, { signal }),
+        { timeoutMs: operationDeadlineMs, code: 'DEPENDENCY_OPERATION_DEADLINE_EXCEEDED' },
+      );
+      if (!output || output.objectName !== config.evidenceOutputObject
+        || !/^[1-9]\d*$/.test(String(output.generation ?? ''))
+        || output.artifactSha256 !== record.artifactSha256
+        || output.objectSha256 !== objectSha256) {
+        throw new Error('invalid evidence output receipt');
+      }
+    } catch {
+      return publish(writeOutput, 1, {
+        status: 'failed',
+        code: 'ACCEPTANCE_ARTIFACT_WRITE_FAILED',
+        outputObject: config.evidenceOutputObject,
+      });
+    }
   }
   if (!result) {
     return publish(writeOutput, 1, {
       status: 'failed',
       code: 'DEPENDENCY_ACCEPTANCE_FAILED',
       artifactSha256: record.artifactSha256,
+      ...(output ? { output } : {}),
       checks: record.checks,
       cleanup: {
         schemaAbsent: record.schemaAbsent,
-        blobPrefixObjectCount: record.blobPrefixObjectCount,
+        gcsPrefixObjectCount: record.gcsPrefixObjectCount,
       },
     });
   }
@@ -1855,10 +2138,11 @@ export async function runRealDependencyAcceptance({
     status: 'recorded',
     code: 'DEPENDENCY_ACCEPTANCE_RECORDED',
     artifactSha256: record.artifactSha256,
+    output,
     checks: record.checks,
     cleanup: {
       schemaAbsent: record.schemaAbsent,
-      blobPrefixObjectCount: record.blobPrefixObjectCount,
+      gcsPrefixObjectCount: record.gcsPrefixObjectCount,
     },
   });
 }
