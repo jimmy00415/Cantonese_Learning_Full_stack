@@ -1,3 +1,64 @@
+const EXPERIENCE_COPY = Object.freeze({
+  en: Object.freeze({
+    documentLanguage: 'en',
+    welcome: 'Hi — I’m Hong Kong Buddy, your HKBU AI senior. Ask me about registration, halls, food, campus services, transport, or settling into Hong Kong.',
+    disclosure: 'Campus facts include official sources.',
+    placeholder: 'Ask your AI senior…',
+    starterPrompts: Object.freeze([
+      'How do I activate my SSOid?',
+      'What food options are available at HKBU?',
+      'Where can I use my student e-Card?',
+      'How do I set up Duo on a new phone?',
+    ]),
+  }),
+  'yue-Hant-HK': Object.freeze({
+    documentLanguage: 'zh-HK',
+    welcome: '你好，我係 Hong Kong Buddy，你嘅浸大 AI 學長。註冊、宿舍、飲食、校園服務、交通同香港生活，都可以問我。',
+    disclosure: '校園資料會附上官方來源。',
+    placeholder: '問你嘅浸大 AI 學長…',
+    starterPrompts: Object.freeze([
+      '點樣啟用 SSOid？',
+      '浸大有咩食嘢選擇？',
+      '學生電子證（Student e-Card）可以喺邊度用？',
+      '換咗電話後點樣設定 Duo？',
+    ]),
+  }),
+  'cmn-Hans-CN': Object.freeze({
+    documentLanguage: 'zh-CN',
+    welcome: '你好，我是 Hong Kong Buddy，你的浸大 AI 学长。注册、宿舍、餐饮、校园服务、交通和香港生活，都可以问我。',
+    disclosure: '校园信息会附上官方来源。',
+    placeholder: '问你的浸大 AI 学长…',
+    starterPrompts: Object.freeze([
+      '怎么启用 SSOid？',
+      '浸大有什么吃饭选择？',
+      '学生电子证（Student e-Card）可以在哪里使用？',
+      '换了手机后怎么设置 Duo？',
+    ]),
+  }),
+});
+
+const REPLY_LANGUAGE_LABELS = Object.freeze({
+  en: 'English',
+  'yue-Hant-HK': '廣東話',
+  'cmn-Hans-CN': '普通話',
+});
+
+const REPLY_MODE_LABELS = Object.freeze({ text: 'Text', voice: 'Voice reply' });
+
+export function chatExperienceCopy(replyLanguage = 'en') {
+  const copy = EXPERIENCE_COPY[replyLanguage];
+  if (!copy) throw new TypeError('Unsupported reply language');
+  return { ...copy, starterPrompts: [...copy.starterPrompts] };
+}
+
+export function replyPreferenceLabel({ replyLanguage = 'en', replyMode = 'text' } = {}) {
+  const language = REPLY_LANGUAGE_LABELS[replyLanguage];
+  if (!language) throw new TypeError('Unsupported reply language');
+  const mode = REPLY_MODE_LABELS[replyMode];
+  if (!mode) throw new TypeError('Unsupported reply mode');
+  return `${language} · ${mode}`;
+}
+
 export function startErrorCopy() {
   return 'The chat could not start. Check your connection and refresh to try again.';
 }

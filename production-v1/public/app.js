@@ -1,10 +1,20 @@
 import { createChatController } from './chat-controller.js';
-import { clearErrorCopy, sendErrorCopy, startErrorCopy } from './chat-copy.js';
+import {
+  chatExperienceCopy,
+  clearErrorCopy,
+  replyPreferenceLabel,
+  sendErrorCopy,
+  startErrorCopy,
+} from './chat-copy.js';
 import { formatFreshness, shouldSubmitOnEnter, shouldSyncDraft, turnStatusMessage } from './chat-state.js';
 import { createAssistantAudioController } from './assistant-audio-controller.js';
 import { assistantAudioMediaIdentity, performAssistantAudioAction } from './assistant-audio-actions.js';
 import { createMessageElement } from './message-renderer.js';
-import { reconcileMessageFeed } from './timeline-view.js';
+import {
+  assistantVoiceMessagesToPrepare,
+  currentReplyTupleIsFixed,
+  reconcileMessageFeed,
+} from './timeline-view.js';
 import { createVoiceCapture } from './voice-capture.js';
 import { createVoiceMessageController } from './voice-message-controller.js';
 import { createVoiceTransport } from './voice-transport.js';
@@ -27,6 +37,7 @@ const welcome = document.querySelector('#welcome');
 const turnStatus = document.querySelector('#turn-status');
 const connectionStatus = document.querySelector('#connection-status');
 const composer = document.querySelector('#composer');
+const composerPanel = document.querySelector('.composer-panel');
 const messageInput = document.querySelector('#message-input');
 const sendButton = document.querySelector('#send-button');
 const voiceButton = document.querySelector('#voice-button');
@@ -44,9 +55,17 @@ const voiceConsentContinue = document.querySelector('#voice-consent-continue');
 const voiceConsentCancel = document.querySelector('#voice-consent-cancel');
 const feedback = document.querySelector('#composer-feedback');
 const starterPrompts = [...document.querySelectorAll('.starter-prompt')];
+const welcomeMessage = document.querySelector('#welcome-message');
+const welcomeDisclosure = document.querySelector('#welcome-disclosure');
+const replyPreferencesTrigger = document.querySelector('#reply-preferences-trigger');
+const replyPreferenceValue = document.querySelector('#reply-preference-value');
+const replyPreferenceNote = document.querySelector('#reply-preference-note');
+const replyPreferences = document.querySelector('#reply-preferences');
+const replyPreferencesForm = document.querySelector('#reply-preferences-form');
+const cancelReplyPreferences = document.querySelector('#cancel-reply-preferences');
 const infoButton = document.querySelector('.info-button');
 const infoSheet = document.querySelector('#assistant-info');
-const closeButton = document.querySelector('.close-button');
+const closeButton = document.querySelector('#assistant-info .close-button');
 const clearButton = document.querySelector('#clear-session');
 const clearStatus = document.querySelector('#clear-status');
 const knowledgeSnapshotDate = document.querySelector('#knowledge-snapshot-date');
@@ -172,15 +191,15 @@ function renderAssistantAudioControls() {
       button.textContent = 'Pause voice';
       button.setAttribute('aria-label', 'Pause the AI-generated voice for this answer');
       status.textContent = playback.statusText;
-    } else if (entry?.state === 'generating') {
-      button.textContent = 'Preparing voice…';
+    } else if (entry?.state === 'pending' || entry?.state === 'generating') {
+      button.textContent = 'Preparing AI voice…';
       button.setAttribute('aria-label', 'AI-generated voice is being prepared');
       button.disabled = true;
-      status.textContent = entry.statusText;
+      status.textContent = 'The text answer is ready.';
     } else if (mediaId) {
       button.textContent = playback?.state === 'paused' ? 'Resume voice' : 'Play voice';
       button.setAttribute('aria-label', `${button.textContent} for this answer`);
-      status.textContent = playback?.statusText || entry?.statusText || 'Audio ready. Tap Play to listen.';
+      status.textContent = playback?.statusText || 'AI voice ready';
     } else if (entry?.state === 'retryable') {
       const retryPending = Number.isFinite(entry.retryNotBefore) && Date.now() < entry.retryNotBefore;
       if (retryPending) nextRetryAt = Math.min(nextRetryAt ?? entry.retryNotBefore, entry.retryNotBefore);
@@ -195,6 +214,15 @@ function renderAssistantAudioControls() {
       button.setAttribute('aria-label', 'AI-generated voice is unavailable for this answer');
       button.disabled = true;
       status.textContent = entry.statusText;
+    } else if (entry?.state === 'missing') {
+      button.textContent = 'Generate voice';
+      button.setAttribute('aria-label', 'Generate an AI voice for this answer');
+      status.textContent = 'AI voice was not prepared. The text answer is ready.';
+    } else if (message?.replyMode === 'voice') {
+      button.textContent = 'Preparing AI voice…';
+      button.setAttribute('aria-label', 'AI-generated voice is being prepared');
+      button.disabled = true;
+      status.textContent = 'The text answer is ready.';
     } else {
       button.textContent = 'Generate voice';
       button.setAttribute('aria-label', 'Generate an optional AI voice for this answer');
@@ -213,6 +241,14 @@ function renderAssistantAudioControls() {
       assistantAudioRetryAt = null;
       renderAssistantAudioControls();
     }, Math.max(1, nextRetryAt - Date.now()));
+  }
+}
+
+function prepareAssistantVoiceReplies(messages = latestSnapshot?.messages ?? []) {
+  if (!assistantAudioController || assistantAudioScope !== latestSnapshot?.clientSessionScope) return;
+  const entries = latestAssistantAudioSnapshot?.entries ?? {};
+  for (const message of assistantVoiceMessagesToPrepare(messages, entries)) {
+    void assistantAudioController.prepare(message).catch(() => undefined);
   }
 }
 
@@ -345,9 +381,12 @@ function renderVoiceControls() {
   const live = Boolean(available && (VOICE_BUSY_PHASES.has(phase) || retainedOperation));
   const sendInProgress = latestSnapshot?.messages?.some((message) => message.sendState === 'sending');
   const hasTextDraft = Boolean(latestSnapshot?.draft?.trim());
-  const boundDraft = Boolean(snapshot?.binding);
+  const boundDraft = currentReplyTupleIsFixed({ voiceSnapshot: snapshot });
   const acceptedCleanupPending = phase === 'accepted-cleanup-pending';
   const explicitlyRejected = phase === 'error' && snapshot?.error?.code === 'VOICE_SEND_REJECTED';
+
+  voiceButton.hidden = !voiceAvailable();
+  composerPanel.dataset.voiceAvailable = String(voiceAvailable());
 
   voiceDraft.hidden = !hasVoiceDraft;
   if (hasVoiceDraft) {
@@ -425,7 +464,7 @@ function renderVoiceControls() {
     voiceButton.setAttribute('aria-label', 'Clear the typed message before recording a voice message');
     voiceButton.disabled = true;
   } else {
-    voiceButton.textContent = 'Hold to talk';
+    voiceButton.textContent = 'Hold to speak';
     voiceButton.setAttribute('aria-label', 'Press or hold to record a voice message');
     voiceButton.disabled = false;
   }
@@ -440,6 +479,7 @@ function renderVoiceControls() {
   for (const prompt of starterPrompts) {
     prompt.disabled = !latestSnapshot?.ready || sendInProgress || voiceBlocksEditing || hasVoiceDraft;
   }
+  renderReplyExperience();
 }
 
 function renderVoice(snapshot) {
@@ -530,6 +570,36 @@ function scheduleVoiceScope(snapshot = latestSnapshot) {
   });
 }
 
+function replyTupleIsAlreadyBound() {
+  return currentReplyTupleIsFixed({
+    voiceSnapshot: latestVoiceSnapshot,
+    messages: latestSnapshot?.messages,
+  });
+}
+
+function renderReplyExperience(snapshot = latestSnapshot) {
+  const replyLanguage = snapshot?.replyLanguage ?? 'en';
+  const replyMode = snapshot?.replyMode ?? 'text';
+  const copy = chatExperienceCopy(replyLanguage);
+  welcomeMessage.textContent = copy.welcome;
+  welcomeMessage.setAttribute('lang', copy.documentLanguage);
+  welcomeDisclosure.textContent = copy.disclosure;
+  welcomeDisclosure.setAttribute('lang', copy.documentLanguage);
+  messageInput.placeholder = copy.placeholder;
+  replyPreferenceValue.textContent = replyPreferenceLabel({ replyLanguage, replyMode });
+  replyPreferencesTrigger.disabled = !snapshot?.ready;
+  replyPreferenceNote.textContent = replyTupleIsAlreadyBound()
+    ? 'Your current send or voice draft keeps its original reply setting.'
+    : 'Applies to your next message';
+  starterPrompts.forEach((prompt, index) => {
+    const localized = copy.starterPrompts[index];
+    if (!localized) return;
+    prompt.textContent = localized;
+    prompt.dataset.prompt = localized;
+    prompt.lang = copy.documentLanguage;
+  });
+}
+
 function render(snapshot) {
   const shouldStick = !latestSnapshot || atBottom();
   latestSnapshot = snapshot;
@@ -543,6 +613,7 @@ function render(snapshot) {
   welcome.hidden = snapshot.messages.length > 0;
   messageFeed.setAttribute('aria-busy', 'false');
   renderAssistantAudioControls();
+  prepareAssistantVoiceReplies(snapshot.messages);
 
   turnStatus.textContent = turnStatusMessage(snapshot.activeTurn);
   const connectionText = connectionCopy(snapshot.connection);
@@ -551,6 +622,7 @@ function render(snapshot) {
   knowledgeSnapshotDate.textContent = formatFreshness(snapshot.knowledgeSnapshotDate);
   if (snapshot.knowledgeSnapshotDate) knowledgeSnapshotDate.dateTime = snapshot.knowledgeSnapshotDate;
   else knowledgeSnapshotDate.removeAttribute('datetime');
+  renderReplyExperience(snapshot);
 
   if (shouldSyncDraft(messageInput.value, snapshot.draft)) {
     messageInput.value = snapshot.draft;
@@ -566,6 +638,18 @@ const chatController = createChatController({
   storage: window.sessionStorage,
   onChange: render,
 });
+
+function showReplyPreferences() {
+  const snapshot = chatController.snapshot();
+  for (const input of replyPreferencesForm.querySelectorAll('[name="reply-language"]')) {
+    input.checked = input.value === snapshot.replyLanguage;
+  }
+  for (const input of replyPreferencesForm.querySelectorAll('[name="reply-mode"]')) {
+    input.checked = input.value === snapshot.replyMode;
+  }
+  replyPreferencesTrigger.setAttribute('aria-expanded', 'true');
+  if (!replyPreferences.open) replyPreferences.showModal();
+}
 
 async function sendText(text) {
   const normalized = text.trim();
@@ -734,6 +818,39 @@ async function toggleVoiceRecording() {
 composer.addEventListener('submit', (event) => {
   event.preventDefault();
   void sendText(messageInput.value);
+});
+
+replyPreferencesTrigger.addEventListener('click', () => {
+  cancelVoiceInteraction('visible-cancel');
+  showReplyPreferences();
+});
+
+replyPreferencesForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const formData = new FormData(replyPreferencesForm);
+  try {
+    chatController.setReplyPreferences({
+      replyLanguage: formData.get('reply-language'),
+      replyMode: formData.get('reply-mode'),
+    });
+    setFeedback('');
+    replyPreferences.close('saved');
+  } catch {
+    setFeedback('Reply settings could not be changed.');
+  }
+});
+
+cancelReplyPreferences.addEventListener('click', () => replyPreferences.close('cancel'));
+replyPreferences.addEventListener('cancel', (event) => {
+  event.preventDefault();
+  replyPreferences.close('cancel');
+});
+replyPreferences.addEventListener('close', () => {
+  replyPreferencesTrigger.setAttribute('aria-expanded', 'false');
+  replyPreferencesTrigger.focus();
+});
+replyPreferences.addEventListener('click', (event) => {
+  if (event.target === replyPreferences) replyPreferences.close('cancel');
 });
 
 messageInput.addEventListener('input', () => {
@@ -1056,5 +1173,4 @@ void chatController.start().catch((error) => {
   const copy = startErrorCopy(error);
   connectionStatus.hidden = false;
   connectionStatus.textContent = copy;
-  setFeedback(copy);
 });

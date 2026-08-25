@@ -650,9 +650,10 @@ test('config logger retains operational fields and drops user content and secret
 test('shell presents one AI assistant conversation without legacy modes', async () => {
   const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
 
-  assert.match(html, /Campus AI Senior/);
+  assert.match(html, /Hong Kong Buddy/);
+  assert.match(html, /Your HKBU AI senior/);
   assert.match(html, /AI assistant/);
-  assert.doesNotMatch(html, /MODE|SCENARIO|START MISSION/i);
+  assert.doesNotMatch(html, />\s*(?:MODE|SCENARIO|START MISSION)\s*</i);
 });
 
 test('shell app serves a safe liveness envelope with a request ID', async (t) => {

@@ -166,17 +166,41 @@ export function createChatController({
     else storageRemove(key);
   }
 
+  function loadReplyPreferences(scope) {
+    const key = scopedKey(scope, 'reply-preferences');
+    const saved = storageGet(key);
+    if (saved === null) return normalizeReplyPreferences();
+    try {
+      return normalizeReplyPreferences(JSON.parse(saved));
+    } catch {
+      storageRemove(key);
+      return normalizeReplyPreferences();
+    }
+  }
+
+  function persistReplyPreferences() {
+    if (!state.clientSessionScope) return;
+    storageSet(scopedKey(state.clientSessionScope, 'reply-preferences'), JSON.stringify({
+      replyLanguage: state.replyLanguage,
+      replyMode: state.replyMode,
+    }));
+  }
+
   function adoptScope(scope) {
     const previous = storageGet(ROOT_SCOPE_KEY);
     if (previous && previous !== scope) {
       storageRemove(scopedKey(previous, 'draft'));
       storageRemove(scopedKey(previous, 'event-cursor'));
+      storageRemove(scopedKey(previous, 'reply-preferences'));
     }
     state.clientSessionScope = scope;
     storageSet(ROOT_SCOPE_KEY, scope);
     state.draft = storageGet(scopedKey(scope, 'draft')) ?? '';
     const savedCursor = Number(storageGet(scopedKey(scope, 'event-cursor')) ?? 0);
     state.eventCursor = Number.isSafeInteger(savedCursor) && savedCursor >= 0 ? savedCursor : 0;
+    const preferences = loadReplyPreferences(scope);
+    state.replyLanguage = preferences.replyLanguage;
+    state.replyMode = preferences.replyMode;
   }
 
   function closeEvents() {
@@ -384,6 +408,7 @@ export function createChatController({
         if (oldScope) {
           storageRemove(scopedKey(oldScope, 'draft'));
           storageRemove(scopedKey(oldScope, 'event-cursor'));
+          storageRemove(scopedKey(oldScope, 'reply-preferences'));
         }
         storageRemove(ROOT_SCOPE_KEY);
         state.ready = false;
@@ -525,6 +550,7 @@ export function createChatController({
     const preferences = normalizeReplyPreferences(input);
     state.replyLanguage = preferences.replyLanguage;
     state.replyMode = preferences.replyMode;
+    persistReplyPreferences();
     notify();
     return { ...preferences };
   }
@@ -603,6 +629,7 @@ export function createChatController({
     if (oldScope) {
       storageRemove(scopedKey(oldScope, 'draft'));
       storageRemove(scopedKey(oldScope, 'event-cursor'));
+      storageRemove(scopedKey(oldScope, 'reply-preferences'));
     }
     storageRemove(ROOT_SCOPE_KEY);
     state.ready = false;

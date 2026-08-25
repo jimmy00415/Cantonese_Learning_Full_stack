@@ -37,8 +37,9 @@ test('ui contract exposes one truthful mobile conversation and no legacy workspa
   assert.doesNotMatch(html, /<main[^>]+role="log"/i);
   assert.match(html, /id="message-feed"[^>]+role="log"[^>]+aria-live="polite"[^>]+aria-atomic="false"/i);
   assert.match(html, /id="turn-status"[^>]+role="status"[^>]+aria-atomic="true"/i);
-  assert.match(html, /Campus AI Senior/);
-  assert.match(html, /AI assistant/);
+  assert.match(html, /<h1>Hong Kong Buddy<\/h1>/);
+  assert.match(html, /Your HKBU AI senior/);
+  assert.match(html, /class="info-button"[^>]*>Info<\/button>/i);
   assert.match(html, /id="assistant-info"/);
   assert.match(html, /not a student or an official HKBU representative/i);
   assert.match(html, /id="clear-session"/);
@@ -47,8 +48,28 @@ test('ui contract exposes one truthful mobile conversation and no legacy workspa
   assert.match(html, /id="message-template"/);
   assert.match(html, /id="source-template"/);
   assert.match(html, /id="action-card-template"/);
-  assert.doesNotMatch(html, /MODE|SCENARIO|START MISSION|Free Talk|Teaching/i);
+  assert.doesNotMatch(html, />\s*(?:MODE|SCENARIO|START MISSION|Free Talk|Teaching)\s*</i);
   assert.doesNotMatch(html, /\btyping\b|\bonline\b|\bseen\b|last active|read receipt/i);
+  assert.doesNotMatch(html, /aria-label="[^"]*(?:phone call|video call)|data-(?:online|presence|read-receipt)|class="[^"]*(?:online-dot|typing-dots|call-waveform)/i);
+});
+
+test('ui contract places one accessible reply selector immediately above the composer panel', async () => {
+  const html = await text('index.html');
+  const app = await text('app.js');
+  const composer = html.slice(html.indexOf('id="composer"'), html.indexOf('</form>', html.indexOf('id="composer"')));
+  const triggerIndex = composer.indexOf('id="reply-preferences-trigger"');
+  const panelIndex = composer.indexOf('class="composer-panel"');
+
+  assert.ok(triggerIndex >= 0 && panelIndex > triggerIndex);
+  assert.match(composer, /id="reply-preferences-trigger"[^>]+aria-controls="reply-preferences"[^>]+aria-expanded="false"/i);
+  assert.match(html, /<dialog[^>]+id="reply-preferences"[^>]+aria-labelledby="reply-preferences-title"/i);
+  assert.match(html, /<fieldset[\s\S]*?<legend>Reply language<\/legend>[\s\S]*?name="reply-language"[^>]+value="en"[\s\S]*?English[\s\S]*?value="yue-Hant-HK"[\s\S]*?廣東話[\s\S]*?value="cmn-Hans-CN"[\s\S]*?普通話[\s\S]*?<\/fieldset>/i);
+  assert.match(html, /<fieldset[\s\S]*?<legend>Reply as<\/legend>[\s\S]*?name="reply-mode"[^>]+value="text"[\s\S]*?Text[\s\S]*?value="voice"[\s\S]*?Voice message[\s\S]*?<\/fieldset>/i);
+  assert.match(html, /id="save-reply-preferences"[^>]+type="submit"/i);
+  assert.match(html, /id="cancel-reply-preferences"[^>]+type="button"/i);
+  assert.match(app, /chatController\.setReplyPreferences\(/);
+  assert.ok((app.match(/currentReplyTupleIsFixed\(/g) ?? []).length >= 2);
+  assert.match(app, /replyPreferences\.addEventListener\(['"]close['"][\s\S]{0,180}replyPreferencesTrigger\.focus\(\)/i);
 });
 
 test('ui contract keeps four starter questions and the composer after the timeline', async () => {
@@ -90,6 +111,8 @@ test('ui contract exposes one consented asynchronous voice-message flow inside t
   assert.match(html, /id="voice-consent-cancel"[^>]+type="button"/i);
   assert.match(html, /not sent to the chat until you tap Send/i);
   assert.doesNotMatch(html, /auto(?:matically)?[- ]send/i);
+  assert.match(html, />Hold to speak<\/button>/i);
+  assert.match(html, />Voice message<\/span>/i);
 
   assert.match(app, /from ['"]\.\/voice-capture\.js['"]/);
   assert.match(app, /from ['"]\.\/voice-upload-store\.js['"]/);
@@ -117,6 +140,7 @@ test('ui contract exposes one consented asynchronous voice-message flow inside t
   assert.match(app, /performAssistantAudioAction\(/i);
   assert.doesNotMatch(app, /void\s+assistantAudioController\.(?:generate|play)\(/i);
   assert.match(app, /assistantAudioController\.handleHidden\(\)/i);
+  assert.match(app, /assistantVoiceMessagesToPrepare\(/i);
   assert.match(app, /visibilitychange/i);
   assert.match(app, /pagehide/i);
   assert.match(app, /Escape/);
@@ -174,6 +198,15 @@ test('ui contract locks the mobile-safe visual and accessibility fundamentals', 
   assert.match(css, /:focus-visible/i);
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/i);
   assert.match(css, /overflow-x:\s*hidden/i);
+  assert.match(css, /\.app-frame\s*\{[^}]*overflow:\s*hidden/is);
+  assert.match(css, /\.chat-shell\s*\{[^}]*min-width:\s*0/is);
+  assert.match(css, /\.chat-shell\s*\{[^}]*overflow:\s*hidden/is);
+  assert.match(css, /\.reply-preferences-trigger\s*\{[^}]*min-height:\s*44px/is);
+  assert.match(css, /\.reply-option\s*\{[^}]*min-height:\s*44px/is);
+  assert.match(css, /\.sources-summary\s*\{[^}]*min-height:\s*44px/is);
+  assert.match(css, /\.message-bubble\s*\{[^}]*font-size:\s*16px/is);
+  assert.match(css, /\.composer textarea\s*\{[^}]*font-size:\s*16px/is);
+  assert.match(css, /\.composer-panel\[data-voice-available="false"\]\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+62px/is);
 
   const retryRule = css.match(/\.retry-message\s*\{([^}]+)\}/i)?.[1] ?? '';
   assert.match(retryRule, /min-height:\s*44px/i);

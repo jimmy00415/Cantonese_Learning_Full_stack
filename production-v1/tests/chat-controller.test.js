@@ -240,6 +240,31 @@ test('chat controller defaults to en text and an ambiguous retry keeps the captu
   });
 });
 
+test('chat controller restores and persists only the current anonymous scope reply preference', async () => {
+  const store = storage();
+  store.setItem('hk-buddy:v1:scope', 'scope-one');
+  store.setItem('hk-buddy:v1:scope-one:reply-preferences', JSON.stringify({
+    replyLanguage: 'yue-Hant-HK', replyMode: 'voice',
+  }));
+  const firstNetwork = queuedFetch(envelope(bootstrapData({ scope: 'scope-one' })));
+  const first = controllerFor(firstNetwork.fetchImpl, { storage: store });
+
+  await first.start();
+  assert.equal(first.snapshot().replyLanguage, 'yue-Hant-HK');
+  assert.equal(first.snapshot().replyMode, 'voice');
+  first.setReplyPreferences({ replyLanguage: 'cmn-Hans-CN', replyMode: 'text' });
+  assert.equal(store.getItem('hk-buddy:v1:scope-one:reply-preferences'), JSON.stringify({
+    replyLanguage: 'cmn-Hans-CN', replyMode: 'text',
+  }));
+
+  const secondNetwork = queuedFetch(envelope(bootstrapData({ scope: 'scope-two' })));
+  const second = controllerFor(secondNetwork.fetchImpl, { storage: store });
+  await second.start();
+  assert.equal(second.snapshot().replyLanguage, 'en');
+  assert.equal(second.snapshot().replyMode, 'text');
+  assert.equal(store.getItem('hk-buddy:v1:scope-one:reply-preferences'), null);
+});
+
 test('chat controller preserves a caller-bound voice message identity and draft through an ambiguous retry', async () => {
   const clientMessageId = '44444444-4444-4444-8444-444444444444';
   const voiceDraftId = '55555555-5555-4555-8555-555555555555';

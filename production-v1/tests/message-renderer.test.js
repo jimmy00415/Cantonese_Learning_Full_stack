@@ -65,8 +65,50 @@ test('message renderer calls the official URL allowlist and renders safe source 
   assert.equal(source.href, 'https://ito.hkbu.edu.hk/services/mfa');
   assert.equal(source.rel, 'noopener noreferrer');
   assert.equal(nodes.find((node) => node.className === 'source-title').textContent, 'HKBU Duo guide');
-  assert.equal(nodes.find((node) => node.className === 'source-freshness').textContent, 'Verified 25 Aug 2026');
+  assert.equal(nodes.find((node) => node.className === 'source-freshness').textContent, 'Checked 25 Aug 2026');
   assert.equal(card.href, 'https://ito.hkbu.edu.hk/services/mfa');
+});
+
+test('message renderer sets the answer language and collapses multiple unique official sources', () => {
+  const assistant = createMessageElement(fakeDocument, {
+    id: 'assistant-2', role: 'assistant', status: 'delivered', text: '已核實的答案',
+    replyLanguage: 'yue-Hant-HK', createdAt: '2026-08-25T08:00:00.000Z',
+    citations: [
+      { title: 'Duo guide', publisher: 'HKBU ITO', url: 'https://ito.hkbu.edu.hk/services/mfa', verifiedAt: '2026-08-25T04:00:00+08:00', status: 'verified' },
+      { title: 'Duo duplicate', publisher: 'HKBU ITO', url: 'https://ito.hkbu.edu.hk/services/mfa', verifiedAt: '2026-08-25T04:00:00+08:00', status: 'verified' },
+      { title: 'Student guide', publisher: 'HKBU', url: 'https://sa.hkbu.edu.hk/student-guide', verifiedAt: '2026-08-24T04:00:00+08:00', status: 'verified' },
+      { title: 'Unsafe', publisher: 'Elsewhere', url: 'https://example.com/', verifiedAt: '2026-08-24T04:00:00+08:00', status: 'verified' },
+    ],
+  });
+  const nodes = all(assistant);
+  assert.equal(nodes.find((node) => node.className === 'message-text').attributes.lang, 'zh-HK');
+  assert.equal(nodes.filter((node) => node.className === 'source-card').length, 2);
+  assert.equal(nodes.find((node) => node.className === 'sources-disclosure').tagName, 'details');
+  assert.equal(nodes.find((node) => node.className === 'sources-summary').tagName, 'summary');
+  assert.equal(nodes.find((node) => node.className === 'sources-summary').textContent, 'Sources (2)');
+
+  const mandarin = createMessageElement(fakeDocument, {
+    id: 'assistant-3', role: 'assistant', status: 'delivered', text: '答案',
+    replyLanguage: 'cmn-Hans-CN', citations: [], createdAt: '2026-08-25T08:00:00.000Z',
+  });
+  assert.equal(all(mandarin).find((node) => node.className === 'message-text').attributes.lang, 'zh-CN');
+});
+
+test('message renderer shows an Official next step only for a supplied safe handoff', () => {
+  const withoutHandoff = createMessageElement(fakeDocument, {
+    id: 'assistant-4', role: 'assistant', status: 'delivered', text: 'I could not confirm that.',
+    groundingStatus: 'unverified', cards: [], citations: [], createdAt: '2026-08-25T08:00:00.000Z',
+  });
+  assert.equal(all(withoutHandoff).some((node) => node.className === 'official-next-step-label'), false);
+
+  const suppliedHandoff = createMessageElement(fakeDocument, {
+    id: 'assistant-5', role: 'assistant', status: 'delivered', text: 'I could not confirm that.',
+    groundingStatus: 'unverified', citations: [], createdAt: '2026-08-25T08:00:00.000Z',
+    cards: [{ title: 'HKBU student guide', label: 'Open official guide', url: 'https://sa.hkbu.edu.hk/student-guide' }],
+  });
+  const nodes = all(suppliedHandoff);
+  assert.equal(nodes.find((node) => node.className === 'official-next-step-label').textContent, 'Official next step');
+  assert.equal(nodes.find((node) => node.className === 'action-card').href, 'https://sa.hkbu.edu.hk/student-guide');
 });
 
 test('message renderer distinguishes an unconfirmed send from an accepted answer failure', () => {

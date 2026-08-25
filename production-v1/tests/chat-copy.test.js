@@ -1,7 +1,60 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { clearErrorCopy, sendErrorCopy, startErrorCopy } from '../public/chat-copy.js';
+import * as chatCopy from '../public/chat-copy.js';
+
+const {
+  chatExperienceCopy, clearErrorCopy, replyPreferenceLabel, sendErrorCopy, startErrorCopy,
+} = chatCopy;
+
+test('chat experience copy localizes the welcome, composer, and four useful starters', () => {
+  assert.equal(typeof chatExperienceCopy, 'function');
+  assert.deepEqual(chatExperienceCopy('en'), {
+    documentLanguage: 'en',
+    welcome: 'Hi — I’m Hong Kong Buddy, your HKBU AI senior. Ask me about registration, halls, food, campus services, transport, or settling into Hong Kong.',
+    disclosure: 'Campus facts include official sources.',
+    placeholder: 'Ask your AI senior…',
+    starterPrompts: [
+      'How do I activate my SSOid?',
+      'What food options are available at HKBU?',
+      'Where can I use my student e-Card?',
+      'How do I set up Duo on a new phone?',
+    ],
+  });
+  assert.deepEqual(chatExperienceCopy('yue-Hant-HK'), {
+    documentLanguage: 'zh-HK',
+    welcome: '你好，我係 Hong Kong Buddy，你嘅浸大 AI 學長。註冊、宿舍、飲食、校園服務、交通同香港生活，都可以問我。',
+    disclosure: '校園資料會附上官方來源。',
+    placeholder: '問你嘅浸大 AI 學長…',
+    starterPrompts: [
+      '點樣啟用 SSOid？',
+      '浸大有咩食嘢選擇？',
+      '學生電子證（Student e-Card）可以喺邊度用？',
+      '換咗電話後點樣設定 Duo？',
+    ],
+  });
+  assert.deepEqual(chatExperienceCopy('cmn-Hans-CN'), {
+    documentLanguage: 'zh-CN',
+    welcome: '你好，我是 Hong Kong Buddy，你的浸大 AI 学长。注册、宿舍、餐饮、校园服务、交通和香港生活，都可以问我。',
+    disclosure: '校园信息会附上官方来源。',
+    placeholder: '问你的浸大 AI 学长…',
+    starterPrompts: [
+      '怎么启用 SSOid？',
+      '浸大有什么吃饭选择？',
+      '学生电子证（Student e-Card）可以在哪里使用？',
+      '换了手机后怎么设置 Duo？',
+    ],
+  });
+});
+
+test('reply preference labels distinguish assistant output from Hold to speak input', () => {
+  assert.equal(typeof replyPreferenceLabel, 'function');
+  assert.equal(replyPreferenceLabel({ replyLanguage: 'en', replyMode: 'text' }), 'English · Text');
+  assert.equal(replyPreferenceLabel({ replyLanguage: 'yue-Hant-HK', replyMode: 'voice' }), '廣東話 · Voice reply');
+  assert.equal(replyPreferenceLabel({ replyLanguage: 'cmn-Hans-CN', replyMode: 'voice' }), '普通話 · Voice reply');
+  assert.throws(() => chatExperienceCopy('fr'), /reply language/i);
+  assert.throws(() => replyPreferenceLabel({ replyLanguage: 'en', replyMode: 'audio' }), /reply mode/i);
+});
 
 test('chat copy keeps bootstrap failure separate from send ambiguity', () => {
   const copy = startErrorCopy({ code: 'NETWORK_UNAVAILABLE' });

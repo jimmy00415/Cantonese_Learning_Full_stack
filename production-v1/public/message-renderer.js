@@ -15,32 +15,54 @@ function messageTime(value) {
   }).format(date);
 }
 
+const ANSWER_LANG = Object.freeze({
+  en: 'en',
+  'yue-Hant-HK': 'zh-HK',
+  'cmn-Hans-CN': 'zh-CN',
+});
+
+function sourceLink(document, citation, href) {
+  const link = element(document, 'a', 'source-card');
+  link.href = href;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  link.setAttribute('aria-label', `Open official source: ${String(citation.title || 'HKBU source')}`);
+  link.append(
+    element(document, 'span', 'source-title', citation.title || 'Official HKBU source'),
+    element(document, 'span', 'source-publisher', citation.publisher || 'Hong Kong Baptist University'),
+    element(
+      document,
+      'span',
+      'source-freshness',
+      citation.status === 'verified'
+        ? formatFreshness(citation.verifiedAt).replace(/^Verified /, 'Checked ')
+        : 'Official source · not confirmed for this answer',
+    ),
+  );
+  return link;
+}
+
 function appendSources(document, container, citations) {
+  const unique = new Map();
   for (const citation of citations ?? []) {
     const href = safeOfficialUrl(citation?.url);
-    if (!href) continue;
-    const link = element(document, 'a', 'source-card');
-    link.href = href;
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-    link.setAttribute('aria-label', `Open official source: ${String(citation.title || 'HKBU source')}`);
-    link.append(
-      element(document, 'span', 'source-title', citation.title || 'Official HKBU source'),
-      element(document, 'span', 'source-publisher', citation.publisher || 'Hong Kong Baptist University'),
-      element(
-        document,
-        'span',
-        'source-freshness',
-        citation.status === 'verified'
-          ? formatFreshness(citation.verifiedAt)
-          : 'Official source · not verified for this answer',
-      ),
-    );
-    container.append(link);
+    if (href && !unique.has(href)) unique.set(href, { citation, href });
   }
+  const links = [...unique.values()].map(({ citation, href }) => sourceLink(document, citation, href));
+  if (links.length <= 1) {
+    if (links[0]) container.append(links[0]);
+    return;
+  }
+  const disclosure = element(document, 'details', 'sources-disclosure');
+  const summary = element(document, 'summary', 'sources-summary', `Sources (${links.length})`);
+  const list = element(document, 'div', 'sources-list');
+  list.append(...links);
+  disclosure.append(summary, list);
+  container.append(disclosure);
 }
 
 function appendActions(document, container, cards) {
+  const links = [];
   for (const card of cards ?? []) {
     const href = safeOfficialUrl(card?.url);
     if (!href) continue;
@@ -53,8 +75,10 @@ function appendActions(document, container, cards) {
       element(document, 'span', 'action-card-title', card.title || 'Official HKBU guide'),
       element(document, 'span', 'action-card-label', card.label || 'Open official guide'),
     );
-    container.append(link);
+    links.push(link);
   }
+  if (links.length === 0) return;
+  container.append(element(document, 'span', 'official-next-step-label', 'Official next step'), ...links);
 }
 
 export function createMessageElement(document, message, {
@@ -71,7 +95,9 @@ export function createMessageElement(document, message, {
   avatar.alt = '';
   const stack = element(document, 'div', 'message-stack');
   const bubble = element(document, 'div', `message-bubble message-bubble--${role}`);
-  bubble.append(element(document, 'p', 'message-text', message?.text ?? ''));
+  const messageText = element(document, 'p', 'message-text', message?.text ?? '');
+  if (role === 'assistant') messageText.setAttribute('lang', ANSWER_LANG[message?.replyLanguage] ?? 'en');
+  bubble.append(messageText);
   stack.append(bubble);
 
   if (role === 'assistant') {

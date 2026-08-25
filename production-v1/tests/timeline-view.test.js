@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { reconcileMessageFeed } from '../public/timeline-view.js';
+import * as timelineView from '../public/timeline-view.js';
+
+const { assistantVoiceMessagesToPrepare, currentReplyTupleIsFixed, reconcileMessageFeed } = timelineView;
 
 class FakeNode {
   constructor(label) {
@@ -78,4 +80,49 @@ test('timeline reconciliation replaces only a changed row and keeps unrelated fo
 
   assert.equal(container.children[0], focusedUnchangedRow);
   assert.notEqual(container.children[1], changingRow);
+});
+
+test('timeline selects only delivered voice replies that still need status hydration', () => {
+  assert.equal(typeof assistantVoiceMessagesToPrepare, 'function');
+  const voice = message({
+    id: '11111111-1111-4111-8111-111111111111', replyMode: 'voice', mediaId: null,
+  });
+  const alreadyTracked = message({
+    id: '22222222-2222-4222-8222-222222222222', replyMode: 'voice', mediaId: null,
+  });
+  const ready = message({
+    id: '33333333-3333-4333-8333-333333333333', replyMode: 'voice',
+    mediaId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+  });
+  const text = message({ id: '44444444-4444-4444-8444-444444444444', replyMode: 'text' });
+  const user = message({ id: '55555555-5555-4555-8555-555555555555', role: 'user', replyMode: 'voice' });
+  const invalid = message({ id: 'not-a-public-id', replyMode: 'voice' });
+
+  assert.deepEqual(
+    assistantVoiceMessagesToPrepare(
+      [voice, alreadyTracked, ready, text, user, invalid],
+      { [alreadyTracked.id]: { state: 'generating' } },
+    ).map((item) => item.id),
+    [voice.id],
+  );
+});
+
+test('reply preference presentation treats the deferred voice binding phase as already fixed', () => {
+  assert.equal(typeof currentReplyTupleIsFixed, 'function');
+  assert.equal(currentReplyTupleIsFixed({
+    voiceSnapshot: { phase: 'binding', binding: null },
+    messages: [],
+  }), true);
+  assert.equal(currentReplyTupleIsFixed({
+    voiceSnapshot: { phase: 'send-unconfirmed', binding: { replyLanguage: 'en', replyMode: 'text' } },
+    messages: [],
+  }), true);
+  assert.equal(currentReplyTupleIsFixed({
+    voiceSnapshot: { phase: 'draft-ready', binding: null },
+    messages: [],
+  }), false);
+  assert.equal(currentReplyTupleIsFixed({
+    voiceSnapshot: null,
+    messages: [{ optimistic: true, sendState: 'sending' }],
+  }), true);
 });

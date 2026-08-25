@@ -10,6 +10,30 @@ function renderSignature(message, isLatestAssistant) {
   return JSON.stringify([message, isLatestAssistant]);
 }
 
+const PUBLIC_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function assistantVoiceMessagesToPrepare(messages = [], entries = {}) {
+  return messages.filter((message) => (
+    message?.role === 'assistant'
+      && message?.status === 'delivered'
+      && message?.replyMode === 'voice'
+      && !message?.mediaId
+      && PUBLIC_UUID.test(String(message?.id ?? ''))
+      && !Object.prototype.hasOwnProperty.call(entries ?? {}, message.id)
+  ));
+}
+
+export function currentReplyTupleIsFixed({ voiceSnapshot = null, messages = [] } = {}) {
+  return Boolean(
+    voiceSnapshot?.phase === 'binding'
+      || voiceSnapshot?.binding
+      || messages.some((message) => (
+        message?.optimistic
+          && ['sending', 'unconfirmed', 'retryable-rejection'].includes(message.sendState)
+      )),
+  );
+}
+
 export function reconcileMessageFeed(container, messages = [], createMessage) {
   if (!container?.children || typeof createMessage !== 'function') {
     throw new Error('A message-feed container and renderer are required');

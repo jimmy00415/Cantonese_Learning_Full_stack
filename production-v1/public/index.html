@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#f5f1ec">
     <meta name="description" content="Ask a grounded AI senior about everyday life at HKBU.">
-    <title>Hong Kong Buddy | Campus AI Senior</title>
+    <title>Hong Kong Buddy | Your HKBU AI senior</title>
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="apple-touch-icon" href="/assets/ai-senior-avatar.png">
     <link rel="stylesheet" href="/styles.css">
@@ -16,10 +16,10 @@
         <header id="app-header" class="app-header">
           <img class="profile-avatar profile-avatar--header" src="/assets/ai-senior-avatar-128.png" alt="">
           <div class="profile-copy">
-            <h1>Campus AI Senior</h1>
-            <p>AI assistant · HKBU guide</p>
+            <h1>Hong Kong Buddy</h1>
+            <p>Your HKBU AI senior</p>
           </div>
-          <button class="info-button" type="button" aria-label="About Campus AI Senior" aria-controls="assistant-info" aria-expanded="false">About</button>
+          <button class="info-button" type="button" aria-label="Information about Hong Kong Buddy" aria-controls="assistant-info" aria-expanded="false">Info</button>
         </header>
 
         <p id="connection-status" class="connection-status" role="status" hidden></p>
@@ -30,10 +30,9 @@
               <img class="profile-avatar message-avatar" src="/assets/ai-senior-avatar-128.png" alt="">
               <div class="message-stack">
                 <div class="message-bubble message-bubble--assistant">
-                  <p>Hi! I’m your Campus AI Senior. I can help with HKBU life, services, and getting started.</p>
-                  <p>What would you like to know?</p>
+                  <p id="welcome-message">Hi — I’m Hong Kong Buddy, your HKBU AI senior. Ask me about registration, halls, food, campus services, transport, or settling into Hong Kong.</p>
                 </div>
-                <p class="ai-disclosure">AI assistant · Answers may need checking against the linked official source.</p>
+                <p id="welcome-disclosure" class="ai-disclosure">Campus facts include official sources.</p>
               </div>
             </div>
 
@@ -50,7 +49,7 @@
 
         <p id="turn-status" class="turn-status" role="status" aria-live="polite" aria-atomic="true"></p>
 
-        <form id="composer" class="composer" aria-label="Message Campus AI Senior">
+        <form id="composer" class="composer" aria-label="Message Hong Kong Buddy">
           <div id="voice-draft" class="voice-draft" hidden>
             <div class="voice-draft-copy">
               <p id="voice-draft-state" role="status" aria-live="polite" aria-atomic="true">Voice draft · Not sent</p>
@@ -68,10 +67,17 @@
               <button id="cancel-voice" type="button">Cancel</button>
             </div>
           </div>
-          <div class="composer-panel">
+          <div class="reply-toolbar">
+            <button id="reply-preferences-trigger" class="reply-preferences-trigger" type="button" aria-controls="reply-preferences" aria-expanded="false" disabled>
+              <span id="reply-preference-value">English · Text</span>
+              <span aria-hidden="true">⌄</span>
+            </button>
+            <span id="reply-preference-note" class="reply-preference-note">Applies to your next message</span>
+          </div>
+          <div class="composer-panel" data-voice-available="false">
             <label class="sr-only" for="message-input">Your message</label>
             <textarea id="message-input" name="message" rows="1" maxlength="4000" placeholder="Ask your AI senior…" autocomplete="off" disabled></textarea>
-            <button id="voice-button" type="button" aria-pressed="false" aria-describedby="voice-hint" aria-label="Press or hold to record a voice message" disabled>Hold to talk</button>
+            <button id="voice-button" type="button" aria-pressed="false" aria-describedby="voice-hint" aria-label="Press or hold to record a voice message" disabled hidden>Hold to speak</button>
             <button id="send-button" type="submit" disabled>Send</button>
           </div>
           <p id="composer-feedback" class="composer-feedback" aria-live="polite" aria-atomic="true"></p>
@@ -82,6 +88,37 @@
         </form>
       </div>
     </div>
+
+    <dialog id="reply-preferences" class="reply-preferences" aria-labelledby="reply-preferences-title" aria-describedby="reply-preferences-description">
+      <form id="reply-preferences-form" method="dialog">
+        <div class="reply-sheet-heading">
+          <div>
+            <p class="sheet-eyebrow">Next reply</p>
+            <h2 id="reply-preferences-title">Choose how Buddy replies</h2>
+          </div>
+          <button id="cancel-reply-preferences" class="close-button" type="button">Cancel</button>
+        </div>
+        <p id="reply-preferences-description" class="reply-sheet-description">Your choice applies to future sends. Text always appears before optional AI voice.</p>
+        <fieldset>
+          <legend>Reply language</legend>
+          <div class="reply-options reply-options--three">
+            <label class="reply-option"><input type="radio" name="reply-language" value="en" checked><span>English</span></label>
+            <label class="reply-option"><input type="radio" name="reply-language" value="yue-Hant-HK"><span>廣東話</span></label>
+            <label class="reply-option"><input type="radio" name="reply-language" value="cmn-Hans-CN"><span>普通話</span></label>
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>Reply as</legend>
+          <div class="reply-options reply-options--two">
+            <label class="reply-option"><input type="radio" name="reply-mode" value="text" checked><span>Text</span></label>
+            <label class="reply-option"><input type="radio" name="reply-mode" value="voice"><span>Voice message</span></label>
+          </div>
+        </fieldset>
+        <div class="reply-sheet-actions">
+          <button id="save-reply-preferences" type="submit">Use these settings</button>
+        </div>
+      </form>
+    </dialog>
 
     <dialog id="voice-consent" class="voice-consent" aria-labelledby="voice-consent-title" aria-describedby="voice-consent-copy">
       <div class="voice-consent-card">
@@ -99,7 +136,7 @@
       <div class="sheet-heading">
         <div>
           <p class="sheet-eyebrow">Hong Kong Buddy</p>
-          <h2 id="assistant-info-title">About your Campus AI Senior</h2>
+          <h2 id="assistant-info-title">About your HKBU AI senior</h2>
         </div>
         <button class="close-button" type="button" aria-label="Close information">Close</button>
       </div>
