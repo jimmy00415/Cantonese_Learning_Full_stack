@@ -1430,6 +1430,226 @@ test('media cleanup stop does not abort a claimed deletion before durable comple
   assert.equal(persisted.mediaDeletionJobs.find((job) => job.storageKey === storageKey).state, 'completed');
 });
 
+test('media cleanup live-key retry rechecks the durable lease after its liveness lookup', async (t) => {
+  const { createMediaCleanupService } = await import('../src/services/media-cleanup.js');
+  const { filePath, store } = await createStore(t, 'hb-v1-cleanup-live-clock-fence-');
+  const storageKey = 'attempts/voice/ffffffff-9999-4999-8999-999999999999';
+  const claimedAt = new Date('2026-08-25T03:15:00.000Z');
+  let current = claimedAt;
+  await store.enqueueMediaDeletion({ storageKey, reason: 'clock-fenced-live-key', notBefore: current, now: current });
+  store.isStorageKeyLive = async () => {
+    current = new Date(claimedAt.getTime() + 26);
+    return true;
+  };
+  const mediaStore = {
+    delete: async () => { throw new Error('a live key must not be deleted'); },
+    listAttemptKeys: async () => ({ keys: [], cursor: null }),
+  };
+  const cleanup = createMediaCleanupService({
+    store,
+    mediaStore,
+    now: () => new Date(current),
+    leaseMs: 25,
+  });
+  const result = await cleanup.drainOnce();
+  assert.equal(result.completed, false);
+  assert.equal(result.fenced, true);
+  const persisted = JSON.parse(await readFile(filePath, 'utf8')).mediaDeletionJobs
+    .find((job) => job.storageKey === storageKey);
+  assert.equal(persisted.state, 'deleting');
+  assert.equal(persisted.lastErrorCode, null);
+});
+
+test('media cleanup completion rechecks the durable lease at the mutation clock boundary', async (t) => {
+  const { createMediaCleanupService } = await import('../src/services/media-cleanup.js');
+  const { filePath, store } = await createStore(t, 'hb-v1-cleanup-complete-clock-fence-');
+  const storageKey = 'attempts/voice/dddddddd-9999-4999-8999-999999999999';
+  const claimedAt = new Date('2026-08-25T03:30:00.000Z');
+  let current = claimedAt;
+  await store.enqueueMediaDeletion({ storageKey, reason: 'clock-fenced-complete', notBefore: current, now: current });
+  const mediaStore = {
+    delete: async () => {
+      current = new Date(claimedAt.getTime() + 26);
+      return { deleted: true, notFound: false };
+    },
+    listAttemptKeys: async () => ({ keys: [], cursor: null }),
+  };
+  const cleanup = createMediaCleanupService({
+    store,
+    mediaStore,
+    now: () => new Date(current),
+    leaseMs: 25,
+  });
+  const result = await cleanup.drainOnce();
+  assert.equal(result.completed, false);
+  assert.equal(result.fenced, true);
+  const persisted = JSON.parse(await readFile(filePath, 'utf8')).mediaDeletionJobs
+    .find((job) => job.storageKey === storageKey);
+  assert.equal(persisted.state, 'deleting');
+  assert.ok(persisted.leaseToken);
+});
+
+test('media cleanup failure rechecks the durable lease before persisting a retry', async (t) => {
+  const { createMediaCleanupService } = await import('../src/services/media-cleanup.js');
+  const { filePath, store } = await createStore(t, 'hb-v1-cleanup-fail-clock-fence-');
+  const storageKey = 'attempts/tts/eeeeeeee-9999-4999-8999-999999999999';
+  const claimedAt = new Date('2026-08-25T03:45:00.000Z');
+  let current = claimedAt;
+  await store.enqueueMediaDeletion({ storageKey, reason: 'clock-fenced-failure', notBefore: current, now: current });
+  const mediaStore = {
+    delete: async () => {
+      current = new Date(claimedAt.getTime() + 26);
+      const error = new Error('delete failed after the durable lease boundary');
+      error.code = 'MEDIA_DELETE_FAILED';
+      throw error;
+    },
+    listAttemptKeys: async () => ({ keys: [], cursor: null }),
+  };
+  const cleanup = createMediaCleanupService({
+    store,
+    mediaStore,
+    now: () => new Date(current),
+    leaseMs: 25,
+  });
+  const result = await cleanup.drainOnce();
+  assert.equal(result.completed, false);
+  assert.equal(result.fenced, true);
+  const persisted = JSON.parse(await readFile(filePath, 'utf8')).mediaDeletionJobs
+    .find((job) => job.storageKey === storageKey);
+  assert.equal(persisted.state, 'deleting');
+  assert.equal(persisted.lastErrorCode, null);
+});
+
+test('media cleanup stop is lease-bounded when delete ignores abort and leaves the durable job reclaimable', async (t) => {
+  const { createMediaCleanupService } = await import('../src/services/media-cleanup.js');
+  const { filePath, store } = await createStore(t, 'hb-v1-cleanup-stop-stalled-delete-');
+  const storageKey = 'attempts/voice/99999999-9999-4999-8999-999999999999';
+  let current = new Date('2026-08-25T04:00:00.000Z');
+  await store.enqueueMediaDeletion({ storageKey, reason: 'stalled-delete', notBefore: current, now: current });
+  let deletionStartedResolve;
+  const deletionStarted = new Promise((resolve) => { deletionStartedResolve = resolve; });
+  let releaseDeletion;
+  const deletion = new Promise((resolve) => { releaseDeletion = resolve; });
+  let deletionSignal = null;
+  const mediaStore = {
+    delete: ({ signal }) => {
+      deletionSignal = signal;
+      deletionStartedResolve();
+      return deletion;
+    },
+    listAttemptKeys: async () => ({ keys: [], cursor: null }),
+  };
+  const cleanup = createMediaCleanupService({
+    store,
+    mediaStore,
+    now: () => new Date(current),
+    leaseMs: 25,
+    pollMs: 60_000,
+  });
+  t.after(() => cleanup.stop());
+  cleanup.start();
+  await settleWithin(deletionStarted, 250, 'cleanup never claimed the stalled deletion');
+  const stopping = cleanup.stop();
+  let stoppedWithinLease = false;
+  try {
+    await settleWithin(stopping, 300, 'cleanup stop waited forever for a delete adapter that ignored abort');
+    stoppedWithinLease = true;
+  } finally {
+    if (!stoppedWithinLease) {
+      releaseDeletion({ deleted: true, notFound: false });
+      await stopping;
+    }
+  }
+  assert.equal(deletionSignal.aborted, true, 'the adapter received the expired deletion lease signal');
+  const expired = JSON.parse(await readFile(filePath, 'utf8')).mediaDeletionJobs
+    .find((job) => job.storageKey === storageKey);
+  assert.equal(expired.state, 'deleting');
+  assert.ok(expired.leaseToken, 'the timed-out claim remains durably fenced until its lease expires');
+
+  current = new Date(current.getTime() + 26);
+  const reclaimed = await store.claimNextMediaDeletion({
+    workerId: 'replacement-cleanup-worker',
+    leaseToken: 'replacement-delete-token',
+    leaseExpiresAt: new Date(current.getTime() + 25),
+    now: current,
+  });
+  assert.equal(reclaimed.id, expired.id);
+  assert.equal(reclaimed.attempt, 2);
+  assert.equal(reclaimed.leaseToken, 'replacement-delete-token');
+
+  releaseDeletion({ deleted: true, notFound: false });
+  await new Promise((resolve) => setImmediate(resolve));
+  const afterLateSuccess = JSON.parse(await readFile(filePath, 'utf8')).mediaDeletionJobs
+    .find((job) => job.storageKey === storageKey);
+  assert.equal(afterLateSuccess.state, 'deleting');
+  assert.equal(afterLateSuccess.leaseToken, 'replacement-delete-token');
+  assert.equal(afterLateSuccess.attempt, 2);
+});
+
+test('late rejection from an expired delete lease is observed and cannot fail its replacement claim', async (t) => {
+  const { createMediaCleanupService } = await import('../src/services/media-cleanup.js');
+  const { filePath, store } = await createStore(t, 'hb-v1-cleanup-late-delete-reject-');
+  const storageKey = 'attempts/tts/aaaaaaaa-9999-4999-8999-999999999999';
+  let current = new Date('2026-08-25T04:30:00.000Z');
+  await store.enqueueMediaDeletion({ storageKey, reason: 'late-reject-delete', notBefore: current, now: current });
+  let deletionStartedResolve;
+  const deletionStarted = new Promise((resolve) => { deletionStartedResolve = resolve; });
+  let rejectDeletion;
+  const deletion = new Promise((resolve, reject) => {
+    void resolve;
+    rejectDeletion = reject;
+  });
+  let deletionSignal = null;
+  const mediaStore = {
+    delete: ({ signal }) => {
+      deletionSignal = signal;
+      deletionStartedResolve();
+      return deletion;
+    },
+    listAttemptKeys: async () => ({ keys: [], cursor: null }),
+  };
+  const cleanup = createMediaCleanupService({
+    store,
+    mediaStore,
+    now: () => new Date(current),
+    leaseMs: 25,
+  });
+  const draining = cleanup.drainOnce();
+  await settleWithin(deletionStarted, 250, 'cleanup never began the late-reject deletion');
+  let boundedResult;
+  try {
+    boundedResult = await settleWithin(draining, 300, 'cleanup drain waited forever for a late-rejecting delete adapter');
+  } finally {
+    if (!boundedResult) {
+      const cleanupError = new Error('release current implementation after RED');
+      cleanupError.code = 'MEDIA_DELETE_FAILED';
+      rejectDeletion(cleanupError);
+      await draining;
+    }
+  }
+  assert.equal(boundedResult.completed, false);
+  assert.equal(boundedResult.leaseExpired, true);
+  assert.equal(deletionSignal.aborted, true);
+
+  current = new Date(current.getTime() + 26);
+  const reclaimed = await store.claimNextMediaDeletion({
+    workerId: 'late-reject-replacement-worker',
+    leaseToken: 'late-reject-replacement-token',
+    leaseExpiresAt: new Date(current.getTime() + 25),
+    now: current,
+  });
+  assert.equal(reclaimed.attempt, 2);
+  const lateError = new Error('provider rejected after its deletion lease expired');
+  lateError.code = 'MEDIA_DELETE_FAILED';
+  rejectDeletion(lateError);
+  await new Promise((resolve) => setImmediate(resolve));
+  const persisted = JSON.parse(await readFile(filePath, 'utf8')).mediaDeletionJobs
+    .find((job) => job.storageKey === storageKey);
+  assert.equal(persisted.state, 'deleting');
+  assert.equal(persisted.leaseToken, 'late-reject-replacement-token');
+  assert.equal(persisted.lastErrorCode, null);
+});
+
 test('server shutdown aborts a stalled cleanup listing and closes within a bounded window', async (t) => {
   const { startServer } = await import('../src/server.js');
   const directory = await mkdtemp(join(tmpdir(), 'hb-v1-server-cleanup-stop-'));
@@ -1475,6 +1695,77 @@ test('server shutdown aborts a stalled cleanup listing and closes within a bound
     await shutdown;
   }
   assert.equal(listingSignal.aborted, true);
+});
+
+test('server shutdown is lease-bounded when the media delete adapter ignores abort', async (t) => {
+  const { startServer } = await import('../src/server.js');
+  const { createMediaCleanupService } = await import('../src/services/media-cleanup.js');
+  const directory = await mkdtemp(join(tmpdir(), 'hb-v1-server-cleanup-delete-stop-'));
+  const filePath = join(directory, 'store.json');
+  const store = new AtomicFileStore({ filePath });
+  await store.init();
+  const current = new Date('2026-08-25T05:00:00.000Z');
+  const storageKey = 'attempts/voice/bbbbbbbb-9999-4999-8999-999999999999';
+  await store.enqueueMediaDeletion({ storageKey, reason: 'server-shutdown-delete', notBefore: current, now: current });
+  let deletionStartedResolve;
+  const deletionStarted = new Promise((resolve) => { deletionStartedResolve = resolve; });
+  let releaseDeletion;
+  const deletion = new Promise((resolve) => { releaseDeletion = resolve; });
+  let deletionSignal = null;
+  const mediaStore = {
+    init: async () => undefined,
+    close: async () => undefined,
+    createAttemptKey: () => 'attempts/voice/cccccccc-9999-4999-8999-999999999999',
+    delete: ({ signal }) => {
+      deletionSignal = signal;
+      deletionStartedResolve();
+      return deletion;
+    },
+    listAttemptKeys: async () => ({ keys: [], cursor: null }),
+  };
+  const cleanupService = createMediaCleanupService({
+    store,
+    mediaStore,
+    now: () => current,
+    leaseMs: 25,
+    pollMs: 60_000,
+  });
+  const server = await startServer({
+    environment: {
+      NODE_ENV: 'test',
+      V1_PUBLIC_ORIGIN: 'https://voice.example.test',
+      V1_SESSION_SECRET: 's'.repeat(32),
+      V1_ATOMIC_FILE_PATH: filePath,
+      V1_LOCAL_MEDIA_PATH: join(directory, 'media'),
+      V1_LLM_PROVIDER: 'deterministic',
+    },
+    host: '127.0.0.1',
+    port: 0,
+    store,
+    mediaStore,
+    cleanupService,
+    llmProvider: { provider: 'shutdown-delete-test', generate: async () => { throw new Error('must not run'); } },
+    now: () => current,
+  });
+  t.after(() => server.shutdown());
+  await settleWithin(deletionStarted, 250, 'server cleanup never claimed the stalled deletion');
+  const shutdown = server.shutdown();
+  let shutdownWithinLease = false;
+  try {
+    await settleWithin(shutdown, 300, 'server shutdown waited forever for a delete adapter that ignored abort');
+    shutdownWithinLease = true;
+  } finally {
+    if (!shutdownWithinLease) {
+      releaseDeletion({ deleted: true, notFound: false });
+      await shutdown;
+    }
+  }
+  assert.equal(deletionSignal.aborted, true);
+  const persisted = JSON.parse(await readFile(filePath, 'utf8')).mediaDeletionJobs
+    .find((job) => job.storageKey === storageKey);
+  assert.equal(persisted.state, 'deleting');
+  releaseDeletion({ deleted: true, notFound: false });
+  await new Promise((resolve) => setImmediate(resolve));
 });
 
 test('orphan sweep evidence reopens a completed deletion exactly once across cleanup workers', async (t) => {

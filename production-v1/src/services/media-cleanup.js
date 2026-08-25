@@ -36,13 +36,19 @@ function throwIfSweepAborted(signal) {
   if (signal?.aborted) throw sweepAbortError(signal);
 }
 
-async function withSweepAbort(operation, signal) {
-  throwIfSweepAborted(signal);
+function deleteLeaseError(signal) {
+  const error = new Error('Media cleanup delete lease expired', signal?.reason ? { cause: signal.reason } : undefined);
+  error.code = 'MEDIA_DELETE_LEASE_EXPIRED';
+  return error;
+}
+
+async function withAbortSignal(operation, signal, createAbortError) {
+  if (signal?.aborted) throw createAbortError(signal);
   if (!signal) return operation();
   let removeAbortListener = () => undefined;
   const aborted = new Promise((resolve, reject) => {
     void resolve;
-    const onAbort = () => reject(sweepAbortError(signal));
+    const onAbort = () => reject(createAbortError(signal));
     signal.addEventListener('abort', onAbort, { once: true });
     removeAbortListener = () => signal.removeEventListener('abort', onAbort);
   });
@@ -63,6 +69,10 @@ async function withSweepAbort(operation, signal) {
   } finally {
     removeAbortListener();
   }
+}
+
+function withSweepAbort(operation, signal) {
+  return withAbortSignal(operation, signal, sweepAbortError);
 }
 
 export function createMediaCleanupService({
@@ -105,25 +115,50 @@ export function createMediaCleanupService({
     if (!job) return { completed: false, idle: true };
     try {
       if (await store.isStorageKeyLive({ storageKey: job.storageKey, now: current })) {
+        const liveFailureNow = new Date(now());
         await store.failMediaDeletion({
           jobId: job.id, generation: job.generation, leaseToken,
           failureCode: 'MEDIA_KEY_STILL_LIVE',
-          retryAt: addMilliseconds(current, retryDelayMs),
-          now: current,
+          retryAt: addMilliseconds(liveFailureNow, retryDelayMs),
+          now: liveFailureNow,
         });
         return { completed: false, live: true, storageKey: job.storageKey };
       }
-      await mediaStore.delete({ storageKey: job.storageKey, signal: AbortSignal.timeout(leaseMs) });
-      await store.completeMediaDeletion({ jobId: job.id, generation: job.generation, leaseToken, now: current });
+      const deleteSignal = AbortSignal.timeout(leaseMs);
+      try {
+        await withAbortSignal(
+          () => mediaStore.delete({ storageKey: job.storageKey, signal: deleteSignal }),
+          deleteSignal,
+          deleteLeaseError,
+        );
+      } catch (error) {
+        if (error?.code === 'MEDIA_DELETE_LEASE_EXPIRED') {
+          return { completed: false, leaseExpired: true, storageKey: job.storageKey };
+        }
+        throw error;
+      }
+      await store.completeMediaDeletion({
+        jobId: job.id,
+        generation: job.generation,
+        leaseToken,
+        now: new Date(now()),
+      });
       return { completed: true, storageKey: job.storageKey };
     } catch (error) {
       if (error?.code === 'LEASE_LOST') return { completed: false, fenced: true, storageKey: job.storageKey };
-      await store.failMediaDeletion({
-        jobId: job.id, generation: job.generation, leaseToken,
-        failureCode: error?.code === 'MEDIA_DELETE_FAILED' ? 'MEDIA_DELETE_FAILED' : 'MEDIA_UNAVAILABLE',
-        retryAt: addMilliseconds(current, retryDelayMs),
-        now: current,
-      }).catch(() => undefined);
+      const failureNow = new Date(now());
+      try {
+        await store.failMediaDeletion({
+          jobId: job.id, generation: job.generation, leaseToken,
+          failureCode: error?.code === 'MEDIA_DELETE_FAILED' ? 'MEDIA_DELETE_FAILED' : 'MEDIA_UNAVAILABLE',
+          retryAt: addMilliseconds(failureNow, retryDelayMs),
+          now: failureNow,
+        });
+      } catch (failureError) {
+        if (failureError?.code === 'LEASE_LOST') {
+          return { completed: false, fenced: true, storageKey: job.storageKey };
+        }
+      }
       return { completed: false, retryable: true, storageKey: job.storageKey };
     }
   };
