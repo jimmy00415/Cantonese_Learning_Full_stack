@@ -6,7 +6,6 @@ const ALLOWED_FIELDS = new Set([
   'statusClass',
   'latencyMs',
   'byteCount',
-  'tokenCount',
   'errorCode',
 ]);
 

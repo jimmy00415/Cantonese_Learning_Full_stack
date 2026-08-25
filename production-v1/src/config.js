@@ -24,6 +24,8 @@ export const NORMALIZER_CONTRACT_VERSION = 'canonical-wav-v1';
 const RELEASE_SHA = /^[0-9a-f]{40}$/;
 const AZURE_SPEECH_REGION = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const GOOGLE_PROJECT_ID = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
+const STABLE_CLOUD_RUN_HOST = /^hkbuddy-api-(\d{6,20})\.asia-east2\.run\.app$/;
+const RUNTIME_SERVICE_ACCOUNT = 'hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com';
 const GOOGLE_SECRET_ENV_NAMES = Object.freeze([
   'V1_GOOGLE_API_KEY', 'GOOGLE_API_KEY', 'GEMINI_API_KEY',
   'GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_APPLICATION_CREDENTIALS_JSON',
@@ -288,6 +290,17 @@ function canonicalPublicOrigin(value, { production = false } = {}) {
   }
 }
 
+function productionOriginAllowlist(publicOrigin, candidateOrigin, commitSha) {
+  const stable = canonicalPublicOrigin(publicOrigin, { production: true });
+  const candidate = canonicalPublicOrigin(candidateOrigin, { production: true });
+  if (!stable || !candidate || !RELEASE_SHA.test(String(commitSha ?? ''))) return null;
+  const stableUrl = new URL(stable);
+  const match = STABLE_CLOUD_RUN_HOST.exec(stableUrl.hostname);
+  if (!match) return null;
+  const expectedCandidate = `https://candidate-${commitSha.slice(0, 12)}---hkbuddy-api-${match[1]}.asia-east2.run.app`;
+  return candidate === expectedCandidate ? Object.freeze([stable, candidate]) : null;
+}
+
 function assertProductionReady(config) {
   if (!canonicalPublicOrigin(config.publicOrigin, { production: true })) {
     throw new Error('V1_PUBLIC_ORIGIN must be a canonical HTTPS origin in production');
@@ -297,6 +310,13 @@ function assertProductionReady(config) {
   }
   if (!config.trustedProxyHopsExplicit || config.trustedProxyHops === null) {
     throw new Error('V1_TRUST_PROXY_HOPS must be explicitly set in production');
+  }
+  if (config.trustedProxyHops !== 1) throw new Error('V1_TRUST_PROXY_HOPS must be exactly 1 for Cloud Run');
+  if (!Array.isArray(config.allowedOrigins) || config.allowedOrigins.length !== 2) {
+    throw new Error('V1 production origin allowlist is invalid');
+  }
+  if (config.runtimeServiceAccount !== RUNTIME_SERVICE_ACCOUNT) {
+    throw new Error('V1_RUNTIME_SERVICE_ACCOUNT must be the exact runtime service account');
   }
   if (config.storeDriver !== 'postgres') throw new Error('V1_STORE_DRIVER=postgres is required in production');
   if (!config.databaseUrl) throw new Error('V1_DATABASE_URL is required in production');
@@ -355,6 +375,48 @@ export function loadLlmSmokeConfiguration(environment = process.env, { now = () 
   return { releaseCommitSha, llm };
 }
 
+export function loadVoiceSmokeConfiguration(environment = process.env, { now = () => new Date() } = {}) {
+  const env = loadEnvironmentFile(environment);
+  const releaseCommitSha = env.V1_RELEASE_COMMIT_SHA?.trim() || null;
+  if (!releaseCommitSha || !RELEASE_SHA.test(releaseCommitSha)) {
+    throw new Error('V1_RELEASE_COMMIT_SHA must be a lowercase 40-hex commit SHA');
+  }
+  if (env.V1_RELEASE_MANIFEST_FILE !== '/app/release-manifest.json') {
+    throw new Error('V1_RELEASE_MANIFEST_FILE must identify the immutable image manifest');
+  }
+  if (env.V1_RUNTIME_SERVICE_ACCOUNT !== RUNTIME_SERVICE_ACCOUNT) {
+    throw new Error('V1_RUNTIME_SERVICE_ACCOUNT must be the exact runtime service account');
+  }
+  const asrProvider = asProvider(env.V1_ASR_PROVIDER);
+  const ttsProvider = asProvider(env.V1_TTS_PROVIDER);
+  if (asrProvider !== 'google-stt-v2' || ttsProvider !== 'google-tts') {
+    throw new Error('Strict Google V1 speech providers are required');
+  }
+  const asrSettings = selectedAsrSettings(env, asrProvider, { v1Only: true });
+  const ttsSettings = selectedTtsSettings(env, ttsProvider, { v1Only: true });
+  const asr = {
+    provider: asrProvider,
+    settings: asrSettings,
+    available: configuredAsr(asrProvider, asrSettings),
+  };
+  const tts = {
+    provider: ttsProvider,
+    settings: ttsSettings,
+    available: configuredTts(ttsProvider, ttsSettings),
+  };
+  if (!asr.available || !tts.available) throw new Error('Strict V1 speech provider configuration is required');
+  providerConfigDigest(asr, 'asr');
+  providerConfigDigest(tts, 'tts');
+  void now;
+  return Object.freeze({
+    releaseCommitSha,
+    releaseManifestFile: env.V1_RELEASE_MANIFEST_FILE,
+    runtimeServiceAccount: env.V1_RUNTIME_SERVICE_ACCOUNT,
+    asr,
+    tts,
+  });
+}
+
 function publicStatusFor(config, speechEvidence, at) {
   const isProduction = config.nodeEnv === 'production';
   let asrValid = false;
@@ -372,6 +434,9 @@ function publicStatusFor(config, speechEvidence, at) {
         provider: config.asr.provider,
         contractVersion,
         configDigest: providerConfigDigest(config.asr, 'asr'),
+        runtimeIdentity: config.runtimeServiceAccount,
+        fixtureGeneratorConfigDigest: config.tts.provider === 'google-tts'
+          ? providerConfigDigest(config.tts, 'tts') : undefined,
         now: at,
       });
     }
@@ -388,6 +453,7 @@ function publicStatusFor(config, speechEvidence, at) {
         provider: config.tts.provider,
         contractVersion,
         configDigest: providerConfigDigest(config.tts, 'tts'),
+        runtimeIdentity: config.runtimeServiceAccount,
         now: at,
       });
     }
@@ -405,8 +471,9 @@ function publicStatusFor(config, speechEvidence, at) {
     ttsConfigured: config.tts.available,
     voiceInputPreview: !isProduction && config.asr.available,
     voiceOutputPreview: !isProduction && config.tts.available,
-    voiceInput: isProduction && asrValid && iosValid,
+    voiceInput: isProduction && asrValid,
     voiceOutput: isProduction && ttsValid,
+    iosVoiceCertified: isProduction && iosValid,
     asrEvidenceVersion: asrValid ? speechEvidence.asr.version : null,
     ttsEvidenceVersion: ttsValid ? speechEvidence.tts.version : null,
     iosVoiceAcceptanceVersion: iosValid ? speechEvidence.ios.version : null,
@@ -480,10 +547,19 @@ export function loadConfig(environment = process.env, { now = () => new Date() }
       ? 'V1_PUBLIC_ORIGIN must be a canonical HTTPS origin in production'
       : 'Public origin must be a canonical HTTP or HTTPS origin');
   }
+  const allowedOrigins = isProduction
+    ? productionOriginAllowlist(publicOrigin, env.V1_CANDIDATE_ORIGIN, releaseCommitSha)
+    : Object.freeze([publicOrigin]);
+  if (isProduction && !allowedOrigins) {
+    throw new Error('V1_PUBLIC_ORIGIN and V1_CANDIDATE_ORIGIN must be the exact stable and SHA-bound Cloud Run origins');
+  }
 
   const config = {
     nodeEnv,
     publicOrigin,
+    allowedOrigins,
+    candidateOrigin: isProduction ? env.V1_CANDIDATE_ORIGIN : null,
+    runtimeServiceAccount: isProduction ? env.V1_RUNTIME_SERVICE_ACCOUNT : null,
     sessionSecret: isProduction
       ? env.V1_SESSION_SECRET
       : firstDefined(env, 'V1_SESSION_SECRET', 'SESSION_SECRET'),
@@ -520,7 +596,8 @@ export function loadConfig(environment = process.env, { now = () => new Date() }
     postgresQueryTimeoutMs: boundedInteger(env.V1_POSTGRES_QUERY_TIMEOUT_MS, 10_000, 100, 30_000),
     postgresStatementTimeoutMs: boundedInteger(env.V1_POSTGRES_STATEMENT_TIMEOUT_MS, 10_000, 100, 30_000),
     rateLimits: {
-      bootstrap: rateLimit(env.V1_SESSION_BOOTSTRAP_LIMIT_10M, 20),
+      bootstrapClient10m: rateLimit(env.V1_SESSION_BOOTSTRAP_CLIENT_LIMIT_10M, 4),
+      bootstrapCoarseIp10m: rateLimit(env.V1_SESSION_BOOTSTRAP_COARSE_IP_LIMIT_10M, 100),
       message5m: rateLimit(env.V1_MESSAGE_LIMIT_5M, 30),
       messageDaily: rateLimit(env.V1_MESSAGE_LIMIT_DAY, 300),
       asr10m: rateLimit(env.V1_ASR_LIMIT_10M, 10),

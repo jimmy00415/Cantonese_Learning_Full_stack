@@ -39,9 +39,61 @@ test('security rejects missing and cross-site origins before session writes', as
   assert.equal(exact.response.status, 201);
 });
 
+test('exact origin allowlist accepts stable and one candidate but rejects unrelated Cloud Run tags', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'hb-v1-origin-list-'));
+  const store = new AtomicFileStore({ filePath: join(directory, 'store.json') });
+  await store.init();
+  const stable = 'https://hkbuddy-api-123456789012.asia-east2.run.app';
+  const candidate = 'https://candidate-aaaaaaaaaaaa---hkbuddy-api-123456789012.asia-east2.run.app';
+  const config = loadConfig({ NODE_ENV: 'test', V1_PUBLIC_ORIGIN: stable, V1_SESSION_SECRET: 's'.repeat(32) });
+  config.allowedOrigins = [stable, candidate];
+  const app = createApp({ config, store });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  t.after(async () => {
+    await store.close();
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  });
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  for (const [origin, expected] of [
+    [stable, 201],
+    [candidate, 201],
+    ['https://other---hkbuddy-api-123456789012.asia-east2.run.app', 403],
+    ['https://hkbuddy-pilot-0630.azurewebsites.net', 403],
+  ]) {
+    const result = await json(`${baseUrl}/api/v1/session`, {
+      method: 'POST',
+      headers: { Origin: origin, 'X-Client-Instance-Id': crypto.randomUUID() },
+    });
+    assert.equal(result.response.status, expected, origin);
+  }
+});
+
+test('campus NAT bootstrap uses bounded client instance plus coarse proxy-derived IP with post-load QA headroom', async (t) => {
+  const { baseUrl, origin, directory } = await startApp(t);
+  const bootstrap = (clientId, forwardedFor = '203.0.113.4, 198.51.100.72') => json(`${baseUrl}/api/v1/session`, {
+    method: 'POST',
+    headers: { Origin: origin, 'X-Client-Instance-Id': clientId, 'X-Forwarded-For': forwardedFor },
+  });
+  const fixedClient = '11111111-1111-4111-8111-111111111111';
+  for (let index = 0; index < 4; index += 1) assert.equal((await bootstrap(fixedClient)).response.status, 201);
+  assert.equal((await bootstrap(fixedClient)).response.status, 429, 'one client instance is bounded');
+
+  for (let index = 0; index < 21; index += 1) {
+    const id = `22222222-2222-4222-8222-${String(index + 1).padStart(12, '0')}`;
+    assert.equal((await bootstrap(id)).response.status, 201, `load plus browser QA request ${index + 1}`);
+  }
+  const persisted = JSON.parse(await readFile(join(directory, 'store.json'), 'utf8'));
+  const ipBuckets = persisted.rateLimitBuckets.filter(({ quota }) => quota === 'session-bootstrap-coarse-ip');
+  assert.equal(ipBuckets.length, 1, 'spoofed leftmost XFF is ignored and the trusted rightmost address is coarsened');
+  assert.equal(ipBuckets[0].subjectHash, createHmac('sha256', 's'.repeat(32)).update('198.51.100.0/24').digest('hex'));
+  assert.equal(ipBuckets[0].count, 26);
+});
+
 test('security rate limit hashes bootstrap IP and enforces durable session chat limits', async (t) => {
   const { baseUrl, origin, directory } = await startApp(t, { V1_MESSAGE_LIMIT_5M: '1' });
-  const bootstrap = await json(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin, 'X-Forwarded-For': '198.51.100.72' } });
+  const bootstrap = await json(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin, 'X-Forwarded-For': '198.51.100.72', 'X-Client-Instance-Id': '33333333-3333-4333-8333-333333333333' } });
   const cookie = bootstrap.response.headers.getSetCookie()[0].split(';')[0];
   const headers = { Origin: origin, Cookie: cookie, 'Content-Type': 'application/json' };
   const firstPayload = { clientMessageId: '66666666-6666-4666-8666-666666666666', text: '一', replyLanguage: 'en', replyMode: 'text' };
@@ -58,8 +110,8 @@ test('security rate limit hashes bootstrap IP and enforces durable session chat 
   assert.equal(raw.includes('198.51.100.72'), false);
   assert.equal(raw.includes(cookie), false);
   const persisted = JSON.parse(await readFile(join(directory, 'store.json'), 'utf8'));
-  const bootstrapBucket = persisted.rateLimitBuckets.find((bucket) => bucket.quota === 'session-bootstrap');
-  assert.equal(bootstrapBucket.subjectHash, createHmac('sha256', 's'.repeat(32)).update('198.51.100.72').digest('hex'));
+  const bootstrapBucket = persisted.rateLimitBuckets.find((bucket) => bucket.quota === 'session-bootstrap-coarse-ip');
+  assert.equal(bootstrapBucket.subjectHash, createHmac('sha256', 's'.repeat(32)).update('198.51.100.0/24').digest('hex'));
   assert.equal(bootstrapBucket.count, 1);
   assert.match(bootstrapBucket.windowStart, /^\d{4}-\d{2}-\d{2}T/);
 });

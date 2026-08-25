@@ -285,13 +285,16 @@ export function createVoiceUploadStore({
     }
   }
 
-  async function commitRecording({ clientSessionScope, audio, durationMs }) {
+  async function commitRecording({ clientSessionScope, audio, durationMs, asrLanguage }) {
     const scope = requireString(clientSessionScope, 'clientSessionScope');
     const binding = requireLocalBinding(scope);
     if (!(audio instanceof Blob) || audio.type !== 'audio/wav') {
       throw new TypeError('audio must be a canonical audio/wav Blob');
     }
     if (!Number.isFinite(durationMs) || durationMs < 0) throw new TypeError('durationMs must be non-negative');
+    if (asrLanguage !== undefined && !['en', 'zhHant', 'zhHans'].includes(asrLanguage)) {
+      throw new TypeError('asrLanguage must be en, zhHant, or zhHans');
+    }
 
     const createdAt = requireTime(now(), 'createdAt');
     const clientUploadId = requireString(uuid(), 'clientUploadId');
@@ -299,7 +302,7 @@ export function createVoiceUploadStore({
     const requestSha256 = bytesToLowerHex(await cryptoImpl.subtle.digest('SHA-256', audioBytes));
     if (!bindingStillCurrent(binding)) throw scopeFencedError();
     const operation = {
-      schemaVersion: 1,
+      schemaVersion: asrLanguage === undefined ? 1 : 2,
       clientUploadId,
       clientSessionScope: scope,
       scopeGeneration: binding.scopeGeneration,
@@ -307,6 +310,7 @@ export function createVoiceUploadStore({
       mimeType: 'audio/wav',
       byteLength: audio.size,
       durationMs,
+      ...(asrLanguage === undefined ? {} : { asrLanguage }),
       blob: audio,
       state: 'queued',
       postAuthorized: true,

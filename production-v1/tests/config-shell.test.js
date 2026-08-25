@@ -22,6 +22,10 @@ const TEST_GCS_BUCKET = 'hkbuddy-prod-v1-20260826-media';
 const TEST_POSTGRES_RESOURCE_ID = 'test-v1-postgres';
 const TEST_GCS_RESOURCE_ID = '//storage.googleapis.com/projects/_/buckets/hkbuddy-prod-v1-20260826-media';
 const TEST_LLM_CREDENTIAL_VERSION = 'llm-credential-v1';
+const TEST_PROJECT_NUMBER = '123456789012';
+const TEST_STABLE_ORIGIN = `https://hkbuddy-api-${TEST_PROJECT_NUMBER}.asia-east2.run.app`;
+const TEST_CANDIDATE_ORIGIN = `https://candidate-${TEST_RELEASE_COMMIT.slice(0, 12)}---hkbuddy-api-${TEST_PROJECT_NUMBER}.asia-east2.run.app`;
+const TEST_RUNTIME_SERVICE_ACCOUNT = 'hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com';
 const TEST_LLM_CONFIG = {
   provider: 'hkbu',
   credentialVersion: TEST_LLM_CREDENTIAL_VERSION,
@@ -96,7 +100,9 @@ writeFileSync(llmSmokeFile, JSON.stringify(llmSmoke));
 function productionEnvironment(overrides = {}) {
   return {
     NODE_ENV: 'production',
-    V1_PUBLIC_ORIGIN: 'https://v1.example.test',
+    V1_PUBLIC_ORIGIN: TEST_STABLE_ORIGIN,
+    V1_CANDIDATE_ORIGIN: TEST_CANDIDATE_ORIGIN,
+    V1_RUNTIME_SERVICE_ACCOUNT: TEST_RUNTIME_SERVICE_ACCOUNT,
     V1_SESSION_SECRET: '12345678901234567890123456789012',
     V1_TRUST_PROXY_HOPS: '1',
     V1_STORE_DRIVER: 'postgres',
@@ -135,7 +141,8 @@ test('config defaults to a local atomic-file runtime outside production', () => 
   assert.equal(config.publicOrigin, 'http://localhost:3000');
   assert.equal(config.productionReady, false);
   assert.deepEqual(config.rateLimits, {
-    bootstrap: 20,
+    bootstrapClient10m: 4,
+    bootstrapCoarseIp10m: 100,
     message5m: 30,
     messageDaily: 300,
     asr10m: 10,
@@ -269,6 +276,23 @@ test('config requires a canonical HTTPS production origin and derives only a loc
   const legacySecretOnly = productionEnvironment({ SESSION_SECRET: 'l'.repeat(64) });
   delete legacySecretOnly.V1_SESSION_SECRET;
   assert.throws(() => loadConfig(legacySecretOnly), /V1_SESSION_SECRET/);
+});
+
+test('production origin allowlist is exactly stable plus the SHA-bound candidate and proxy depth is one', () => {
+  const config = loadConfig(productionEnvironment());
+  assert.deepEqual(config.allowedOrigins, [TEST_STABLE_ORIGIN, TEST_CANDIDATE_ORIGIN]);
+  assert.equal(config.trustedProxyHops, 1);
+  assert.equal(config.runtimeServiceAccount, TEST_RUNTIME_SERVICE_ACCOUNT);
+  for (const overrides of [
+    { V1_CANDIDATE_ORIGIN: `https://other---hkbuddy-api-${TEST_PROJECT_NUMBER}.asia-east2.run.app` },
+    { V1_CANDIDATE_ORIGIN: `https://candidate-${'b'.repeat(12)}---hkbuddy-api-${TEST_PROJECT_NUMBER}.asia-east2.run.app` },
+    { V1_CANDIDATE_ORIGIN: `https://candidate-${TEST_RELEASE_COMMIT.slice(0, 12)}---hkbuddy-api-999999999999.asia-east2.run.app` },
+    { V1_PUBLIC_ORIGIN: 'https://hkbuddy-pilot-0630.azurewebsites.net' },
+    { V1_TRUST_PROXY_HOPS: '2' },
+    { V1_RUNTIME_SERVICE_ACCOUNT: 'owner@example.iam.gserviceaccount.com' },
+  ]) {
+    assert.throws(() => loadConfig(productionEnvironment(overrides)), /origin|candidate|proxy|runtime service account/i);
+  }
 });
 
 test('production requires exact V1-only postgres plus private GCS identity while Azure aliases stay local-only', () => {
@@ -605,6 +629,7 @@ test('config public status contains capability booleans rather than secret value
     voiceOutputPreview: false,
     voiceInput: false,
     voiceOutput: false,
+    iosVoiceCertified: false,
     asrEvidenceVersion: null,
     ttsEvidenceVersion: null,
     iosVoiceAcceptanceVersion: null,
@@ -643,7 +668,6 @@ test('config logger retains operational fields and drops user content and secret
     provider: 'hkbu',
     statusClass: 200,
     latencyMs: 18,
-    tokenCount: 42,
   }]);
 });
 

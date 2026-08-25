@@ -2,6 +2,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const LOWERCASE_SHA256 = /^[0-9a-f]{64}$/;
 const SAFE_ERROR_CODE = /^[A-Z][A-Z0-9_]{0,79}$/;
 const PROCESSING_STATES = new Set(['uploading', 'transcribing']);
+const ASR_LANGUAGES = new Set(['en', 'zhHant', 'zhHans']);
 
 function requireIdentity(clientUploadId, requestSha256) {
   if (typeof clientUploadId !== 'string' || !UUID.test(clientUploadId)) {
@@ -243,11 +244,12 @@ export function createVoiceTransport({
     });
   }
 
-  async function postUpload({ clientUploadId, requestSha256, audio, signal } = {}) {
+  async function postUpload({ clientUploadId, requestSha256, asrLanguage, audio, signal } = {}) {
     const identity = requireIdentity(clientUploadId, requestSha256);
     if (!(audio instanceof Blob) || audio.type !== 'audio/wav') {
       throw new TypeError('audio must be an audio/wav Blob');
     }
+    if (!ASR_LANGUAGES.has(asrLanguage)) throw new TypeError('ASR language must be en, zhHant, or zhHans');
     const path = '/api/v1/voice/transcriptions';
     let headers;
     try {
@@ -258,6 +260,7 @@ export function createVoiceTransport({
     headers.set('Content-Type', 'audio/wav');
     headers.set('X-Client-Upload-Id', identity.clientUploadId);
     headers.set('X-Content-SHA256', identity.requestSha256);
+    headers.set('X-ASR-Language', asrLanguage);
     return request({
       path,
       method: 'POST',

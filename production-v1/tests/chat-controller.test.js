@@ -98,6 +98,7 @@ function controllerFor(fetchImpl, overrides = {}) {
     EventSourceImpl: FakeEventSource,
     storage: overrides.storage ?? storage(),
     uuid: overrides.uuid ?? (() => '11111111-1111-4111-8111-111111111111'),
+    clientInstanceUuid: overrides.clientInstanceUuid ?? (() => '22222222-2222-4222-8222-222222222222'),
     now: overrides.now ?? (() => new Date('2026-08-25T08:00:00.000Z')),
     scheduleReconnect: overrides.scheduleReconnect ?? ((callback) => callback()),
     onChange: overrides.onChange,
@@ -139,6 +140,29 @@ test('chat controller bootstraps ordered history and keeps event cursor separate
   await eventually(() => network.calls.length === 4);
   assert.equal(network.calls[3].url, '/api/v1/messages?after=4');
   assert.deepEqual(controller.snapshot().messages.map((item) => item.id), ['m1', 'm3', 'm4']);
+});
+
+test('chat bootstrap persists one bounded client-instance identity and sends it on every new session', async () => {
+  const shared = storage();
+  const firstNetwork = queuedFetch(envelope(bootstrapData({ scope: 'scope-a' })));
+  const first = controllerFor(firstNetwork.fetchImpl, {
+    storage: shared,
+    clientInstanceUuid: () => 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+  });
+  await first.start();
+  first.dispose();
+
+  const secondNetwork = queuedFetch(envelope(bootstrapData({ scope: 'scope-b' })));
+  const second = controllerFor(secondNetwork.fetchImpl, {
+    storage: shared,
+    clientInstanceUuid: () => 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+  });
+  await second.start();
+  second.dispose();
+
+  assert.equal(new Headers(firstNetwork.calls[0].options.headers).get('x-client-instance-id'), 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+  assert.equal(new Headers(secondNetwork.calls[0].options.headers).get('x-client-instance-id'), 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+  assert.equal(shared.getItem('hk-buddy:v1:client-instance-id'), 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
 });
 
 test('chat controller resets only SSE cursor and fully repairs prior-row mutations on resync', async () => {

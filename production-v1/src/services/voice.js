@@ -40,6 +40,11 @@ const PROVIDER_RESPONSE_LANGUAGE = Object.freeze({
   'yue-Hant-HK': 'yueHant',
   'cmn-Hans-CN': 'zhHans',
 });
+const ASR_PROVIDER_RESPONSE_LANGUAGE = Object.freeze({
+  en: 'en',
+  zhHant: 'yueHant',
+  zhHans: 'zhHans',
+});
 
 export function providerResponseLanguage(replyLanguage) {
   const value = PROVIDER_RESPONSE_LANGUAGE[replyLanguage];
@@ -391,6 +396,7 @@ export function createVoiceService({
   ttsProvider,
   cleanupService,
   eventHub,
+  acceptanceTimingRecorder,
   now = () => new Date(),
   mediaDeadlineMs = voiceLimits.mediaDeadlineMs,
   spoolParentDirectory = defaultVoiceIngressSpoolRoot,
@@ -410,15 +416,19 @@ export function createVoiceService({
   const drainCleanup = async () => cleanupService?.drainOnce?.().catch(() => undefined);
 
   const transcribe = async ({
-    sessionId, clientUploadId, requestSha256, mimeType, readable, signal,
+    sessionId, clientUploadId, requestSha256, mimeType, responseLanguage, readable, signal,
+    acceptanceContext,
     idleMs = voiceLimits.ingressIdleMs, absoluteMs = voiceLimits.ingressAbsoluteMs,
   }) => {
     const startedAt = currentDate(now);
     const hardDeadline = addMs(startedAt, voiceLimits.voiceAttemptMs);
     const leaseToken = randomUUID();
     const attemptStorageKey = mediaStore.createAttemptKey({ kind: 'voice' });
+    const selectedResponseLanguage = responseLanguage ?? 'zhHant';
+    if (!['en', 'zhHant', 'zhHans'].includes(selectedResponseLanguage)) throw workError('INVALID_REQUEST', 400, false);
+    const boundMimeType = responseLanguage ? `${mimeType};asr-language=${selectedResponseLanguage}` : mimeType;
     const claim = await store.claimVoiceUploadWithRateLimits({
-      sessionId, clientUploadId, requestSha256, mimeType,
+      sessionId, clientUploadId, requestSha256, mimeType: boundMimeType,
       rateLimits: asrBuckets(sessionId, startedAt), leaseToken, attemptStorageKey,
       leaseExpiresAt: addMs(startedAt, voiceLimits.leaseMs),
       attemptDeadlineAt: hardDeadline,
@@ -454,6 +464,7 @@ export function createVoiceService({
         signal: heartbeat.signal,
         parentDirectory: spoolParentDirectory,
       });
+      const spoolCompletedAtMs = currentDate(now).getTime();
       const wav = validateCanonicalWav(spooled.buffer, { expectedSha256: requestSha256 });
       const stored = await withOperationDeadline({
         signal: heartbeat.signal,
@@ -482,7 +493,10 @@ export function createVoiceService({
         throw workError('VOICE_MEDIA_UNAVAILABLE', 503, true);
       }
       await store.setVoiceUploadTranscribing({ uploadId: claim.upload.id, leaseToken, now: currentDate(now) });
-      const transcript = await asrProvider.transcribe(spooled.buffer, { signal: heartbeat.signal });
+      const transcript = await asrProvider.transcribe(spooled.buffer, {
+        signal: heartbeat.signal,
+        responseLanguage: ASR_PROVIDER_RESPONSE_LANGUAGE[selectedResponseLanguage],
+      });
       const completed = await store.completeVoiceUpload({
         uploadId: claim.upload.id,
         leaseToken,
@@ -493,6 +507,23 @@ export function createVoiceService({
         transcript: transcript.transcript,
         now: currentDate(now),
       });
+      const transcriptReadyAtMs = currentDate(now).getTime();
+      if (acceptanceContext) {
+        acceptanceTimingRecorder?.record?.({
+          ...acceptanceContext,
+          sessionId,
+          operation: 'asr',
+          layer: 'server',
+          latencyMs: Math.max(0, transcriptReadyAtMs - spoolCompletedAtMs),
+        });
+        acceptanceTimingRecorder?.record?.({
+          ...acceptanceContext,
+          sessionId,
+          operation: 'asr',
+          layer: 'provider',
+          latencyMs: transcript.latencyMs,
+        });
+      }
       return { httpStatus: 201, data: uploadPublic({ ...completed.upload, mediaAsset: completed.mediaAsset }) };
     } catch (rawError) {
       const error = normalizeWorkError(rawError, 'asr');
@@ -542,9 +573,10 @@ export function createVoiceService({
     return { httpStatus: 200, data: uploadPublic(upload) };
   };
 
-  const generateAssistantAudio = async ({ sessionId, messageId, signal }) => {
+  const generateAssistantAudio = async ({ sessionId, messageId, signal, acceptanceContext }) => {
     assertVoiceOutputCapability(config, currentDate(now));
     const current = currentDate(now);
+    const timingContext = acceptanceContext ?? acceptanceTimingRecorder?.contextForMessage?.(messageId);
     const hardDeadline = addMs(current, voiceLimits.ttsAttemptMs);
     const leaseToken = randomUUID();
     const attemptStorageKey = mediaStore.createAttemptKey({ kind: 'tts' });
@@ -605,6 +637,23 @@ export function createVoiceService({
         },
         now: currentDate(now),
       });
+      const readyAtMs = currentDate(now).getTime();
+      if (timingContext) {
+        acceptanceTimingRecorder?.record?.({
+          ...timingContext,
+          sessionId,
+          operation: 'tts',
+          layer: 'server',
+          latencyMs: Math.max(0, readyAtMs - current.getTime()),
+        });
+        acceptanceTimingRecorder?.record?.({
+          ...timingContext,
+          sessionId,
+          operation: 'tts',
+          layer: 'provider',
+          latencyMs: synthesized.latencyMs,
+        });
+      }
       eventHub?.publish?.({ sessionId, conversationId: completed.message.conversationId, cursor: completed.event.cursor });
       return { httpStatus: 201, data: generationPublic(completed.generation) };
     } catch (rawError) {
@@ -644,13 +693,13 @@ export function createVoiceService({
     return { httpStatus: 200, data: generationPublic(generation) };
   };
 
-  const prepareAssistantAudio = ({ sessionId, messageId }) => {
+  const prepareAssistantAudio = ({ sessionId, messageId, acceptanceContext }) => {
     assertVoiceOutputCapability(config, currentDate(now));
     if (!config.tts?.available || typeof ttsProvider?.synthesize !== 'function') {
       throw workError('VOICE_PROVIDER_MISCONFIGURED', 503, false);
     }
     queueMicrotask(() => {
-      void generateAssistantAudio({ sessionId, messageId }).catch(() => undefined);
+      void generateAssistantAudio({ sessionId, messageId, acceptanceContext }).catch(() => undefined);
     });
     return { messageId, state: 'pending' };
   };

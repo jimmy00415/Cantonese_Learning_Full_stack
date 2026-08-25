@@ -55,6 +55,7 @@ test('postUpload sends the exact WAV Blob and immutable upload identity with sam
   const result = await transport.postUpload({
     clientUploadId: CLIENT_UPLOAD_ID,
     requestSha256: REQUEST_SHA256,
+    asrLanguage: 'zhHans',
     audio,
   });
 
@@ -66,6 +67,7 @@ test('postUpload sends the exact WAV Blob and immutable upload identity with sam
   assert.equal(new Headers(request.options.headers).get('content-type'), 'audio/wav');
   assert.equal(new Headers(request.options.headers).get('x-client-upload-id'), CLIENT_UPLOAD_ID);
   assert.equal(new Headers(request.options.headers).get('x-content-sha256'), REQUEST_SHA256);
+  assert.equal(new Headers(request.options.headers).get('x-asr-language'), 'zhHans');
   assert.equal(new Headers(request.options.headers).get('x-csrf-token'), 'csrf-token');
   assert.deepEqual(
     {
@@ -88,6 +90,24 @@ test('postUpload sends the exact WAV Blob and immutable upload identity with sam
       retryAfterMs: null,
     },
   );
+});
+
+test('postUpload requires one exact immutable ASR language before transport', async () => {
+  let calls = 0;
+  const transport = createVoiceTransport({
+    origin: ORIGIN,
+    fetchImpl: async () => { calls += 1; throw new Error('must not fetch'); },
+  });
+  const audio = new Blob([Uint8Array.from([82, 73, 70, 70])], { type: 'audio/wav' });
+  for (const asrLanguage of [undefined, 'auto', 'zh-Hant', 'cantonese']) {
+    await assert.rejects(transport.postUpload({
+      clientUploadId: CLIENT_UPLOAD_ID,
+      requestSha256: REQUEST_SHA256,
+      asrLanguage,
+      audio,
+    }), /ASR language/i);
+  }
+  assert.equal(calls, 0);
 });
 
 test('factory exposes the three coordinator methods and GET carries the exact AbortSignal', async () => {
@@ -180,6 +200,7 @@ test('POST 410 keeps the durable cancelled identity terminal without throwing', 
   const result = await transport.postUpload({
     clientUploadId: CLIENT_UPLOAD_ID,
     requestSha256: REQUEST_SHA256,
+    asrLanguage: 'zhHant',
     audio: new Blob([Uint8Array.from([1])], { type: 'audio/wav' }),
   });
 
@@ -245,6 +266,7 @@ test('Retry-After HTTP-date becomes a caller-cappable wait and transport never s
   const result = await transport.postUpload({
     clientUploadId: CLIENT_UPLOAD_ID,
     requestSha256: REQUEST_SHA256,
+    asrLanguage: 'en',
     audio: new Blob([Uint8Array.from([1])], { type: 'audio/wav' }),
   });
 
@@ -607,7 +629,12 @@ test('same upload identity can replay the exact Blob and accept a later 200 resu
     },
   });
 
-  const input = { clientUploadId: CLIENT_UPLOAD_ID, requestSha256: REQUEST_SHA256, audio };
+  const input = {
+    clientUploadId: CLIENT_UPLOAD_ID,
+    requestSha256: REQUEST_SHA256,
+    asrLanguage: 'zhHant',
+    audio,
+  };
   const accepted = await transport.postUpload(input);
   const replayed = await transport.postUpload(input);
 
@@ -620,6 +647,7 @@ test('same upload identity can replay the exact Blob and accept a later 200 resu
     const headers = new Headers(call.options.headers);
     assert.equal(headers.get('x-client-upload-id'), CLIENT_UPLOAD_ID);
     assert.equal(headers.get('x-content-sha256'), REQUEST_SHA256);
+    assert.equal(headers.get('x-asr-language'), 'zhHant');
   }
 });
 

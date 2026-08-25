@@ -15,6 +15,7 @@ import { startRetentionWorker } from './services/retention.js';
 import { createRuntimeReadinessChecks } from './services/runtime-readiness.js';
 import { createStorageRuntime } from './services/storage-runtime.js';
 import { createTurnProcessor } from './services/turn-processor.js';
+import { createAcceptanceTimingRecorder } from './telemetry/acceptance-timings.js';
 import {
   assistantAudioRecoveryIntervalMs,
   assertVoiceOutputCapability,
@@ -162,6 +163,7 @@ export async function startServer({
   googleAuthProvider: suppliedGoogleAuthProvider,
   cleanupService: suppliedCleanupService,
   voiceService: suppliedVoiceService,
+  acceptanceTimingRecorder: suppliedAcceptanceTimingRecorder,
   retentionWorker: suppliedRetentionWorker,
   createApp: createAppImpl = createApp,
   createStorageRuntime: createStorageRuntimeImpl = createStorageRuntime,
@@ -181,6 +183,10 @@ export async function startServer({
   spoolStaleAfterMs,
 } = {}) {
   const config = suppliedConfig ?? loadConfigImpl(environment, { now });
+  const acceptanceTimingRecorder = suppliedAcceptanceTimingRecorder
+    ?? (/^[0-9a-f]{40}$/.test(String(config.releaseCommitSha ?? ''))
+      ? createAcceptanceTimingRecorder({ releaseCommitSha: config.releaseCommitSha, now: () => new Date(now()).getTime() })
+      : null);
   const startupTimeoutMs = startupStepTimeout(config);
   const runtimeState = {
     accepting: false,
@@ -499,7 +505,7 @@ export async function startServer({
     cleanupService = suppliedCleanupService ?? createMediaCleanupService({ store, mediaStore, now });
     voiceService = suppliedVoiceService ?? createVoiceService({
       config, store, mediaStore, asrProvider, ttsProvider, cleanupService,
-      eventHub, now, spoolParentDirectory,
+      eventHub, now, spoolParentDirectory, acceptanceTimingRecorder,
     });
     const turnProcessor = createTurnProcessor({
       store,
@@ -507,6 +513,7 @@ export async function startServer({
       voiceService,
       voiceOutputGate: () => assertVoiceOutputCapability(config, now()),
       eventHub,
+      acceptanceTimingRecorder,
       now,
     });
     dispatcher = createDispatcher({
@@ -582,6 +589,7 @@ export async function startServer({
       spoolParentDirectory,
       readiness,
       runtimeState,
+      acceptanceTimingRecorder,
       now,
     });
     server = host ? app.listen(port, host) : app.listen(port);

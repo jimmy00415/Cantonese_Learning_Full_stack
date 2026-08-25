@@ -10,12 +10,16 @@ import {
   createLatencyHttpRequester,
   finalizeLatencyAcceptanceRecord,
   inspectGitState,
+  nearestRankP50,
   nearestRankP95,
   runLatencyAcceptance,
 } from '../scripts/production-latency-workload.js';
+import { acceptanceTimingQueryDigest } from '../src/telemetry/acceptance-timings.js';
 
 const COMMIT = '1'.repeat(40);
-const ORIGIN = 'https://v1-candidate.example.com';
+const PROJECT_NUMBER = '123456789012';
+const STABLE_ORIGIN = `https://hkbuddy-api-${PROJECT_NUMBER}.asia-east2.run.app`;
+const ORIGIN = `https://candidate-${COMMIT.slice(0, 12)}---hkbuddy-api-${PROJECT_NUMBER}.asia-east2.run.app`;
 const MANIFEST_PATH = resolve('latency-asr-fixtures.json');
 const CWD = resolve('..');
 const NOW = new Date('2026-08-25T12:00:00.000Z');
@@ -30,9 +34,14 @@ function exactArgv(origin = ORIGIN, manifestPath = MANIFEST_PATH) {
 
 function fixtureSet() {
   const samples = [];
+  const layout = {
+    10: { cantonese: 4, english: 3, mandarin: 3 },
+    30: { cantonese: 3, english: 4, mandarin: 3 },
+    55: { cantonese: 3, english: 3, mandarin: 4 },
+  };
   for (const durationBucketSeconds of [10, 30, 55]) {
-    for (const language of ['cantonese', 'english']) {
-      for (let index = 0; index < 5; index += 1) {
+    for (const language of ['cantonese', 'english', 'mandarin']) {
+      for (let index = 0; index < layout[durationBucketSeconds][language]; index += 1) {
         const id = `${language}-${durationBucketSeconds}-${index + 1}`;
         const bytes = Buffer.from(`${id}-canonical-wav`.padEnd(64, 'x'));
         samples.push({
@@ -73,7 +82,12 @@ function observeSettlement(promise) {
 }
 
 function createHarness({
-  environment = { V1_LOAD_TEST_CONFIRM: 'true', V1_RELEASE_COMMIT_SHA: COMMIT },
+  environment = {
+    V1_LOAD_TEST_CONFIRM: 'true',
+    V1_RELEASE_COMMIT_SHA: COMMIT,
+    V1_PUBLIC_ORIGIN: STABLE_ORIGIN,
+    V1_CANDIDATE_ORIGIN: ORIGIN,
+  },
   argv = exactArgv(),
   gitState = { head: COMMIT, clean: true },
   fixtures = fixtureSet(),
@@ -85,14 +99,14 @@ function createHarness({
   const calls = [];
   const outputs = [];
   const artifacts = [];
-  const active = { bootstrap: 0, verifyCandidate: 0, text: 0, asr: 0, tts: 0 };
-  const maximum = { bootstrap: 0, verifyCandidate: 0, text: 0, asr: 0, tts: 0 };
+  const active = { bootstrap: 0, verifyCandidate: 0, text: 0, asr: 0, tts: 0, timings: 0 };
+  const maximum = { bootstrap: 0, verifyCandidate: 0, text: 0, asr: 0, tts: 0, timings: 0 };
 
   const defaultResult = (input) => {
     if (['bootstrap', 'verifyCandidate'].includes(input.operation)) {
       return {
         ok: true,
-        session: { sessionIndex: input.sessionIndex },
+        session: { id: `session-${input.sessionIndex}`, sessionIndex: input.sessionIndex },
         capabilities: {
           productionReady: true,
           releaseCommitSha: COMMIT,
@@ -108,11 +122,12 @@ function createHarness({
         processingVisible: true,
         processingVisibleMs: 400,
         delivered: true,
-        finalAnswerMs: 7_000,
+        finalAnswerMs: 2_400,
         messageLost: false,
         assistantReplyCount: 1,
         unsupportedVerifiedClaimCount: 0,
         assistantMessageId: `assistant-${input.sessionIndex}-${input.turnIndex}`,
+        replyMode: input.replyMode,
         providerLatencyMs: 5_500,
         serverLatencyMs: 250,
         privateBody: 'must-not-enter-artifact',
@@ -121,7 +136,8 @@ function createHarness({
     if (input.operation === 'asr') {
       return {
         ready: true,
-        transcriptMs: 5_000,
+        transcriptMs: input.sample.durationBucketSeconds === 10 ? 2_000 : 5_000,
+        durationBucketSeconds: input.sample.durationBucketSeconds,
         providerLatencyMs: 4_400,
         serverLatencyMs: 300,
         transcript: 'private transcript must not enter artifact',
@@ -129,8 +145,9 @@ function createHarness({
     }
     return {
       ready: true,
-      readyMs: 4_000,
+      readyMs: 2_000,
       textAvailable: true,
+      mediaValidated: true,
       providerLatencyMs: 3_500,
       serverLatencyMs: 200,
       audio: 'private audio must not enter artifact',
@@ -143,6 +160,36 @@ function createHarness({
     maximum[input.operation] = Math.max(maximum[input.operation], active[input.operation]);
     await new Promise((resolveImmediate) => setImmediate(resolveImmediate));
     active[input.operation] -= 1;
+    if (input.operation === 'timings') {
+      const completed = calls
+        .filter(([kind, item]) => kind === 'request' && item?.sessionIndex === input.sessionIndex)
+        .map(([, item]) => item);
+      const samples = [];
+      for (const item of completed.filter(({ operation }) => operation === 'text')) {
+        samples.push({ correlationId: item.correlationId, operation: 'text', layer: 'server', latencyMs: 2_300 });
+        if (item.promptClass === 'grounded') samples.push({ correlationId: item.correlationId, operation: 'text', layer: 'provider', latencyMs: 1_800 });
+      }
+      for (const item of completed.filter(({ operation }) => operation === 'asr')) {
+        samples.push({ correlationId: item.correlationId, operation: 'asr', layer: 'provider', latencyMs: 1_800 });
+        samples.push({ correlationId: item.correlationId, operation: 'asr', layer: 'server', latencyMs: 2_000 });
+      }
+      for (const item of completed.filter(({ operation }) => operation === 'tts')) {
+        samples.push({ correlationId: item.correlationId, operation: 'tts', layer: 'provider', latencyMs: 1_700 });
+        samples.push({ correlationId: item.correlationId, operation: 'tts', layer: 'server', latencyMs: 1_900 });
+      }
+      const fallback = {
+        schemaVersion: 1,
+        releaseCommitSha: COMMIT,
+        windowId: input.acceptanceWindowId,
+        queryDigest: acceptanceTimingQueryDigest({
+          releaseCommitSha: COMMIT,
+          windowId: input.acceptanceWindowId,
+          sessionId: input.session.id,
+        }),
+        samples,
+      };
+      return resultFor?.(input, fallback) ?? fallback;
+    }
     return resultFor?.(input, defaultResult(input)) ?? defaultResult(input);
   });
 
@@ -176,7 +223,8 @@ function createHarness({
   return { active, artifacts, calls, maximum, outputs, run };
 }
 
-test('nearest-rank P95 is deterministic and the acceptance contract fixes every workload and threshold', () => {
+test('nearest-rank percentiles are deterministic and the acceptance contract fixes every workload and threshold', () => {
+  assert.equal(nearestRankP50([1, 2, 3, 4]), 2);
   assert.equal(nearestRankP95(Array.from({ length: 20 }, (_, index) => index + 1)), 19);
   assert.equal(nearestRankP95(Array.from({ length: 30 }, (_, index) => index + 1)), 29);
   assert.equal(nearestRankP95([300]), 300);
@@ -184,27 +232,33 @@ test('nearest-rank P95 is deterministic and the acceptance contract fixes every 
   assert.throws(() => nearestRankP95([1, Number.NaN]), /finite/i);
 
   assert.deepEqual(LATENCY_ACCEPTANCE_CONTRACT, {
-    schemaVersion: 1,
+    schemaVersion: 2,
     text: {
       sessions: 20,
       turns: 200,
       turnsPerSession: 10,
       concurrency: 5,
       promptMix: { grounded: 80, abstention: 60, casual: 60 },
+      voiceModeTurns: 30,
     },
     asr: {
       requests: 30,
       concurrency: 5,
       durationBucketsSeconds: { 10: 10, 30: 10, 55: 10 },
-      languages: { cantonese: 15, english: 15 },
+      languages: { cantonese: 10, english: 10, mandarin: 10 },
     },
     tts: { requests: 30, concurrency: 5 },
     thresholdsMs: {
-      sendAck: 300,
-      processingVisible: 500,
-      groundedResponse: 8_000,
-      asrTranscript: 6_000,
-      ttsReady: 5_000,
+      sendAckP95: 300,
+      processingVisibleP95: 500,
+      groundedResponseP50: 2_500,
+      groundedResponseP95: 6_000,
+      asr10P50: 2_500,
+      asr10P95: 4_000,
+      asr30P95: 6_000,
+      asr55P95: 6_000,
+      ttsReadyP50: 2_500,
+      ttsReadyP95: 5_000,
     },
   });
 });
@@ -215,16 +269,19 @@ test('command is inert unless exact arguments, explicit load confirmation, froze
     ['missing approval flag', { argv: exactArgv().slice(0, -1) }, 'LATENCY_ARGUMENTS_REQUIRED'],
     ['extra argument', { argv: [...exactArgv(), '--force'] }, 'LATENCY_ARGUMENTS_REQUIRED'],
     ['relative fixture manifest', { argv: exactArgv(ORIGIN, 'fixtures.json') }, 'LATENCY_ARGUMENTS_REQUIRED'],
-    ['confirmation absent', { environment: { V1_RELEASE_COMMIT_SHA: COMMIT } }, 'LOAD_TEST_CONFIRMATION_REQUIRED'],
-    ['confirmation is not exact lowercase true', { environment: { V1_LOAD_TEST_CONFIRM: 'TRUE', V1_RELEASE_COMMIT_SHA: COMMIT } }, 'LOAD_TEST_CONFIRMATION_REQUIRED'],
-    ['release commit missing', { environment: { V1_LOAD_TEST_CONFIRM: 'true' } }, 'RELEASE_COMMIT_INVALID'],
-    ['release commit uppercase', { environment: { V1_LOAD_TEST_CONFIRM: 'true', V1_RELEASE_COMMIT_SHA: 'A'.repeat(40) } }, 'RELEASE_COMMIT_INVALID'],
+    ['confirmation absent', { environment: { V1_RELEASE_COMMIT_SHA: COMMIT, V1_PUBLIC_ORIGIN: STABLE_ORIGIN, V1_CANDIDATE_ORIGIN: ORIGIN } }, 'LOAD_TEST_CONFIRMATION_REQUIRED'],
+    ['confirmation is not exact lowercase true', { environment: { V1_LOAD_TEST_CONFIRM: 'TRUE', V1_RELEASE_COMMIT_SHA: COMMIT, V1_PUBLIC_ORIGIN: STABLE_ORIGIN, V1_CANDIDATE_ORIGIN: ORIGIN } }, 'LOAD_TEST_CONFIRMATION_REQUIRED'],
+    ['release commit missing', { environment: { V1_LOAD_TEST_CONFIRM: 'true', V1_PUBLIC_ORIGIN: STABLE_ORIGIN, V1_CANDIDATE_ORIGIN: ORIGIN } }, 'RELEASE_COMMIT_INVALID'],
+    ['release commit uppercase', { environment: { V1_LOAD_TEST_CONFIRM: 'true', V1_RELEASE_COMMIT_SHA: 'A'.repeat(40), V1_PUBLIC_ORIGIN: STABLE_ORIGIN, V1_CANDIDATE_ORIGIN: ORIGIN } }, 'RELEASE_COMMIT_INVALID'],
     ['http origin', { argv: exactArgv('http://v1-candidate.example.com') }, 'CANDIDATE_ORIGIN_INVALID'],
     ['origin contains path', { argv: exactArgv(`${ORIGIN}/private`) }, 'CANDIDATE_ORIGIN_INVALID'],
     ['origin contains credentials', { argv: exactArgv('https://user:pass@v1-candidate.example.com') }, 'CANDIDATE_ORIGIN_INVALID'],
     ['origin has explicit port', { argv: exactArgv('https://v1-candidate.example.com:8443') }, 'CANDIDATE_ORIGIN_INVALID'],
     ['localhost', { argv: exactArgv('https://localhost') }, 'CANDIDATE_ORIGIN_INVALID'],
     ['known legacy target', { argv: exactArgv('https://hkbuddy-pilot-0630.azurewebsites.net') }, 'CANDIDATE_ORIGIN_INVALID'],
+    ['unrelated Cloud Run tag', { argv: exactArgv(`https://other---hkbuddy-api-${PROJECT_NUMBER}.asia-east2.run.app`) }, 'CANDIDATE_ORIGIN_INVALID'],
+    ['foreign project number', { argv: exactArgv(`https://candidate-${COMMIT.slice(0, 12)}---hkbuddy-api-999999999999.asia-east2.run.app`) }, 'CANDIDATE_ORIGIN_INVALID'],
+    ['configured candidate mismatch', { environment: { V1_LOAD_TEST_CONFIRM: 'true', V1_RELEASE_COMMIT_SHA: COMMIT, V1_PUBLIC_ORIGIN: STABLE_ORIGIN, V1_CANDIDATE_ORIGIN: 'https://example.com' } }, 'CANDIDATE_ORIGIN_INVALID'],
   ];
 
   for (const [name, overrides, code] of cases) {
@@ -257,11 +314,11 @@ test('clean current HEAD must equal the frozen release SHA before fixture or net
   }
 });
 
-test('fixture set must contain exactly five Cantonese and five English samples in every 10/30/55 second bucket before network', async (t) => {
+test('fixture set must contain exactly ten samples per language and duration bucket across Cantonese English and Mandarin', async (t) => {
   const cases = [
     ['missing sample', (samples) => samples.pop()],
     ['duplicate id', (samples) => { samples[1].id = samples[0].id; }],
-    ['wrong language', (samples) => { samples[0].language = 'zh-Hant'; }],
+    ['wrong language', (samples) => { samples[0].language = 'auto'; }],
     ['wrong bucket', (samples) => { samples[0].durationBucketSeconds = 12; }],
     ['duration outside approximate bucket', (samples) => { samples[0].durationMs = 12_001; }],
     ['bad lowercase digest', (samples) => { samples[0].sha256 = 'A'.repeat(64); }],
@@ -322,6 +379,7 @@ test('passing run executes the exact workload at concurrency five and writes one
   assert.equal(requests.filter(({ operation }) => operation === 'text').length, 200);
   assert.equal(requests.filter(({ operation }) => operation === 'asr').length, 30);
   assert.equal(requests.filter(({ operation }) => operation === 'tts').length, 30);
+  assert.equal(requests.filter(({ operation }) => operation === 'timings').length, 20);
   assert.equal(requests.filter(({ operation }) => operation === 'verifyCandidate').length, 1);
   assert.deepEqual(
     Object.fromEntries(['grounded', 'abstention', 'casual'].map((kind) => [kind, requests.filter((item) => item.operation === 'text' && item.promptClass === kind).length])),
@@ -332,9 +390,16 @@ test('passing run executes the exact workload at concurrency five and writes one
     { 10: 10, 30: 10, 55: 10 },
   );
   assert.deepEqual(
-    Object.fromEntries(['cantonese', 'english'].map((language) => [language, requests.filter((item) => item.operation === 'asr' && item.sample.language === language).length])),
-    { cantonese: 15, english: 15 },
+    Object.fromEntries(['cantonese', 'english', 'mandarin'].map((language) => [language, requests.filter((item) => item.operation === 'asr' && item.sample.language === language).length])),
+    { cantonese: 10, english: 10, mandarin: 10 },
   );
+  const textRequests = requests.filter(({ operation }) => operation === 'text');
+  assert.deepEqual([...new Set(textRequests.map(({ replyLanguage }) => replyLanguage))].sort(), ['en', 'zhHans', 'zhHant']);
+  assert.equal(textRequests.filter(({ replyMode }) => replyMode === 'voice').length, 30);
+  assert.equal(requests.filter(({ operation }) => operation === 'tts').every(({ assistantMessageId }) => {
+    const source = textRequests.find(({ sessionIndex, turnIndex }) => assistantMessageId === `assistant-${sessionIndex}-${turnIndex}`);
+    return source?.replyMode === 'voice';
+  }), true);
   const ttsBySession = new Map();
   for (const request of requests.filter(({ operation }) => operation === 'tts')) {
     ttsBySession.set(request.sessionIndex, (ttsBySession.get(request.sessionIndex) ?? 0) + 1);
@@ -351,30 +416,35 @@ test('passing run executes the exact workload at concurrency five and writes one
   assert.equal(basename(filePath), `${COMMIT}-${record.artifactSha256}.json`);
   assert.deepEqual(record.workload, LATENCY_ACCEPTANCE_CONTRACT);
   assert.deepEqual(record.metrics, {
-    sendAck: { sampleCount: 200, p95Ms: 200, thresholdMs: 300, pass: true },
-    processingVisible: { sampleCount: 200, p95Ms: 400, thresholdMs: 500, pass: true },
-    groundedResponse: { sampleCount: 80, p95Ms: 7_000, thresholdMs: 8_000, pass: true },
-    asrTranscript: { sampleCount: 30, p95Ms: 5_000, thresholdMs: 6_000, pass: true },
-    ttsReady: { sampleCount: 30, p95Ms: 4_000, thresholdMs: 5_000, pass: true },
+    sendAck: { sampleCount: 200, p95Ms: 200, p95ThresholdMs: 300, pass: true },
+    processingVisible: { sampleCount: 200, p95Ms: 400, p95ThresholdMs: 500, pass: true },
+    groundedResponse: { sampleCount: 80, p50Ms: 2_400, p50ThresholdMs: 2_500, p95Ms: 2_400, p95ThresholdMs: 6_000, pass: true },
+    asr10: { sampleCount: 10, p50Ms: 2_000, p50ThresholdMs: 2_500, p95Ms: 2_000, p95ThresholdMs: 4_000, pass: true },
+    asr30: { sampleCount: 10, p95Ms: 5_000, p95ThresholdMs: 6_000, pass: true },
+    asr55: { sampleCount: 10, p95Ms: 5_000, p95ThresholdMs: 6_000, pass: true },
+    ttsReady: { sampleCount: 30, p50Ms: 2_000, p50ThresholdMs: 2_500, p95Ms: 2_000, p95ThresholdMs: 5_000, pass: true },
   });
   assert.deepEqual(record.invariants, {
     acknowledgedMessageLossCount: 0,
     duplicateAssistantReplyCount: 0,
     unsupportedVerifiedClaimCount: 0,
     ttsFailureTextLossCount: 0,
+    ttsMediaValidationFailureCount: 0,
   });
-  assert.deepEqual(record.observations, {
-    provider: {
-      text: { available: false, sampleCount: 0, p95Ms: null },
-      asr: { available: false, sampleCount: 0, p95Ms: null },
-      tts: { available: false, sampleCount: 0, p95Ms: null },
-    },
-    server: {
-      text: { available: false, sampleCount: 0, p95Ms: null },
-      asr: { available: false, sampleCount: 0, p95Ms: null },
-      tts: { available: false, sampleCount: 0, p95Ms: null },
-    },
-  }, 'fake requester timing fields cannot masquerade as timings exposed by the real public API');
+  assert.equal(record.observations.releaseCommitSha, COMMIT);
+  assert.equal(record.observations.queryDigests.sampleCount, 20);
+  assert.equal(record.observations.queryDigests.values.length, 20);
+  assert.equal(record.observations.queryDigests.pass, true);
+  assert.deepEqual(record.observations.provider, {
+    text: { available: true, sampleCount: 80, p50Ms: 1_800, p95Ms: 1_800 },
+    asr: { available: true, sampleCount: 30, p50Ms: 1_800, p95Ms: 1_800 },
+    tts: { available: true, sampleCount: 30, p50Ms: 1_700, p95Ms: 1_700 },
+  });
+  assert.deepEqual(record.observations.server, {
+    text: { available: true, sampleCount: 200, p50Ms: 2_300, p95Ms: 2_300 },
+    asr: { available: true, sampleCount: 30, p50Ms: 2_000, p95Ms: 2_000 },
+    tts: { available: true, sampleCount: 30, p50Ms: 1_900, p95Ms: 1_900 },
+  });
   assert.deepEqual(record.counts, {
     sessionsCreated: 20,
     textTurnsAttempted: 200,
@@ -416,6 +486,9 @@ test('nearest-rank threshold overflow or any invariant/count failure records a f
     ['acknowledged message lost', (input, result) => input.operation === 'text' && input.turnIndex === 0 ? { ...result, messageLost: true } : result],
     ['ASR not ready', (input, result) => input.operation === 'asr' && input.sampleIndex === 0 ? { ...result, ready: false, transcriptMs: null } : result],
     ['TTS failure loses text', (input, result) => input.operation === 'tts' && input.requestIndex === 0 ? { ...result, ready: false, readyMs: null, textAvailable: false } : result],
+    ['TTS media is not structurally validated', (input, result) => input.operation === 'tts' && input.requestIndex === 0 ? { ...result, mediaValidated: false } : result],
+    ['timing observation is missing', (input, result) => input.operation === 'timings' && input.sessionIndex === 0 ? { ...result, samples: [] } : result],
+    ['timing query digest is wrong', (input, result) => input.operation === 'timings' && input.sessionIndex === 0 ? { ...result, queryDigest: '0'.repeat(64) } : result],
   ];
 
   for (const [name, resultFor] of cases) {
@@ -471,8 +544,10 @@ test('a candidate redeploy during the workload is detected with the existing ses
   assert.equal(fixture.artifacts.length, 0);
 });
 
-test('real HTTP requester measures ASR after body consumption and stops TTS timing before the text-survival GET', async () => {
+test('real HTTP requester measures ASR after body consumption and validates TTS HEAD range GET and canonical MP3 outside ready timing', async () => {
   let clock = 0;
+  const mp3 = Buffer.alloc(417, 0);
+  mp3.set([0xff, 0xfb, 0x90, 0x64]);
   const fetchImpl = async (url, options = {}) => {
     const path = new URL(url).pathname;
     if (path === '/api/v1/voice/transcriptions') {
@@ -485,7 +560,19 @@ test('real HTTP requester measures ASR after body consumption and stops TTS timi
     }
     if (path.endsWith('/audio')) {
       clock += 4_000;
-      return new Response(JSON.stringify({ data: { state: 'ready' }, error: null }), { status: 201 });
+      return new Response(JSON.stringify({ data: { state: 'ready', mediaId: '99999999-9999-4999-8999-999999999999' }, error: null }), { status: 201 });
+    }
+    if (path.endsWith('/media/99999999-9999-4999-8999-999999999999')) {
+      const baseHeaders = { 'content-type': 'audio/mpeg', 'accept-ranges': 'bytes' };
+      if (options.method === 'HEAD') {
+        return new Response(null, { status: 200, headers: { ...baseHeaders, 'content-length': String(mp3.length) } });
+      }
+      if (options.headers?.Range === 'bytes=0-3') {
+        return new Response(mp3.subarray(0, 4), { status: 206, headers: {
+          ...baseHeaders, 'content-length': '4', 'content-range': `bytes 0-3/${mp3.length}`,
+        } });
+      }
+      return new Response(mp3, { status: 200, headers: { ...baseHeaders, 'content-length': String(mp3.length) } });
     }
     if (path === '/api/v1/messages') {
       clock += 2_000;
@@ -523,6 +610,7 @@ test('real HTTP requester measures ASR after body consumption and stops TTS timi
   });
   assert.equal(tts.readyMs, 4_000, 'the 2-second text-survival GET must not enter TTS-ready timing');
   assert.equal(tts.textAvailable, true);
+  assert.equal(tts.mediaValidated, true);
 });
 
 test('real HTTP requester stops and cancels an oversized streamed JSON body before buffering it all', async () => {
@@ -656,7 +744,7 @@ test('poll deadline aborts an in-flight fetch instead of waiting for the fetch d
 
   assert.equal(observation.settled, true);
   assert.equal(observation.status, 'fulfilled');
-  assert.deepEqual(observation.value, { ready: false, transcriptMs: null });
+  assert.deepEqual(observation.value, { ready: false, transcriptMs: null, durationBucketSeconds: null });
   assert.equal(signals[1].aborted, true);
 });
 
@@ -697,7 +785,10 @@ test('total latency command deadline is not downgraded to a Git-state error when
   const outputs = [];
   const pending = runLatencyAcceptance({
     argv: exactArgv(),
-    environment: { V1_LOAD_TEST_CONFIRM: 'true', V1_RELEASE_COMMIT_SHA: COMMIT },
+    environment: {
+      V1_LOAD_TEST_CONFIRM: 'true', V1_RELEASE_COMMIT_SHA: COMMIT,
+      V1_PUBLIC_ORIGIN: STABLE_ORIGIN, V1_CANDIDATE_ORIGIN: ORIGIN,
+    },
     cwd: CWD,
     artifactDirectory: resolve('reports', 'latency-test'),
     commandDeadlineMs: 40,
@@ -784,7 +875,7 @@ test('default artifact publication is immutable and cannot overwrite the same fr
   const filePath = join(directory, files[0]);
   const original = await readFile(filePath, 'utf8');
 
-  const second = await fixture.run({ ...input, writeArtifact: undefined });
+  const second = await createHarness().run({ ...input, writeArtifact: undefined });
   assert.equal(second.exitCode, 1);
   assert.deepEqual(second.publicReport, { status: 'failed', code: 'LATENCY_ARTIFACT_EXISTS' });
   assert.equal(await readFile(filePath, 'utf8'), original);

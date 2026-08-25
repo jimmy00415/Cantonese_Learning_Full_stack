@@ -43,7 +43,7 @@ function safeReadinessReport(report) {
 export function createApp({
   config, store, mediaStore, answerService, eventHub, dispatcher,
   asrProvider, ttsProvider, cleanupService, voiceService, spoolParentDirectory,
-  readiness, runtimeState,
+  readiness, runtimeState, acceptanceTimingRecorder,
   now = () => new Date(),
 } = {}) {
   void answerService;
@@ -75,12 +75,13 @@ export function createApp({
     }
     next();
   });
-  app.use(requireSameOrigin(config.publicOrigin));
+  app.use(requireSameOrigin(config.allowedOrigins ?? config.publicOrigin));
   const selectedEventHub = store ? (eventHub ?? new EventHub()) : null;
   if (store && mediaStore) {
     app.use('/api/v1', createVoiceRouter({
       config, store, mediaStore, asrProvider, ttsProvider, cleanupService,
       eventHub: selectedEventHub, now, voiceService, spoolParentDirectory,
+      acceptanceTimingRecorder,
     }));
   }
   app.use(express.json({ limit: '64kb', type: ['application/json', 'application/*+json'] }));
@@ -102,7 +103,8 @@ export function createApp({
   if (store) {
     app.locals.eventHub = selectedEventHub;
     app.use('/api/v1', createSessionRouter({
-      config, store, eventHub: selectedEventHub, dispatcher, cleanupService, now,
+      config, store, eventHub: selectedEventHub, dispatcher, cleanupService,
+      acceptanceTimingRecorder, now,
     }));
   }
   app.use('/api', (request, response) => {

@@ -10,6 +10,7 @@ import {
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const ROOT_SCOPE_KEY = 'hk-buddy:v1:scope';
+const ROOT_CLIENT_INSTANCE_KEY = 'hk-buddy:v1:client-instance-id';
 const MUTATING_EXISTING_MESSAGE_EVENTS = new Set(['turn.failed', 'audio.ready']);
 const SSE_EVENTS = ['message.accepted', 'turn.state', 'message.delivered', 'turn.failed', 'audio.ready', 'resync_required'];
 
@@ -51,6 +52,7 @@ export function createChatController({
   EventSourceImpl = globalThis.EventSource,
   storage = globalThis.sessionStorage,
   uuid = () => globalThis.crypto.randomUUID(),
+  clientInstanceUuid = () => globalThis.crypto.randomUUID(),
   now = () => new Date(),
   onChange = () => {},
   scheduleReconnect = (callback, delay = 1_500) => globalThis.setTimeout(callback, delay),
@@ -109,6 +111,17 @@ export function createChatController({
 
   function storageRemove(key) {
     try { storage?.removeItem?.(key); } catch { /* storage is best effort */ }
+  }
+
+  function clientInstanceId() {
+    const stored = storageGet(ROOT_CLIENT_INSTANCE_KEY);
+    if (UUID.test(stored ?? '')) return stored.toLowerCase();
+    if (stored !== null) storageRemove(ROOT_CLIENT_INSTANCE_KEY);
+    const created = clientInstanceUuid();
+    if (!UUID.test(created ?? '')) throw new Error('Client instance identity is unavailable.');
+    const normalized = created.toLowerCase();
+    storageSet(ROOT_CLIENT_INSTANCE_KEY, normalized);
+    return normalized;
   }
 
   function snapshot() {
@@ -338,7 +351,10 @@ export function createChatController({
     if (!isCurrentEpoch(epoch)) return snapshot();
     state.connection = 'connecting';
     notify();
-    const data = await requestJson('/api/v1/session', { method: 'POST' });
+    const data = await requestJson('/api/v1/session', {
+      method: 'POST',
+      headers: { 'X-Client-Instance-Id': clientInstanceId() },
+    });
     if (!isCurrentEpoch(epoch)) return snapshot();
     if (typeof data?.clientSessionScope !== 'string' || !data.clientSessionScope) {
       throw new Error('Session bootstrap did not return a client scope.');

@@ -3,6 +3,7 @@ import express from 'express';
 import { sendError } from './errors.js';
 import { createSessionResolver } from './session.js';
 import { assertVoiceOutputCapability, createVoiceService, voiceLimits } from '../services/voice.js';
+import { acceptanceTimingContext } from '../telemetry/acceptance-timings.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -95,6 +96,7 @@ export function createVoiceRouter({
   ttsProvider,
   cleanupService,
   eventHub,
+  acceptanceTimingRecorder,
   now = () => new Date(),
   voiceService,
   spoolParentDirectory,
@@ -103,7 +105,7 @@ export function createVoiceRouter({
   const resolveSession = createSessionResolver({ store });
   const service = voiceService ?? createVoiceService({
     config, store, mediaStore, asrProvider, ttsProvider, cleanupService, eventHub, now,
-    spoolParentDirectory,
+    spoolParentDirectory, acceptanceTimingRecorder,
   });
 
   router.post('/voice/transcriptions', async (request, response) => {
@@ -113,14 +115,20 @@ export function createVoiceRouter({
       assertCapability(config, 'voiceInput', now);
       const clientUploadId = request.get('x-client-upload-id');
       const requestSha256 = request.get('x-content-sha256');
+      const responseLanguage = request.get('x-asr-language');
       if (!UUID.test(clientUploadId ?? '') || !SHA256.test(requestSha256 ?? '')) throw voiceError(400, 'INVALID_REQUEST');
+      if (!['en', 'zhHant', 'zhHans'].includes(responseLanguage)) throw voiceError(400, 'INVALID_REQUEST');
       const declared = request.get('content-length');
       if (declared !== undefined && (!/^\d+$/.test(declared) || !Number.isSafeInteger(Number(declared)))) throw voiceError(400, 'INVALID_REQUEST');
       if (declared !== undefined && Number(declared) > voiceLimits.uploadBytes) throw voiceError(413, 'VOICE_UPLOAD_TOO_LARGE');
       if (request.get('content-type') !== 'audio/wav') throw voiceError(415, 'VOICE_UNSUPPORTED_MEDIA_TYPE');
       const result = await service.transcribe({
-        sessionId: session.id, clientUploadId, requestSha256, mimeType: 'audio/wav',
+        sessionId: session.id, clientUploadId, requestSha256, mimeType: 'audio/wav', responseLanguage,
         readable: request, signal: disconnect.signal,
+        acceptanceContext: acceptanceTimingContext({
+          windowId: request.get('x-acceptance-window-id'),
+          correlationId: request.get('x-acceptance-correlation-id'),
+        }),
       });
       if (!canWriteResponse(response)) return undefined;
       return operationResponse(response, result);
@@ -178,6 +186,10 @@ export function createVoiceRouter({
       assertVoiceOutputCapability(config, now());
       const result = await service.generateAssistantAudio({
         sessionId: session.id, messageId: request.params.messageId, signal: disconnect.signal,
+        acceptanceContext: acceptanceTimingContext({
+          windowId: request.get('x-acceptance-window-id'),
+          correlationId: request.get('x-acceptance-correlation-id'),
+        }),
       });
       if (!canWriteResponse(response)) return undefined;
       return operationResponse(response, result);

@@ -1,7 +1,5 @@
-import { execFile } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
 import { loadLlmSmokeConfiguration } from '../src/config.js';
@@ -12,12 +10,12 @@ import {
   llmProviderConfigDigest,
   validateLlmSmokeEvidence,
 } from '../src/services/release-evidence.js';
+import { writeImmutableGcsEvidence } from '../src/services/gcs-evidence-writer.js';
 
 const RELEASE_SHA = /^[0-9a-f]{40}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 const SAFE_PROVIDER_CODE = /^PROVIDER_[A-Z0-9_]+$/;
 const productionRoot = fileURLToPath(new URL('../', import.meta.url));
-const executeFile = promisify(execFile);
 
 function render(write, value) {
   write(JSON.stringify(value));
@@ -93,17 +91,18 @@ function defaultLoadSmokeConfig(environment, now) {
   return loadLlmSmokeConfiguration(environment, { now });
 }
 
-async function defaultInspectGit() {
-  const options = {
-    cwd: productionRoot,
-    encoding: 'utf8',
-    maxBuffer: 1024 * 1024,
-    windowsHide: true,
-  };
-  const before = (await executeFile('git', ['rev-parse', '--verify', 'HEAD'], options)).stdout.trim();
-  const status = (await executeFile('git', ['status', '--porcelain=v1', '--untracked-files=all'], options)).stdout;
-  const after = (await executeFile('git', ['rev-parse', '--verify', 'HEAD'], options)).stdout.trim();
-  return { commitSha: after, clean: before === after && status.length === 0 };
+async function defaultInspectGit(environment = process.env) {
+  if (environment.V1_RELEASE_MANIFEST_FILE !== '/app/release-manifest.json') return null;
+  const raw = await readFile(environment.V1_RELEASE_MANIFEST_FILE, 'utf8');
+  if (Buffer.byteLength(raw, 'utf8') > 1_024) return null;
+  const manifest = JSON.parse(raw);
+  const keys = Object.keys(manifest ?? {}).sort();
+  if (keys.join('\0') !== ['releaseSha', 'schemaVersion', 'sourceArchiveSha256', 'sourcePath'].sort().join('\0')
+    || manifest.schemaVersion !== 1
+    || manifest.releaseSha !== environment.V1_RELEASE_COMMIT_SHA
+    || !DIGEST.test(String(manifest.sourceArchiveSha256 ?? ''))
+    || manifest.sourcePath !== 'git-archive:production-v1') return null;
+  return { commitSha: manifest.releaseSha, clean: true };
 }
 
 function validFrozenGit(state, commitSha) {
@@ -140,7 +139,7 @@ export async function runProviderSmoke({
   loadSmokeConfig = defaultLoadSmokeConfig,
   inspectGit = defaultInspectGit,
   createProvider = createLlmProvider,
-  writeEvidence = writeLlmSmokeEvidence,
+  writeEvidence,
   now = () => new Date(),
   clockMs = Date.now,
 } = {}) {
@@ -163,8 +162,23 @@ export async function runProviderSmoke({
     return 2;
   }
 
+  const productionJob = env.V1_RELEASE_MANIFEST_FILE === '/app/release-manifest.json';
+  const expectedOutput = new RegExp(`^release-evidence/${config.releaseCommitSha}/llm-smoke/llm-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\\.json$`);
+  if (productionJob && !writeEvidence && (env.V1_LLM_SMOKE_OUTPUT_BUCKET !== 'hkbuddy-prod-v1-20260826-media'
+    || !expectedOutput.test(String(env.V1_LLM_SMOKE_OUTPUT_OBJECT ?? '')))) {
+    render(stderr, outputRecord({ provider: config.llm.provider, code: 'LLM_SMOKE_OUTPUT_INVALID' }));
+    return 2;
+  }
+  const persistEvidence = writeEvidence ?? (productionJob
+    ? ((record) => writeImmutableGcsEvidence({
+      bucket: env.V1_LLM_SMOKE_OUTPUT_BUCKET,
+      objectName: env.V1_LLM_SMOKE_OUTPUT_OBJECT,
+      record,
+    }))
+    : writeLlmSmokeEvidence);
+
   let initialGit;
-  try { initialGit = await inspectGit(); } catch { initialGit = null; }
+  try { initialGit = await inspectGit(env); } catch { initialGit = null; }
   if (!validFrozenGit(initialGit, config.releaseCommitSha)) {
     render(stderr, outputRecord({
       provider: config.llm.provider,
@@ -205,7 +219,7 @@ export async function runProviderSmoke({
   const latencyMs = elapsedLatency(startedAt, clockMs);
 
   let finalGit;
-  try { finalGit = await inspectGit(); } catch { finalGit = null; }
+  try { finalGit = await inspectGit(env); } catch { finalGit = null; }
   if (!validFrozenGit(finalGit, config.releaseCommitSha)) {
     render(stderr, outputRecord({
       provider: config.llm.provider,
@@ -268,7 +282,7 @@ export async function runProviderSmoke({
   }
 
   try {
-    await writeEvidence(record);
+    await persistEvidence(record);
   } catch (error) {
     render(stderr, outputRecord({
       provider: config.llm.provider,

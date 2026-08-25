@@ -20,6 +20,34 @@ const SPEECH_EVIDENCE_KEYS = Object.freeze([
   'providerConfigDigest', 'occurredAt', 'result', 'latencyMs', 'artifactSha256',
 ]);
 const ASR_FIXTURE_KEYS = Object.freeze(['fixtureSha256', 'fixtureDurationMs']);
+const SPEECH_V2_KEYS = Object.freeze([
+  'schemaVersion', 'commitSha', 'capability', 'provider', 'contractVersion',
+  'providerConfigDigest', 'runtimeIdentity', 'occurredAt', 'result', 'samples',
+  'artifactSha256',
+]);
+const ASR_V2_SAMPLE_KEYS = Object.freeze([
+  'responseLanguage', 'locale', 'referenceId', 'fixtureOrigin', 'fixtureVoiceName',
+  'fixtureGeneratorContractVersion', 'fixtureGeneratorConfigDigest', 'fixtureTtsLatencyMs',
+  'fixtureSha256', 'fixtureDurationMs', 'fixtureByteLength', 'transcriptUtf8Bytes',
+  'transcriptCodePointCount', 'normalizedReferenceCodePointCount',
+  'normalizedEditDistance', 'normalizedErrorRate', 'asrLatencyMs',
+]);
+const TTS_V2_SAMPLE_KEYS = Object.freeze([
+  'responseLanguage', 'locale', 'voiceName', 'latencyMs', 'audioSha256',
+  'audioByteLength', 'decodable',
+]);
+const SPEECH_V2_DEFINITIONS = Object.freeze({
+  yueHant: Object.freeze({
+    locale: 'yue-Hant-HK', referenceId: 'voice-smoke-yue-v1', voiceName: 'yue-HK-Chirp3-HD-Achernar',
+  }),
+  en: Object.freeze({
+    locale: 'en-US', referenceId: 'voice-smoke-en-v1', voiceName: 'en-US-Chirp3-HD-Achernar',
+  }),
+  zhHans: Object.freeze({
+    locale: 'cmn-Hans-CN', referenceId: 'voice-smoke-cmn-v1', voiceName: 'cmn-CN-Chirp3-HD-Achernar',
+  }),
+});
+const SPEECH_V2_LANGUAGES = Object.freeze(Object.keys(SPEECH_V2_DEFINITIONS));
 const IOS_ASSERTION_KEYS = Object.freeze([
   'normalizedCanonicalWav', 'autoStop55Seconds', 'permissionCleanup', 'cancelCleanup',
   'oneIdempotentUpload', 'editableTranscript', 'textFallback', 'noRawContainerUpload',
@@ -28,6 +56,13 @@ const IOS_EVIDENCE_KEYS = Object.freeze([
   'schemaVersion', 'commitSha', 'capability', 'normalizerContractVersion',
   'deviceModelClass', 'iosVersion', 'safariVersion', 'captureMimeType',
   'fixtureSha256', 'fixtureDurationMs', 'assertions', 'occurredAt', 'result',
+  'artifactSha256',
+]);
+const IOS_V2_EVIDENCE_KEYS = Object.freeze([
+  'schemaVersion', 'commitSha', 'capability', 'normalizerContractVersion',
+  'reportSource', 'deviceReportSha256', 'deviceRunId', 'deviceModelClass',
+  'iosVersion', 'safariVersion', 'captureMimeType', 'fixtureSha256',
+  'fixtureDurationMs', 'fixtureByteLength', 'assertions', 'occurredAt', 'result',
   'artifactSha256',
 ]);
 
@@ -185,10 +220,74 @@ function speechFixtureValid(record, capability) {
     && record?.fixtureDurationMs === undefined;
 }
 
+function finiteNonNegative(value) {
+  return Number.isFinite(value) && value >= 0;
+}
+
+function speechV2SamplesValid(record, capability, fixtureGeneratorConfigDigest) {
+  if (!Array.isArray(record.samples) || record.samples.length !== SPEECH_V2_LANGUAGES.length) return false;
+  const observed = new Set();
+  for (const sample of record.samples) {
+    const definition = SPEECH_V2_DEFINITIONS[sample?.responseLanguage];
+    if (!definition || observed.has(sample.responseLanguage)) return false;
+    observed.add(sample.responseLanguage);
+    if (sample.locale !== definition.locale) return false;
+    if (capability === 'tts') {
+      if (!hasExactOwnKeys(sample, TTS_V2_SAMPLE_KEYS)
+        || sample.voiceName !== definition.voiceName
+        || !finiteNonNegative(sample.latencyMs)
+        || !DIGEST.test(String(sample.audioSha256 ?? ''))
+        || !Number.isSafeInteger(sample.audioByteLength) || sample.audioByteLength <= 4
+        || sample.decodable !== true) return false;
+      continue;
+    }
+    if (!hasExactOwnKeys(sample, ASR_V2_SAMPLE_KEYS)
+      || sample.referenceId !== definition.referenceId
+      || sample.fixtureOrigin !== 'google-tts-linear16-v1'
+      || sample.fixtureVoiceName !== definition.voiceName
+      || sample.fixtureGeneratorContractVersion !== 'google-tts-linear16-v1'
+      || sample.fixtureGeneratorConfigDigest !== fixtureGeneratorConfigDigest
+      || !DIGEST.test(String(sample.fixtureGeneratorConfigDigest ?? ''))
+      || !finiteNonNegative(sample.fixtureTtsLatencyMs)
+      || !DIGEST.test(String(sample.fixtureSha256 ?? ''))
+      || !Number.isFinite(sample.fixtureDurationMs) || sample.fixtureDurationMs <= 0 || sample.fixtureDurationMs > 60_000
+      || !Number.isSafeInteger(sample.fixtureByteLength) || sample.fixtureByteLength <= 44
+      || !Number.isSafeInteger(sample.transcriptUtf8Bytes) || sample.transcriptUtf8Bytes <= 0
+      || !Number.isSafeInteger(sample.transcriptCodePointCount) || sample.transcriptCodePointCount <= 0
+      || !Number.isSafeInteger(sample.normalizedReferenceCodePointCount) || sample.normalizedReferenceCodePointCount <= 0
+      || !Number.isSafeInteger(sample.normalizedEditDistance) || sample.normalizedEditDistance < 0
+      || !finiteNonNegative(sample.normalizedErrorRate) || sample.normalizedErrorRate > 0.35
+      || Math.abs(sample.normalizedErrorRate
+        - Number((sample.normalizedEditDistance / sample.normalizedReferenceCodePointCount).toFixed(6))) > 1e-6
+      || !finiteNonNegative(sample.asrLatencyMs)) return false;
+  }
+  return SPEECH_V2_LANGUAGES.every((language) => observed.has(language));
+}
+
 export function validateSpeechEvidence(record, {
   expectedVersion, commitSha, capability, provider, contractVersion,
-  configDigest, now,
+  configDigest, runtimeIdentity, fixtureGeneratorConfigDigest, now,
 }) {
+  if (record?.schemaVersion === 2) {
+    const expectedProvider = capability === 'asr' ? 'google-stt-v2' : 'google-tts';
+    return Boolean(
+      hasExactOwnKeys(record, SPEECH_V2_KEYS)
+      && provider === expectedProvider
+      && record.provider === expectedProvider
+      && /^[0-9a-f]{40}$/.test(String(commitSha ?? ''))
+      && artifactValid(record, expectedVersion)
+      && record.commitSha === commitSha
+      && record.capability === capability
+      && record.contractVersion === contractVersion
+      && record.providerConfigDigest === configDigest
+      && DIGEST.test(String(configDigest ?? ''))
+      && typeof runtimeIdentity === 'string' && runtimeIdentity.length > 0
+      && record.runtimeIdentity === runtimeIdentity
+      && record.result === 'pass'
+      && speechV2SamplesValid(record, capability, fixtureGeneratorConfigDigest)
+      && timeValid(record, now, 30 * DAY_MS)
+    );
+  }
   const allowedProviders = capability === 'asr'
     ? new Set(['azure', 'google-stt-v2'])
     : new Set(['azure', 'minimax', 'google-tts']);
@@ -217,6 +316,30 @@ export function validateIosVoiceEvidence(record, {
   expectedVersion, commitSha, normalizerContractVersion, now,
 }) {
   const assertions = record?.assertions ?? {};
+  if (record?.schemaVersion === 2) {
+    return Boolean(
+      hasExactOwnKeys(record, IOS_V2_EVIDENCE_KEYS)
+      && hasExactOwnKeys(assertions, IOS_ASSERTION_KEYS)
+      && /^[0-9a-f]{40}$/.test(String(commitSha ?? ''))
+      && artifactValid(record, expectedVersion)
+      && record.commitSha === commitSha
+      && record.capability === 'ios-voice'
+      && record.normalizerContractVersion === normalizerContractVersion
+      && record.reportSource === 'real-iphone-safari-manual-v1'
+      && DIGEST.test(String(record.deviceReportSha256 ?? ''))
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(record.deviceRunId ?? ''))
+      && /^iPhone(?:\s+[A-Za-z0-9.+-]+){1,4}$/.test(String(record.deviceModelClass ?? ''))
+      && /^\d+(?:\.\d+){1,2}$/.test(String(record.iosVersion ?? ''))
+      && /^\d+(?:\.\d+){1,2}$/.test(String(record.safariVersion ?? ''))
+      && record.captureMimeType === 'audio/mp4'
+      && DIGEST.test(String(record.fixtureSha256 ?? ''))
+      && Number.isFinite(record.fixtureDurationMs) && record.fixtureDurationMs > 0
+      && Number.isSafeInteger(record.fixtureByteLength) && record.fixtureByteLength > 44
+      && IOS_ASSERTION_KEYS.every((name) => assertions[name] === true)
+      && record.result === 'pass'
+      && timeValid(record, now, 90 * DAY_MS)
+    );
+  }
   return Boolean(
     hasExactOwnKeys(record, IOS_EVIDENCE_KEYS)
     && hasExactOwnKeys(assertions, IOS_ASSERTION_KEYS)
@@ -240,10 +363,11 @@ export function validateIosVoiceEvidence(record, {
 
 export const voiceEvidenceContracts = Object.freeze({
   asr: 'azure-asr-v1',
-  googleAsr: 'google-stt-v2-v1',
+  googleAsr: 'google-stt-v2-v2',
   azureTts: 'azure-tts-v1',
   minimaxTts: 'minimax-tts-v1',
-  googleTts: 'google-tts-v1',
+  googleTts: 'google-tts-v2',
+  googleFixtureGenerator: 'google-tts-linear16-v1',
   speechMaximumAgeMs: 30 * DAY_MS,
   iosMaximumAgeMs: 90 * DAY_MS,
   futureSkewMs: FUTURE_SKEW_MS,

@@ -1,10 +1,12 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { isIP } from 'node:net';
 import express from 'express';
 
 import { httpError, sendError } from './errors.js';
 import { createRateLimiter, rateLimitBucket } from '../services/rate-limiter.js';
 import { createEventStreamHandler } from '../services/events.js';
 import { REPLY_LANGUAGES, REPLY_MODES } from '../stores/store-contract.js';
+import { acceptanceTimingContext } from '../telemetry/acceptance-timings.js';
 
 const COOKIE_NAME = 'hb_v1_session';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -20,6 +22,45 @@ function requestHash({ text, voiceDraftId, replyLanguage, replyMode }) {
   })).digest('hex');
 }
 function rateLimited(response, result) { response.set('Retry-After', String(result.retryAfter)); throw httpError(429, 'RATE_LIMITED'); }
+
+function ipv6Groups(value) {
+  const source = value.toLowerCase().split('%', 1)[0];
+  const halves = source.split('::');
+  if (halves.length > 2) return null;
+  const parseHalf = (half) => {
+    if (!half) return [];
+    const parts = half.split(':');
+    const last = parts.at(-1);
+    if (last?.includes('.')) {
+      if (isIP(last) !== 4) return null;
+      const octets = last.split('.').map(Number);
+      parts.splice(parts.length - 1, 1, ((octets[0] << 8) | octets[1]).toString(16), ((octets[2] << 8) | octets[3]).toString(16));
+    }
+    if (parts.some((part) => !/^[0-9a-f]{1,4}$/.test(part))) return null;
+    return parts.map((part) => Number.parseInt(part, 16));
+  };
+  const left = parseHalf(halves[0]);
+  const right = parseHalf(halves[1] ?? '');
+  if (!left || !right) return null;
+  const omitted = 8 - left.length - right.length;
+  if ((halves.length === 1 && omitted !== 0) || (halves.length === 2 && omitted < 1)) return null;
+  return [...left, ...Array.from({ length: omitted }, () => 0), ...right];
+}
+
+export function coarseIpSubject(value) {
+  const version = isIP(String(value ?? ''));
+  if (version === 4) {
+    const octets = value.split('.').map(Number);
+    return `${octets[0]}.${octets[1]}.${octets[2]}.0/24`;
+  }
+  if (version === 6) {
+    const groups = ipv6Groups(value);
+    if (!groups) return 'unknown';
+    const prefix = [groups[0], groups[1], groups[2], groups[3] & 0xff00].map((group) => group.toString(16));
+    return `${prefix.join(':')}::/56`;
+  }
+  return 'unknown';
+}
 
 function cookieOptions(config) { return { httpOnly: true, sameSite: 'lax', secure: config.nodeEnv === 'production', path: '/', maxAge: 30 * 24 * 60 * 60 * 1000 }; }
 
@@ -73,10 +114,13 @@ export function createSessionResolver({ store }) {
   };
 }
 
-export function createSessionRouter({ config, store, eventHub, dispatcher, cleanupService, now = () => new Date() }) {
+export function createSessionRouter({
+  config, store, eventHub, dispatcher, cleanupService, acceptanceTimingRecorder,
+  now = () => new Date(),
+}) {
   const router = express.Router();
   const limiter = createRateLimiter({ store, secret: config.sessionSecret ?? 'local-development-session-secret' });
-  const limits = config.rateLimits ?? { bootstrap: 20, message5m: 30, messageDaily: 300 };
+  const limits = config.rateLimits ?? { bootstrapClient10m: 4, bootstrapCoarseIp10m: 100, message5m: 30, messageDaily: 300 };
 
   const sessionFromRequest = createSessionResolver({ store });
   const currentCapabilities = () => config.getPublicStatus?.(now()) ?? config.publicStatus ?? {};
@@ -94,12 +138,37 @@ export function createSessionRouter({ config, store, eventHub, dispatcher, clean
           return response.json({ data: { session: { id: resumed.id }, clientSessionScope: resumed.clientScopeId, conversation, messages: messages.map(publicMessage), capabilities: currentCapabilities(), knowledgeSnapshotDate: config.knowledgeSnapshotDate ?? null }, error: null, requestId: response.locals.requestId });
         }
       }
-      const bootstrap = await limiter.consume({ subject: request.ip, quota: 'session-bootstrap', limit: limits.bootstrap, durationMs: 10 * 60 * 1000 });
-      if (!bootstrap.allowed) return rateLimited(response, bootstrap);
+      const clientInstance = UUID.test(request.get('x-client-instance-id') ?? '')
+        ? request.get('x-client-instance-id').toLowerCase()
+        : 'missing';
+      const coarseIp = await limiter.consume({
+        subject: coarseIpSubject(request.ip), quota: 'session-bootstrap-coarse-ip',
+        limit: limits.bootstrapCoarseIp10m, durationMs: 10 * 60 * 1000,
+      });
+      if (!coarseIp.allowed) return rateLimited(response, coarseIp);
+      const client = await limiter.consume({
+        subject: clientInstance, quota: 'session-bootstrap-client-instance',
+        limit: limits.bootstrapClient10m, durationMs: 10 * 60 * 1000,
+      });
+      if (!client.allowed) return rateLimited(response, client);
       const token = randomBytes(32).toString('base64url');
       const sessionData = await store.createOrResumeSession({ tokenHash: tokenHash(token) });
       response.cookie(COOKIE_NAME, token, cookieOptions(config));
       return response.status(201).json({ data: { session: { id: sessionData.session.id }, clientSessionScope: sessionData.session.clientScopeId, conversation: sessionData.conversation, messages: [], capabilities: currentCapabilities(), knowledgeSnapshotDate: config.knowledgeSnapshotDate ?? null }, error: null, requestId: response.locals.requestId });
+    } catch (error) { return sendError(response, error); }
+  });
+
+  router.get('/acceptance/timings', async (request, response) => {
+    try {
+      if (!acceptanceTimingRecorder?.query || !/^[0-9a-f]{64}$/.test(String(request.query.windowId ?? ''))) {
+        throw httpError(400, 'INVALID_REQUEST');
+      }
+      const { session } = await sessionFromRequest(request);
+      const data = acceptanceTimingRecorder.query({
+        windowId: request.query.windowId,
+        sessionId: session.id,
+      });
+      return response.json({ data, error: null, requestId: response.locals.requestId });
     } catch (error) { return sendError(response, error); }
   });
 
@@ -136,6 +205,17 @@ export function createSessionRouter({ config, store, eventHub, dispatcher, clean
           rateLimitBucket({ secret: config.sessionSecret ?? 'local-development-session-secret', subject, quota: 'messages-day', limit: limits.messageDaily, durationMs: 24 * 60 * 60 * 1000, now }),
         ],
       });
+      if (!accepted.idempotent) {
+        const timing = acceptanceTimingContext({
+          windowId: request.get('x-acceptance-window-id'),
+          correlationId: request.get('x-acceptance-correlation-id'),
+        });
+        if (timing) acceptanceTimingRecorder?.bindTurn?.({
+          ...timing,
+          turnId: accepted.turn.id,
+          sessionId: sessionData.session.id,
+        });
+      }
       response.status(202).json({ data: { idempotent: accepted.idempotent, message: publicMessage(accepted.message), turn: publicTurn(accepted.turn) }, error: null, requestId: response.locals.requestId });
       queueMicrotask(() => {
         eventHub?.publish({ sessionId: accepted.event.sessionId, conversationId: accepted.event.conversationId, cursor: accepted.event.cursor });

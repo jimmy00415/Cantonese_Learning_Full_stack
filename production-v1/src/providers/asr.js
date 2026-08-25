@@ -108,6 +108,9 @@ export function createAsrProvider({
   }
   const transcribe = async (audio, { signal, responseLanguage = 'yueHant' } = {}) => {
     const buffer = Buffer.isBuffer(audio) ? audio : Buffer.from(audio ?? []);
+    if (!google && responseLanguage !== 'yueHant') {
+      throw speechError('VOICE_TRANSCRIPTION_REJECTED', 502, false, 'rejected');
+    }
     const googleLanguages = google ? googleLanguageCodes(config.settings, responseLanguage) : null;
     const startedAt = now();
     try {

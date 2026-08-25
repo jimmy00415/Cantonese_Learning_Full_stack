@@ -1145,8 +1145,13 @@ test('voice release evidence is artifact/config/commit bound and expires dynamic
   await writeFile(inventoryPath, JSON.stringify(inventoryRecord));
   await writeFile(dependencyPath, JSON.stringify(dependencyRecord));
   await writeFile(llmPath, JSON.stringify(llmRecord));
+  const projectNumber = '123456789012';
   const baseEnvironment = {
-    NODE_ENV: 'production', V1_PUBLIC_ORIGIN: 'https://v1.example.test', V1_SESSION_SECRET: 's'.repeat(32),
+    NODE_ENV: 'production',
+    V1_PUBLIC_ORIGIN: `https://hkbuddy-api-${projectNumber}.asia-east2.run.app`,
+    V1_CANDIDATE_ORIGIN: `https://candidate-${commitSha.slice(0, 12)}---hkbuddy-api-${projectNumber}.asia-east2.run.app`,
+    V1_RUNTIME_SERVICE_ACCOUNT: 'hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com',
+    V1_SESSION_SECRET: 's'.repeat(32),
     V1_TRUST_PROXY_HOPS: '1', V1_STORE_DRIVER: 'postgres', V1_DATABASE_URL: databaseUrl,
     V1_POSTGRES_RESOURCE_ID: postgresResourceId,
     V1_MEDIA_DRIVER: 'gcs', V1_GOOGLE_CLOUD_PROJECT: gcsProjectId,
@@ -2694,6 +2699,7 @@ test('late-rejecting ASR and TTS writes return bounded HTTP 503 and rearm cleanu
         'Content-Length': String(audio.length),
         'X-Client-Upload-Id': 'dededede-0000-4000-8000-000000000000',
         'X-Content-SHA256': createHash('sha256').update(audio).digest('hex'),
+        'X-ASR-Language': 'zhHant',
       },
       body: audio,
     }),
@@ -2787,6 +2793,7 @@ test('post-body ASR client disconnect aborts provider work and durably fails wit
       'Content-Length': String(audio.length),
       'X-Client-Upload-Id': uploadId,
       'X-Content-SHA256': createHash('sha256').update(audio).digest('hex'),
+      'X-ASR-Language': 'zhHant',
     },
   });
   client.request.end(audio);
@@ -2953,6 +2960,7 @@ test('normal canonical ASR and TTS responses reuse keep-alive without false prov
       'Content-Length': String(audio.length),
       'X-Client-Upload-Id': 'aaaaaaaa-2222-4222-8222-222222222222',
       'X-Content-SHA256': createHash('sha256').update(audio).digest('hex'),
+      'X-ASR-Language': 'zhHant',
     },
     body: audio,
   });
@@ -2994,6 +3002,7 @@ test('mid-body ASR disconnect remains a durable retryable abort without provider
       'Content-Length': String(audio.length),
       'X-Client-Upload-Id': uploadId,
       'X-Content-SHA256': createHash('sha256').update(audio).digest('hex'),
+      'X-ASR-Language': 'zhHant',
     },
   });
   client.request.write(audio.subarray(0, 44));
@@ -3048,6 +3057,7 @@ test('voice HTTP transcription is owned, idempotent, editable, status-recoverabl
     Origin: origin, Cookie: cookie, 'Content-Type': 'audio/wav',
     'X-Client-Upload-Id': uploadId,
     'X-Content-SHA256': requestSha256,
+    'X-ASR-Language': 'zhHant',
     'Content-Length': String(audio.length),
   };
   const created = await fetchJson(`${baseUrl}/api/v1/voice/transcriptions`, { method: 'POST', headers, body: audio });
@@ -3090,6 +3100,51 @@ test('voice HTTP transcription is owned, idempotent, editable, status-recoverabl
   assert.equal(mediaFiles.length, 1, 'only the ready draft object remains');
 });
 
+test('voice HTTP binds Cantonese English and Mandarin selection to the durable claim and provider call', async (t) => {
+  const observed = [];
+  const { baseUrl, origin } = await startVoiceApp(t, {
+    asrProvider: {
+      provider: 'google-stt-v2',
+      transcribe: async (_audio, options) => {
+        observed.push(options.responseLanguage);
+        return { transcript: `safe-${options.responseLanguage}`, provider: 'google-stt-v2', latencyMs: 1, confidence: null };
+      },
+    },
+  });
+  const session = await fetchJson(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin } });
+  const cookie = session.response.headers.getSetCookie()[0].split(';')[0];
+  const audio = canonicalWav(25);
+  const requestSha256 = createHash('sha256').update(audio).digest('hex');
+  const results = [];
+  for (const [index, asrLanguage] of ['zhHant', 'en', 'zhHans'].entries()) {
+    const clientUploadId = `d${index + 1}d${index + 1}d${index + 1}d${index + 1}-0000-4000-8000-000000000000`;
+    results.push(await fetchJson(`${baseUrl}/api/v1/voice/transcriptions`, {
+      method: 'POST',
+      headers: {
+        Origin: origin, Cookie: cookie, 'Content-Type': 'audio/wav',
+        'Content-Length': String(audio.length), 'X-Client-Upload-Id': clientUploadId,
+        'X-Content-SHA256': requestSha256, 'X-ASR-Language': asrLanguage,
+      },
+      body: audio,
+    }));
+  }
+  assert.deepEqual(results.map(({ response }) => response.status), [201, 201, 201]);
+  assert.deepEqual(observed, ['yueHant', 'en', 'zhHans']);
+
+  const rejected = await fetchJson(`${baseUrl}/api/v1/voice/transcriptions`, {
+    method: 'POST',
+    headers: {
+      Origin: origin, Cookie: cookie, 'Content-Type': 'audio/wav',
+      'Content-Length': String(audio.length), 'X-Client-Upload-Id': 'eeeeeeee-0000-4000-8000-000000000000',
+      'X-Content-SHA256': requestSha256, 'X-ASR-Language': 'auto',
+    },
+    body: audio,
+  });
+  assert.equal(rejected.response.status, 400);
+  assert.equal(rejected.body.error.code, 'INVALID_REQUEST');
+  assert.deepEqual(observed, ['yueHant', 'en', 'zhHans']);
+});
+
 test('missing ASR provider durably records one permanent upload failure for POST replay and GET recovery', async (t) => {
   const { baseUrl, origin, store } = await startVoiceApp(t, { asrProvider: null });
   const session = await fetchJson(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin } });
@@ -3104,6 +3159,7 @@ test('missing ASR provider durably records one permanent upload failure for POST
     'Content-Length': String(audio.length),
     'X-Client-Upload-Id': clientUploadId,
     'X-Content-SHA256': requestSha256,
+    'X-ASR-Language': 'zhHant',
   };
 
   const first = await fetchJson(`${baseUrl}/api/v1/voice/transcriptions`, {
@@ -3163,6 +3219,7 @@ test('voice transcription rejects missing or malformed upload identity headers b
     Cookie: cookie,
     'Content-Type': 'audio/wav',
     'Content-Length': String(audio.length),
+    'X-ASR-Language': 'zhHant',
   };
   const cases = [
     ['missing X-Client-Upload-Id', { ...baseHeaders, 'X-Content-SHA256': requestSha256 }],
@@ -3206,6 +3263,7 @@ test('oversized chunked voice upload exposes one public 413 code and keeps its d
     'Content-Type': 'audio/wav',
     'X-Client-Upload-Id': clientUploadId,
     'X-Content-SHA256': requestSha256,
+    'X-ASR-Language': 'zhHant',
   };
   const upload = () => fetchJson(`${baseUrl}/api/v1/voice/transcriptions`, {
     method: 'POST', headers, body: Readable.from([bytes]), duplex: 'half',
@@ -3276,6 +3334,7 @@ test('voice upload DELETE is owned, capability-independent, idempotent, and perm
     'Content-Length': String(audio.length),
     'X-Client-Upload-Id': clientUploadId,
     'X-Content-SHA256': requestSha256,
+    'X-ASR-Language': 'zhHant',
   };
   const posting = fetchJson(`${baseUrl}/api/v1/voice/transcriptions`, {
     method: 'POST', headers, body: audio,
@@ -3406,6 +3465,7 @@ test('voice upload DELETE removes a ready draft but returns 409 when message att
       'Content-Length': String(audio.length),
       'X-Client-Upload-Id': clientUploadId,
       'X-Content-SHA256': requestSha256,
+      'X-ASR-Language': 'zhHant',
     },
     body: audio,
   });
@@ -3822,6 +3882,7 @@ test('voice draft and session deletion revoke ownership first and durably delete
       'Content-Type': 'audio/wav',
       'X-Client-Upload-Id': clientUploadId,
       'X-Content-SHA256': createHash('sha256').update(audio).digest('hex'),
+      'X-ASR-Language': 'zhHant',
       'Content-Length': String(audio.length),
     },
     body: audio,

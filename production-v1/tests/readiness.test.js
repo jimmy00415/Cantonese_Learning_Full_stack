@@ -32,6 +32,10 @@ const GCS_PROJECT_ID = 'hkbuddy-prod-v1-20260826';
 const GCS_BUCKET = 'hkbuddy-prod-v1-20260826-media';
 const GCS_RESOURCE_ID = '//storage.googleapis.com/projects/_/buckets/hkbuddy-prod-v1-20260826-media';
 const GCS_IDENTITY = '790771a3d488e3ea04123af67c5f17fac94783a7859f72363ea142df95b70d4f';
+const CLOUD_RUN_PROJECT_NUMBER = '123456789012';
+const PUBLIC_ORIGIN = `https://hkbuddy-api-${CLOUD_RUN_PROJECT_NUMBER}.asia-east2.run.app`;
+const CANDIDATE_ORIGIN = `https://candidate-${COMMIT.slice(0, 12)}---hkbuddy-api-${CLOUD_RUN_PROJECT_NUMBER}.asia-east2.run.app`;
+const RUNTIME_SERVICE_ACCOUNT = 'hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com';
 
 function inventoryPayload(overrides = {}) {
   return {
@@ -152,7 +156,9 @@ async function productionFixture(t, {
   await writeFile(llmSmokeFile, JSON.stringify(llmSmoke));
   const environment = {
     NODE_ENV: 'production',
-    V1_PUBLIC_ORIGIN: 'https://v1.example.test',
+    V1_PUBLIC_ORIGIN: PUBLIC_ORIGIN,
+    V1_CANDIDATE_ORIGIN: CANDIDATE_ORIGIN,
+    V1_RUNTIME_SERVICE_ACCOUNT: RUNTIME_SERVICE_ACCOUNT,
     V1_SESSION_SECRET: 'private-session-secret-private-session-secret',
     V1_TRUST_PROXY_HOPS: '1',
     V1_STORE_DRIVER: 'postgres',

@@ -313,6 +313,7 @@ export function createVoiceUploadCoordinator({
       requestSha256: operation.requestSha256,
       audio: operation.blob,
       mimeType: 'audio/wav',
+      asrLanguage: operation.schemaVersion === 1 ? 'zhHant' : operation.asrLanguage,
       signal: context.run.controller.signal,
     });
     return runIsCurrent(context.run) ? { response } : { disposed: true };

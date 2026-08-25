@@ -131,8 +131,15 @@ test('session api recomputes expiring voice and iOS capabilities for new and res
 });
 
 test('session api uses a 30-day secure production cookie without weakening production config validation', async (t) => {
+  const releaseSha = '1'.repeat(40);
+  const projectNumber = '123456789012';
   assert.throws(() => loadConfig({
-    NODE_ENV: 'production', V1_PUBLIC_ORIGIN: 'https://v1.example.test', V1_SESSION_SECRET: 'x'.repeat(32),
+    NODE_ENV: 'production',
+    V1_PUBLIC_ORIGIN: `https://hkbuddy-api-${projectNumber}.asia-east2.run.app`,
+    V1_CANDIDATE_ORIGIN: `https://candidate-${releaseSha.slice(0, 12)}---hkbuddy-api-${projectNumber}.asia-east2.run.app`,
+    V1_RUNTIME_SERVICE_ACCOUNT: 'hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com',
+    V1_RELEASE_COMMIT_SHA: releaseSha,
+    V1_SESSION_SECRET: 'x'.repeat(32),
     V1_TRUST_PROXY_HOPS: '1', V1_STORE_DRIVER: 'postgres', DATABASE_URL: 'postgres://localhost/v1',
     V1_MEDIA_DRIVER: 'azure-blob', V1_AZURE_BLOB_CONTAINER: 'v1-media', V1_AZURE_STORAGE_CONNECTION_STRING: 'UseDevelopmentStorage=true',
     V1_LLM_PROVIDER: 'hkbu', HKBU_API_KEY: 'test-key', HKBU_BASE_URL: 'https://hkbu.example.test', HKBU_MODEL: 'hkbu-model', HKBU_API_VERSION: 'v1',

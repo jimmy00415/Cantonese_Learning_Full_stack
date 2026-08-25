@@ -11,7 +11,8 @@ function publish(eventHub, result) {
 }
 
 export function createTurnProcessor({
-  store, answerService, voiceService, voiceOutputGate, eventHub, now = () => new Date(),
+  store, answerService, voiceService, voiceOutputGate, eventHub, acceptanceTimingRecorder,
+  now = () => new Date(),
 } = {}) {
   if (!store || typeof answerService?.answer !== 'function') throw new Error('turn processor dependencies are required');
 
@@ -49,16 +50,23 @@ export function createTurnProcessor({
       await ensureGenerating();
       const delivered = await store.deliverAssistant({ turnId: turn.id, leaseToken, message: answer, now: now() });
       publish(eventHub, delivered);
+      acceptanceTimingRecorder?.completeText?.({
+        turnId: turn.id,
+        messageId: delivered.message.id,
+        providerLatencyMs: answer.provider === 'deterministic' ? null : answer.providerLatencyMs,
+      });
       if (turn.replyMode === 'voice') {
         try {
           if (typeof voiceOutputGate !== 'function') {
             throw Object.assign(new Error('VOICE_NOT_RELEASE_VERIFIED'), { code: 'VOICE_NOT_RELEASE_VERIFIED' });
           }
           voiceOutputGate();
+          const acceptanceContext = acceptanceTimingRecorder?.contextForMessage?.(delivered.message.id);
           const preparation = voiceService?.prepareAssistantAudio?.({
             sessionId: turn.sessionId,
             messageId: delivered.message.id,
             replyLanguage: turn.replyLanguage,
+            ...(acceptanceContext ? { acceptanceContext } : {}),
           });
           void Promise.resolve(preparation).catch(() => undefined);
         } catch { /* grounded text delivery is terminal even when TTS preparation fails */ }

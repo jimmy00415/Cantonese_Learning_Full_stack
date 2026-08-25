@@ -10,6 +10,7 @@ import {
   withSpeechDeadline,
 } from './speech-common.js';
 import { createGoogleAccessTokenProvider } from './google-auth.js';
+import { validateCanonicalWav } from '../media/canonical-wav.js';
 
 const AZURE_REGION = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const AZURE_VOICE = 'zh-HK-HiuMaanNeural';
@@ -69,7 +70,7 @@ function googleTtsUrl(settings) {
   return `https://${settings.location}-texttospeech.googleapis.com/v1/text:synthesize`;
 }
 
-function parseGoogleTts(buffer) {
+function parseGoogleTts(buffer, audioEncoding) {
   let payload;
   try { payload = JSON.parse(buffer.toString('utf8')); } catch {
     throw speechError('VOICE_PROVIDER_INVALID_RESPONSE', 502, false, 'invalid_response');
@@ -80,9 +81,16 @@ function parseGoogleTts(buffer) {
     throw speechError('VOICE_PROVIDER_INVALID_RESPONSE', 502, false, 'invalid_response');
   }
   const audio = Buffer.from(value, 'base64');
-  if (audio.length > SPEECH_LIMITS.audioBytes
-    || audio.toString('base64') !== value || !isMp3(audio)) {
+  if (audio.length > SPEECH_LIMITS.audioBytes || audio.toString('base64') !== value) {
     throw speechError('VOICE_PROVIDER_INVALID_RESPONSE', 502, false, 'invalid_response');
+  }
+  if (audioEncoding === 'MP3' && !isMp3(audio)) {
+    throw speechError('VOICE_PROVIDER_INVALID_RESPONSE', 502, false, 'invalid_response');
+  }
+  if (audioEncoding === 'LINEAR16') {
+    try { validateCanonicalWav(audio); } catch {
+      throw speechError('VOICE_PROVIDER_INVALID_RESPONSE', 502, false, 'invalid_response');
+    }
   }
   return audio;
 }
@@ -119,11 +127,16 @@ export function createTtsProvider({
     throw speechError('VOICE_PROVIDER_MISCONFIGURED', 503, false, 'configuration');
   }
 
-  const synthesize = async (text, { signal, responseLanguage = 'yueHant' } = {}) => {
+  const synthesizeWithEncoding = async (text, {
+    signal, responseLanguage = 'yueHant', audioEncoding = 'MP3',
+  } = {}) => {
     const serverText = String(text ?? '');
     if (!serverText.trim()) throw speechError('VOICE_SYNTHESIS_REJECTED', 502, false, 'rejected');
     const startedAt = now();
     const azure = config.provider === 'azure';
+    if (!['MP3', 'LINEAR16'].includes(audioEncoding) || (!google && audioEncoding !== 'MP3')) {
+      throw speechError('VOICE_SYNTHESIS_REJECTED', 502, false, 'rejected');
+    }
     if (!GOOGLE_VOICE_KEYS.has(responseLanguage)) {
       throw speechError('VOICE_SYNTHESIS_REJECTED', 502, false, 'rejected');
     }
@@ -134,7 +147,9 @@ export function createTtsProvider({
       ? JSON.stringify({
         input: { text: serverText },
         voice: settings.voices[responseLanguage],
-        audioConfig: { audioEncoding: 'MP3' },
+        audioConfig: audioEncoding === 'LINEAR16'
+          ? { audioEncoding: 'LINEAR16', sampleRateHertz: 16_000 }
+          : { audioEncoding: 'MP3' },
       })
       : azure
       ? `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="zh-HK"><voice name="${AZURE_VOICE}">${escapeXml(serverText)}</voice></speak>`
@@ -192,10 +207,15 @@ export function createTtsProvider({
           if (responseContentType(response) !== 'application/json') {
             throw speechError('VOICE_PROVIDER_INVALID_RESPONSE', 502, false, 'invalid_response');
           }
-          return google ? parseGoogleTts(responseBody) : parseMiniMax(responseBody);
+          return google ? parseGoogleTts(responseBody, audioEncoding) : parseMiniMax(responseBody);
         },
       });
-      const result = { buffer: audio, mimeType: 'audio/mpeg', provider: config.provider, latencyMs: Math.max(0, now() - startedAt) };
+      const result = {
+        buffer: audio,
+        mimeType: audioEncoding === 'LINEAR16' ? 'audio/wav' : 'audio/mpeg',
+        provider: config.provider,
+        latencyMs: Math.max(0, now() - startedAt),
+      };
       logSpeech(logger, { stage: 'tts', provider: config.provider, statusClass: '2xx', latencyMs: result.latencyMs, byteCount: audio.length });
       return result;
     } catch (error) {
@@ -206,5 +226,7 @@ export function createTtsProvider({
       throw normalized;
     }
   };
-  return { provider: config.provider, synthesize };
+  const synthesize = (text, options = {}) => synthesizeWithEncoding(text, { ...options, audioEncoding: 'MP3' });
+  const synthesizeLinear16 = (text, options = {}) => synthesizeWithEncoding(text, { ...options, audioEncoding: 'LINEAR16' });
+  return { provider: config.provider, synthesize, synthesizeLinear16 };
 }

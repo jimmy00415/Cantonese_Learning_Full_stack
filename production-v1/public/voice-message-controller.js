@@ -356,6 +356,8 @@ export function createVoiceMessageController({
         audio: outcome.audio,
         durationMs: outcome.durationMs,
         clientSessionScope: state.clientSessionScope,
+        asrLanguage: ['en', 'zhHant', 'zhHans'].includes(chat.snapshot()?.replyLanguage)
+          ? chat.snapshot().replyLanguage : 'zhHant',
       });
     } catch {
       if (!currentEpoch(runEpoch)) return { state: 'stale' };
