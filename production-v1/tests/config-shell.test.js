@@ -374,6 +374,69 @@ test('config gives V1 voice selectors precedence over legacy selectors', () => {
   assert.equal(config.tts.available, false);
 });
 
+test('Google AI config is ADC-only, V1-prefixed, and binds one exact voice per locale', () => {
+  const google = loadConfig({
+    NODE_ENV: 'test',
+    V1_LLM_PROVIDER: 'vertex-ai',
+    V1_LLM_CREDENTIAL_VERSION: 'runtime-sa-rotation-v1',
+    V1_GOOGLE_CLOUD_PROJECT: 'hkbuddy-prod-v1-20260826',
+    V1_VERTEX_LOCATION: 'global',
+    V1_VERTEX_MODEL: 'gemini-2.5-flash',
+    V1_ASR_PROVIDER: 'google-stt-v2',
+    V1_GOOGLE_STT_LOCATION: 'asia-southeast1',
+    V1_GOOGLE_STT_MODEL: 'chirp_2',
+    V1_GOOGLE_STT_RECOGNIZER: '_',
+    V1_TTS_PROVIDER: 'google-tts',
+    V1_GOOGLE_TTS_LOCATION: 'asia-southeast1',
+    V1_GOOGLE_TTS_VOICE_EN: 'en-US-Chirp3-HD-Achernar',
+    V1_GOOGLE_TTS_VOICE_YUE: 'yue-HK-Chirp3-HD-Achernar',
+    V1_GOOGLE_TTS_VOICE_CMN: 'cmn-CN-Chirp3-HD-Achernar',
+    V1_GOOGLE_CREDENTIAL_VERSION: 'runtime-sa-rotation-v1',
+  });
+
+  assert.equal(google.llm.available, true);
+  assert.deepEqual(google.llm.settings, {
+    projectId: 'hkbuddy-prod-v1-20260826',
+    location: 'global',
+    model: 'gemini-2.5-flash',
+  });
+  assert.equal(google.asr.available, true);
+  assert.deepEqual(google.asr.settings.languageCodes, ['yue-Hant-HK', 'en-US', 'cmn-Hans-CN']);
+  assert.equal(google.tts.available, true);
+  assert.deepEqual(google.tts.settings.voices, {
+    en: { languageCode: 'en-US', name: 'en-US-Chirp3-HD-Achernar' },
+    yueHant: { languageCode: 'yue-HK', name: 'yue-HK-Chirp3-HD-Achernar' },
+    zhHans: { languageCode: 'cmn-CN', name: 'cmn-CN-Chirp3-HD-Achernar' },
+  });
+  assert.equal(JSON.stringify(google).includes('apiKey'), false);
+
+  const invalid = [
+    ['legacy project', { GOOGLE_CLOUD_PROJECT: 'legacy-project', V1_GOOGLE_CLOUD_PROJECT: undefined }],
+    ['wrong model', { V1_VERTEX_MODEL: 'gemini-latest' }],
+    ['wrong STT region', { V1_GOOGLE_STT_LOCATION: 'global' }],
+    ['wrong recognizer', { V1_GOOGLE_STT_RECOGNIZER: 'default' }],
+    ['voice locale mismatch', { V1_GOOGLE_TTS_VOICE_YUE: 'en-US-Chirp3-HD-Achernar' }],
+    ['API key', { V1_GOOGLE_API_KEY: 'must-not-be-accepted' }],
+    ['credential JSON', { GOOGLE_APPLICATION_CREDENTIALS_JSON: '{"private_key":"must-not-be-accepted"}' }],
+  ];
+  const base = {
+    NODE_ENV: 'test',
+    V1_LLM_PROVIDER: 'vertex-ai', V1_LLM_CREDENTIAL_VERSION: 'runtime-sa-rotation-v1',
+    V1_GOOGLE_CLOUD_PROJECT: 'hkbuddy-prod-v1-20260826', V1_VERTEX_LOCATION: 'global',
+    V1_VERTEX_MODEL: 'gemini-2.5-flash', V1_ASR_PROVIDER: 'google-stt-v2',
+    V1_GOOGLE_STT_LOCATION: 'asia-southeast1', V1_GOOGLE_STT_MODEL: 'chirp_2',
+    V1_GOOGLE_STT_RECOGNIZER: '_', V1_TTS_PROVIDER: 'google-tts',
+    V1_GOOGLE_TTS_LOCATION: 'asia-southeast1',
+    V1_GOOGLE_TTS_VOICE_EN: 'en-US-Chirp3-HD-Achernar',
+    V1_GOOGLE_TTS_VOICE_YUE: 'yue-HK-Chirp3-HD-Achernar',
+    V1_GOOGLE_TTS_VOICE_CMN: 'cmn-CN-Chirp3-HD-Achernar',
+    V1_GOOGLE_CREDENTIAL_VERSION: 'runtime-sa-rotation-v1',
+  };
+  for (const [name, override] of invalid) {
+    assert.throws(() => loadConfig({ ...base, ...override }), /Google|Vertex|ADC|voice|recognizer|project/i, name);
+  }
+});
+
 test('config requires the Azure deployment setting rather than a model alias', () => {
   const azureModelOnly = {
     NODE_ENV: 'test',

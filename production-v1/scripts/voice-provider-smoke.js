@@ -95,8 +95,14 @@ export async function runVoiceProviderSmoke({
       };
     }
     const contractVersion = selection.capability === 'asr'
-      ? voiceEvidenceContracts.asr
-      : selected.provider === 'azure' ? voiceEvidenceContracts.azureTts : voiceEvidenceContracts.minimaxTts;
+      ? selected.provider === 'google-stt-v2'
+        ? voiceEvidenceContracts.googleAsr
+        : voiceEvidenceContracts.asr
+      : selected.provider === 'azure'
+        ? voiceEvidenceContracts.azureTts
+        : selected.provider === 'google-tts'
+          ? voiceEvidenceContracts.googleTts
+          : voiceEvidenceContracts.minimaxTts;
     const record = finalizeEvidenceRecord({
       schemaVersion: 1,
       commitSha: config.releaseCommitSha,

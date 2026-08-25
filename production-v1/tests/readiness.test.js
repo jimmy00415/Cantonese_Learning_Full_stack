@@ -735,6 +735,32 @@ test('readiness re-reads LLM smoke evidence, fails redacted, and performs zero p
   assert.equal(serialized.includes('private-provider-key'), false);
 });
 
+test('readiness rejects Google provider evidence drift before dependency or provider access', async (t) => {
+  const fixture = await productionFixture(t);
+  const config = loadConfig(fixture.environment, { now: () => NOW });
+  config.llmEvidence = Object.freeze({
+    ...config.llmEvidence,
+    provider: 'vertex-ai',
+    configDigest: 'f'.repeat(64),
+  });
+  const counter = { calls: [] };
+  let providerCalls = 0;
+  const result = await evaluateProductionReadiness({
+    config,
+    checks: healthyReadinessChecks(counter),
+    now: () => NOW,
+    llmProvider: { generate: async () => { providerCalls += 1; } },
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.publicReport.productionReady, false);
+  assert.equal(providerCalls, 0);
+  assert.deepEqual(counter.calls, []);
+  assert.deepEqual(result.publicReport.checks.at(-1), {
+    name: 'llm-smoke', status: 'not-ready', version: 'llm-smoke-v1',
+  });
+});
+
 test('retention, dispatcher, and runtime checks independently keep aggregate readiness red', async (t) => {
   for (const failedName of ['retention', 'dispatcher', 'runtime']) {
     await t.test(failedName, async (inner) => {

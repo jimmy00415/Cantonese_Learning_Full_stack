@@ -65,7 +65,7 @@ const LLM_SMOKE_KEYS = [
   'usage',
 ];
 const LLM_USAGE_KEYS = ['inputTokens', 'outputTokens', 'totalTokens'];
-const LLM_PROVIDERS = new Set(['hkbu', 'azure-openai', 'minimax']);
+const LLM_PROVIDERS = new Set(['hkbu', 'azure-openai', 'minimax', 'vertex-ai']);
 export const DEPENDENCY_ACCEPTANCE_CORE_CHECK_NAMES = Object.freeze([
   'postgres-migration-health',
   'postgres-concurrency-recovery',
@@ -155,6 +155,21 @@ function llmProviderConfigDescriptor(config) {
       anthropicBaseUrl: normalizedHttpsBase(settings.anthropicBaseUrl),
       baseUrl: normalizedHttpsBase(settings.baseUrl),
       model: safeConfigurationText(settings.model),
+    };
+  } else if (provider === 'vertex-ai') {
+    const projectId = safeConfigurationText(settings.projectId);
+    const location = safeConfigurationText(settings.location);
+    const model = safeConfigurationText(settings.model);
+    if (projectId !== 'hkbuddy-prod-v1-20260826'
+      || location !== 'global' || model !== 'gemini-2.5-flash') {
+      throw llmConfigurationError();
+    }
+    transport = {
+      endpoint: `https://aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models/${model}:generateContent`,
+      location,
+      model,
+      projectId,
+      authentication: 'adc-attached-service-account',
     };
   } else {
     throw llmConfigurationError();

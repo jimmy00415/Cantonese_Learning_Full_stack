@@ -9,10 +9,12 @@ import {
   speechError,
   withSpeechDeadline,
 } from './speech-common.js';
+import { createGoogleAccessTokenProvider } from './google-auth.js';
 
 const AZURE_REGION = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const AZURE_VOICE = 'zh-HK-HiuMaanNeural';
 const AZURE_FORMAT = 'audio-24khz-48kbitrate-mono-mp3';
+const GOOGLE_VOICE_KEYS = new Set(['en', 'yueHant', 'zhHans']);
 
 export function escapeXml(value) {
   return String(value)
@@ -53,14 +55,47 @@ function parseMiniMax(buffer) {
   return audio;
 }
 
+function googleTtsUrl(settings) {
+  const expected = {
+    en: { languageCode: 'en-US', name: 'en-US-Chirp3-HD-Achernar' },
+    yueHant: { languageCode: 'yue-HK', name: 'yue-HK-Chirp3-HD-Achernar' },
+    zhHans: { languageCode: 'cmn-CN', name: 'cmn-CN-Chirp3-HD-Achernar' },
+  };
+  if (settings?.projectId !== 'hkbuddy-prod-v1-20260826'
+    || settings.location !== 'asia-southeast1'
+    || JSON.stringify(settings.voices) !== JSON.stringify(expected)) {
+    throw speechError('VOICE_PROVIDER_MISCONFIGURED', 503, false, 'configuration');
+  }
+  return `https://${settings.location}-texttospeech.googleapis.com/v1/text:synthesize`;
+}
+
+function parseGoogleTts(buffer) {
+  let payload;
+  try { payload = JSON.parse(buffer.toString('utf8')); } catch {
+    throw speechError('VOICE_PROVIDER_INVALID_RESPONSE', 502, false, 'invalid_response');
+  }
+  const value = payload?.audioContent;
+  if (typeof value !== 'string' || value.length < 4 || value.length % 4 !== 0
+    || !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) {
+    throw speechError('VOICE_PROVIDER_INVALID_RESPONSE', 502, false, 'invalid_response');
+  }
+  const audio = Buffer.from(value, 'base64');
+  if (audio.length > SPEECH_LIMITS.audioBytes
+    || audio.toString('base64') !== value || !isMp3(audio)) {
+    throw speechError('VOICE_PROVIDER_INVALID_RESPONSE', 502, false, 'invalid_response');
+  }
+  return audio;
+}
+
 export function createTtsProvider({
   config,
   fetchImpl = globalThis.fetch,
   now = Date.now,
   logger,
   totalDeadlineMs = SPEECH_LIMITS.deadlineMs,
+  googleAuthProvider: suppliedGoogleAuthProvider,
 } = {}) {
-  if (!['azure', 'minimax'].includes(config?.provider) || typeof fetchImpl !== 'function') {
+  if (!['azure', 'minimax', 'google-tts'].includes(config?.provider) || typeof fetchImpl !== 'function') {
     throw speechError('VOICE_PROVIDER_MISCONFIGURED', 503, false, 'configuration');
   }
   const settings = config.settings ?? {};
@@ -68,19 +103,37 @@ export function createTtsProvider({
   if (config.provider === 'azure') {
     if (!settings.apiKey || !settings.region) throw speechError('VOICE_PROVIDER_MISCONFIGURED', 503, false, 'configuration');
     url = azureUrl(settings.region);
-  } else {
+  } else if (config.provider === 'minimax') {
     if (!settings.apiKey || !settings.baseUrl || !settings.model || !settings.voice) {
       throw speechError('VOICE_PROVIDER_MISCONFIGURED', 503, false, 'configuration');
     }
     url = `${safeHttpsBase(settings.baseUrl)}/v1/t2a_v2`;
+  } else {
+    url = googleTtsUrl(settings);
+  }
+  const google = config.provider === 'google-tts';
+  const googleAuthProvider = google
+    ? suppliedGoogleAuthProvider ?? createGoogleAccessTokenProvider({ fetchImpl })
+    : null;
+  if (google && typeof googleAuthProvider?.fetch !== 'function') {
+    throw speechError('VOICE_PROVIDER_MISCONFIGURED', 503, false, 'configuration');
   }
 
-  const synthesize = async (text, { signal } = {}) => {
+  const synthesize = async (text, { signal, responseLanguage = 'yueHant' } = {}) => {
     const serverText = String(text ?? '');
     if (!serverText.trim()) throw speechError('VOICE_SYNTHESIS_REJECTED', 502, false, 'rejected');
     const startedAt = now();
     const azure = config.provider === 'azure';
-    const body = azure
+    if (google && !GOOGLE_VOICE_KEYS.has(responseLanguage)) {
+      throw speechError('VOICE_SYNTHESIS_REJECTED', 502, false, 'rejected');
+    }
+    const body = google
+      ? JSON.stringify({
+        input: { text: serverText },
+        voice: settings.voices[responseLanguage],
+        audioConfig: { audioEncoding: 'MP3' },
+      })
+      : azure
       ? `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="zh-HK"><voice name="${AZURE_VOICE}">${escapeXml(serverText)}</voice></speak>`
       : JSON.stringify({
         model: settings.model,
@@ -98,9 +151,13 @@ export function createTtsProvider({
         operation: async (deadlineSignal) => {
           let response;
           try {
-            response = await fetchImpl(url, {
+            const providerFetch = googleAuthProvider?.fetch ?? fetchImpl;
+            response = await providerFetch(url, {
               method: 'POST',
-              headers: azure ? {
+              headers: google ? {
+                Accept: 'application/json',
+                'Content-Type': 'application/json',
+              } : azure ? {
                 'Ocp-Apim-Subscription-Key': settings.apiKey,
                 'Content-Type': 'application/ssml+xml',
                 'X-Microsoft-OutputFormat': AZURE_FORMAT,
@@ -115,6 +172,9 @@ export function createTtsProvider({
             });
           } catch (error) {
             if (deadlineSignal.aborted) throw error;
+            if (error?.code === 'GOOGLE_AUTHENTICATION_FAILED') {
+              throw speechError('VOICE_PROVIDER_MISCONFIGURED', 503, false, 'authentication');
+            }
             throw speechError('VOICE_SYNTHESIS_FAILED', 502, true, 'network');
           }
           const maximum = azure ? SPEECH_LIMITS.audioBytes : SPEECH_LIMITS.minimaxJsonBytes;
@@ -129,7 +189,7 @@ export function createTtsProvider({
           if (responseContentType(response) !== 'application/json') {
             throw speechError('VOICE_PROVIDER_INVALID_RESPONSE', 502, false, 'invalid_response');
           }
-          return parseMiniMax(responseBody);
+          return google ? parseGoogleTts(responseBody) : parseMiniMax(responseBody);
         },
       });
       const result = { buffer: audio, mimeType: 'audio/mpeg', provider: config.provider, latencyMs: Math.max(0, now() - startedAt) };

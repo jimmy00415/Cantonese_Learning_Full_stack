@@ -59,9 +59,9 @@ function normalizedUsage(usage) {
     }
     return null;
   };
-  const inputTokens = safeToken('prompt_tokens', 'input_tokens');
-  const outputTokens = safeToken('completion_tokens', 'output_tokens');
-  let totalTokens = safeToken('total_tokens');
+  const inputTokens = safeToken('inputTokens', 'prompt_tokens', 'input_tokens');
+  const outputTokens = safeToken('outputTokens', 'completion_tokens', 'output_tokens');
+  let totalTokens = safeToken('totalTokens', 'total_tokens');
   if (totalTokens === null && inputTokens !== null && outputTokens !== null
     && Number.isSafeInteger(inputTokens + outputTokens)) {
     totalTokens = inputTokens + outputTokens;

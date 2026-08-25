@@ -627,6 +627,52 @@ test('configuration failure happens before any storage factory can open a connec
   assert.equal(storageFactoryCalls, 0, 'unknown NODE_ENV values open no storage adapter');
 });
 
+test('server creates one shared ADC adapter for all configured Google providers', async (t) => {
+  const config = productionConfig();
+  config.llm = {
+    available: true, provider: 'vertex-ai', timeoutMs: 1_000,
+    settings: { projectId: 'hkbuddy-prod-v1-20260826', location: 'global', model: 'gemini-2.5-flash' },
+  };
+  config.asr = { available: true, provider: 'google-stt-v2', settings: {
+    projectId: 'hkbuddy-prod-v1-20260826', location: 'asia-southeast1', model: 'chirp_2', recognizer: '_',
+    languageCodes: ['yue-Hant-HK', 'en-US', 'cmn-Hans-CN'], credentialVersion: 'runtime-sa-rotation-v1',
+  } };
+  config.tts = { available: true, provider: 'google-tts', settings: {
+    projectId: 'hkbuddy-prod-v1-20260826', location: 'asia-southeast1', credentialVersion: 'runtime-sa-rotation-v1',
+    voices: {
+      en: { languageCode: 'en-US', name: 'en-US-Chirp3-HD-Achernar' },
+      yueHant: { languageCode: 'yue-HK', name: 'yue-HK-Chirp3-HD-Achernar' },
+      zhHans: { languageCode: 'cmn-CN', name: 'cmn-CN-Chirp3-HD-Achernar' },
+    },
+  } };
+  const order = [];
+  const { store, mediaStore, cleanupService } = runtimeFixture(order);
+  const retentionWorker = {
+    firstRun: Promise.resolve({ ok: true }),
+    readiness: async () => ({ status: 'ready', healthy: true, policyVersion: 'retention-v1' }),
+    stop: async () => undefined,
+  };
+  let authFactoryCalls = 0;
+  const server = await startServer({
+    config, host: '127.0.0.1', port: 0, store, mediaStore, cleanupService, retentionWorker,
+    corpus: {
+      schemaVersion: 'hkbu-campus-v1', snapshotAt: '2026-08-25T12:00:00+08:00',
+      sources: [{ id: 'official-source' }],
+    },
+    createGoogleAuthProvider: () => {
+      authFactoryCalls += 1;
+      return { fetch: async () => assert.fail('provider must not run during startup') };
+    },
+    evaluateReadiness: async () => safeReadiness(true),
+    dispatcherOptions: { pollIntervalMs: 60_000 },
+  });
+  t.after(() => server.shutdown());
+
+  assert.equal(authFactoryCalls, 1);
+  assert.equal(server.runtime.asrProvider.provider, 'google-stt-v2');
+  assert.equal(server.runtime.ttsProvider.provider, 'google-tts');
+});
+
 test('the single-flight readiness supervisor revokes, gates, and recovers while public ready stays cached', async (t) => {
   const config = productionConfig();
   const order = [];

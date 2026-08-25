@@ -7,6 +7,8 @@ const FUTURE_SKEW_MS = 5 * 60 * 1_000;
 const RELEASE_SHA = /^[0-9a-f]{40}$/i;
 const DIGEST = /^[0-9a-f]{64}$/;
 const AZURE_REGION = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const GOOGLE_PROJECT = 'hkbuddy-prod-v1-20260826';
+const GOOGLE_SPEECH_LOCATION = 'asia-southeast1';
 const VOICE_EVIDENCE_MAX_BYTES = 64 * 1_024;
 const SPEECH_EVIDENCE_KEYS = Object.freeze([
   'schemaVersion', 'commitSha', 'capability', 'provider', 'contractVersion',
@@ -95,6 +97,47 @@ export function providerConfigDescriptor(config, capability) {
       credentialVersion: settings.credentialVersion ?? null,
     };
   }
+  if (provider === 'google-stt-v2' && capability === 'asr') {
+    if (settings.projectId !== GOOGLE_PROJECT || settings.location !== GOOGLE_SPEECH_LOCATION
+      || settings.model !== 'chirp_2' || settings.recognizer !== '_'
+      || JSON.stringify(settings.languageCodes) !== JSON.stringify(['yue-Hant-HK', 'en-US', 'cmn-Hans-CN'])) {
+      throw new Error('Invalid Google STT V2 configuration');
+    }
+    return {
+      provider, capability,
+      endpoint: `https://${settings.location}-speech.googleapis.com/v2/projects/${settings.projectId}/locations/${settings.location}/recognizers/${settings.recognizer}:recognize`,
+      projectId: settings.projectId,
+      location: settings.location,
+      recognizer: settings.recognizer,
+      model: settings.model,
+      languageCodes: [...settings.languageCodes],
+      contentType: 'application/json',
+      inputEncoding: 'canonical-wav-v1',
+      credentialVersion: settings.credentialVersion ?? null,
+    };
+  }
+  if (provider === 'google-tts' && capability === 'tts') {
+    const expectedVoices = {
+      en: { languageCode: 'en-US', name: 'en-US-Chirp3-HD-Achernar' },
+      yueHant: { languageCode: 'yue-HK', name: 'yue-HK-Chirp3-HD-Achernar' },
+      zhHans: { languageCode: 'cmn-CN', name: 'cmn-CN-Chirp3-HD-Achernar' },
+    };
+    if (settings.projectId !== GOOGLE_PROJECT || settings.location !== GOOGLE_SPEECH_LOCATION
+      || JSON.stringify(settings.voices) !== JSON.stringify(expectedVoices)) {
+      throw new Error('Invalid Google TTS configuration');
+    }
+    return {
+      provider, capability,
+      endpoint: `https://${settings.location}-texttospeech.googleapis.com/v1/text:synthesize`,
+      projectId: settings.projectId,
+      location: settings.location,
+      voices: expectedVoices,
+      audioEncoding: 'MP3',
+      outputChannels: 1,
+      credentialVersion: settings.credentialVersion ?? null,
+      fallbackPolicy: 'none',
+    };
+  }
   throw new Error('Unsupported speech provider configuration');
 }
 
@@ -138,11 +181,15 @@ export function validateSpeechEvidence(record, {
   expectedVersion, commitSha, capability, provider, contractVersion,
   configDigest, now,
 }) {
+  const allowedProviders = capability === 'asr'
+    ? new Set(['azure', 'google-stt-v2'])
+    : new Set(['azure', 'minimax', 'google-tts']);
   const expectedKeys = capability === 'asr'
     ? [...SPEECH_EVIDENCE_KEYS, ...ASR_FIXTURE_KEYS]
     : SPEECH_EVIDENCE_KEYS;
   return Boolean(
     hasExactOwnKeys(record, expectedKeys)
+    && allowedProviders.has(provider)
     && RELEASE_SHA.test(String(commitSha ?? ''))
     && artifactValid(record, expectedVersion)
     && record.schemaVersion === 1
@@ -185,8 +232,10 @@ export function validateIosVoiceEvidence(record, {
 
 export const voiceEvidenceContracts = Object.freeze({
   asr: 'azure-asr-v1',
+  googleAsr: 'google-stt-v2-v1',
   azureTts: 'azure-tts-v1',
   minimaxTts: 'minimax-tts-v1',
+  googleTts: 'google-tts-v1',
   speechMaximumAgeMs: 30 * DAY_MS,
   iosMaximumAgeMs: 90 * DAY_MS,
   futureSkewMs: FUTURE_SKEW_MS,

@@ -46,6 +46,10 @@ V1 runs as one new application replica behind HTTPS:
   boundary; only allowlisted official HKBU sources can support verified claims.
 - One real LLM provider is required. ASR and TTS are separately configured and
   separately release-evidenced capabilities.
+- The GCP release selectors are `vertex-ai`, `google-stt-v2`, and `google-tts`.
+  All three share Application Default Credentials from the attached Cloud Run
+  runtime service account. API keys, access-token settings, credential JSON,
+  and credential-file paths are rejected.
 
 Production does not listen on a port until the first retention run succeeds and
 all six live checks are ready: database, private media, corpus, retention,
@@ -100,6 +104,17 @@ readiness, startup, PostgreSQL connection, query, and statement waits also have
 bounded `V1_*_TIMEOUT_MS` settings documented in `.env.example`; the readiness
 watchdog interval is configured separately with
 `V1_READINESS_WATCHDOG_INTERVAL_MS`.
+
+For the Google release, configure `V1_GOOGLE_CLOUD_PROJECT` as
+`hkbuddy-prod-v1-20260826`, `V1_VERTEX_LOCATION=global`, and
+`V1_VERTEX_MODEL=gemini-2.5-flash`. STT is fixed to `chirp_2` through the `_`
+recognizer in `asia-southeast1`. TTS uses the regional
+`asia-southeast1` endpoint and exactly one evidenced Chirp 3 HD Achernar voice
+for each supported locale: `en-US`, `yue-HK`, and `cmn-CN`. Unsupported reply
+languages are rejected; there is no hidden runtime voice fallback. Rotate the
+non-secret `V1_GOOGLE_CREDENTIAL_VERSION` label whenever attached service-account
+authority changes. Tokens, prompts, transcripts, audio, and upstream bodies are
+never evidence fields.
 
 ## Frozen release and guarded evidence
 

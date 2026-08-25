@@ -23,6 +23,18 @@ const NODE_ENVIRONMENTS = new Set(['development', 'test', 'production']);
 export const NORMALIZER_CONTRACT_VERSION = 'canonical-wav-v1';
 const RELEASE_SHA = /^[0-9a-f]{40}$/;
 const AZURE_SPEECH_REGION = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const GOOGLE_PROJECT_ID = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
+const GOOGLE_SECRET_ENV_NAMES = Object.freeze([
+  'V1_GOOGLE_API_KEY', 'GOOGLE_API_KEY', 'GEMINI_API_KEY',
+  'GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_APPLICATION_CREDENTIALS_JSON',
+  'V1_GOOGLE_CREDENTIAL_JSON', 'V1_GOOGLE_ACCESS_TOKEN',
+]);
+const GOOGLE_SPEECH_LANGUAGES = Object.freeze(['yue-Hant-HK', 'en-US', 'cmn-Hans-CN']);
+const GOOGLE_TTS_VOICES = Object.freeze({
+  en: Object.freeze({ languageCode: 'en-US', envName: 'V1_GOOGLE_TTS_VOICE_EN' }),
+  yueHant: Object.freeze({ languageCode: 'yue-HK', envName: 'V1_GOOGLE_TTS_VOICE_YUE' }),
+  zhHans: Object.freeze({ languageCode: 'cmn-CN', envName: 'V1_GOOGLE_TTS_VOICE_CMN' }),
+});
 
 function firstDefined(env, ...names) {
   for (const name of names) {
@@ -79,6 +91,13 @@ function selectedLlmSettings(env, provider, { v1Only = false } = {}) {
       model: selected('V1_MINIMAX_LLM_MODEL', 'MINIMAX_LLM_MODEL'),
     };
   }
+  if (provider === 'vertex-ai') {
+    return {
+      projectId: env.V1_GOOGLE_CLOUD_PROJECT,
+      location: env.V1_VERTEX_LOCATION,
+      model: env.V1_VERTEX_MODEL,
+    };
+  }
   return {};
 }
 
@@ -89,7 +108,32 @@ function configuredLlm(provider, settings) {
       && AZURE_REQUEST_PROFILES.has(settings.requestProfile));
   }
   if (provider === 'minimax') return Boolean(settings.apiKey && settings.baseUrl && settings.anthropicBaseUrl && settings.model);
+  if (provider === 'vertex-ai') {
+    return settings.projectId === 'hkbuddy-prod-v1-20260826'
+      && settings.location === 'global' && settings.model === 'gemini-2.5-flash';
+  }
   return provider === 'deterministic';
+}
+
+function assertGoogleAdcOnly(env) {
+  if (GOOGLE_SECRET_ENV_NAMES.some((name) => env[name] !== undefined && env[name] !== '')) {
+    throw new Error('Google providers require attached-service-account ADC only');
+  }
+}
+
+function validateGoogleProject(value) {
+  if (!GOOGLE_PROJECT_ID.test(String(value ?? '')) || value !== 'hkbuddy-prod-v1-20260826') {
+    throw new Error('V1_GOOGLE_CLOUD_PROJECT is invalid');
+  }
+}
+
+function googleTtsVoice(env, key) {
+  const definition = GOOGLE_TTS_VOICES[key];
+  const name = env[definition.envName];
+  if (name !== `${definition.languageCode}-Chirp3-HD-Achernar`) {
+    throw new Error(`${definition.envName} is invalid`);
+  }
+  return { languageCode: definition.languageCode, name };
 }
 
 function buildLlmConfiguration(env, { v1Only = false } = {}) {
@@ -98,6 +142,12 @@ function buildLlmConfiguration(env, { v1Only = false } = {}) {
     v1Only ? 'none' : 'deterministic',
   );
   const settings = selectedLlmSettings(env, provider, { v1Only });
+  if (provider === 'vertex-ai') {
+    assertGoogleAdcOnly(env);
+    validateGoogleProject(settings.projectId);
+    if (settings.location !== 'global') throw new Error('V1_VERTEX_LOCATION must be global');
+    if (settings.model !== 'gemini-2.5-flash') throw new Error('V1_VERTEX_MODEL must be gemini-2.5-flash');
+  }
   if (provider === 'azure-openai' && settings.requestProfile
     && !AZURE_REQUEST_PROFILES.has(settings.requestProfile)) {
     throw new Error('V1_AZURE_OPENAI_REQUEST_PROFILE must be standard or reasoning');
@@ -119,6 +169,23 @@ function buildLlmConfiguration(env, { v1Only = false } = {}) {
 }
 
 function selectedAsrSettings(env, provider) {
+  if (provider === 'google-stt-v2') {
+    assertGoogleAdcOnly(env);
+    validateGoogleProject(env.V1_GOOGLE_CLOUD_PROJECT);
+    if (env.V1_GOOGLE_STT_LOCATION !== 'asia-southeast1') {
+      throw new Error('V1_GOOGLE_STT_LOCATION must be asia-southeast1');
+    }
+    if (env.V1_GOOGLE_STT_MODEL !== 'chirp_2') throw new Error('V1_GOOGLE_STT_MODEL must be chirp_2');
+    if (env.V1_GOOGLE_STT_RECOGNIZER !== '_') throw new Error('V1_GOOGLE_STT_RECOGNIZER must be _');
+    return {
+      projectId: env.V1_GOOGLE_CLOUD_PROJECT,
+      location: env.V1_GOOGLE_STT_LOCATION,
+      model: env.V1_GOOGLE_STT_MODEL,
+      recognizer: env.V1_GOOGLE_STT_RECOGNIZER,
+      languageCodes: [...GOOGLE_SPEECH_LANGUAGES],
+      credentialVersion: env.V1_GOOGLE_CREDENTIAL_VERSION,
+    };
+  }
   if (provider !== 'azure') return {};
   return {
     apiKey: firstDefined(env, 'V1_AZURE_SPEECH_KEY', 'AZURE_SPEECH_KEY'),
@@ -128,6 +195,23 @@ function selectedAsrSettings(env, provider) {
 }
 
 function selectedTtsSettings(env, provider) {
+  if (provider === 'google-tts') {
+    assertGoogleAdcOnly(env);
+    validateGoogleProject(env.V1_GOOGLE_CLOUD_PROJECT);
+    if (env.V1_GOOGLE_TTS_LOCATION !== 'asia-southeast1') {
+      throw new Error('V1_GOOGLE_TTS_LOCATION must be asia-southeast1');
+    }
+    return {
+      projectId: env.V1_GOOGLE_CLOUD_PROJECT,
+      location: env.V1_GOOGLE_TTS_LOCATION,
+      voices: {
+        en: googleTtsVoice(env, 'en'),
+        yueHant: googleTtsVoice(env, 'yueHant'),
+        zhHans: googleTtsVoice(env, 'zhHans'),
+      },
+      credentialVersion: env.V1_GOOGLE_CREDENTIAL_VERSION,
+    };
+  }
   if (provider === 'azure') return selectedAsrSettings(env, provider);
   if (provider === 'minimax') {
     return {
@@ -148,10 +232,18 @@ function validateSpeechSettings(provider, settings) {
 }
 
 function configuredAsr(provider, settings) {
+  if (provider === 'google-stt-v2') {
+    return Boolean(settings.projectId && settings.location && settings.model && settings.recognizer
+      && settings.credentialVersion && settings.languageCodes?.length === 3);
+  }
   return provider === 'azure' && Boolean(settings.apiKey && settings.region);
 }
 
 function configuredTts(provider, settings) {
+  if (provider === 'google-tts') {
+    return Boolean(settings.projectId && settings.location && settings.credentialVersion
+      && Object.keys(settings.voices ?? {}).length === 3);
+  }
   if (provider === 'azure') return Boolean(settings.apiKey && settings.region);
   if (provider === 'minimax') return Boolean(settings.apiKey && settings.baseUrl && settings.model && settings.voice);
   return false;
@@ -221,8 +313,10 @@ function assertProductionReady(config) {
   if (!validResourceId(config.llm.credentialVersion)) {
     throw new Error('V1_LLM_CREDENTIAL_VERSION is required in production');
   }
-  const providerUrls = config.llm.provider === 'hkbu'
-    ? [config.llm.settings.baseUrl]
+  const providerUrls = config.llm.provider === 'vertex-ai'
+    ? []
+    : config.llm.provider === 'hkbu'
+      ? [config.llm.settings.baseUrl]
     : config.llm.provider === 'azure-openai'
       ? [config.llm.settings.endpoint]
       : [config.llm.settings.baseUrl, config.llm.settings.anthropicBaseUrl];
@@ -263,12 +357,15 @@ function publicStatusFor(config, speechEvidence, at) {
   let iosValid = false;
   if (isProduction && config.releaseCommitSha) {
     if (config.asr.available && config.asr.settings.credentialVersion) {
+      const contractVersion = config.asr.provider === 'google-stt-v2'
+        ? voiceEvidenceContracts.googleAsr
+        : voiceEvidenceContracts.asr;
       asrValid = validateSpeechEvidence(speechEvidence.asr.record, {
         expectedVersion: speechEvidence.asr.version,
         commitSha: config.releaseCommitSha,
         capability: 'asr',
         provider: config.asr.provider,
-        contractVersion: voiceEvidenceContracts.asr,
+        contractVersion,
         configDigest: providerConfigDigest(config.asr, 'asr'),
         now: at,
       });
@@ -276,7 +373,9 @@ function publicStatusFor(config, speechEvidence, at) {
     if (config.tts.available && config.tts.settings.credentialVersion) {
       const contractVersion = config.tts.provider === 'azure'
         ? voiceEvidenceContracts.azureTts
-        : voiceEvidenceContracts.minimaxTts;
+        : config.tts.provider === 'google-tts'
+          ? voiceEvidenceContracts.googleTts
+          : voiceEvidenceContracts.minimaxTts;
       ttsValid = validateSpeechEvidence(speechEvidence.tts.record, {
         expectedVersion: speechEvidence.tts.version,
         commitSha: config.releaseCommitSha,

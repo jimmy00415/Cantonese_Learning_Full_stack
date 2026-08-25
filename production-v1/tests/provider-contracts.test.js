@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { loadConfig } from '../src/config.js';
+import { createAsrProvider } from '../src/providers/asr.js';
 import { createLlmProvider, ProviderError, providerLimits } from '../src/providers/llm.js';
+import { createTtsProvider } from '../src/providers/tts.js';
 import {
   runProviderSmoke,
   writeLlmSmokeEvidence,
@@ -42,6 +44,124 @@ function miniMaxSuccess(rawText = '{"replyText":"ok"}', stopReason = 'end_turn')
     usage: { input_tokens: 11, output_tokens: 5 },
   }), { status: 200, headers: { 'content-type': 'application/json' } });
 }
+
+test('Google auth adapter caches bounded ADC tokens and sanitizes authentication failures', async () => {
+  const authModule = await import('../src/providers/google-auth.js').catch(() => ({}));
+  assert.equal(typeof authModule.createGoogleAccessTokenProvider, 'function');
+  const calls = { tokens: 0, fetches: [] };
+  let now = 1_000;
+  const provider = authModule.createGoogleAccessTokenProvider({
+    auth: {
+      async getAccessToken() {
+        calls.tokens += 1;
+        return { token: 'private-access-token', res: { data: { expiry_date: now + 120_000 } } };
+      },
+    },
+    now: () => now,
+    fetchImpl: async (url, init) => {
+      calls.fetches.push({ url, init });
+      return new Response('{}', { status: 200 });
+    },
+  });
+  await provider.fetch('https://googleapis.test/v1', { headers: { 'content-type': 'application/json' } });
+  now += 1_000;
+  await provider.fetch('https://googleapis.test/v1', { headers: { accept: 'application/json' } });
+  assert.equal(calls.tokens, 1);
+  assert.equal(calls.fetches[0].init.headers.Authorization, 'Bearer private-access-token');
+  assert.deepEqual(Object.keys(provider), ['fetch']);
+
+  const failing = authModule.createGoogleAccessTokenProvider({
+    auth: { getAccessToken: async () => { throw new Error('upstream body private-access-token'); } },
+    fetchImpl: async () => { throw new Error('must not fetch'); },
+  });
+  await assert.rejects(failing.fetch('https://googleapis.test/v1'), (error) => {
+    assert.equal(error.code, 'GOOGLE_AUTHENTICATION_FAILED');
+    assert.equal(String(error).includes('private-access-token'), false);
+    assert.equal(String(error).includes('upstream body'), false);
+    return true;
+  });
+});
+
+test('Vertex AI uses ADC generateContent and normalizes candidate text without exposing provider bodies', async () => {
+  let request;
+  const provider = createLlmProvider({
+    config: {
+      provider: 'vertex-ai', timeoutMs: 12_000,
+      settings: { projectId: 'hkbuddy-prod-v1-20260826', location: 'global', model: 'gemini-2.5-flash' },
+    },
+    googleAuthProvider: {
+      fetch: async (url, init) => {
+        request = { url, init };
+        return new Response(JSON.stringify({
+          responseId: 'vertex-request-1',
+          candidates: [{ content: { role: 'model', parts: [{ text: '{"replyText":"ok"}' }] }, finishReason: 'STOP' }],
+          usageMetadata: { promptTokenCount: 11, candidatesTokenCount: 5, totalTokenCount: 16 },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      },
+    },
+  });
+  const result = await provider.generate(TURN_INPUT);
+  const body = JSON.parse(request.init.body);
+  assert.equal(request.url, 'https://aiplatform.googleapis.com/v1/projects/hkbuddy-prod-v1-20260826/locations/global/publishers/google/models/gemini-2.5-flash:generateContent');
+  assert.deepEqual(body.generationConfig.responseMimeType, 'application/json');
+  assert.match(body.systemInstruction.parts[0].text, /one strict JSON object/i);
+  assert.match(body.contents.at(-1).parts[0].text, /untrusted_reference_data/);
+  assert.deepEqual(result, {
+    rawText: '{"replyText":"ok"}', provider: 'vertex-ai', latencyMs: result.latencyMs,
+    usage: { inputTokens: 11, outputTokens: 5, totalTokens: 16 },
+    finishReason: 'stop', providerRequestId: 'vertex-request-1',
+  });
+});
+
+test('Google STT V2 and TTS issue locale-bound ADC requests with no hidden fallback', async () => {
+  const requests = [];
+  const auth = {
+    fetch: async (url, init) => {
+      requests.push({ url, init });
+      if (url.includes(':recognize')) {
+        return new Response(JSON.stringify({ results: [{ alternatives: [{ transcript: '你好', confidence: 0.93 }] }] }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ audioContent: Buffer.from('ID3fixture').toString('base64') }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      });
+    },
+  };
+  const asr = createAsrProvider({
+    config: { provider: 'google-stt-v2', settings: {
+      projectId: 'hkbuddy-prod-v1-20260826', location: 'asia-southeast1', model: 'chirp_2', recognizer: '_',
+      languageCodes: ['yue-Hant-HK', 'en-US', 'cmn-Hans-CN'], credentialVersion: 'runtime-sa-rotation-v1',
+    } },
+    googleAuthProvider: auth,
+  });
+  const asrResult = await asr.transcribe(Buffer.from('RIFFcanonical-wav'), { responseLanguage: 'en' });
+  const asrBody = JSON.parse(requests[0].init.body);
+  assert.match(requests[0].url, /asia-southeast1-speech\.googleapis\.com\/v2\/projects\/hkbuddy-prod-v1-20260826\/locations\/asia-southeast1\/recognizers\/_:recognize$/);
+  assert.deepEqual(asrBody.config.languageCodes, ['en-US', 'yue-Hant-HK', 'cmn-Hans-CN']);
+  assert.equal(asrBody.config.model, 'chirp_2');
+  assert.equal(asrResult.transcript, '你好');
+
+  const tts = createTtsProvider({
+    config: { provider: 'google-tts', settings: {
+      projectId: 'hkbuddy-prod-v1-20260826', location: 'asia-southeast1', credentialVersion: 'runtime-sa-rotation-v1',
+      voices: {
+        en: { languageCode: 'en-US', name: 'en-US-Chirp3-HD-Achernar' },
+        yueHant: { languageCode: 'yue-HK', name: 'yue-HK-Chirp3-HD-Achernar' },
+        zhHans: { languageCode: 'cmn-CN', name: 'cmn-CN-Chirp3-HD-Achernar' },
+      },
+    } },
+    googleAuthProvider: auth,
+  });
+  const ttsResult = await tts.synthesize('Hello', { responseLanguage: 'en' });
+  const ttsBody = JSON.parse(requests[1].init.body);
+  assert.equal(requests[1].url, 'https://asia-southeast1-texttospeech.googleapis.com/v1/text:synthesize');
+  assert.deepEqual(ttsBody.voice, { languageCode: 'en-US', name: 'en-US-Chirp3-HD-Achernar' });
+  assert.deepEqual(ttsBody.audioConfig, { audioEncoding: 'MP3' });
+  assert.equal(ttsResult.buffer.toString('ascii'), 'ID3fixture');
+  await assert.rejects(tts.synthesize('未知', { responseLanguage: 'fr' }), (error) => error.code === 'VOICE_SYNTHESIS_REJECTED');
+  assert.equal(requests.length, 2);
+});
 
 function smokeEnvironment(overrides = {}) {
   return {
@@ -496,6 +616,38 @@ test('confirmed provider smoke emits one strict commit/config-bound immutable ev
     'never-print-this-key', 'https://hkbu.test', 'private', 'path',
     record.providerConfigDigest, '{"ok":true}', 'request-1',
   ]) assert.equal(rendered.includes(forbidden), false);
+});
+
+test('provider smoke preserves normalized Vertex token usage in immutable evidence', async () => {
+  const records = [];
+  const llm = {
+    available: true, provider: 'vertex-ai', credentialVersion: 'runtime-sa-rotation-v1', timeoutMs: 12_000,
+    settings: { projectId: 'hkbuddy-prod-v1-20260826', location: 'global', model: 'gemini-2.5-flash' },
+  };
+  const exitCode = await runProviderSmoke({
+    argv: ['--confirm-real-provider'],
+    loadSmokeConfig: () => ({ releaseCommitSha: SMOKE_COMMIT, llm }),
+    inspectGit: cleanFrozenGit(),
+    createProvider: ({ fetchImpl }) => ({
+      generate: async () => {
+        await fetchImpl('https://aiplatform.googleapis.com/v1/test', {});
+        return {
+          provider: 'vertex-ai', rawText: '{"ok":true}', latencyMs: 1,
+          usage: { inputTokens: 11, outputTokens: 5, totalTokens: 16 },
+          finishReason: 'stop', providerRequestId: 'private-request-id',
+        };
+      },
+    }),
+    fetchImpl: async () => new Response('{}', { status: 200 }),
+    writeEvidence: async (record) => { records.push(record); },
+    now: () => SMOKE_NOW,
+    clockMs: (() => { const values = [1_000, 1_001]; return () => values.shift(); })(),
+    stdout: () => {},
+    stderr: () => {},
+  });
+
+  assert.equal(exitCode, 0);
+  assert.deepEqual(records[0].usage, { inputTokens: 11, outputTokens: 5, totalTokens: 16 });
 });
 
 test('provider smoke rejects dirty or moving Git state before publishing evidence', async (t) => {

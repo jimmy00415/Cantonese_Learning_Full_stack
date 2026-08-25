@@ -1,4 +1,5 @@
 import { contextLimits, retainRecentCompletePairs } from '../context-budget.js';
+import { createGoogleAccessTokenProvider } from './google-auth.js';
 
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const DEFAULT_DEADLINE_MS = 12_000;
@@ -52,8 +53,9 @@ function safeUsage(value) {
 }
 
 function requestIdFrom(response, payload) {
-  if (typeof payload?.id === 'string' && payload.id.length <= 256) return payload.id;
-  for (const name of ['x-request-id', 'apim-request-id', 'request-id']) {
+  const payloadId = payload?.id ?? payload?.responseId;
+  if (typeof payloadId === 'string' && payloadId.length <= 256) return payloadId;
+  for (const name of ['x-request-id', 'x-goog-request-id', 'apim-request-id', 'request-id']) {
     const value = response.headers?.get?.(name);
     if (value && value.length <= 256) return value;
   }
@@ -157,6 +159,29 @@ function buildRequest(config, input) {
     };
   }
 
+  if (config.provider === 'vertex-ai') {
+    if (settings.projectId !== 'hkbuddy-prod-v1-20260826'
+      || settings.location !== 'global' || settings.model !== 'gemini-2.5-flash') {
+      throw providerError('PROVIDER_NOT_CONFIGURED');
+    }
+    return {
+      url: `https://aiplatform.googleapis.com/v1/projects/${settings.projectId}/locations/${settings.location}/publishers/google/models/${settings.model}:generateContent`,
+      headers: { accept: 'application/json', 'Content-Type': 'application/json' },
+      body: {
+        systemInstruction: { parts: [{ text: system }] },
+        contents: messages.map((message) => ({
+          role: message.role === 'assistant' ? 'model' : 'user',
+          parts: [{ text: message.content }],
+        })),
+        generationConfig: {
+          maxOutputTokens,
+          temperature: 0.2,
+          responseMimeType: 'application/json',
+        },
+      },
+    };
+  }
+
   throw providerError('PROVIDER_NOT_CONFIGURED');
 }
 
@@ -214,6 +239,35 @@ function parseJsonBody(text) {
 }
 
 function parseProviderSuccess(provider, response, payload, latencyMs) {
+  if (provider === 'vertex-ai') {
+    const candidate = payload.candidates?.[0];
+    const finishReason = typeof candidate?.finishReason === 'string'
+      ? candidate.finishReason.toLowerCase()
+      : null;
+    if (finishReason === 'max_tokens') throw providerError('PROVIDER_OUTPUT_TRUNCATED');
+    if (['safety', 'blocklist', 'prohibited_content', 'spii', 'recitation'].includes(finishReason)
+      || payload.promptFeedback?.blockReason) throw providerError('PROVIDER_CONTENT_FILTERED');
+    const rawText = Array.isArray(candidate?.content?.parts)
+      ? candidate.content.parts
+        .filter((part) => typeof part?.text === 'string')
+        .map((part) => part.text)
+        .join('')
+      : '';
+    if (!rawText.trim()) throw providerError('PROVIDER_INVALID_RESPONSE');
+    const metadata = payload.usageMetadata ?? {};
+    const usage = {
+      inputTokens: Number.isSafeInteger(metadata.promptTokenCount) && metadata.promptTokenCount >= 0
+        ? metadata.promptTokenCount : null,
+      outputTokens: Number.isSafeInteger(metadata.candidatesTokenCount) && metadata.candidatesTokenCount >= 0
+        ? metadata.candidatesTokenCount : null,
+      totalTokens: Number.isSafeInteger(metadata.totalTokenCount) && metadata.totalTokenCount >= 0
+        ? metadata.totalTokenCount : null,
+    };
+    return {
+      rawText: rawText.trim(), provider, latencyMs, usage, finishReason,
+      providerRequestId: requestIdFrom(response, payload),
+    };
+  }
   if (provider === 'minimax') {
     const finishReason = typeof payload.stop_reason === 'string' ? payload.stop_reason : null;
     if (TRUNCATED_REASONS.has(finishReason)) throw providerError('PROVIDER_OUTPUT_TRUNCATED');
@@ -280,12 +334,19 @@ export function createLlmProvider({
   sleep = defaultSleep,
   totalDeadlineMs = DEFAULT_DEADLINE_MS,
   maxRetries = 1,
+  googleAuthProvider: suppliedGoogleAuthProvider,
 } = {}) {
   if (!config?.provider) throw new Error('createLlmProvider requires selected provider config');
   if (config.provider === 'deterministic') {
     return { provider: 'deterministic', generate: async (input) => deterministicResult(input, now) };
   }
   if (typeof fetchImpl !== 'function') throw new Error('createLlmProvider requires fetch');
+  const googleAuthProvider = config.provider === 'vertex-ai'
+    ? suppliedGoogleAuthProvider ?? createGoogleAccessTokenProvider({ fetchImpl })
+    : null;
+  if (config.provider === 'vertex-ai' && typeof googleAuthProvider?.fetch !== 'function') {
+    throw providerError('PROVIDER_NOT_CONFIGURED');
+  }
 
   const generate = async (input, options = {}) => {
     const request = buildRequest(config, input);
@@ -308,7 +369,8 @@ export function createLlmProvider({
       for (let attempt = 0; attempt <= retryLimit; attempt += 1) {
         if (controller.signal.aborted || now() >= deadlineAt) throw providerError('PROVIDER_TIMEOUT');
         try {
-          const response = await fetchImpl(request.url, {
+          const providerFetch = googleAuthProvider?.fetch ?? fetchImpl;
+          const response = await providerFetch(request.url, {
             method: 'POST',
             headers: request.headers,
             body: serializedBody,
@@ -330,7 +392,9 @@ export function createLlmProvider({
           if (controller.signal.aborted || now() >= deadlineAt) throw providerError('PROVIDER_TIMEOUT');
           const normalized = error instanceof ProviderError
             ? error
-            : providerError('PROVIDER_TRANSIENT', { transient: true });
+            : error?.code === 'GOOGLE_AUTHENTICATION_FAILED'
+              ? providerError('PROVIDER_AUTH_FAILED')
+              : providerError('PROVIDER_TRANSIENT', { transient: true });
           if (!normalized.transient || attempt >= retryLimit) throw normalized;
           const remaining = deadlineAt - now();
           const delay = Math.min(normalized.retryAfterMs ?? DEFAULT_RETRY_DELAY_MS, remaining);

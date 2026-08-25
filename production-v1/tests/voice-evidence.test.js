@@ -1,7 +1,45 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { readEvidenceRecord } from '../src/services/voice-evidence.js';
+import { providerConfigDescriptor, providerConfigDigest, readEvidenceRecord } from '../src/services/voice-evidence.js';
+
+test('Google speech evidence binds exact regional recognizer and one selected voice per locale', () => {
+  const asr = { provider: 'google-stt-v2', settings: {
+    projectId: 'hkbuddy-prod-v1-20260826', location: 'asia-southeast1', model: 'chirp_2', recognizer: '_',
+    languageCodes: ['yue-Hant-HK', 'en-US', 'cmn-Hans-CN'], credentialVersion: 'runtime-sa-rotation-v1',
+  } };
+  const tts = { provider: 'google-tts', settings: {
+    projectId: 'hkbuddy-prod-v1-20260826', location: 'asia-southeast1', credentialVersion: 'runtime-sa-rotation-v1',
+    voices: {
+      en: { languageCode: 'en-US', name: 'en-US-Chirp3-HD-Achernar' },
+      yueHant: { languageCode: 'yue-HK', name: 'yue-HK-Chirp3-HD-Achernar' },
+      zhHans: { languageCode: 'cmn-CN', name: 'cmn-CN-Chirp3-HD-Achernar' },
+    },
+  } };
+  assert.deepEqual(providerConfigDescriptor(asr, 'asr'), {
+    provider: 'google-stt-v2', capability: 'asr',
+    endpoint: 'https://asia-southeast1-speech.googleapis.com/v2/projects/hkbuddy-prod-v1-20260826/locations/asia-southeast1/recognizers/_:recognize',
+    projectId: 'hkbuddy-prod-v1-20260826', location: 'asia-southeast1', recognizer: '_', model: 'chirp_2',
+    languageCodes: ['yue-Hant-HK', 'en-US', 'cmn-Hans-CN'],
+    contentType: 'application/json', inputEncoding: 'canonical-wav-v1', credentialVersion: 'runtime-sa-rotation-v1',
+  });
+  assert.deepEqual(providerConfigDescriptor(tts, 'tts'), {
+    provider: 'google-tts', capability: 'tts',
+    endpoint: 'https://asia-southeast1-texttospeech.googleapis.com/v1/text:synthesize',
+    projectId: 'hkbuddy-prod-v1-20260826', location: 'asia-southeast1',
+    voices: tts.settings.voices, audioEncoding: 'MP3', outputChannels: 1,
+    credentialVersion: 'runtime-sa-rotation-v1', fallbackPolicy: 'none',
+  });
+  const asrDigest = providerConfigDigest(asr, 'asr');
+  const ttsDigest = providerConfigDigest(tts, 'tts');
+  assert.match(asrDigest, /^[0-9a-f]{64}$/);
+  assert.match(ttsDigest, /^[0-9a-f]{64}$/);
+  assert.notEqual(providerConfigDigest({ ...asr, settings: { ...asr.settings, credentialVersion: 'runtime-sa-rotation-v2' } }, 'asr'), asrDigest);
+  assert.throws(
+    () => providerConfigDigest({ ...tts, settings: { ...tts.settings, location: 'us' } }, 'tts'),
+    /Google TTS configuration/,
+  );
+});
 
 test('voice evidence reader is regular-file-only, fixed-cap, and always closes its descriptor', async (t) => {
   const record = { schemaVersion: 1, capability: 'asr', result: 'pass' };

@@ -5,6 +5,7 @@ import { createRetriever } from './knowledge/retriever.js';
 import { createAsrProvider } from './providers/asr.js';
 import { createLlmProvider } from './providers/llm.js';
 import { createTtsProvider } from './providers/tts.js';
+import { createGoogleAccessTokenProvider } from './providers/google-auth.js';
 import { createAnswerService } from './services/answer.js';
 import { createDispatcher } from './services/dispatcher.js';
 import { EventHub } from './services/events.js';
@@ -155,10 +156,12 @@ export async function startServer({
   mediaStore: suppliedMediaStore,
   asrProvider: suppliedAsrProvider,
   ttsProvider: suppliedTtsProvider,
+  googleAuthProvider: suppliedGoogleAuthProvider,
   cleanupService: suppliedCleanupService,
   retentionWorker: suppliedRetentionWorker,
   createApp: createAppImpl = createApp,
   createStorageRuntime: createStorageRuntimeImpl = createStorageRuntime,
+  createGoogleAuthProvider: createGoogleAuthProviderImpl = createGoogleAccessTokenProvider,
   startRetentionWorker: startRetentionWorkerImpl = startRetentionWorker,
   evaluateReadiness: evaluateReadinessImpl = evaluateProductionReadiness,
   poolFactory,
@@ -410,12 +413,22 @@ export async function startServer({
       startupTimeoutMs,
     );
     const retriever = createRetriever({ corpus, now });
+    const usesGoogleProvider = config.llm.provider === 'vertex-ai'
+      || config.asr.provider === 'google-stt-v2'
+      || config.tts.provider === 'google-tts';
+    const googleAuthProvider = usesGoogleProvider
+      ? suppliedGoogleAuthProvider ?? createGoogleAuthProviderImpl()
+      : null;
     const llmProvider = suppliedLlmProvider
-      ?? createLlmProvider({ config: config.llm, totalDeadlineMs: config.llm.timeoutMs });
+      ?? createLlmProvider({
+        config: config.llm,
+        totalDeadlineMs: config.llm.timeoutMs,
+        googleAuthProvider,
+      });
     const asrProvider = suppliedAsrProvider
-      ?? (config.asr.available ? createAsrProvider({ config: config.asr }) : null);
+      ?? (config.asr.available ? createAsrProvider({ config: config.asr, googleAuthProvider }) : null);
     const ttsProvider = suppliedTtsProvider
-      ?? (config.tts.available ? createTtsProvider({ config: config.tts }) : null);
+      ?? (config.tts.available ? createTtsProvider({ config: config.tts, googleAuthProvider }) : null);
     const answerService = createAnswerService({ corpus, retriever, llmProvider, now });
     eventHub = suppliedEventHub ?? new EventHub();
     const turnProcessor = createTurnProcessor({ store, answerService, eventHub, now });

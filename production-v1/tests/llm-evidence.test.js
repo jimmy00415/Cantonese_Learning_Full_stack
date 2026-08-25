@@ -105,6 +105,37 @@ test('LLM config digest canonicalizes the effective HKBU and MiniMax transports'
   );
 });
 
+test('Vertex config digest binds ADC rotation, project, location, model, and excludes credential bytes', () => {
+  const config = {
+    provider: 'vertex-ai', credentialVersion: 'runtime-sa-rotation-v1', timeoutMs: 12_000,
+    settings: { projectId: 'hkbuddy-prod-v1-20260826', location: 'global', model: 'gemini-2.5-flash' },
+  };
+  const digest = releaseEvidence.llmProviderConfigDigest(config);
+  assert.match(digest, /^[0-9a-f]{64}$/);
+  assert.notEqual(releaseEvidence.llmProviderConfigDigest({
+    ...config, credentialVersion: 'runtime-sa-rotation-v2',
+  }), digest);
+  for (const settings of [
+    { ...config.settings, projectId: 'other-project' },
+    { ...config.settings, location: 'asia-southeast1' },
+    { ...config.settings, model: 'other-model' },
+  ]) assert.throws(() => releaseEvidence.llmProviderConfigDigest({ ...config, settings }), /configuration/i);
+  assert.equal(JSON.stringify(config).includes('token'), false);
+});
+
+test('LLM evidence allowlist accepts Vertex and still rejects unknown providers', () => {
+  const vertex = rehash({ ...validLlmEvidence(), provider: 'vertex-ai' });
+  assert.equal(releaseEvidence.validateLlmSmokeEvidence(vertex, {
+    expectedVersion: vertex.artifactSha256, commitSha: COMMIT, provider: 'vertex-ai',
+    configDigest: CONFIG_DIGEST, now: NOW,
+  }).valid, true);
+  const unknown = rehash({ ...validLlmEvidence(), provider: 'google' });
+  assert.equal(releaseEvidence.validateLlmSmokeEvidence(unknown, {
+    expectedVersion: unknown.artifactSha256, commitSha: COMMIT, provider: 'google',
+    configDigest: CONFIG_DIGEST, now: NOW,
+  }).valid, false);
+});
+
 test('strict LLM smoke validator accepts one fresh commit/config-bound pass artifact', () => {
   assert.equal(typeof releaseEvidence.validateLlmSmokeEvidence, 'function');
   const record = validLlmEvidence();
