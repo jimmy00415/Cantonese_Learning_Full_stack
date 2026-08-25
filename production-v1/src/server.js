@@ -249,6 +249,7 @@ export async function startServer({
 
   const handleInstanceLockLost = () => {
     if (config.nodeEnv !== 'production') return;
+    stopVoiceRecovery();
     runtimeState.instanceLockOwned = false;
     runtimeState.recoverable = false;
     try {

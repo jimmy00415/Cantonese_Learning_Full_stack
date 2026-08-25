@@ -889,6 +889,161 @@ test('server shutdown clears a pending assistant audio recovery timer', async (t
   assert.equal(scheduled.length, 1, 'a late cleared callback must not rearm recovery');
 });
 
+test('production lock loss synchronously clears a pending recovery timer and fences late callbacks', async (t) => {
+  const config = productionConfig();
+  const order = [];
+  const { store, mediaStore, cleanupService } = runtimeFixture(order);
+  let owned = true;
+  let loseLock;
+  const instanceLock = {
+    get owned() { return owned; },
+    isOwned: () => owned,
+    healthCheck: async () => ({ owned }),
+    release: async () => { owned = false; },
+  };
+  store.acquireInstanceLock = async ({ onLost }) => {
+    loseLock = () => { owned = false; onLost(); };
+    return instanceLock;
+  };
+  const retentionWorker = {
+    firstRun: Promise.resolve({ ok: true }),
+    readiness: async () => ({ status: 'ready', healthy: true, policyVersion: 'retention-v1' }),
+    stop: async () => undefined,
+  };
+  const scheduled = [];
+  const cleared = [];
+  let recoveryClaims = 0;
+  const server = await startServer({
+    config,
+    host: '127.0.0.1',
+    port: 0,
+    store,
+    mediaStore,
+    cleanupService,
+    retentionWorker,
+    voiceService: {
+      async recoverAssistantAudio() {
+        recoveryClaims += 1;
+        return { scanned: 0, attempted: 0, attached: 0, limit: 25 };
+      },
+    },
+    corpus: {
+      schemaVersion: 'hkbu-campus-v1', snapshotAt: '2026-08-25T12:00:00+08:00', sources: [{ id: 'official-source' }],
+    },
+    llmProvider: { provider: 'fake-real', generate: async () => ({ text: 'unused' }) },
+    evaluateReadiness: async () => safeReadiness(true),
+    dispatcherOptions: { pollIntervalMs: 60_000 },
+    readinessWatchdogOptions: {
+      intervalMs: 60_000,
+      setTimeoutFn: () => ({ unref() {} }),
+      clearTimeoutFn: () => undefined,
+    },
+    voiceRecoveryOptions: {
+      intervalMs: 25,
+      setTimeoutFn(callback) {
+        const handle = { callback, unref() {} };
+        scheduled.push(handle);
+        return handle;
+      },
+      clearTimeoutFn: (handle) => cleared.push(handle),
+    },
+  });
+  t.after(() => server.shutdown());
+  await server.runtime.voiceRecovery;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(recoveryClaims, 1);
+  assert.equal(scheduled.length, 1);
+
+  loseLock();
+  assert.deepEqual(cleared, [scheduled[0]], 'lock loss clears recovery synchronously');
+  assert.equal(server.runtime.runtimeState.instanceLockOwned, false);
+  scheduled[0].callback();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(recoveryClaims, 1, 'a lock-lost instance cannot claim another recovery sweep');
+  assert.equal(scheduled.length, 1, 'a late timer callback cannot rearm recovery');
+
+  loseLock();
+  await server.shutdown();
+  assert.deepEqual(cleared, [scheduled[0]], 'lock loss and shutdown share one idempotent timer fence');
+});
+
+test('production lock loss synchronously aborts an in-flight recovery and prevents rearm', async (t) => {
+  const config = productionConfig();
+  const order = [];
+  const { store, mediaStore, cleanupService } = runtimeFixture(order);
+  let owned = true;
+  let loseLock;
+  const instanceLock = {
+    get owned() { return owned; },
+    isOwned: () => owned,
+    healthCheck: async () => ({ owned }),
+    release: async () => { owned = false; },
+  };
+  store.acquireInstanceLock = async ({ onLost }) => {
+    loseLock = () => { owned = false; onLost(); };
+    return instanceLock;
+  };
+  const retentionWorker = {
+    firstRun: Promise.resolve({ ok: true }),
+    readiness: async () => ({ status: 'ready', healthy: true, policyVersion: 'retention-v1' }),
+    stop: async () => undefined,
+  };
+  const recovery = deferred();
+  const scheduled = [];
+  let recoveryClaims = 0;
+  let recoveryAborted = false;
+  const server = await startServer({
+    config,
+    host: '127.0.0.1',
+    port: 0,
+    store,
+    mediaStore,
+    cleanupService,
+    retentionWorker,
+    voiceService: {
+      recoverAssistantAudio({ signal }) {
+        recoveryClaims += 1;
+        signal.addEventListener('abort', () => { recoveryAborted = true; }, { once: true });
+        return recovery.promise;
+      },
+    },
+    corpus: {
+      schemaVersion: 'hkbu-campus-v1', snapshotAt: '2026-08-25T12:00:00+08:00', sources: [{ id: 'official-source' }],
+    },
+    llmProvider: { provider: 'fake-real', generate: async () => ({ text: 'unused' }) },
+    evaluateReadiness: async () => safeReadiness(true),
+    dispatcherOptions: { pollIntervalMs: 60_000 },
+    readinessWatchdogOptions: {
+      intervalMs: 60_000,
+      setTimeoutFn: () => ({ unref() {} }),
+      clearTimeoutFn: () => undefined,
+    },
+    voiceRecoveryOptions: {
+      intervalMs: 25,
+      setTimeoutFn(callback) {
+        const handle = { callback, unref() {} };
+        scheduled.push(handle);
+        return handle;
+      },
+      clearTimeoutFn: () => undefined,
+    },
+  });
+  t.after(() => server.shutdown());
+  assert.equal(recoveryClaims, 1);
+
+  loseLock();
+  assert.equal(recoveryAborted, true, 'lock loss aborts provider work synchronously');
+  assert.equal(server.runtime.runtimeState.accepting, false);
+  recovery.resolve({ scanned: 1, attempted: 1, attached: 0, limit: 25 });
+  await server.runtime.voiceRecovery;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(recoveryClaims, 1, 'the lock-lost instance starts no further store/provider work');
+  assert.equal(scheduled.length, 0, 'late recovery settlement cannot rearm after ownership loss');
+
+  await server.shutdown();
+  assert.equal(recoveryClaims, 1, 'normal shutdown is idempotent after lock-loss abort');
+});
+
 test('the single-flight readiness supervisor revokes, gates, and recovers while public ready stays cached', async (t) => {
   const config = productionConfig();
   const order = [];
