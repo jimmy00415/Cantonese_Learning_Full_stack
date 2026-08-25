@@ -296,10 +296,15 @@ async function spoolIngress({
 }
 
 function uploadPublic(upload) {
+  if (!/^[0-9a-f]{64}$/i.test(upload.requestSha256 ?? '')) {
+    throw new Error('Voice upload hash binding is missing');
+  }
+  const requestSha256 = upload.requestSha256.toLowerCase();
   const asset = upload.mediaAsset ?? null;
   if (upload.state === 'ready') {
     return {
       clientUploadId: upload.clientUploadId,
+      requestSha256,
       state: 'ready',
       transcript: upload.transcript,
       voiceDraftId: upload.mediaAssetId,
@@ -310,6 +315,7 @@ function uploadPublic(upload) {
   }
   return {
     clientUploadId: upload.clientUploadId,
+    requestSha256,
     state: upload.state,
     failureCode: upload.failureCode ?? null,
     retryable: Boolean(upload.retryable),
@@ -502,7 +508,15 @@ export function createVoiceService({
       const live = upload.leaseExpiresAt && upload.attemptDeadlineAt
         && new Date(upload.leaseExpiresAt) > current && new Date(upload.attemptDeadlineAt) > current;
       if (live) return { httpStatus: 202, data: uploadPublic(upload), retryAfter: 1 };
-      return { httpStatus: 200, data: { clientUploadId, state: 'failed', failureCode: 'VOICE_ATTEMPT_EXPIRED', retryable: true } };
+      return {
+        httpStatus: 200,
+        data: uploadPublic({
+          ...upload,
+          state: 'failed',
+          failureCode: 'VOICE_ATTEMPT_EXPIRED',
+          retryable: true,
+        }),
+      };
     }
     return { httpStatus: 200, data: uploadPublic(upload) };
   };
@@ -605,9 +619,22 @@ export function createVoiceService({
     return { httpStatus: 200, data: generationPublic(generation) };
   };
 
+  const cancelUpload = async ({ sessionId, clientUploadId }) => {
+    const current = currentDate(now);
+    const upload = await store.cancelVoiceUpload({
+      sessionId,
+      clientUploadId,
+      cleanupNotBefore: current,
+      now: current,
+    });
+    void drainCleanup().catch(() => undefined);
+    return { httpStatus: 200, data: uploadPublic(upload) };
+  };
+
   return {
     transcribe,
     getUploadStatus,
+    cancelUpload,
     generateAssistantAudio,
     getAssistantAudioStatus,
     revokeVoiceDraft: (input) => store.revokeVoiceDraft({ ...input, now: currentDate(now), cleanupNotBefore: currentDate(now) }),

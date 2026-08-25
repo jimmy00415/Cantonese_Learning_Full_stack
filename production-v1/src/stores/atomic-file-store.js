@@ -634,6 +634,12 @@ export class AtomicFileStore {
         item.sessionId === sessionId && item.clientUploadId === clientUploadId
       ));
       if (upload) {
+        if (upload.state === 'failed' && upload.failureCode === 'VOICE_UPLOAD_CANCELLED') {
+          return noChange({
+            status: 'permanent_failure', upload,
+            failureCode: 'VOICE_UPLOAD_CANCELLED', failureHttpStatus: 410, retryable: false,
+          });
+        }
         if (upload.requestSha256 !== requestSha256 || upload.mimeType !== mimeType) {
           return noChange({ status: 'conflict', upload });
         }
@@ -726,6 +732,71 @@ export class AtomicFileStore {
         ? snapshot.mediaAssets.find((asset) => asset.id === upload.mediaAssetId && asset.sessionId === sessionId) ?? null
         : null;
       return clone({ ...upload, mediaAsset });
+    });
+  }
+
+  async cancelVoiceUpload({ sessionId, clientUploadId, cleanupNotBefore, now }) {
+    return this.#mutate((snapshot) => {
+      this.#activeSession(snapshot, sessionId);
+      const upload = snapshot.voiceUploads.find((item) => (
+        item.sessionId === sessionId && item.clientUploadId === clientUploadId
+      ));
+      if (!upload) throw storeError('NOT_FOUND', 'The requested voice upload was not found.');
+      if (upload.state === 'failed' && upload.failureCode === 'VOICE_UPLOAD_CANCELLED') {
+        if (upload.mediaAssetId || upload.transcript || upload.attemptStorageKey) {
+          throw new Error('Atomic store state is corrupt');
+        }
+        return noChange(upload);
+      }
+
+      const assetIndex = upload.mediaAssetId
+        ? snapshot.mediaAssets.findIndex((asset) => asset.id === upload.mediaAssetId && asset.sessionId === sessionId)
+        : -1;
+      const asset = assetIndex >= 0 ? snapshot.mediaAssets[assetIndex] : null;
+      if (upload.mediaAssetId && !asset) throw new Error('Atomic store state is corrupt');
+      if (asset?.status === 'attached' || asset?.ownerMessageId) {
+        throw storeError('VOICE_DRAFT_ALREADY_ATTACHED', 'The voice draft is already attached to a message.');
+      }
+
+      const timestamp = nowIso(now);
+      if (asset) {
+        if (asset.kind !== 'user_voice' || asset.status !== 'draft') {
+          throw new Error('Atomic store state is corrupt');
+        }
+        enqueueDeletion(snapshot, {
+          storageKey: asset.storageKey,
+          reason: 'voice-upload-cancelled-draft',
+          notBefore: cleanupNotBefore ?? now,
+          now,
+          rearm: true,
+        });
+        snapshot.mediaAssets.splice(assetIndex, 1);
+      } else if (upload.attemptStorageKey) {
+        const safeHorizon = latestInstant(
+          cleanupNotBefore ?? now,
+          upload.leaseExpiresAt,
+          upload.attemptDeadlineAt,
+        ) + ATTEMPT_CLEANUP_GRACE_MS;
+        enqueueDeletion(snapshot, {
+          storageKey: upload.attemptStorageKey,
+          reason: 'voice-upload-cancelled-attempt',
+          notBefore: safeHorizon,
+          now,
+          rearm: true,
+        });
+      }
+
+      upload.state = 'failed';
+      upload.mediaAssetId = null;
+      upload.transcript = null;
+      upload.failureCode = 'VOICE_UPLOAD_CANCELLED';
+      upload.failureHttpStatus = 410;
+      upload.retryable = false;
+      upload.leaseToken = null;
+      upload.leaseExpiresAt = null;
+      upload.attemptStorageKey = null;
+      upload.updatedAt = timestamp;
+      return upload;
     });
   }
 

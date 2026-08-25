@@ -544,6 +544,177 @@ test('voice upload claims are atomic, idempotent, fenced, and attach an owned dr
   }), { code: 'INVALID_VOICE_DRAFT' });
 });
 
+test('cancelling a live voice upload atomically tombstones its identity and fences late workers', async (t) => {
+  const { filePath, store } = await createStore(t, 'hb-v1-voice-cancel-live-');
+  const owner = await store.createOrResumeSession({ tokenHash: 'voice-cancel-live-owner', now: '2026-08-25T00:00:00.000Z' });
+  const base = {
+    sessionId: owner.session.id,
+    clientUploadId: '51515151-5151-4151-8151-515151515151',
+    requestSha256: 'a1'.repeat(32), mimeType: 'audio/wav', rateLimits: [],
+    leaseToken: 'voice-cancel-live-lease',
+    attemptStorageKey: 'attempts/voice/51515151-5151-4151-8151-515151515151',
+    leaseExpiresAt: '2026-08-25T00:00:20.000Z',
+    attemptDeadlineAt: '2026-08-25T00:01:00.000Z',
+    now: '2026-08-25T00:00:01.000Z',
+  };
+  const claimed = await store.claimVoiceUploadWithRateLimits(base);
+
+  const cancelled = await store.cancelVoiceUpload({
+    sessionId: owner.session.id, clientUploadId: base.clientUploadId,
+    now: '2026-08-25T00:00:02.000Z', cleanupNotBefore: '2026-08-25T00:00:02.000Z',
+  });
+  assert.equal(cancelled.state, 'failed');
+  assert.equal(cancelled.failureCode, 'VOICE_UPLOAD_CANCELLED');
+  assert.equal(cancelled.failureHttpStatus, 410);
+  assert.equal(cancelled.retryable, false);
+  assert.equal(cancelled.requestSha256, base.requestSha256);
+  assert.equal(cancelled.leaseToken, null);
+  assert.equal(cancelled.leaseExpiresAt, null);
+  assert.equal(cancelled.attemptStorageKey, null);
+  assert.equal(cancelled.mediaAssetId, null);
+  assert.equal(cancelled.transcript, null);
+
+  await assert.rejects(store.setVoiceUploadTranscribing({
+    uploadId: claimed.upload.id, leaseToken: base.leaseToken, now: '2026-08-25T00:00:03.000Z',
+  }), { code: 'LEASE_LOST' });
+  await assert.rejects(store.completeVoiceUpload({
+    uploadId: claimed.upload.id, leaseToken: base.leaseToken,
+    mediaAsset: {
+      storageKey: base.attemptStorageKey, mimeType: 'audio/wav', byteLength: 32_044,
+      durationMs: 1_000, sha256: base.requestSha256,
+    },
+    transcript: 'must not survive cancellation', now: '2026-08-25T00:00:03.000Z',
+  }), { code: 'LEASE_LOST' });
+  await assert.rejects(store.failVoiceUpload({
+    uploadId: claimed.upload.id, leaseToken: base.leaseToken,
+    failureCode: 'VOICE_TRANSCRIPTION_FAILED', failureHttpStatus: 502, retryable: true,
+    now: '2026-08-25T00:00:03.000Z',
+  }), { code: 'LEASE_LOST' });
+
+  const repeated = await store.cancelVoiceUpload({
+    sessionId: owner.session.id, clientUploadId: base.clientUploadId,
+    now: '2026-08-25T00:00:04.000Z',
+  });
+  assert.equal(repeated.failureCode, 'VOICE_UPLOAD_CANCELLED');
+  const retry = await store.claimVoiceUploadWithRateLimits({
+    ...base,
+    leaseToken: 'voice-cancel-retry-lease',
+    attemptStorageKey: 'attempts/voice/52525252-5252-4252-8252-525252525252',
+    leaseExpiresAt: '2026-08-25T00:02:20.000Z',
+    attemptDeadlineAt: '2026-08-25T00:03:00.000Z',
+    now: '2026-08-25T00:02:01.000Z',
+  });
+  assert.equal(retry.status, 'permanent_failure');
+  assert.equal(retry.failureCode, 'VOICE_UPLOAD_CANCELLED');
+  assert.equal(retry.failureHttpStatus, 410);
+
+  const snapshot = JSON.parse(await readFile(filePath, 'utf8'));
+  const deletion = snapshot.mediaDeletionJobs.find((job) => job.storageKey === base.attemptStorageKey);
+  assert.equal(deletion.state, 'pending');
+  assert.equal(deletion.reason, 'voice-upload-cancelled-attempt');
+  assert.equal(deletion.notBefore, '2026-08-25T00:02:00.000Z');
+  assert.equal(snapshot.mediaAssets.length, 0);
+});
+
+test('cancelling a ready voice upload revokes its unattached draft and removes transcript data', async (t) => {
+  const { filePath, store } = await createStore(t, 'hb-v1-voice-cancel-ready-');
+  const owner = await store.createOrResumeSession({ tokenHash: 'voice-cancel-ready-owner', now: '2026-08-25T00:00:00.000Z' });
+  const base = {
+    sessionId: owner.session.id,
+    clientUploadId: '53535353-5353-4353-8353-535353535353',
+    requestSha256: 'b2'.repeat(32), mimeType: 'audio/wav', rateLimits: [],
+    leaseToken: 'voice-cancel-ready-lease',
+    attemptStorageKey: 'attempts/voice/53535353-5353-4353-8353-535353535353',
+    leaseExpiresAt: '2026-08-25T00:00:20.000Z',
+    attemptDeadlineAt: '2026-08-25T00:01:00.000Z',
+    now: '2026-08-25T00:00:01.000Z',
+  };
+  const claimed = await store.claimVoiceUploadWithRateLimits(base);
+  await store.setVoiceUploadTranscribing({
+    uploadId: claimed.upload.id, leaseToken: base.leaseToken, now: '2026-08-25T00:00:02.000Z',
+  });
+  const completing = store.completeVoiceUpload({
+    uploadId: claimed.upload.id, leaseToken: base.leaseToken,
+    mediaAsset: {
+      storageKey: base.attemptStorageKey, mimeType: 'audio/wav', byteLength: 32_044,
+      durationMs: 1_000, sha256: base.requestSha256,
+    },
+    transcript: 'sensitive transcript', now: '2026-08-25T00:00:03.000Z',
+  });
+  const cancelling = store.cancelVoiceUpload({
+    sessionId: owner.session.id, clientUploadId: base.clientUploadId,
+    now: '2026-08-25T00:00:04.000Z', cleanupNotBefore: '2026-08-25T00:00:04.000Z',
+  });
+  const [completedResult, cancelledResult] = await Promise.allSettled([completing, cancelling]);
+  assert.equal(completedResult.status, 'fulfilled');
+  assert.equal(cancelledResult.status, 'fulfilled');
+  const completed = completedResult.value;
+  const cancelled = cancelledResult.value;
+  assert.equal(cancelled.failureCode, 'VOICE_UPLOAD_CANCELLED');
+  assert.equal(cancelled.retryable, false);
+  assert.equal(cancelled.mediaAssetId, null);
+  assert.equal(cancelled.transcript, null);
+  await assert.rejects(store.getMediaAsset({
+    sessionId: owner.session.id, mediaId: completed.mediaAsset.id,
+  }), { code: 'NOT_FOUND' });
+
+  const snapshot = JSON.parse(await readFile(filePath, 'utf8'));
+  assert.equal(snapshot.mediaAssets.length, 0);
+  const deletion = snapshot.mediaDeletionJobs.find((job) => job.storageKey === base.attemptStorageKey);
+  assert.equal(deletion.state, 'pending');
+  assert.equal(deletion.reason, 'voice-upload-cancelled-draft');
+  assert.equal(deletion.notBefore, '2026-08-25T00:00:04.000Z');
+});
+
+test('an attached voice draft rejects upload cancellation without changing message or media ownership', async (t) => {
+  const { filePath, store } = await createStore(t, 'hb-v1-voice-cancel-attached-');
+  const owner = await store.createOrResumeSession({ tokenHash: 'voice-cancel-attached-owner', now: '2026-08-25T00:00:00.000Z' });
+  const base = {
+    sessionId: owner.session.id,
+    clientUploadId: '54545454-5454-4454-8454-545454545454',
+    requestSha256: 'c3'.repeat(32), mimeType: 'audio/wav', rateLimits: [],
+    leaseToken: 'voice-cancel-attached-lease',
+    attemptStorageKey: 'attempts/voice/54545454-5454-4454-8454-545454545454',
+    leaseExpiresAt: '2026-08-25T00:00:20.000Z',
+    attemptDeadlineAt: '2026-08-25T00:01:00.000Z',
+    now: '2026-08-25T00:00:01.000Z',
+  };
+  const claimed = await store.claimVoiceUploadWithRateLimits(base);
+  await store.setVoiceUploadTranscribing({ uploadId: claimed.upload.id, leaseToken: base.leaseToken, now: '2026-08-25T00:00:02.000Z' });
+  const completed = await store.completeVoiceUpload({
+    uploadId: claimed.upload.id, leaseToken: base.leaseToken,
+    mediaAsset: {
+      storageKey: base.attemptStorageKey, mimeType: 'audio/wav', byteLength: 32_044,
+      durationMs: 1_000, sha256: base.requestSha256,
+    },
+    transcript: 'attached transcript', now: '2026-08-25T00:00:03.000Z',
+  });
+  const accepting = store.acceptMessage({
+    sessionId: owner.session.id, conversationId: owner.conversation.id,
+    clientMessageId: '55555555-5555-4555-8555-555555555555', requestHash: 'attached-cancel-race',
+    text: 'edited attached transcript', voiceDraftId: completed.mediaAsset.id,
+    now: '2026-08-25T00:00:04.000Z',
+  });
+  const cancelling = store.cancelVoiceUpload({
+    sessionId: owner.session.id, clientUploadId: base.clientUploadId,
+    now: '2026-08-25T00:00:05.000Z',
+  });
+  const [acceptedResult, cancelledResult] = await Promise.allSettled([accepting, cancelling]);
+  assert.equal(acceptedResult.status, 'fulfilled');
+  assert.equal(cancelledResult.status, 'rejected');
+  assert.equal(cancelledResult.reason.code, 'VOICE_DRAFT_ALREADY_ATTACHED');
+  const accepted = acceptedResult.value;
+  const asset = await store.getMediaAsset({ sessionId: owner.session.id, mediaId: completed.mediaAsset.id });
+  assert.equal(asset.status, 'attached');
+  assert.equal(asset.ownerMessageId, accepted.message.id);
+  const upload = await store.getVoiceUploadStatus({ sessionId: owner.session.id, clientUploadId: base.clientUploadId });
+  assert.equal(upload.state, 'ready');
+  assert.equal(upload.mediaAssetId, completed.mediaAsset.id);
+  assert.equal(upload.transcript, 'attached transcript');
+  const snapshot = JSON.parse(await readFile(filePath, 'utf8'));
+  assert.equal(snapshot.mediaDeletionJobs.some((job) => job.storageKey === base.attemptStorageKey), false);
+});
+
 test('voice reclaim atomically outboxes the displaced attempt key and permanent failures never consume again', async (t) => {
   const { filePath, store } = await createStore(t, 'hb-v1-voice-reclaim-');
   const owner = await store.createOrResumeSession({ tokenHash: 'voice-reclaim-owner', now: '2026-08-25T00:00:00.000Z' });
@@ -2658,23 +2829,27 @@ test('voice HTTP transcription is owned, idempotent, editable, status-recoverabl
   const cookie = session.response.headers.getSetCookie()[0].split(';')[0];
   const audio = canonicalWav(1_000);
   const uploadId = 'bbbbbbbb-0000-4000-8000-000000000000';
+  const requestSha256 = createHash('sha256').update(audio).digest('hex');
   const headers = {
     Origin: origin, Cookie: cookie, 'Content-Type': 'audio/wav',
     'X-Client-Upload-Id': uploadId,
-    'X-Content-SHA256': createHash('sha256').update(audio).digest('hex'),
+    'X-Content-SHA256': requestSha256,
     'Content-Length': String(audio.length),
   };
   const created = await fetchJson(`${baseUrl}/api/v1/voice/transcriptions`, { method: 'POST', headers, body: audio });
   assert.equal(created.response.status, 201);
   assert.equal(created.body.data.transcript, '可編輯廣東話');
+  assert.equal(created.body.data.requestSha256, requestSha256);
   assert.match(created.body.data.voiceDraftId, /^[0-9a-f-]{36}$/i);
   const retry = await fetchJson(`${baseUrl}/api/v1/voice/transcriptions`, { method: 'POST', headers, body: audio });
   assert.equal(retry.response.status, 200);
   assert.equal(retry.body.data.voiceDraftId, created.body.data.voiceDraftId);
+  assert.equal(retry.body.data.requestSha256, requestSha256);
   assert.equal(asrCalls, 1);
   const status = await fetchJson(`${baseUrl}/api/v1/voice/uploads/${uploadId}`, { headers: { Cookie: cookie } });
   assert.equal(status.response.status, 200);
   assert.equal(status.body.data.state, 'ready');
+  assert.equal(status.body.data.requestSha256, requestSha256);
 
   const invalid = Buffer.from('not-a-wave');
   const invalidId = 'cccccccc-0000-4000-8000-000000000000';
@@ -2689,9 +2864,246 @@ test('voice HTTP transcription is owned, idempotent, editable, status-recoverabl
   assert.equal(rejected.body.error.code, 'VOICE_INVALID_WAV');
   const rejectedRetry = await fetchJson(`${baseUrl}/api/v1/voice/transcriptions`, { method: 'POST', headers: invalidHeaders, body: invalid });
   assert.equal(rejectedRetry.response.status, 422);
+  const rejectedStatus = await fetchJson(`${baseUrl}/api/v1/voice/uploads/${invalidId}`, { headers: { Cookie: cookie } });
+  assert.equal(rejectedStatus.response.status, 200);
+  assert.equal(rejectedStatus.body.data.requestSha256, invalidHeaders['X-Content-SHA256']);
+  assert.equal(rejectedStatus.body.data.failureCode, 'VOICE_INVALID_WAV');
   assert.equal(asrCalls, 1);
   const mediaFiles = await import('node:fs/promises').then(({ readdir }) => readdir(join(directory, 'media', 'attempts', 'voice')).catch(() => []));
   assert.equal(mediaFiles.length, 1, 'only the ready draft object remains');
+});
+
+test('voice upload DELETE is owned, capability-independent, idempotent, and permanently fences live work', async (t) => {
+  let voiceInputEnabled = true;
+  let asrCalls = 0;
+  let markProviderStarted;
+  let resolveProvider;
+  const providerStarted = new Promise((resolve) => { markProviderStarted = resolve; });
+  const providerResult = new Promise((resolve) => { resolveProvider = resolve; });
+  const { baseUrl, origin, store, mediaStore } = await startVoiceApp(t, {
+    configTransform: (config) => ({
+      ...config,
+      nodeEnv: 'production',
+      getPublicStatus: () => ({
+        ...config.publicStatus,
+        voiceInput: voiceInputEnabled,
+        voiceInputPreview: voiceInputEnabled,
+      }),
+    }),
+    asrProvider: {
+      provider: 'azure',
+      transcribe: async () => {
+        asrCalls += 1;
+        markProviderStarted();
+        return providerResult;
+      },
+    },
+  });
+  const session = await fetchJson(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin } });
+  const cookie = session.response.headers.getSetCookie()[0].split(';')[0];
+  const audio = canonicalWav(100);
+  const clientUploadId = '56565656-5656-4656-8656-565656565656';
+  const requestSha256 = createHash('sha256').update(audio).digest('hex');
+  const headers = {
+    Origin: origin,
+    Cookie: cookie,
+    'Content-Type': 'audio/wav',
+    'Content-Length': String(audio.length),
+    'X-Client-Upload-Id': clientUploadId,
+    'X-Content-SHA256': requestSha256,
+  };
+  const posting = fetchJson(`${baseUrl}/api/v1/voice/transcriptions`, {
+    method: 'POST', headers, body: audio,
+  });
+  await providerStarted;
+  const liveUpload = await store.getVoiceUploadStatus({
+    sessionId: session.body.data.session.id,
+    clientUploadId,
+  });
+  assert.equal(liveUpload.state, 'transcribing');
+  const attemptStorageKey = liveUpload.attemptStorageKey;
+
+  const liveStatus = await fetchJson(`${baseUrl}/api/v1/voice/uploads/${clientUploadId}`, {
+    headers: { Cookie: cookie },
+  });
+  voiceInputEnabled = false;
+  const cancelled = await fetchJson(`${baseUrl}/api/v1/voice/uploads/${clientUploadId}`, {
+    method: 'DELETE', headers: { Origin: origin, Cookie: cookie },
+  });
+  const repeated = await fetchJson(`${baseUrl}/api/v1/voice/uploads/${clientUploadId}`, {
+    method: 'DELETE', headers: { Origin: origin, Cookie: cookie },
+  });
+  const other = await fetchJson(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin } });
+  const otherCookie = other.response.headers.getSetCookie()[0].split(';')[0];
+  const crossSession = await fetchJson(`${baseUrl}/api/v1/voice/uploads/${clientUploadId}`, {
+    method: 'DELETE', headers: { Origin: origin, Cookie: otherCookie },
+  });
+  const malformed = await fetchJson(`${baseUrl}/api/v1/voice/uploads/not-a-uuid`, {
+    method: 'DELETE', headers: { Origin: origin, Cookie: cookie },
+  });
+  voiceInputEnabled = true;
+  const retryAfterCancel = await fetchJson(`${baseUrl}/api/v1/voice/transcriptions`, {
+    method: 'POST', headers, body: audio,
+  });
+  resolveProvider({ transcript: 'must never become a draft', provider: 'azure', latencyMs: 1, confidence: null });
+  const originalAfterCancel = await posting;
+
+  assert.equal(liveStatus.response.status, 202);
+  assert.equal(liveStatus.body.data.requestSha256, requestSha256);
+  assert.equal(cancelled.response.status, 200);
+  assert.deepEqual(cancelled.body.data, {
+    clientUploadId,
+    requestSha256,
+    state: 'failed',
+    failureCode: 'VOICE_UPLOAD_CANCELLED',
+    retryable: false,
+  });
+  assert.equal(JSON.stringify(cancelled.body).includes('must never become a draft'), false);
+  assert.equal(repeated.response.status, 200);
+  assert.deepEqual(repeated.body.data, cancelled.body.data);
+  assert.equal(crossSession.response.status, 404);
+  assert.equal(crossSession.body.error.code, 'NOT_FOUND');
+  assert.equal(malformed.response.status, 404);
+  assert.equal(malformed.body.error.code, 'NOT_FOUND');
+  assert.equal(retryAfterCancel.response.status, 410);
+  assert.equal(retryAfterCancel.body.error.code, 'VOICE_UPLOAD_CANCELLED');
+  assert.equal(asrCalls, 1, 'a cancelled upload identity never invokes ASR again');
+  assert.equal(originalAfterCancel.body.data, null);
+  assert.equal(JSON.stringify(originalAfterCancel.body).includes('must never become a draft'), false);
+
+  const finalStatus = await fetchJson(`${baseUrl}/api/v1/voice/uploads/${clientUploadId}`, {
+    headers: { Cookie: cookie },
+  });
+  assert.equal(finalStatus.response.status, 200);
+  assert.deepEqual(finalStatus.body.data, cancelled.body.data);
+  await waitForCondition(async () => {
+    try {
+      await mediaStore.open({ storageKey: attemptStorageKey });
+      return false;
+    } catch (error) {
+      if (error.code === 'MEDIA_NOT_FOUND') return true;
+      throw error;
+    }
+  }, { message: 'cancelled in-flight upload media was not reclaimed' });
+});
+
+test('expired upload status keeps the exact lowercase request hash binding', async (t) => {
+  let clock = new Date('2026-08-25T00:00:00.000Z');
+  const now = () => new Date(clock);
+  const { baseUrl, origin, store } = await startVoiceApp(t, { now });
+  const session = await fetchJson(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin } });
+  const cookie = session.response.headers.getSetCookie()[0].split(';')[0];
+  const clientUploadId = '57575757-5757-4757-8757-575757575757';
+  await store.claimVoiceUploadWithRateLimits({
+    sessionId: session.body.data.session.id,
+    clientUploadId,
+    requestSha256: 'D4'.repeat(32),
+    mimeType: 'audio/wav',
+    rateLimits: [],
+    leaseToken: 'expired-upload-lease',
+    attemptStorageKey: 'attempts/voice/57575757-5757-4757-8757-575757575757',
+    leaseExpiresAt: '2026-08-25T00:00:10.000Z',
+    attemptDeadlineAt: '2026-08-25T00:00:20.000Z',
+    now: '2026-08-25T00:00:01.000Z',
+  });
+  clock = new Date('2026-08-25T00:00:21.000Z');
+
+  const status = await fetchJson(`${baseUrl}/api/v1/voice/uploads/${clientUploadId}`, {
+    headers: { Cookie: cookie },
+  });
+  assert.equal(status.response.status, 200);
+  assert.deepEqual(status.body.data, {
+    clientUploadId,
+    requestSha256: 'd4'.repeat(32),
+    state: 'failed',
+    failureCode: 'VOICE_ATTEMPT_EXPIRED',
+    retryable: true,
+  });
+});
+
+test('voice upload DELETE removes a ready draft but returns 409 when message attachment wins', async (t) => {
+  const { baseUrl, origin, store, mediaStore } = await startVoiceApp(t, {
+    asrProvider: {
+      provider: 'azure',
+      transcribe: async () => ({ transcript: 'private draft transcript', provider: 'azure', latencyMs: 1, confidence: null }),
+    },
+  });
+  const session = await fetchJson(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin } });
+  const cookie = session.response.headers.getSetCookie()[0].split(';')[0];
+  const audio = canonicalWav(50);
+  const requestSha256 = createHash('sha256').update(audio).digest('hex');
+  const upload = (clientUploadId) => fetchJson(`${baseUrl}/api/v1/voice/transcriptions`, {
+    method: 'POST',
+    headers: {
+      Origin: origin,
+      Cookie: cookie,
+      'Content-Type': 'audio/wav',
+      'Content-Length': String(audio.length),
+      'X-Client-Upload-Id': clientUploadId,
+      'X-Content-SHA256': requestSha256,
+    },
+    body: audio,
+  });
+
+  const disposableId = '58585858-5858-4858-8858-585858585858';
+  const disposable = await upload(disposableId);
+  const disposableAsset = await store.getMediaAsset({
+    sessionId: session.body.data.session.id,
+    mediaId: disposable.body.data.voiceDraftId,
+  });
+  const removed = await fetchJson(`${baseUrl}/api/v1/voice/uploads/${disposableId}`, {
+    method: 'DELETE', headers: { Origin: origin, Cookie: cookie },
+  });
+  assert.equal(removed.response.status, 200);
+  assert.deepEqual(removed.body.data, {
+    clientUploadId: disposableId,
+    requestSha256,
+    state: 'failed',
+    failureCode: 'VOICE_UPLOAD_CANCELLED',
+    retryable: false,
+  });
+  assert.equal(JSON.stringify(removed.body).includes('private draft transcript'), false);
+  const removedStatus = await fetchJson(`${baseUrl}/api/v1/voice/uploads/${disposableId}`, {
+    headers: { Cookie: cookie },
+  });
+  assert.deepEqual(removedStatus.body.data, removed.body.data);
+  await waitForCondition(async () => {
+    try {
+      await mediaStore.open({ storageKey: disposableAsset.storageKey });
+      return false;
+    } catch (error) {
+      if (error.code === 'MEDIA_NOT_FOUND') return true;
+      throw error;
+    }
+  }, { message: 'cancelled ready draft media was not reclaimed' });
+
+  const attachedId = '59595959-5959-4959-8959-595959595959';
+  const attached = await upload(attachedId);
+  const accepted = await store.acceptMessage({
+    sessionId: session.body.data.session.id,
+    conversationId: session.body.data.conversation.id,
+    clientMessageId: '60606060-6060-4060-8060-606060606060',
+    requestHash: 'http-attach-before-cancel',
+    text: 'edited voice message',
+    voiceDraftId: attached.body.data.voiceDraftId,
+    now: '2026-08-25T00:10:00.000Z',
+  });
+  const attachedAsset = await store.getMediaAsset({
+    sessionId: session.body.data.session.id,
+    mediaId: attached.body.data.voiceDraftId,
+  });
+  const rejected = await fetchJson(`${baseUrl}/api/v1/voice/uploads/${attachedId}`, {
+    method: 'DELETE', headers: { Origin: origin, Cookie: cookie },
+  });
+  assert.equal(rejected.response.status, 409);
+  assert.equal(rejected.body.error.code, 'VOICE_DRAFT_ALREADY_ATTACHED');
+  const preserved = await store.getMediaAsset({
+    sessionId: session.body.data.session.id,
+    mediaId: attached.body.data.voiceDraftId,
+  });
+  assert.equal(preserved.status, 'attached');
+  assert.equal(preserved.ownerMessageId, accepted.message.id);
+  assert.deepEqual(await readableBuffer((await mediaStore.open({ storageKey: attachedAsset.storageKey })).readable), audio);
 });
 
 test('voice capability failure precedes malformed headers, MIME, declared size, claim, body, and provider work', async (t) => {

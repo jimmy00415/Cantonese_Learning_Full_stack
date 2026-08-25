@@ -25,6 +25,7 @@ function normalizeError(error = {}) {
     VOICE_SYNTHESIS_REJECTED: 502, VOICE_TRANSCRIPTION_FAILED: 502,
     VOICE_SYNTHESIS_FAILED: 502, VOICE_PROVIDER_TIMEOUT: 504,
     VOICE_MEDIA_UNAVAILABLE: 503, VOICE_DRAFT_DELETED: 404,
+    VOICE_UPLOAD_CANCELLED: 410, VOICE_DRAFT_ALREADY_ATTACHED: 409,
     RANGE_NOT_SATISFIABLE: 416,
   };
   if (error.code in known) {
@@ -63,6 +64,8 @@ function safeMessage(code) {
     VOICE_PROVIDER_TIMEOUT: 'The voice provider timed out.',
     VOICE_MEDIA_UNAVAILABLE: 'Voice media storage is temporarily unavailable.',
     VOICE_DRAFT_DELETED: 'The voice draft was deleted.',
+    VOICE_UPLOAD_CANCELLED: 'The voice upload was cancelled.',
+    VOICE_DRAFT_ALREADY_ATTACHED: 'The voice draft is already attached to a message.',
     RANGE_NOT_SATISFIABLE: 'The requested byte range is not satisfiable.',
   };
   return messages[code] ?? 'The service could not process this request.';

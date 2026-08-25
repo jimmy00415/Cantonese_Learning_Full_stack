@@ -146,6 +146,18 @@ export function createVoiceRouter({
     } catch (error) { return sendError(response, error); }
   });
 
+  router.delete('/voice/uploads/:clientUploadId', async (request, response) => {
+    try {
+      const { session } = await resolveSession(request);
+      if (!UUID.test(request.params.clientUploadId ?? '')) throw voiceError(404, 'NOT_FOUND');
+      const result = await service.cancelUpload({
+        sessionId: session.id,
+        clientUploadId: request.params.clientUploadId,
+      });
+      return operationResponse(response, result);
+    } catch (error) { return sendError(response, error); }
+  });
+
   router.delete('/voice/drafts/:draftId', async (request, response) => {
     try {
       const { session } = await resolveSession(request);
