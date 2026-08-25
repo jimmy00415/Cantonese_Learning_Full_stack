@@ -447,6 +447,60 @@ test('AbortSignal cancels a stalled response body after headers and resolves saf
   assert.equal(cancelCalls, 1);
 });
 
+test('AbortSignal settles immediately even when both response text and body cancellation ignore abort', async (t) => {
+  for (const [name, abortBeforeRead] of [
+    ['abort while reading', false],
+    ['response returned after a pre-aborted fetch', true],
+  ]) {
+    await t.test(name, async () => {
+      const controller = new AbortController();
+      let textStarted;
+      const started = new Promise((resolve) => { textStarted = resolve; });
+      let cancelCalls = 0;
+      const transport = createVoiceTransport({
+        origin: ORIGIN,
+        fetchImpl: async () => {
+          if (abortBeforeRead) controller.abort();
+          return {
+            status: 200,
+            ok: true,
+            redirected: false,
+            url: `${ORIGIN}/api/v1/voice/uploads/${CLIENT_UPLOAD_ID}`,
+            headers: new Headers(),
+            body: {
+              cancel: () => {
+                cancelCalls += 1;
+                return new Promise(() => undefined);
+              },
+            },
+            text: () => {
+              textStarted();
+              return new Promise(() => undefined);
+            },
+          };
+        },
+      });
+
+      const pending = transport.getUploadStatus({
+        clientUploadId: CLIENT_UPLOAD_ID,
+        requestSha256: REQUEST_SHA256,
+        signal: controller.signal,
+      });
+      if (!abortBeforeRead) {
+        await started;
+        controller.abort();
+      }
+      const result = await Promise.race([
+        pending,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('abort waited for body cancellation')), 100)),
+      ]);
+
+      assert.equal(result.error.code, 'REQUEST_ABORTED');
+      assert.equal(cancelCalls, 1);
+    });
+  }
+});
+
 test('CSRF callback failures are normalized without exposing private setup diagnostics', async () => {
   let fetchCalls = 0;
   const transport = createVoiceTransport({

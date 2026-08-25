@@ -85,8 +85,11 @@ function normalizeOrigin(value) {
   return parsed.origin;
 }
 
-async function cancelResponseBody(response) {
-  try { await response?.body?.cancel?.(); } catch { /* best-effort connection cleanup */ }
+function cancelResponseBody(response) {
+  try {
+    const pending = response?.body?.cancel?.();
+    void Promise.resolve(pending).catch(() => undefined);
+  } catch { /* best-effort connection cleanup */ }
 }
 
 function responseUrlIsTrusted(response, requestPath, origin) {
@@ -106,7 +109,7 @@ function responseUrlIsTrusted(response, requestPath, origin) {
 
 async function responseTextWithAbort(response, signal) {
   if (signal?.aborted) {
-    await cancelResponseBody(response);
+    cancelResponseBody(response);
     throw new DOMException('The request was aborted.', 'AbortError');
   }
   if (!signal?.addEventListener) return response.text();
@@ -114,9 +117,8 @@ async function responseTextWithAbort(response, signal) {
   let abortListener;
   const aborted = new Promise((_, reject) => {
     abortListener = () => {
-      void cancelResponseBody(response).then(() => {
-        reject(new DOMException('The request was aborted.', 'AbortError'));
-      });
+      cancelResponseBody(response);
+      reject(new DOMException('The request was aborted.', 'AbortError'));
     };
     signal.addEventListener('abort', abortListener, { once: true });
   });
