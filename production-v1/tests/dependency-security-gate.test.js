@@ -10,6 +10,129 @@ import { fileURLToPath } from 'node:url';
 
 const ADVISORY_ID = 'GHSA-w5hq-g745-h8pq';
 const EXPIRY = '2026-09-26T00:00:00.000Z';
+const GAXIOS_RESOLVED = 'https://registry.npmjs.org/gaxios/-/gaxios-6.7.1.tgz';
+const GAXIOS_INTEGRITY = 'sha512-LDODD4TMYx7XXdpwxAVRAIAuB0bzv0s+ywFonY46k126qzQHT9ygyoa9tncmOiQmmDrik65UYsEkv3lbfqQ3yQ==';
+const GAXIOS_TREE_SHA256 = '79b81803bf8037ffa1117a3a626d73e161427e01834e5e00bdf99de36529bb2b';
+const UUID_RESOLVED = 'https://registry.npmjs.org/uuid/-/uuid-9.0.1.tgz';
+const UUID_INTEGRITY = 'sha512-b+1eJOlsR9K8HJpow9Ok3fiWOWSIcIzXodvv0rQjVoOVNpWMpxf1wZNpt4y9h10odCNrqnYp1OBzRktckBe3sA==';
+const UUID_TREE_SHA256 = '588984b1885d6848ca4f9773d4a76705bf4e562f2c0057593f76c2f612e4339a';
+const GAXIOS_TREE_FILES = [
+  'CHANGELOG.md',
+  'LICENSE',
+  'README.md',
+  'build/src/common.d.ts',
+  'build/src/common.js',
+  'build/src/common.js.map',
+  'build/src/gaxios.d.ts',
+  'build/src/gaxios.js',
+  'build/src/gaxios.js.map',
+  'build/src/index.d.ts',
+  'build/src/index.js',
+  'build/src/index.js.map',
+  'build/src/interceptor.d.ts',
+  'build/src/interceptor.js',
+  'build/src/interceptor.js.map',
+  'build/src/retry.d.ts',
+  'build/src/retry.js',
+  'build/src/retry.js.map',
+  'build/src/util.d.ts',
+  'build/src/util.js',
+  'build/src/util.js.map',
+  'package.json',
+];
+const UUID_TREE_FILES = [
+  'CHANGELOG.md',
+  'CONTRIBUTING.md',
+  'LICENSE.md',
+  'README.md',
+  'dist/bin/uuid',
+  'dist/commonjs-browser/index.js',
+  'dist/commonjs-browser/md5.js',
+  'dist/commonjs-browser/native.js',
+  'dist/commonjs-browser/nil.js',
+  'dist/commonjs-browser/parse.js',
+  'dist/commonjs-browser/regex.js',
+  'dist/commonjs-browser/rng.js',
+  'dist/commonjs-browser/sha1.js',
+  'dist/commonjs-browser/stringify.js',
+  'dist/commonjs-browser/v1.js',
+  'dist/commonjs-browser/v3.js',
+  'dist/commonjs-browser/v35.js',
+  'dist/commonjs-browser/v4.js',
+  'dist/commonjs-browser/v5.js',
+  'dist/commonjs-browser/validate.js',
+  'dist/commonjs-browser/version.js',
+  'dist/esm-browser/index.js',
+  'dist/esm-browser/md5.js',
+  'dist/esm-browser/native.js',
+  'dist/esm-browser/nil.js',
+  'dist/esm-browser/parse.js',
+  'dist/esm-browser/regex.js',
+  'dist/esm-browser/rng.js',
+  'dist/esm-browser/sha1.js',
+  'dist/esm-browser/stringify.js',
+  'dist/esm-browser/v1.js',
+  'dist/esm-browser/v3.js',
+  'dist/esm-browser/v35.js',
+  'dist/esm-browser/v4.js',
+  'dist/esm-browser/v5.js',
+  'dist/esm-browser/validate.js',
+  'dist/esm-browser/version.js',
+  'dist/esm-node/index.js',
+  'dist/esm-node/md5.js',
+  'dist/esm-node/native.js',
+  'dist/esm-node/nil.js',
+  'dist/esm-node/parse.js',
+  'dist/esm-node/regex.js',
+  'dist/esm-node/rng.js',
+  'dist/esm-node/sha1.js',
+  'dist/esm-node/stringify.js',
+  'dist/esm-node/v1.js',
+  'dist/esm-node/v3.js',
+  'dist/esm-node/v35.js',
+  'dist/esm-node/v4.js',
+  'dist/esm-node/v5.js',
+  'dist/esm-node/validate.js',
+  'dist/esm-node/version.js',
+  'dist/index.js',
+  'dist/md5-browser.js',
+  'dist/md5.js',
+  'dist/native-browser.js',
+  'dist/native.js',
+  'dist/nil.js',
+  'dist/parse.js',
+  'dist/regex.js',
+  'dist/rng-browser.js',
+  'dist/rng.js',
+  'dist/sha1-browser.js',
+  'dist/sha1.js',
+  'dist/stringify.js',
+  'dist/uuid-bin.js',
+  'dist/v1.js',
+  'dist/v3.js',
+  'dist/v35.js',
+  'dist/v4.js',
+  'dist/v5.js',
+  'dist/validate.js',
+  'dist/version.js',
+  'package.json',
+  'wrapper.mjs',
+];
+const UUID_EXPORTS = {
+  '.': {
+    node: {
+      module: './dist/esm-node/index.js',
+      require: './dist/index.js',
+      import: './wrapper.mjs',
+    },
+    browser: {
+      import: './dist/esm-browser/index.js',
+      require: './dist/commonjs-browser/index.js',
+    },
+    default: './dist/esm-browser/index.js',
+  },
+  './package.json': './package.json',
+};
 const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const GATE_SCRIPT = join(ROOT_DIR, 'scripts', 'dependency-security-gate.js');
 
@@ -110,6 +233,9 @@ function exactPolicy() {
           path: 'node_modules/@google-cloud/storage/node_modules/gaxios',
           version: '6.7.1',
           uuidRange: '^9.0.1',
+          resolved: GAXIOS_RESOLVED,
+          integrity: GAXIOS_INTEGRITY,
+          packageTreeSha256: GAXIOS_TREE_SHA256,
           sourcePath: 'build/src/gaxios.js',
           sourceSha256: '9a9988f38306d08faaa73aa0316ed0c6eed519ef8cfd3561273a45249eaf94b2',
         },
@@ -117,13 +243,59 @@ function exactPolicy() {
           path: 'node_modules/gtoken/node_modules/gaxios',
           version: '6.7.1',
           uuidRange: '^9.0.1',
+          resolved: GAXIOS_RESOLVED,
+          integrity: GAXIOS_INTEGRITY,
+          packageTreeSha256: GAXIOS_TREE_SHA256,
           sourcePath: 'build/src/gaxios.js',
           sourceSha256: '9a9988f38306d08faaa73aa0316ed0c6eed519ef8cfd3561273a45249eaf94b2',
         },
       ],
+      gaxiosPackage: {
+        packageTreeFiles: structuredClone(GAXIOS_TREE_FILES),
+        manifest: {
+          main: 'build/src/index.js',
+          files: ['build/src'],
+          exportsPresent: false,
+          typePresent: false,
+        },
+        runtimeSourcePaths: [
+          'build/src/common.js',
+          'build/src/gaxios.js',
+          'build/src/index.js',
+          'build/src/interceptor.js',
+          'build/src/retry.js',
+          'build/src/util.js',
+        ],
+        entrypoint: {
+          path: 'build/src/index.js',
+          implementationPath: 'build/src/gaxios.js',
+          implementationRequire: 'const gaxios_1 = require("./gaxios");',
+        },
+      },
       uuidPackage: {
         path: 'node_modules/uuid',
         version: '9.0.1',
+        resolved: UUID_RESOLVED,
+        integrity: UUID_INTEGRITY,
+        packageTreeSha256: UUID_TREE_SHA256,
+        packageTreeFiles: structuredClone(UUID_TREE_FILES),
+        manifest: {
+          main: './dist/index.js',
+          exports: structuredClone(UUID_EXPORTS),
+          files: [
+            'CHANGELOG.md',
+            'CONTRIBUTING.md',
+            'LICENSE.md',
+            'README.md',
+            'dist',
+            'wrapper.mjs',
+          ],
+          typePresent: false,
+        },
+        entrypoint: {
+          path: 'dist/index.js',
+          v4Require: 'var _v3 = _interopRequireDefault(require("./v4.js"));',
+        },
       },
       sourceContract: {
         requireStatement: 'const uuid_1 = require("uuid");',
@@ -174,6 +346,7 @@ function exactInstallationInputs() {
     `const boundary = ${policy.installation.sourceContract.zeroArgumentCall};`,
   ].join('\n');
   const files = {};
+  const packageTrees = {};
 
   for (const parent of policy.installation.parentPackages) {
     files[`${parent.path}/package.json`] = {
@@ -185,20 +358,51 @@ function exactInstallationInputs() {
     };
   }
   for (const copy of policy.installation.gaxiosCopies) {
+    const manifest = {
+      name: 'gaxios',
+      version: copy.version,
+      main: policy.installation.gaxiosPackage.manifest.main,
+      files: structuredClone(policy.installation.gaxiosPackage.manifest.files),
+      dependencies: { uuid: copy.uuidRange },
+    };
     files[`${copy.path}/package.json`] = {
-      text: JSON.stringify({
-        name: 'gaxios',
-        version: copy.version,
-        dependencies: { uuid: copy.uuidRange },
-      }),
+      text: JSON.stringify(manifest),
     };
     files[`${copy.path}/${copy.sourcePath}`] = {
       text: source,
       sha256: copy.sourceSha256,
     };
+    const texts = Object.fromEntries(
+      policy.installation.gaxiosPackage.runtimeSourcePaths.map((path) => [path, '']),
+    );
+    texts['package.json'] = JSON.stringify(manifest);
+    texts[policy.installation.gaxiosPackage.entrypoint.path] =
+      policy.installation.gaxiosPackage.entrypoint.implementationRequire;
+    texts[policy.installation.gaxiosPackage.entrypoint.implementationPath] = source;
+    packageTrees[copy.path] = {
+      files: structuredClone(policy.installation.gaxiosPackage.packageTreeFiles),
+      treeSha256: copy.packageTreeSha256,
+      texts,
+    };
   }
+  const uuidManifest = {
+    name: 'uuid',
+    version: policy.installation.uuidPackage.version,
+    main: policy.installation.uuidPackage.manifest.main,
+    exports: structuredClone(policy.installation.uuidPackage.manifest.exports),
+    files: structuredClone(policy.installation.uuidPackage.manifest.files),
+  };
   files[`${policy.installation.uuidPackage.path}/package.json`] = {
-    text: JSON.stringify({ name: 'uuid', version: policy.installation.uuidPackage.version }),
+    text: JSON.stringify(uuidManifest),
+  };
+  packageTrees[policy.installation.uuidPackage.path] = {
+    files: structuredClone(policy.installation.uuidPackage.packageTreeFiles),
+    treeSha256: policy.installation.uuidPackage.packageTreeSha256,
+    texts: {
+      'package.json': JSON.stringify(uuidManifest),
+      [policy.installation.uuidPackage.entrypoint.path]:
+        policy.installation.uuidPackage.entrypoint.v4Require,
+    },
   };
 
   return {
@@ -222,14 +426,20 @@ function exactInstallationInputs() {
         },
         [storageGaxios.path]: {
           version: storageGaxios.version,
+          resolved: storageGaxios.resolved,
+          integrity: storageGaxios.integrity,
           dependencies: { uuid: storageGaxios.uuidRange },
         },
         [gtokenGaxios.path]: {
           version: gtokenGaxios.version,
+          resolved: gtokenGaxios.resolved,
+          integrity: gtokenGaxios.integrity,
           dependencies: { uuid: gtokenGaxios.uuidRange },
         },
         [policy.installation.uuidPackage.path]: {
           version: policy.installation.uuidPackage.version,
+          resolved: policy.installation.uuidPackage.resolved,
+          integrity: policy.installation.uuidPackage.integrity,
         },
         'node_modules/gaxios': {
           version: '7.3.1',
@@ -238,6 +448,7 @@ function exactInstallationInputs() {
       },
     },
     files,
+    packageTrees,
   };
 }
 
@@ -260,6 +471,7 @@ function exactRunnerDependencies(overrides = {}) {
       return file.text;
     },
     hashText: (_text, path) => installation.files[path]?.sha256,
+    collectPackageTree: ({ packagePath }) => structuredClone(installation.packageTrees[packagePath]),
     ...overrides,
   };
 }
@@ -407,6 +619,34 @@ test('the installed dependency and source contract fails closed on malformed inp
         version: '6.7.1', dependencies: { uuid: '^9.0.1' },
       };
     }, 'DEPENDENCY_CONTRACT_DRIFT'],
+    ...['6.4.0', '6.6.0', '6.7.0'].map((version) => [
+      `unreviewed affected gaxios ${version}`,
+      (input) => {
+        input.packageLock.packages[`node_modules/unreviewed-${version}/node_modules/gaxios`] = {
+          version, dependencies: { uuid: '^9.0.1' },
+        };
+      },
+      'DEPENDENCY_CONTRACT_DRIFT',
+    ]),
+    ...['8.0.0', '10.0.0', '11.0.0'].map((version) => [
+      `unreviewed affected uuid ${version}`,
+      (input) => {
+        input.packageLock.packages[`node_modules/unreviewed-${version}/node_modules/uuid`] = {
+          version,
+        };
+      },
+      'DEPENDENCY_CONTRACT_DRIFT',
+    ]),
+    ['malformed gaxios version', (input) => {
+      input.packageLock.packages['node_modules/unreviewed/node_modules/gaxios'] = {
+        version: '6.7', dependencies: { uuid: '^9.0.1' },
+      };
+    }, 'DEPENDENCY_CONTRACT_INVALID'],
+    ['malformed uuid version', (input) => {
+      input.packageLock.packages['node_modules/unreviewed/node_modules/uuid'] = {
+        version: 'not-semver',
+      };
+    }, 'DEPENDENCY_CONTRACT_INVALID'],
     ['parent dependency drift', (input) => {
       input.packageLock.packages['node_modules/gtoken'].dependencies.gaxios = '^7.0.0';
     }, 'DEPENDENCY_CONTRACT_DRIFT'],
@@ -418,6 +658,64 @@ test('the installed dependency and source contract fails closed on malformed inp
     }, 'DEPENDENCY_CONTRACT_DRIFT'],
     ['installed uuid version drift', (input) => {
       input.packageLock.packages['node_modules/uuid'].version = '9.0.2';
+    }, 'DEPENDENCY_CONTRACT_DRIFT'],
+    ['gaxios lock tarball drift', (input) => {
+      input.packageLock.packages[
+        'node_modules/gtoken/node_modules/gaxios'
+      ].resolved = 'https://registry.npmjs.org/gaxios/-/gaxios-6.7.0.tgz';
+    }, 'DEPENDENCY_CONTRACT_DRIFT'],
+    ['gaxios lock integrity drift', (input) => {
+      input.packageLock.packages[
+        'node_modules/gtoken/node_modules/gaxios'
+      ].integrity = 'sha512-unreviewed';
+    }, 'DEPENDENCY_CONTRACT_DRIFT'],
+    ['uuid lock tarball drift', (input) => {
+      input.packageLock.packages['node_modules/uuid'].resolved =
+        'https://registry.npmjs.org/uuid/-/uuid-10.0.0.tgz';
+    }, 'DEPENDENCY_CONTRACT_DRIFT'],
+    ['gaxios main redirects to evil.js', (input) => {
+      const tree = input.packageTrees['node_modules/gtoken/node_modules/gaxios'];
+      const manifest = JSON.parse(tree.texts['package.json']);
+      manifest.main = 'evil.js';
+      tree.texts['package.json'] = JSON.stringify(manifest);
+    }, 'DEPENDENCY_CONTRACT_DRIFT'],
+    ['gaxios exports redirects the entrypoint', (input) => {
+      const tree = input.packageTrees['node_modules/gtoken/node_modules/gaxios'];
+      const manifest = JSON.parse(tree.texts['package.json']);
+      manifest.exports = { '.': './evil.js' };
+      tree.texts['package.json'] = JSON.stringify(manifest);
+    }, 'DEPENDENCY_CONTRACT_DRIFT'],
+    ['gaxios entrypoint chain redirects to evil.js', (input) => {
+      const tree = input.packageTrees['node_modules/gtoken/node_modules/gaxios'];
+      tree.texts['build/src/index.js'] = 'const gaxios_1 = require("./evil");';
+    }, 'DEPENDENCY_CONTRACT_DRIFT'],
+    ['uuid exports redirects the CommonJS entrypoint', (input) => {
+      const tree = input.packageTrees['node_modules/uuid'];
+      const manifest = JSON.parse(tree.texts['package.json']);
+      manifest.exports['.'].node.require = './evil.js';
+      tree.texts['package.json'] = JSON.stringify(manifest);
+    }, 'DEPENDENCY_CONTRACT_DRIFT'],
+    ['uuid entrypoint chain redirects v4', (input) => {
+      const tree = input.packageTrees['node_modules/uuid'];
+      tree.texts['dist/index.js'] =
+        'var _v3 = _interopRequireDefault(require("./evil.js"));';
+    }, 'DEPENDENCY_CONTRACT_DRIFT'],
+    ['extra executable package file', (input) => {
+      const tree = input.packageTrees['node_modules/gtoken/node_modules/gaxios'];
+      tree.files.push('evil.js');
+    }, 'DEPENDENCY_CONTRACT_DRIFT'],
+    ['complete package tree digest drift', (input) => {
+      input.packageTrees['node_modules/gtoken/node_modules/gaxios'].treeSha256 = '0'.repeat(64);
+    }, 'DEPENDENCY_CONTRACT_DRIFT'],
+    ['alternate uuid import in another runtime source', (input) => {
+      const tree = input.packageTrees['node_modules/gtoken/node_modules/gaxios'];
+      tree.texts['build/src/common.js'] =
+        'const altUuid = require("uuid"); altUuid["v5"]();';
+    }, 'DEPENDENCY_CONTRACT_DRIFT'],
+    ['alternative uuid property access', (input) => {
+      const tree = input.packageTrees['node_modules/gtoken/node_modules/gaxios'];
+      tree.texts['build/src/gaxios.js'] = tree.texts['build/src/gaxios.js']
+        .replace('uuid_1.v4)()', 'uuid_1["v4"])()');
     }, 'DEPENDENCY_CONTRACT_DRIFT'],
     ['source hash drift', (input) => {
       const path = 'node_modules/gtoken/node_modules/gaxios/build/src/gaxios.js';
