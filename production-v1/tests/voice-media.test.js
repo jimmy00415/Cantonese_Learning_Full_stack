@@ -1159,7 +1159,7 @@ test('voice release evidence is artifact/config/commit bound and expires dynamic
     V1_LEGACY_RESOURCE_INVENTORY_APPROVED: 'true',
     V1_DEPENDENCY_ACCEPTANCE_EVIDENCE_FILE: dependencyPath,
     V1_DEPENDENCY_ACCEPTANCE_EVIDENCE_VERSION: dependencyRecord.artifactSha256,
-    V1_ASR_PROVIDER: 'azure', V1_TTS_PROVIDER: 'azure', AZURE_SPEECH_KEY: 'speech-secret', AZURE_SPEECH_REGION: 'eastasia',
+    V1_ASR_PROVIDER: 'azure', V1_TTS_PROVIDER: 'azure', V1_AZURE_SPEECH_KEY: 'speech-secret', V1_AZURE_SPEECH_REGION: 'eastasia',
     V1_AZURE_SPEECH_CREDENTIAL_VERSION: 'speech-rotation-2026-08',
   };
   const unverified = loadConfig({ ...baseEnvironment, NODE_ENV: 'test' }, { now: () => new Date(occurredAt) });
@@ -1356,6 +1356,7 @@ test('voice provider smoke is inert without exact confirmations and invokes only
   const dependencies = {
     createTts: () => ({ synthesize: async () => { ttsCalls += 1; return { buffer: Buffer.from([0x49, 0x44, 0x33]), provider: 'azure', latencyMs: 12 }; } }),
     createAsr: () => ({ transcribe: async () => { asrCalls += 1; return { transcript: 'must-not-print', provider: 'azure', latencyMs: 12 }; } }),
+    inspectGit: async () => ({ commitSha: 'e'.repeat(40), clean: true }),
     writeEvidence: async (record) => { written = record; },
     writeOutput: () => undefined,
   };
@@ -1376,6 +1377,48 @@ test('voice provider smoke is inert without exact confirmations and invokes only
   const serialized = JSON.stringify({ success, written });
   assert.equal(serialized.includes('smoke-secret'), false);
   assert.equal(serialized.includes('must-not-print'), false);
+});
+
+test('voice provider smoke rejects dirty or moving Git state before publishing evidence', async (t) => {
+  const { runVoiceProviderSmoke } = await import('../scripts/voice-provider-smoke.js');
+  const commitSha = 'e'.repeat(40);
+  const environment = {
+    NODE_ENV: 'test', V1_RELEASE_COMMIT_SHA: commitSha,
+    V1_TTS_PROVIDER: 'azure', AZURE_SPEECH_KEY: 'smoke-secret', AZURE_SPEECH_REGION: 'eastasia',
+    V1_AZURE_SPEECH_CREDENTIAL_VERSION: 'rotation-v1',
+  };
+  const cases = [
+    ['dirty before request', [{ commitSha, clean: false }], 0, 2],
+    ['wrong commit before request', [{ commitSha: 'd'.repeat(40), clean: true }], 0, 2],
+    ['dirty after request', [{ commitSha, clean: true }, { commitSha, clean: false }], 1, 1],
+    ['commit moved after request', [{ commitSha, clean: true }, { commitSha: 'd'.repeat(40), clean: true }], 1, 1],
+  ];
+
+  for (const [name, states, expectedProviderCalls, expectedExitCode] of cases) {
+    await t.test(name, async () => {
+      let providerCalls = 0;
+      let writes = 0;
+      const output = [];
+      const result = await runVoiceProviderSmoke({
+        argv: ['--capability', 'tts', '--confirm-real-voice-provider'],
+        environment,
+        inspectGit: async () => states.shift(),
+        createTts: () => ({
+          synthesize: async () => {
+            providerCalls += 1;
+            return { buffer: Buffer.from('ID3fixture'), provider: 'azure', latencyMs: 12 };
+          },
+        }),
+        writeEvidence: async () => { writes += 1; },
+        writeOutput: (line) => output.push(line),
+      });
+
+      assert.equal(result.exitCode, expectedExitCode);
+      assert.equal(providerCalls, expectedProviderCalls);
+      assert.equal(writes, 0);
+      assert.equal(JSON.parse(output.at(-1)).errorCode, 'VOICE_RELEASE_GIT_STATE_INVALID');
+    });
+  }
 });
 
 test('media Azure Blob adapter requires a private container and mediates bounded upload/range/delete with no URL', async () => {

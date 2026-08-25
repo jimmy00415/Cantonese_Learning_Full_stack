@@ -60,7 +60,8 @@ function googleAsrUrl(settings) {
 }
 
 function googleLanguageCodes(settings, responseLanguage) {
-  const selected = GOOGLE_RESPONSE_LANGUAGES[responseLanguage] ?? 'yue-Hant-HK';
+  const selected = GOOGLE_RESPONSE_LANGUAGES[responseLanguage];
+  if (!selected) throw speechError('VOICE_TRANSCRIPTION_REJECTED', 502, false, 'rejected');
   return [selected, ...settings.languageCodes.filter((language) => language !== selected)];
 }
 
@@ -105,8 +106,9 @@ export function createAsrProvider({
   if (google && typeof googleAuthProvider?.fetch !== 'function') {
     throw speechError('VOICE_PROVIDER_MISCONFIGURED', 503, false, 'configuration');
   }
-  const transcribe = async (audio, { signal, responseLanguage } = {}) => {
+  const transcribe = async (audio, { signal, responseLanguage = 'yueHant' } = {}) => {
     const buffer = Buffer.isBuffer(audio) ? audio : Buffer.from(audio ?? []);
+    const googleLanguages = google ? googleLanguageCodes(config.settings, responseLanguage) : null;
     const startedAt = now();
     try {
       const result = await withSpeechDeadline({
@@ -119,7 +121,7 @@ export function createAsrProvider({
               config: {
                 autoDecodingConfig: {},
                 model: config.settings.model,
-                languageCodes: googleLanguageCodes(config.settings, responseLanguage),
+                languageCodes: googleLanguages,
               },
               content: buffer.toString('base64'),
             }) : buffer;

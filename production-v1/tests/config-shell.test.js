@@ -437,6 +437,41 @@ test('Google AI config is ADC-only, V1-prefixed, and binds one exact voice per l
   }
 });
 
+test('production ignores unprefixed voice selectors and settings while local compatibility remains', () => {
+  const legacyOnly = loadConfig(productionEnvironment({
+    ASR_PROVIDER: 'azure', TTS_PROVIDER: 'azure',
+    AZURE_SPEECH_KEY: 'legacy-secret', AZURE_SPEECH_REGION: 'eastasia',
+    V1_AZURE_SPEECH_CREDENTIAL_VERSION: 'rotation-v1',
+  }));
+  assert.equal(legacyOnly.asr.provider, 'none');
+  assert.equal(legacyOnly.tts.provider, 'none');
+  assert.equal(legacyOnly.asr.available, false);
+  assert.equal(legacyOnly.tts.available, false);
+
+  const legacySettings = loadConfig(productionEnvironment({
+    V1_ASR_PROVIDER: 'azure', V1_TTS_PROVIDER: 'azure',
+    AZURE_SPEECH_KEY: 'legacy-secret', AZURE_SPEECH_REGION: 'eastasia',
+    V1_AZURE_SPEECH_CREDENTIAL_VERSION: 'rotation-v1',
+  }));
+  assert.equal(legacySettings.asr.available, false);
+  assert.equal(legacySettings.tts.available, false);
+
+  const v1Settings = loadConfig(productionEnvironment({
+    V1_ASR_PROVIDER: 'azure', V1_TTS_PROVIDER: 'azure',
+    V1_AZURE_SPEECH_KEY: 'v1-secret', V1_AZURE_SPEECH_REGION: 'eastasia',
+    V1_AZURE_SPEECH_CREDENTIAL_VERSION: 'rotation-v1',
+  }));
+  assert.equal(v1Settings.asr.available, true);
+  assert.equal(v1Settings.tts.available, true);
+
+  const local = loadConfig({
+    NODE_ENV: 'test', ASR_PROVIDER: 'azure', TTS_PROVIDER: 'azure',
+    AZURE_SPEECH_KEY: 'legacy-secret', AZURE_SPEECH_REGION: 'eastasia',
+  });
+  assert.equal(local.asr.available, true);
+  assert.equal(local.tts.available, true);
+});
+
 test('config requires the Azure deployment setting rather than a model alias', () => {
   const azureModelOnly = {
     NODE_ENV: 'test',

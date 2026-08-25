@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
 import { loadConfig } from '../src/config.js';
@@ -16,6 +18,7 @@ import {
 const RELEASE_SHA = /^[0-9a-f]{40}$/i;
 const FIXED_TTS_PHRASE = '你好，這是 Hong Kong Buddy 的非敏感語音驗證。';
 const productionRoot = fileURLToPath(new URL('../', import.meta.url));
+const executeFile = promisify(execFile);
 
 function exactArguments(argv) {
   if (argv.length === 3
@@ -54,11 +57,29 @@ function safeOutput(writeOutput, value) {
   writeOutput(`${JSON.stringify(value)}\n`);
 }
 
+async function defaultInspectGit() {
+  const options = {
+    cwd: productionRoot,
+    encoding: 'utf8',
+    maxBuffer: 1024 * 1024,
+    windowsHide: true,
+  };
+  const before = (await executeFile('git', ['rev-parse', '--verify', 'HEAD'], options)).stdout.trim();
+  const status = (await executeFile('git', ['status', '--porcelain=v1', '--untracked-files=all'], options)).stdout;
+  const after = (await executeFile('git', ['rev-parse', '--verify', 'HEAD'], options)).stdout.trim();
+  return { commitSha: after, clean: before === after && status.length === 0 };
+}
+
+function validFrozenGit(state, commitSha) {
+  return state?.clean === true && state.commitSha === commitSha;
+}
+
 export async function runVoiceProviderSmoke({
   argv = process.argv.slice(2),
   environment = process.env,
   createTts = (config) => createTtsProvider({ config }),
   createAsr = (config) => createAsrProvider({ config }),
+  inspectGit = defaultInspectGit,
   writeEvidence = defaultWriteEvidence,
   writeOutput = (value) => process.stdout.write(value),
   now = () => new Date(),
@@ -80,9 +101,18 @@ export async function runVoiceProviderSmoke({
     return { exitCode: 2, capability: selection.capability, provider: selected?.provider ?? 'none', result: 'fail', errorCode: 'VOICE_PROVIDER_MISCONFIGURED' };
   }
 
+  let initialGit;
+  try { initialGit = await inspectGit(); } catch { initialGit = null; }
+  if (!validFrozenGit(initialGit, config.releaseCommitSha)) {
+    const output = { capability: selection.capability, provider: selected.provider, result: 'fail', errorCode: 'VOICE_RELEASE_GIT_STATE_INVALID' };
+    safeOutput(writeOutput, output);
+    return { exitCode: 2, ...output };
+  }
+
+  let result;
+  let fixture = {};
+  let providerFailure;
   try {
-    let result;
-    let fixture = {};
     if (selection.capability === 'tts') {
       result = await createTts(selected).synthesize(FIXED_TTS_PHRASE);
     } else {
@@ -94,6 +124,27 @@ export async function runVoiceProviderSmoke({
         fixtureDurationMs: validated.durationMs,
       };
     }
+  } catch (error) {
+    providerFailure = error;
+  }
+
+  let finalGit;
+  try { finalGit = await inspectGit(); } catch { finalGit = null; }
+  if (!validFrozenGit(finalGit, config.releaseCommitSha)) {
+    const output = { capability: selection.capability, provider: selected.provider, result: 'fail', errorCode: 'VOICE_RELEASE_GIT_STATE_INVALID' };
+    safeOutput(writeOutput, output);
+    return { exitCode: 1, ...output };
+  }
+  if (providerFailure) {
+    const errorCode = typeof providerFailure?.code === 'string' && /^VOICE_[A-Z0-9_]+$/.test(providerFailure.code)
+      ? providerFailure.code
+      : 'VOICE_SMOKE_FAILED';
+    const output = { capability: selection.capability, provider: selected.provider, result: 'fail', errorCode };
+    safeOutput(writeOutput, output);
+    return { exitCode: 1, ...output };
+  }
+
+  try {
     const contractVersion = selection.capability === 'asr'
       ? selected.provider === 'google-stt-v2'
         ? voiceEvidenceContracts.googleAsr

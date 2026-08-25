@@ -82,6 +82,50 @@ test('Google auth adapter caches bounded ADC tokens and sanitizes authentication
   });
 });
 
+test('Google auth rejects an already-aborted request before token acquisition', async () => {
+  const { createGoogleAccessTokenProvider } = await import('../src/providers/google-auth.js');
+  let tokenCalls = 0;
+  let fetchCalls = 0;
+  const provider = createGoogleAccessTokenProvider({
+    auth: { getAccessToken: async () => { tokenCalls += 1; return 'private-access-token'; } },
+    fetchImpl: async () => { fetchCalls += 1; return new Response('{}'); },
+  });
+  const controller = new AbortController();
+  controller.abort(new Error('private abort reason'));
+
+  await assert.rejects(
+    provider.fetch('https://googleapis.test/v1', { signal: controller.signal }),
+    (error) => error.code === 'GOOGLE_AUTHENTICATION_FAILED'
+      && !String(error).includes('private abort reason'),
+  );
+  assert.equal(tokenCalls, 0);
+  assert.equal(fetchCalls, 0);
+});
+
+test('Google auth settles a hanging token acquisition when the request deadline aborts', async () => {
+  const { createGoogleAccessTokenProvider } = await import('../src/providers/google-auth.js');
+  let started;
+  const tokenStarted = new Promise((resolve) => { started = resolve; });
+  let fetchCalls = 0;
+  const provider = createGoogleAccessTokenProvider({
+    auth: { getAccessToken: async () => { started(); return new Promise(() => {}); } },
+    fetchImpl: async () => { fetchCalls += 1; return new Response('{}'); },
+  });
+  const controller = new AbortController();
+  const pending = provider.fetch('https://googleapis.test/v1', { signal: controller.signal });
+  await tokenStarted;
+  controller.abort(new Error('private deadline reason'));
+  const result = await Promise.race([
+    pending.catch((error) => error),
+    new Promise((resolve) => setTimeout(() => resolve('DID_NOT_SETTLE'), 100)),
+  ]);
+
+  assert.notEqual(result, 'DID_NOT_SETTLE');
+  assert.equal(result.code, 'GOOGLE_AUTHENTICATION_FAILED');
+  assert.equal(String(result).includes('private deadline reason'), false);
+  assert.equal(fetchCalls, 0);
+});
+
 test('Vertex AI uses ADC generateContent and normalizes candidate text without exposing provider bodies', async () => {
   let request;
   const provider = createLlmProvider({
@@ -161,6 +205,23 @@ test('Google STT V2 and TTS issue locale-bound ADC requests with no hidden fallb
   assert.equal(ttsResult.buffer.toString('ascii'), 'ID3fixture');
   await assert.rejects(tts.synthesize('未知', { responseLanguage: 'fr' }), (error) => error.code === 'VOICE_SYNTHESIS_REJECTED');
   assert.equal(requests.length, 2);
+});
+
+test('Google STT rejects unsupported response locales before ADC transport', async () => {
+  let requests = 0;
+  const asr = createAsrProvider({
+    config: { provider: 'google-stt-v2', settings: {
+      projectId: 'hkbuddy-prod-v1-20260826', location: 'asia-southeast1', model: 'chirp_2', recognizer: '_',
+      languageCodes: ['yue-Hant-HK', 'en-US', 'cmn-Hans-CN'], credentialVersion: 'runtime-sa-rotation-v1',
+    } },
+    googleAuthProvider: { fetch: async () => { requests += 1; return new Response('{}'); } },
+  });
+
+  await assert.rejects(
+    asr.transcribe(Buffer.from('RIFFcanonical-wav'), { responseLanguage: 'fr' }),
+    (error) => error.code === 'VOICE_TRANSCRIPTION_REJECTED' && error.retryable === false,
+  );
+  assert.equal(requests, 0);
 });
 
 function smokeEnvironment(overrides = {}) {

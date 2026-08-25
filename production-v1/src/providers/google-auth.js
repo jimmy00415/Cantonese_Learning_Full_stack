@@ -3,6 +3,7 @@ import { GoogleAuth } from 'google-auth-library';
 const CLOUD_PLATFORM_SCOPE = 'https://www.googleapis.com/auth/cloud-platform';
 const MAX_CACHE_MS = 5 * 60 * 1_000;
 const EXPIRY_SKEW_MS = 30 * 1_000;
+const MAX_AUTHENTICATION_MS = 10 * 1_000;
 
 function authenticationError() {
   const error = new Error('GOOGLE_AUTHENTICATION_FAILED');
@@ -18,25 +19,49 @@ function tokenResult(value) {
   return { token, expiresAt: Number.isFinite(expiresAt) ? Number(expiresAt) : null };
 }
 
+async function boundedTokenAcquisition(auth, signal, authenticationDeadlineMs) {
+  if (signal?.aborted) throw authenticationError();
+  let timer;
+  let abortFromRequest;
+  const boundary = new Promise((_, reject) => {
+    abortFromRequest = () => reject(authenticationError());
+    signal?.addEventListener?.('abort', abortFromRequest, { once: true });
+    timer = setTimeout(() => reject(authenticationError()), authenticationDeadlineMs);
+  });
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => auth.getAccessToken()),
+      boundary,
+    ]);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener?.('abort', abortFromRequest);
+  }
+}
+
 export function createGoogleAccessTokenProvider({
   auth = new GoogleAuth({ scopes: [CLOUD_PLATFORM_SCOPE] }),
   fetchImpl = globalThis.fetch,
   now = Date.now,
   maximumCacheMs = MAX_CACHE_MS,
+  authenticationDeadlineMs = MAX_AUTHENTICATION_MS,
 } = {}) {
   if (typeof auth?.getAccessToken !== 'function' || typeof fetchImpl !== 'function'
     || typeof now !== 'function' || !Number.isSafeInteger(maximumCacheMs)
-    || maximumCacheMs < 1_000 || maximumCacheMs > MAX_CACHE_MS) {
+    || maximumCacheMs < 1_000 || maximumCacheMs > MAX_CACHE_MS
+    || !Number.isSafeInteger(authenticationDeadlineMs)
+    || authenticationDeadlineMs < 1 || authenticationDeadlineMs > MAX_AUTHENTICATION_MS) {
     throw authenticationError();
   }
   let cachedToken = null;
   let refreshAt = 0;
 
-  const accessToken = async () => {
+  const accessToken = async (signal) => {
+    if (signal?.aborted) throw authenticationError();
     const current = now();
     if (cachedToken && current < refreshAt) return cachedToken;
     try {
-      const result = tokenResult(await auth.getAccessToken());
+      const result = tokenResult(await boundedTokenAcquisition(auth, signal, authenticationDeadlineMs));
       if (typeof result.token !== 'string' || !result.token || /[\u0000-\u001f\u007f]/.test(result.token)) {
         throw authenticationError();
       }
@@ -54,13 +79,15 @@ export function createGoogleAccessTokenProvider({
   };
 
   const authenticatedFetch = async (url, init = {}) => {
+    if (init.signal?.aborted) throw authenticationError();
     let parsed;
     try { parsed = new URL(String(url)); } catch { throw authenticationError(); }
     if (parsed.protocol !== 'https:' || parsed.username || parsed.password) throw authenticationError();
     const normalizedHeaders = new Headers(init.headers ?? {});
     if (normalizedHeaders.has('authorization')) throw authenticationError();
     const headers = Object.fromEntries(normalizedHeaders);
-    headers.Authorization = `Bearer ${await accessToken()}`;
+    headers.Authorization = `Bearer ${await accessToken(init.signal)}`;
+    if (init.signal?.aborted) throw authenticationError();
     return fetchImpl(parsed.href, { ...init, headers, redirect: 'error' });
   };
 
@@ -71,4 +98,5 @@ export const googleAuthContract = Object.freeze({
   scope: CLOUD_PLATFORM_SCOPE,
   maximumCacheMs: MAX_CACHE_MS,
   expirySkewMs: EXPIRY_SKEW_MS,
+  maximumAuthenticationMs: MAX_AUTHENTICATION_MS,
 });

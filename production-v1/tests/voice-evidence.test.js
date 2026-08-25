@@ -21,6 +21,9 @@ test('Google speech evidence binds exact regional recognizer and one selected vo
     endpoint: 'https://asia-southeast1-speech.googleapis.com/v2/projects/hkbuddy-prod-v1-20260826/locations/asia-southeast1/recognizers/_:recognize',
     projectId: 'hkbuddy-prod-v1-20260826', location: 'asia-southeast1', recognizer: '_', model: 'chirp_2',
     languageCodes: ['yue-Hant-HK', 'en-US', 'cmn-Hans-CN'],
+    allowedResponseLanguages: ['en', 'yueHant', 'zhHans'],
+    responseLanguageCodes: { en: 'en-US', yueHant: 'yue-Hant-HK', zhHans: 'cmn-Hans-CN' },
+    languageOrderPolicy: 'selected-first-then-configured-order-v1',
     contentType: 'application/json', inputEncoding: 'canonical-wav-v1', credentialVersion: 'runtime-sa-rotation-v1',
   });
   assert.deepEqual(providerConfigDescriptor(tts, 'tts'), {

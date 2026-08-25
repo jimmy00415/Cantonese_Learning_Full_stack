@@ -9,6 +9,11 @@ const DIGEST = /^[0-9a-f]{64}$/;
 const AZURE_REGION = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const GOOGLE_PROJECT = 'hkbuddy-prod-v1-20260826';
 const GOOGLE_SPEECH_LOCATION = 'asia-southeast1';
+const GOOGLE_RESPONSE_LANGUAGE_CODES = Object.freeze({
+  en: 'en-US',
+  yueHant: 'yue-Hant-HK',
+  zhHans: 'cmn-Hans-CN',
+});
 const VOICE_EVIDENCE_MAX_BYTES = 64 * 1_024;
 const SPEECH_EVIDENCE_KEYS = Object.freeze([
   'schemaVersion', 'commitSha', 'capability', 'provider', 'contractVersion',
@@ -111,6 +116,9 @@ export function providerConfigDescriptor(config, capability) {
       recognizer: settings.recognizer,
       model: settings.model,
       languageCodes: [...settings.languageCodes],
+      allowedResponseLanguages: Object.keys(GOOGLE_RESPONSE_LANGUAGE_CODES),
+      responseLanguageCodes: { ...GOOGLE_RESPONSE_LANGUAGE_CODES },
+      languageOrderPolicy: 'selected-first-then-configured-order-v1',
       contentType: 'application/json',
       inputEncoding: 'canonical-wav-v1',
       credentialVersion: settings.credentialVersion ?? null,

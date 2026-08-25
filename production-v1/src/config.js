@@ -168,7 +168,7 @@ function buildLlmConfiguration(env, { v1Only = false } = {}) {
   };
 }
 
-function selectedAsrSettings(env, provider) {
+function selectedAsrSettings(env, provider, { v1Only = false } = {}) {
   if (provider === 'google-stt-v2') {
     assertGoogleAdcOnly(env);
     validateGoogleProject(env.V1_GOOGLE_CLOUD_PROJECT);
@@ -188,13 +188,13 @@ function selectedAsrSettings(env, provider) {
   }
   if (provider !== 'azure') return {};
   return {
-    apiKey: firstDefined(env, 'V1_AZURE_SPEECH_KEY', 'AZURE_SPEECH_KEY'),
-    region: firstDefined(env, 'V1_AZURE_SPEECH_REGION', 'AZURE_SPEECH_REGION'),
+    apiKey: v1Only ? env.V1_AZURE_SPEECH_KEY : firstDefined(env, 'V1_AZURE_SPEECH_KEY', 'AZURE_SPEECH_KEY'),
+    region: v1Only ? env.V1_AZURE_SPEECH_REGION : firstDefined(env, 'V1_AZURE_SPEECH_REGION', 'AZURE_SPEECH_REGION'),
     credentialVersion: env.V1_AZURE_SPEECH_CREDENTIAL_VERSION,
   };
 }
 
-function selectedTtsSettings(env, provider) {
+function selectedTtsSettings(env, provider, { v1Only = false } = {}) {
   if (provider === 'google-tts') {
     assertGoogleAdcOnly(env);
     validateGoogleProject(env.V1_GOOGLE_CLOUD_PROJECT);
@@ -212,13 +212,13 @@ function selectedTtsSettings(env, provider) {
       credentialVersion: env.V1_GOOGLE_CREDENTIAL_VERSION,
     };
   }
-  if (provider === 'azure') return selectedAsrSettings(env, provider);
+  if (provider === 'azure') return selectedAsrSettings(env, provider, { v1Only });
   if (provider === 'minimax') {
     return {
-      apiKey: normalizeMiniMaxKey(firstDefined(env, 'V1_MINIMAX_API_KEY', 'MINIMAX_API_KEY')),
-      baseUrl: firstDefined(env, 'V1_MINIMAX_BASE_URL', 'MINIMAX_BASE_URL'),
-      model: firstDefined(env, 'V1_MINIMAX_TTS_MODEL', 'MINIMAX_TTS_MODEL'),
-      voice: firstDefined(env, 'V1_MINIMAX_TTS_VOICE', 'MINIMAX_TTS_VOICE'),
+      apiKey: normalizeMiniMaxKey(v1Only ? env.V1_MINIMAX_API_KEY : firstDefined(env, 'V1_MINIMAX_API_KEY', 'MINIMAX_API_KEY')),
+      baseUrl: v1Only ? env.V1_MINIMAX_BASE_URL : firstDefined(env, 'V1_MINIMAX_BASE_URL', 'MINIMAX_BASE_URL'),
+      model: v1Only ? env.V1_MINIMAX_TTS_MODEL : firstDefined(env, 'V1_MINIMAX_TTS_MODEL', 'MINIMAX_TTS_MODEL'),
+      voice: v1Only ? env.V1_MINIMAX_TTS_VOICE : firstDefined(env, 'V1_MINIMAX_TTS_VOICE', 'MINIMAX_TTS_VOICE'),
       credentialVersion: env.V1_MINIMAX_CREDENTIAL_VERSION,
     };
   }
@@ -419,10 +419,10 @@ export function loadConfig(environment = process.env, { now = () => new Date() }
   }
   const isProduction = nodeEnv === 'production';
   const llm = buildLlmConfiguration(env, { v1Only: isProduction });
-  const asrProvider = asProvider(firstDefined(env, 'V1_ASR_PROVIDER', 'ASR_PROVIDER'));
-  const ttsProvider = asProvider(firstDefined(env, 'V1_TTS_PROVIDER', 'TTS_PROVIDER'));
-  const asrSettings = selectedAsrSettings(env, asrProvider);
-  const ttsSettings = selectedTtsSettings(env, ttsProvider);
+  const asrProvider = asProvider(isProduction ? env.V1_ASR_PROVIDER : firstDefined(env, 'V1_ASR_PROVIDER', 'ASR_PROVIDER'));
+  const ttsProvider = asProvider(isProduction ? env.V1_TTS_PROVIDER : firstDefined(env, 'V1_TTS_PROVIDER', 'TTS_PROVIDER'));
+  const asrSettings = selectedAsrSettings(env, asrProvider, { v1Only: isProduction });
+  const ttsSettings = selectedTtsSettings(env, ttsProvider, { v1Only: isProduction });
   validateSpeechSettings(asrProvider, asrSettings);
   validateSpeechSettings(ttsProvider, ttsSettings);
   const trustedProxyValue = isProduction
