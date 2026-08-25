@@ -437,6 +437,22 @@ export function createAssistantAudioController({
     return promise;
   }
 
+  function prepare(message) {
+    if (!message || message.role !== 'assistant' || message.replyMode !== 'voice') return Promise.resolve(null);
+    const messageId = requireMessageId(message.id);
+    if (message.mediaId) return Promise.resolve(ready(messageId, { mediaId: requireMediaId(message.mediaId) }));
+    setEntry(messageId, {
+      state: 'pending',
+      mediaId: null,
+      failureCode: null,
+      retryable: false,
+      retryAfterMs: null,
+      retryNotBefore: null,
+      statusText: 'Preparing audio. The text answer is ready.',
+    });
+    return run(messageId, 'GET');
+  }
+
   function setPlayback(next) {
     playback = next;
     notify();
@@ -579,6 +595,7 @@ export function createAssistantAudioController({
     snapshot,
     generate: async (messageId) => run(messageId, 'POST'),
     refresh: async (messageId) => run(messageId, 'GET'),
+    prepare,
     play,
     pause,
     handleHidden,

@@ -205,6 +205,38 @@ test('chat controller reconciles a 202 optimistic send by clientMessageId and cl
   assert.deepEqual(JSON.parse(network.calls[1].options.body), {
     clientMessageId: '11111111-1111-4111-8111-111111111111',
     text: 'How do I use Duo?',
+    replyLanguage: 'en',
+    replyMode: 'text',
+  });
+});
+
+test('chat controller defaults to en text and an ambiguous retry keeps the captured preferences', async () => {
+  const accepted = message({
+    id: 'preference-user', sequence: 1, role: 'user', status: 'accepted',
+    clientMessageId: '11111111-1111-4111-8111-111111111111', text: 'Immutable request',
+    replyLanguage: 'yue-Hant-HK', replyMode: 'voice',
+  });
+  const network = queuedFetch(
+    envelope(bootstrapData()),
+    new Error('response lost'),
+    envelope({ idempotent: true, message: accepted, turn: { id: 'turn-pref', state: 'accepted' } }, 202),
+  );
+  const controller = controllerFor(network.fetchImpl);
+  await controller.start();
+  assert.equal(controller.snapshot().replyLanguage, 'en');
+  assert.equal(controller.snapshot().replyMode, 'text');
+  controller.setReplyPreferences({ replyLanguage: 'yue-Hant-HK', replyMode: 'voice' });
+  await assert.rejects(controller.sendText('Immutable request'), /response lost/);
+  controller.setReplyPreferences({ replyLanguage: 'cmn-Hans-CN', replyMode: 'text' });
+  const optimistic = controller.snapshot().messages[0];
+  assert.equal(optimistic.replyLanguage, 'yue-Hant-HK');
+  assert.equal(optimistic.replyMode, 'voice');
+  await controller.retryUnconfirmed(optimistic.clientMessageId);
+  assert.deepEqual(JSON.parse(network.calls[2].options.body), {
+    clientMessageId: optimistic.clientMessageId,
+    text: 'Immutable request',
+    replyLanguage: 'yue-Hant-HK',
+    replyMode: 'voice',
   });
 });
 
@@ -233,10 +265,10 @@ test('chat controller preserves a caller-bound voice message identity and draft 
   assert.equal(unconfirmed.kind, 'voice');
   assert.equal(unconfirmed.voiceDraftId, voiceDraftId);
   assert.equal(unconfirmed.clientMessageId, clientMessageId);
-  assert.deepEqual(JSON.parse(network.calls[1].options.body), { clientMessageId, text, voiceDraftId });
+  assert.deepEqual(JSON.parse(network.calls[1].options.body), { clientMessageId, text, voiceDraftId, replyLanguage: 'en', replyMode: 'text' });
 
   assert.equal(await controller.retryUnconfirmed(clientMessageId), true);
-  assert.deepEqual(JSON.parse(network.calls[2].options.body), { clientMessageId, text, voiceDraftId });
+  assert.deepEqual(JSON.parse(network.calls[2].options.body), { clientMessageId, text, voiceDraftId, replyLanguage: 'en', replyMode: 'text' });
   assert.equal(controller.snapshot().messages[0].id, accepted.id);
   assert.equal(controller.snapshot().draft, '');
 });
@@ -866,6 +898,8 @@ test('chat controller distinguishes known HTTP rejection from an ambiguous netwo
   assert.deepEqual(JSON.parse(network.calls[2].options.body), {
     clientMessageId,
     text: 'Please accept this later',
+    replyLanguage: 'en',
+    replyMode: 'text',
   });
   assert.equal(controller.snapshot().messages[0].id, accepted.id);
 });

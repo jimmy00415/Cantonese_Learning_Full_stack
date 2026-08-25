@@ -44,10 +44,10 @@ test('security rate limit hashes bootstrap IP and enforces durable session chat 
   const bootstrap = await json(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin, 'X-Forwarded-For': '198.51.100.72' } });
   const cookie = bootstrap.response.headers.getSetCookie()[0].split(';')[0];
   const headers = { Origin: origin, Cookie: cookie, 'Content-Type': 'application/json' };
-  const firstPayload = { clientMessageId: '66666666-6666-4666-8666-666666666666', text: '一' };
+  const firstPayload = { clientMessageId: '66666666-6666-4666-8666-666666666666', text: '一', replyLanguage: 'en', replyMode: 'text' };
   const first = await json(`${baseUrl}/api/v1/messages`, { method: 'POST', headers, body: JSON.stringify(firstPayload) });
   const retry = await json(`${baseUrl}/api/v1/messages`, { method: 'POST', headers, body: JSON.stringify(firstPayload) });
-  const limited = await json(`${baseUrl}/api/v1/messages`, { method: 'POST', headers, body: JSON.stringify({ clientMessageId: '77777777-7777-4777-8777-777777777777', text: '二' }) });
+  const limited = await json(`${baseUrl}/api/v1/messages`, { method: 'POST', headers, body: JSON.stringify({ clientMessageId: '77777777-7777-4777-8777-777777777777', text: '二', replyLanguage: 'en', replyMode: 'text' }) });
   assert.equal(first.response.status, 202);
   assert.equal(retry.response.status, 202);
   assert.equal(retry.body.data.idempotent, true);
@@ -69,7 +69,7 @@ test('security concurrent identical sends share one accepted record and one dura
   const bootstrap = await json(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin } });
   const cookie = bootstrap.response.headers.getSetCookie()[0].split(';')[0];
   const headers = { Origin: origin, Cookie: cookie, 'Content-Type': 'application/json' };
-  const payload = { clientMessageId: '88888888-8888-4888-8888-888888888888', text: '同一個請求' };
+  const payload = { clientMessageId: '88888888-8888-4888-8888-888888888888', text: '同一個請求', replyLanguage: 'en', replyMode: 'text' };
   const [left, right] = await Promise.all([
     json(`${baseUrl}/api/v1/messages`, { method: 'POST', headers, body: JSON.stringify(payload) }),
     json(`${baseUrl}/api/v1/messages`, { method: 'POST', headers, body: JSON.stringify(payload) }),

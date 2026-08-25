@@ -3,6 +3,10 @@ export { contextLimits } from '../context-budget.js';
 
 export const TURN_TERMINAL_STATES = new Set(['delivered', 'failed']);
 export const TURN_STATES = new Set(['accepted', 'retrieving', 'generating', ...TURN_TERMINAL_STATES]);
+export const REPLY_LANGUAGES = new Set(['en', 'yue-Hant-HK', 'cmn-Hans-CN']);
+export const REPLY_MODES = new Set(['text', 'voice']);
+export const DEFAULT_REPLY_LANGUAGE = 'en';
+export const DEFAULT_REPLY_MODE = 'text';
 
 export const SAFE_TURN_FAILURE_CODES = new Set([
   'ANSWER_FAILED',

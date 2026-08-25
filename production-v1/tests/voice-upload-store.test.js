@@ -522,6 +522,8 @@ test('ready transcript can be durably bound to one exact outgoing message before
   assert.deepEqual(bound.messageBinding, {
     clientMessageId: '44444444-4444-4444-8444-444444444444',
     text: 'Where exactly is Academic Registry?',
+    replyLanguage: 'en',
+    replyMode: 'text',
   });
   assert.deepEqual((await store.get(operation.clientUploadId)).messageBinding, bound.messageBinding);
   assert.equal(await store.bindMessage({
@@ -594,7 +596,7 @@ test('releaseMessageBinding is generation-fenced and only one concurrent exact r
   }), false);
   assert.deepEqual(
     (await firstTab.get(replacement.identity.clientUploadId)).messageBinding,
-    { clientMessageId: '66666666-6666-4666-8666-666666666666', text: 'Replacement binding' },
+    { clientMessageId: '66666666-6666-4666-8666-666666666666', text: 'Replacement binding', replyLanguage: 'en', replyMode: 'text' },
   );
 });
 
@@ -639,6 +641,8 @@ test('a new recording never erases a ready draft already bound to an ambiguously
   assert.deepEqual(stillBound.messageBinding, {
     clientMessageId: '44444444-4444-4444-8444-444444444444',
     text: 'Edited and sent, response not confirmed',
+    replyLanguage: 'en',
+    replyMode: 'text',
   });
 });
 

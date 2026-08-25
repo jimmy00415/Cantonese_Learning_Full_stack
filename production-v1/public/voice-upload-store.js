@@ -8,6 +8,8 @@ const METADATA_STORE_NAME = 'voice_upload_metadata';
 const ACTIVE_SCOPE_KEY = 'active_scope';
 const SCOPE_INDEX = 'clientSessionScope';
 const EXPIRES_INDEX = 'expiresAt';
+const REPLY_LANGUAGES = new Set(['en', 'yue-Hant-HK', 'cmn-Hans-CN']);
+const REPLY_MODES = new Set(['text', 'voice']);
 
 const TRANSITION_FIELDS = new Set([
   'state',
@@ -647,6 +649,8 @@ export function createVoiceUploadStore({
     voiceDraftId,
     clientMessageId,
     text,
+    replyLanguage = 'en',
+    replyMode = 'text',
     nowMs = now(),
   }) {
     const id = requireString(clientUploadId, 'clientUploadId');
@@ -655,6 +659,9 @@ export function createVoiceUploadStore({
     const messageId = requireString(clientMessageId, 'clientMessageId');
     if (typeof text !== 'string' || !text.trim() || text.length > 4_000) {
       throw new TypeError('text must contain between 1 and 4000 characters');
+    }
+    if (!REPLY_LANGUAGES.has(replyLanguage) || !REPLY_MODES.has(replyMode)) {
+      throw new TypeError('reply preferences are invalid');
     }
     const at = requireTime(nowMs);
     const binding = localBinding(scope);
@@ -669,10 +676,12 @@ export function createVoiceUploadStore({
         || operation.state !== 'ready'
         || operation.voiceDraftId !== draftId
         || operation.expiresAt <= at) return false;
-      const messageBinding = { clientMessageId: messageId, text };
+      const messageBinding = { clientMessageId: messageId, text, replyLanguage, replyMode };
       if (operation.messageBinding) {
         return operation.messageBinding.clientMessageId === messageId
           && operation.messageBinding.text === text
+          && (operation.messageBinding.replyLanguage ?? 'en') === replyLanguage
+          && (operation.messageBinding.replyMode ?? 'text') === replyMode
           ? operation
           : false;
       }
@@ -693,6 +702,8 @@ export function createVoiceUploadStore({
     voiceDraftId,
     clientMessageId,
     text,
+    replyLanguage = 'en',
+    replyMode = 'text',
     nowMs = now(),
   }) {
     const id = requireString(clientUploadId, 'clientUploadId');
@@ -701,6 +712,9 @@ export function createVoiceUploadStore({
     const messageId = requireString(clientMessageId, 'clientMessageId');
     if (typeof text !== 'string' || !text.trim() || text.length > 4_000) {
       throw new TypeError('text must contain between 1 and 4000 characters');
+    }
+    if (!REPLY_LANGUAGES.has(replyLanguage) || !REPLY_MODES.has(replyMode)) {
+      throw new TypeError('reply preferences are invalid');
     }
     const at = requireTime(nowMs);
     const binding = localBinding(scope);
@@ -715,7 +729,9 @@ export function createVoiceUploadStore({
         || operation.state !== 'ready'
         || operation.voiceDraftId !== draftId
         || operation.messageBinding?.clientMessageId !== messageId
-        || operation.messageBinding?.text !== text) return false;
+        || operation.messageBinding?.text !== text
+        || (operation.messageBinding?.replyLanguage ?? 'en') !== replyLanguage
+        || (operation.messageBinding?.replyMode ?? 'text') !== replyMode) return false;
       const released = {
         ...operation,
         messageBinding: null,

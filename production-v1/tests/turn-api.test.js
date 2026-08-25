@@ -10,6 +10,7 @@ import { loadConfig } from '../src/config.js';
 import { createEventStreamHandler, EventHub } from '../src/services/events.js';
 import { createDispatcher } from '../src/services/dispatcher.js';
 import { createTurnProcessor } from '../src/services/turn-processor.js';
+import { providerResponseLanguage } from '../src/services/voice.js';
 import { startServer } from '../src/server.js';
 import { AtomicFileStore } from '../src/stores/atomic-file-store.js';
 import * as storeContract from '../src/stores/store-contract.js';
@@ -37,6 +38,8 @@ async function accept(store, owner, clientMessageId, text, now) {
     clientMessageId,
     requestHash: `hash-${clientMessageId}`,
     text,
+    replyLanguage: 'en',
+    replyMode: 'text',
     now,
   });
 }
@@ -482,6 +485,86 @@ test('turn api persists generating once before delivering an answer that bypasse
   assert.equal(events.at(-1).turnId, accepted.turn.id);
 });
 
+test('turn processor owns reply preferences from the claimed turn and prepares voice only after text delivery', async (t) => {
+  const { store } = await createStore(t);
+  const owner = await createOwnedConversation(store, 'immutable-preferences');
+  const accepted = await store.acceptMessage({
+    sessionId: owner.session.id,
+    conversationId: owner.conversation.id,
+    clientMessageId: '78000000-0000-4000-8000-000000000000',
+    requestHash: 'immutable-preferences-hash',
+    text: 'Answer in Cantonese',
+    replyLanguage: 'yue-Hant-HK',
+    replyMode: 'voice',
+    now: '2026-08-25T00:00:01.000Z',
+  });
+  const base = Date.parse('2026-08-25T00:01:00.000Z');
+  const claimed = await store.claimNextTurn(lease('preference-worker', 'preference-token', base));
+  const calls = [];
+  const processor = createTurnProcessor({
+    store,
+    eventHub: new EventHub(),
+    answerService: {
+      async answer(input) {
+        calls.push({ type: 'answer', replyLanguage: input.replyLanguage, replyMode: input.replyMode });
+        return finalMessage('先交付文字答案');
+      },
+    },
+    voiceService: {
+      prepareAssistantAudio(input) { calls.push({ type: 'voice', ...input }); }
+    },
+    now: () => new Date(base + 1),
+  });
+  const result = await processor.processTurn({ turn: claimed, leaseToken: 'preference-token', signal: new AbortController().signal });
+  assert.equal(result.delivered, true);
+  assert.deepEqual(calls, [
+    { type: 'answer', replyLanguage: 'yue-Hant-HK', replyMode: 'voice' },
+    { type: 'voice', sessionId: owner.session.id, messageId: result.message.id, replyLanguage: 'yue-Hant-HK' },
+  ]);
+  assert.equal(result.message.text, '先交付文字答案');
+  assert.equal(result.message.replyLanguage, 'yue-Hant-HK');
+  assert.equal(result.message.replyMode, 'voice');
+  assert.equal(accepted.turn.replyLanguage, 'yue-Hant-HK');
+});
+
+test('voice locale mapping is explicit and asynchronous TTS failure cannot revoke delivered text', async (t) => {
+  assert.deepEqual(
+    ['en', 'yue-Hant-HK', 'cmn-Hans-CN'].map(providerResponseLanguage),
+    ['en', 'yueHant', 'zhHans'],
+  );
+  assert.throws(() => providerResponseLanguage('fr'), (error) => error.code === 'VOICE_SYNTHESIS_REJECTED');
+
+  const { store } = await createStore(t);
+  const owner = await createOwnedConversation(store, 'async-tts-failure');
+  await store.acceptMessage({
+    sessionId: owner.session.id,
+    conversationId: owner.conversation.id,
+    clientMessageId: '78100000-0000-4000-8000-000000000000',
+    requestHash: 'async-tts-failure-hash',
+    text: 'Keep the text even if audio fails',
+    replyLanguage: 'en',
+    replyMode: 'voice',
+    now: '2026-08-25T00:00:01.000Z',
+  });
+  const base = Date.parse('2026-08-25T00:01:00.000Z');
+  const claimed = await store.claimNextTurn(lease('async-tts-worker', 'async-tts-token', base));
+  const processor = createTurnProcessor({
+    store,
+    eventHub: new EventHub(),
+    answerService: { async answer() { return finalMessage('Grounded text survives.'); } },
+    voiceService: {
+      async prepareAssistantAudio() {
+        throw Object.assign(new Error('private tts failure'), { code: 'VOICE_SYNTHESIS_REJECTED' });
+      },
+    },
+    now: () => new Date(base + 1),
+  });
+  const result = await processor.processTurn({ turn: claimed, leaseToken: 'async-tts-token', signal: new AbortController().signal });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(result.delivered, true);
+  assert.equal(result.message.text, 'Grounded text survives.');
+});
+
 test('turn api renewal loss aborts provider work and session deletion cannot be undone', async (t) => {
   const { store } = await createStore(t);
   const owner = await createOwnedConversation(store);
@@ -547,6 +630,36 @@ async function collectSse(response, predicate, timeoutMs = 1000) {
   }
   return text;
 }
+
+test('turn API requires supported wire preferences, returns them safely, and hashes them into idempotency', async (t) => {
+  const runtime = await startSseApp(t);
+  const post = (body) => fetch(`${runtime.baseUrl}/api/v1/messages`, {
+    method: 'POST',
+    headers: { Origin: ORIGIN, Cookie: runtime.cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const base = {
+    clientMessageId: '79000000-0000-4000-8000-000000000000',
+    text: 'Use immutable preferences',
+  };
+  for (const body of [
+    base,
+    { ...base, replyLanguage: 'fr', replyMode: 'text' },
+    { ...base, replyLanguage: 'en', replyMode: 'audio' },
+  ]) {
+    const response = await post(body);
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error.code, 'INVALID_REQUEST');
+  }
+  const acceptedResponse = await post({ ...base, replyLanguage: 'cmn-Hans-CN', replyMode: 'voice' });
+  assert.equal(acceptedResponse.status, 202);
+  const accepted = await acceptedResponse.json();
+  assert.equal(accepted.data.message.replyLanguage, 'cmn-Hans-CN');
+  assert.equal(accepted.data.turn.replyMode, 'voice');
+  const conflict = await post({ ...base, replyLanguage: 'en', replyMode: 'voice' });
+  assert.equal(conflict.status, 409);
+  assert.equal((await conflict.json()).error.code, 'IDEMPOTENCY_CONFLICT');
+});
 
 function eventIds(stream) {
   return [...stream.matchAll(/^id: (\d+)$/gm)].map((match) => Number(match[1]));
@@ -900,7 +1013,12 @@ test('turn api real server shutdown is idempotent and closes SSE while aborting 
   const acceptedResponse = await fetch(`${baseUrl}/api/v1/messages`, {
     method: 'POST',
     headers: { Origin: ORIGIN, Cookie: cookie, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ clientMessageId: '74000000-0000-4000-8000-000000000000', text: 'Duo 换手机怎么办' }),
+    body: JSON.stringify({
+      clientMessageId: '74000000-0000-4000-8000-000000000000',
+      text: 'Duo 换手机怎么办',
+      replyLanguage: 'yue-Hant-HK',
+      replyMode: 'text',
+    }),
   });
   assert.equal(acceptedResponse.status, 202);
   await Promise.race([

@@ -97,6 +97,45 @@ test('answer service maps only corpus evidence/actions into citations and cards'
   assert.deepEqual(providerInput.actionSnapshot, duoActions);
 });
 
+test('answer service maps immutable wire locales to trusted provider instructions without content inference', async () => {
+  const observed = [];
+  const provider = {
+    provider: 'hkbu',
+    async generate(input) {
+      observed.push(input);
+      return { rawText: JSON.stringify(validDraft()), provider: 'hkbu', latencyMs: 1, usage: {}, finishReason: 'stop', providerRequestId: null };
+    },
+  };
+  const service = createAnswerService({ corpus, retriever, llmProvider: provider, now: () => FIXED_NOW });
+  for (const replyLanguage of ['en', 'yue-Hant-HK', 'cmn-Hans-CN']) {
+    await service.answer({
+      turnId: `turn-${replyLanguage}`,
+      text: 'Duo changed phone',
+      replyLanguage,
+      context: [],
+      beforeProvider: async () => {},
+    });
+  }
+  assert.deepEqual(observed.map((input) => input.responseLanguage), ['en', 'zhHant', 'zhHans']);
+  assert.match(observed[0].systemPrompt, /international English/i);
+  assert.match(observed[1].systemPrompt, /written Cantonese.*Traditional Chinese/i);
+  assert.match(observed[2].systemPrompt, /Mandarin.*Simplified Chinese/i);
+  await assert.rejects(
+    service.answer({ turnId: 'bad-locale', text: 'Duo changed phone', replyLanguage: 'fr', context: [] }),
+    /unsupported reply language/i,
+  );
+});
+
+test('deterministic grounded fallback follows the requested locale and preserves official URLs', async () => {
+  const provider = { provider: 'hkbu', async generate() { throw Object.assign(new Error('unavailable'), { code: 'PROVIDER_UNAVAILABLE' }); } };
+  const service = createAnswerService({ corpus, retriever, llmProvider: provider, now: () => FIXED_NOW });
+  const cantonese = await service.answer({ turnId: 'fallback-yue', text: 'Duo changed phone', replyLanguage: 'yue-Hant-HK', context: [], beforeProvider: async () => {} });
+  const mandarin = await service.answer({ turnId: 'fallback-cmn', text: 'Duo changed phone', replyLanguage: 'cmn-Hans-CN', context: [], beforeProvider: async () => {} });
+  assert.match(cantonese.text, /[換這門麼裡為還開關間學醫證]/u);
+  assert.match(mandarin.text, /[换这门么里为还开关间学医证]/u);
+  assert.deepEqual(cantonese.citations.map((citation) => citation.url), mandarin.citations.map((citation) => citation.url));
+});
+
 test('answer parser validates actions against the exact current snapshot rather than any retrieval source', () => {
   const retrieval = structuredClone(retriever.retrieve('Duo 换手机怎么办'));
   retrieval.sources.push({ id: 'hkbu.ar.student-card-collection' });
@@ -147,8 +186,8 @@ test('answer acceptance and deterministic fallback recheck corpus freshness at t
 test('answer service falls back deterministically to selected evidence and source metadata on provider failure', async () => {
   const provider = { provider: 'hkbu', async generate() { throw Object.assign(new Error('private provider body'), { code: 'PROVIDER_UNAVAILABLE' }); } };
   const service = createAnswerService({ corpus, retriever, llmProvider: provider, now: () => FIXED_NOW });
-  const first = await service.answer({ turnId: 'turn-1', text: 'Duo 换手机怎么办', context: [], beforeProvider: async () => {} });
-  const second = await service.answer({ turnId: 'turn-1', text: 'Duo 换手机怎么办', context: [], beforeProvider: async () => {} });
+  const first = await service.answer({ turnId: 'turn-1', text: 'Duo 换手机怎么办', replyLanguage: 'yue-Hant-HK', context: [], beforeProvider: async () => {} });
+  const second = await service.answer({ turnId: 'turn-1', text: 'Duo 换手机怎么办', replyLanguage: 'yue-Hant-HK', context: [], beforeProvider: async () => {} });
   const selected = retriever.retrieve('Duo 换手机怎么办').supportableClaims.flatMap((claim) => [claim.text.zhHant, claim.text.zhHans]);
   assert.deepEqual(first, second);
   assert.equal(first.fallback, true);

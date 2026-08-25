@@ -45,7 +45,7 @@ test('session api creates, sends, backfills, and deletes an owned conversation',
 
   const sent = await json(`${baseUrl}/api/v1/messages`, {
     method: 'POST', headers: { Origin: origin, Cookie: cookie, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ clientMessageId: '44444444-4444-4444-8444-444444444444', text: '  唔該  ' }),
+    body: JSON.stringify({ clientMessageId: '44444444-4444-4444-8444-444444444444', text: '  唔該  ', replyLanguage: 'yue-Hant-HK', replyMode: 'text' }),
   });
   assert.equal(sent.response.status, 202);
   assert.equal(sent.body.data.message.sequence, 1);
@@ -67,7 +67,7 @@ test('session api accepts an identical retry but rejects changed idempotency pay
   const created = await json(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin } });
   const cookie = created.response.headers.getSetCookie()[0].split(';')[0];
   const headers = { Origin: origin, Cookie: cookie, 'Content-Type': 'application/json' };
-  const input = { clientMessageId: '55555555-5555-4555-8555-555555555555', text: '你好' };
+  const input = { clientMessageId: '55555555-5555-4555-8555-555555555555', text: '你好', replyLanguage: 'en', replyMode: 'text' };
   const first = await json(`${baseUrl}/api/v1/messages`, { method: 'POST', headers, body: JSON.stringify(input) });
   const retry = await json(`${baseUrl}/api/v1/messages`, { method: 'POST', headers, body: JSON.stringify(input) });
   const conflict = await json(`${baseUrl}/api/v1/messages`, { method: 'POST', headers, body: JSON.stringify({ ...input, text: '再見' }) });
@@ -159,7 +159,7 @@ test('session api normalizes malformed, oversized, invalid-voice, and unexpected
   const cookie = created.response.headers.getSetCookie()[0].split(';')[0];
   const headers = { Origin: origin, Cookie: cookie, 'Content-Type': 'application/json' };
   const oversized = await json(`${baseUrl}/api/v1/messages`, { method: 'POST', headers, body: JSON.stringify({ clientMessageId: '99999999-9999-4999-8999-999999999999', text: 'x'.repeat(70 * 1024) }) });
-  const invalidVoice = await json(`${baseUrl}/api/v1/messages`, { method: 'POST', headers, body: JSON.stringify({ clientMessageId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', text: 'voice', voiceDraftId: 'missing-draft' }) });
+  const invalidVoice = await json(`${baseUrl}/api/v1/messages`, { method: 'POST', headers, body: JSON.stringify({ clientMessageId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', text: 'voice', voiceDraftId: 'missing-draft', replyLanguage: 'en', replyMode: 'text' }) });
   assert.equal(oversized.response.status, 413);
   assert.equal(oversized.body.error.code, 'PAYLOAD_TOO_LARGE');
   assert.equal(invalidVoice.response.status, 400);

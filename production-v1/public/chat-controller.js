@@ -2,6 +2,7 @@ import {
   createOptimisticMessage,
   eventHint,
   markOptimisticFailed,
+  normalizeReplyPreferences,
   reconcileTimeline,
   retryPayload,
 } from './chat-state.js';
@@ -68,6 +69,8 @@ export function createChatController({
     lastMessageSequence: 0,
     eventCursor: 0,
     draft: '',
+    replyLanguage: 'en',
+    replyMode: 'text',
     connection: 'idle',
     disposed: false,
   };
@@ -120,6 +123,8 @@ export function createChatController({
       lastMessageSequence: state.lastMessageSequence,
       eventCursor: state.eventCursor,
       draft: state.draft,
+      replyLanguage: state.replyLanguage,
+      replyMode: state.replyMode,
       connection: state.connection,
     };
   }
@@ -445,7 +450,13 @@ export function createChatController({
     return error;
   }
 
-  function sendMessage({ text, voiceDraftId = null, clientMessageId = uuid() } = {}) {
+  function sendMessage({
+    text,
+    voiceDraftId = null,
+    clientMessageId = uuid(),
+    replyLanguage = state.replyLanguage,
+    replyMode = state.replyMode,
+  } = {}) {
     const normalized = typeof text === 'string' ? text.trim() : '';
     if (!state.ready || state.disposed) return Promise.reject(new Error('The chat is not ready.'));
     if (!normalized || normalized.length > 4000) return Promise.reject(new Error('Enter a message between 1 and 4000 characters.'));
@@ -453,6 +464,13 @@ export function createChatController({
       || (voiceDraftId !== null && !UUID.test(String(voiceDraftId ?? '')))) {
       const error = new Error('The message identity is invalid.');
       error.code = 'INVALID_MESSAGE_IDENTITY';
+      return Promise.reject(error);
+    }
+    let preferences;
+    try { preferences = normalizeReplyPreferences({ replyLanguage, replyMode }); } catch (cause) {
+      const error = new Error('The reply preferences are invalid.');
+      error.code = 'INVALID_REPLY_PREFERENCES';
+      error.cause = cause;
       return Promise.reject(error);
     }
     if (sendBlockedUntil > now().getTime()) {
@@ -468,6 +486,7 @@ export function createChatController({
         clientMessageId,
         text: normalized,
         voiceDraftId,
+        ...preferences,
         createdAt: now().toISOString(),
       }),
       sendState: 'sending',
@@ -500,6 +519,14 @@ export function createChatController({
     state.draft = String(value ?? '').slice(0, 4000);
     persistDraft();
     notify();
+  }
+
+  function setReplyPreferences(input) {
+    const preferences = normalizeReplyPreferences(input);
+    state.replyLanguage = preferences.replyLanguage;
+    state.replyMode = preferences.replyMode;
+    notify();
+    return { ...preferences };
   }
 
   async function clearSession({ confirmed = false } = {}) {
@@ -616,6 +643,7 @@ export function createChatController({
     sendText,
     retryUnconfirmed,
     setDraft,
+    setReplyPreferences,
     clearSession,
     refresh: refreshCanonical,
     dispose,

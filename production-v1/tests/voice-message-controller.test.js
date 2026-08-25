@@ -22,7 +22,7 @@ function deferred() {
 }
 
 function operation(overrides = {}) {
-  return {
+  const value = {
     clientUploadId: UPLOAD_ID,
     clientSessionScope: SCOPE,
     state: 'ready',
@@ -33,6 +33,8 @@ function operation(overrides = {}) {
     expiresAt: START_MS + 60 * 60_000,
     ...overrides,
   };
+  if (value.messageBinding) value.messageBinding = { replyLanguage: 'en', replyMode: 'text', ...value.messageBinding };
+  return value;
 }
 
 function canonicalVoiceMessage(overrides = {}) {
@@ -45,6 +47,8 @@ function canonicalVoiceMessage(overrides = {}) {
     sequence: 1,
     status: 'accepted',
     text: 'Where is Academic Registry?',
+    replyLanguage: 'en',
+    replyMode: 'text',
     ...overrides,
   };
 }
@@ -138,12 +142,20 @@ function createStore({ operations = [], timeline = [], commitResult, releaseBind
         return false;
       }
       if (row.messageBinding
-        && (row.messageBinding.clientMessageId !== input.clientMessageId || row.messageBinding.text !== input.text)) {
+        && (row.messageBinding.clientMessageId !== input.clientMessageId
+          || row.messageBinding.text !== input.text
+          || row.messageBinding.replyLanguage !== input.replyLanguage
+          || row.messageBinding.replyMode !== input.replyMode)) {
         return false;
       }
       const bound = {
         ...row,
-        messageBinding: { clientMessageId: input.clientMessageId, text: input.text },
+        messageBinding: {
+          clientMessageId: input.clientMessageId,
+          text: input.text,
+          replyLanguage: input.replyLanguage,
+          replyMode: input.replyMode,
+        },
       };
       rows.set(input.clientUploadId, bound);
       return { ...bound };
@@ -208,13 +220,13 @@ function createCoordinator({
   };
 }
 
-function createChat({ send = [], retry = [], messages = [], timeline = [] } = {}) {
+function createChat({ send = [], retry = [], messages = [], timeline = [], replyLanguage = 'en', replyMode = 'text' } = {}) {
   const calls = [];
   let currentMessages = [...messages];
   return {
     calls,
     setMessages(next) { currentMessages = [...next]; },
-    snapshot() { return { messages: currentMessages.map((item) => ({ ...item })) }; },
+    snapshot() { return { messages: currentMessages.map((item) => ({ ...item })), replyLanguage, replyMode }; },
     async sendMessage(input) {
       calls.push({ method: 'sendMessage', input });
       timeline.push('chat.sendMessage');
@@ -363,12 +375,16 @@ test('manual voice send binds caller identity first, sends the same normalized t
     voiceDraftId: DRAFT_ID,
     clientMessageId: MESSAGE_ID,
     text: 'Edited transcript',
+    replyLanguage: 'en',
+    replyMode: 'text',
     nowMs: START_MS,
   });
   assert.deepEqual(chat.calls[0].input, {
     clientMessageId: MESSAGE_ID,
     voiceDraftId: DRAFT_ID,
     text: 'Edited transcript',
+    replyLanguage: 'en',
+    replyMode: 'text',
   });
   assert.equal(store.rows.has(UPLOAD_ID), false);
   assert.equal(controller.snapshot().phase, 'ready');
@@ -390,6 +406,8 @@ test('ambiguous send keeps the exact durable binding and retry delegates only to
   assert.deepEqual(store.rows.get(UPLOAD_ID).messageBinding, {
     clientMessageId: MESSAGE_ID,
     text: 'Where is Academic Registry?',
+    replyLanguage: 'en',
+    replyMode: 'text',
   });
   assert.equal(controller.snapshot().phase, 'send-unconfirmed');
   assert.equal(store.calls.some(({ method }) => method === 'consume'), false);
@@ -423,6 +441,8 @@ test('429 keeps the same voice binding and exposes a safe rate-limit state witho
   assert.deepEqual(controller.snapshot().binding, {
     clientMessageId: MESSAGE_ID,
     text: 'Where is Academic Registry?',
+    replyLanguage: 'en',
+    replyMode: 'text',
   });
   assert.deepEqual(store.rows.get(UPLOAD_ID).messageBinding, controller.snapshot().binding);
   assert.equal(store.calls.some(({ method }) => method === 'consume'), false);
@@ -455,6 +475,8 @@ test('explicit rejected send releases only its exact durable binding before coor
     voiceDraftId: DRAFT_ID,
     clientMessageId: MESSAGE_ID,
     text: 'Where is Academic Registry?',
+    replyLanguage: 'en',
+    replyMode: 'text',
     nowMs: START_MS,
   });
   assert.ok(
@@ -490,6 +512,8 @@ test('explicit rejected removal fails closed when the exact binding cannot be re
   assert.deepEqual(controller.snapshot().binding, {
     clientMessageId: MESSAGE_ID,
     text: 'Where is Academic Registry?',
+    replyLanguage: 'en',
+    replyMode: 'text',
   });
 });
 
@@ -829,6 +853,8 @@ test('late bind completion after hidden cannot POST chat while preserving the ex
   assert.deepEqual(baseStore.rows.get(UPLOAD_ID).messageBinding, {
     clientMessageId: MESSAGE_ID,
     text: 'Where is Academic Registry?',
+    replyLanguage: 'en',
+    replyMode: 'text',
   });
   assert.equal(controller.snapshot().phase, 'suspended');
 });
@@ -992,7 +1018,12 @@ test('resume displays the exact bound edited text and prevents edits that would 
   const controller = await readyController(controllerFor({ store, chat }));
 
   assert.deepEqual(controller.snapshot().draft, { text: boundText, voiceDraftId: DRAFT_ID });
-  assert.deepEqual(controller.snapshot().binding, { clientMessageId: MESSAGE_ID, text: boundText });
+  assert.deepEqual(controller.snapshot().binding, {
+    clientMessageId: MESSAGE_ID,
+    text: boundText,
+    replyLanguage: 'en',
+    replyMode: 'text',
+  });
   assert.throws(
     () => controller.setDraft('Different text must not appear on exact-ID retry'),
     (error) => error.code === 'VOICE_MESSAGE_ALREADY_BOUND' && error.textSafe === true,
@@ -1004,7 +1035,7 @@ test('reload retry falls back to chat send only after retryUnconfirmed strictly 
   const boundText = 'Exact durable text from the interrupted bind-to-send window';
   const bound = operation({
     transcript: 'Older automatic transcript',
-    messageBinding: { clientMessageId: MESSAGE_ID, text: boundText },
+    messageBinding: { clientMessageId: MESSAGE_ID, text: boundText, replyLanguage: 'yue-Hant-HK', replyMode: 'voice' },
   });
   const store = createStore({ operations: [bound] });
   const timeline = [];
@@ -1012,7 +1043,11 @@ test('reload retry falls back to chat send only after retryUnconfirmed strictly 
     timeline,
     retry: [false],
     send: [(input) => {
-      chat.setMessages([canonicalVoiceMessage({ text: input.text })]);
+      chat.setMessages([canonicalVoiceMessage({
+        text: input.text,
+        replyLanguage: input.replyLanguage,
+        replyMode: input.replyMode,
+      })]);
       return true;
     }],
   });
@@ -1024,7 +1059,7 @@ test('reload retry falls back to chat send only after retryUnconfirmed strictly 
     { method: 'retryUnconfirmed', clientMessageId: MESSAGE_ID },
     {
       method: 'sendMessage',
-      input: { clientMessageId: MESSAGE_ID, voiceDraftId: DRAFT_ID, text: boundText },
+      input: { clientMessageId: MESSAGE_ID, voiceDraftId: DRAFT_ID, text: boundText, replyLanguage: 'yue-Hant-HK', replyMode: 'voice' },
     },
   ]);
   assert.equal(store.calls.some(({ method }) => method === 'bindMessage'), false);

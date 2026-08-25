@@ -50,6 +50,8 @@ test('chat state retries a failed optimistic send with the original idempotency 
   const pending = createOptimisticMessage({
     clientMessageId: '33333333-3333-4333-8333-333333333333',
     text: 'How do I use Duo?',
+    replyLanguage: 'yue-Hant-HK',
+    replyMode: 'voice',
     createdAt: '2026-08-25T10:00:00.000Z',
   });
   const failed = markOptimisticFailed(pending, 'NETWORK_UNAVAILABLE');
@@ -59,6 +61,29 @@ test('chat state retries a failed optimistic send with the original idempotency 
   assert.deepEqual(retryPayload(failed), {
     clientMessageId: '33333333-3333-4333-8333-333333333333',
     text: 'How do I use Duo?',
+    replyLanguage: 'yue-Hant-HK',
+    replyMode: 'voice',
+  });
+});
+
+test('chat state rejects unsupported preferences and snapshots the accepted wire values for retries', () => {
+  assert.throws(() => createOptimisticMessage({
+    clientMessageId: '33333333-3333-4333-8333-333333333333',
+    text: 'Reply to me',
+    replyLanguage: 'fr',
+    replyMode: 'text',
+  }), /replyLanguage/);
+  const pending = createOptimisticMessage({
+    clientMessageId: '33333333-3333-4333-8333-333333333333',
+    text: 'Reply to me',
+    replyLanguage: 'cmn-Hans-CN',
+    replyMode: 'voice',
+  });
+  assert.deepEqual(retryPayload(pending), {
+    clientMessageId: pending.clientMessageId,
+    text: 'Reply to me',
+    replyLanguage: 'cmn-Hans-CN',
+    replyMode: 'voice',
   });
 });
 
@@ -67,6 +92,8 @@ test('chat state preserves the exact voice draft identity through an ambiguous m
     clientMessageId: '44444444-4444-4444-8444-444444444444',
     text: 'Where can I collect my student card?',
     voiceDraftId: '55555555-5555-4555-8555-555555555555',
+    replyLanguage: 'en',
+    replyMode: 'text',
     createdAt: '2026-08-25T10:00:00.000Z',
   });
 
@@ -76,6 +103,8 @@ test('chat state preserves the exact voice draft identity through an ambiguous m
     clientMessageId: '44444444-4444-4444-8444-444444444444',
     text: 'Where can I collect my student card?',
     voiceDraftId: '55555555-5555-4555-8555-555555555555',
+    replyLanguage: 'en',
+    replyMode: 'text',
   });
 });
 

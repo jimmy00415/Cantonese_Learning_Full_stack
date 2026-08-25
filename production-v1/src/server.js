@@ -17,6 +17,7 @@ import { createStorageRuntime } from './services/storage-runtime.js';
 import { createTurnProcessor } from './services/turn-processor.js';
 import {
   defaultVoiceIngressSpoolRoot,
+  createVoiceService,
   recoverStaleVoiceIngressSpools,
 } from './services/voice.js';
 import { productionInstanceLockName } from './stores/postgres-store.js';
@@ -158,6 +159,7 @@ export async function startServer({
   ttsProvider: suppliedTtsProvider,
   googleAuthProvider: suppliedGoogleAuthProvider,
   cleanupService: suppliedCleanupService,
+  voiceService: suppliedVoiceService,
   retentionWorker: suppliedRetentionWorker,
   createApp: createAppImpl = createApp,
   createStorageRuntime: createStorageRuntimeImpl = createStorageRuntime,
@@ -433,14 +435,18 @@ export async function startServer({
       ?? (config.tts.available ? createTtsProvider({ config: config.tts, googleAuthProvider }) : null);
     const answerService = createAnswerService({ corpus, retriever, llmProvider, now });
     eventHub = suppliedEventHub ?? new EventHub();
-    const turnProcessor = createTurnProcessor({ store, answerService, eventHub, now });
+    cleanupService = suppliedCleanupService ?? createMediaCleanupService({ store, mediaStore, now });
+    const voiceService = suppliedVoiceService ?? createVoiceService({
+      config, store, mediaStore, asrProvider, ttsProvider, cleanupService,
+      eventHub, now, spoolParentDirectory,
+    });
+    const turnProcessor = createTurnProcessor({ store, answerService, voiceService, eventHub, now });
     dispatcher = createDispatcher({
       store,
       processTurn: turnProcessor.processTurn,
       now,
       ...dispatcherOptions,
     });
-    cleanupService = suppliedCleanupService ?? createMediaCleanupService({ store, mediaStore, now });
 
     if (config.retentionWorkerEnabled) {
       retentionWorker = suppliedRetentionWorker ?? startRetentionWorkerImpl({
@@ -504,6 +510,7 @@ export async function startServer({
       asrProvider,
       ttsProvider,
       cleanupService,
+      voiceService,
       spoolParentDirectory,
       readiness,
       runtimeState,

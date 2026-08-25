@@ -4,6 +4,10 @@ import { dirname } from 'node:path';
 
 import { contextLimits, retainRecentCompletePairs } from '../context-budget.js';
 import {
+  DEFAULT_REPLY_LANGUAGE,
+  DEFAULT_REPLY_MODE,
+  REPLY_LANGUAGES,
+  REPLY_MODES,
   SAFE_TURN_FAILURE_CODES,
   STORE_SCHEMA_VERSION,
   TURN_STATES,
@@ -47,11 +51,31 @@ function validateSnapshotShape(snapshot, collections) {
   return snapshot;
 }
 
+function upgradeReplyPreferences(snapshot) {
+  const upgraded = clone(snapshot);
+  let changed = false;
+  for (const row of [...upgraded.messages, ...upgraded.turns]) {
+    if (row.replyLanguage === undefined) {
+      row.replyLanguage = DEFAULT_REPLY_LANGUAGE;
+      changed = true;
+    }
+    if (row.replyMode === undefined) {
+      row.replyMode = DEFAULT_REPLY_MODE;
+      changed = true;
+    }
+  }
+  return { snapshot: upgraded, changed };
+}
+
 function validateSnapshot(snapshot) {
   if (snapshot?.schemaVersion !== STORE_SCHEMA_VERSION) {
     throw new Error('Atomic store state is corrupt or uses an unsupported schema version');
   }
   validateSnapshotShape(snapshot, COLLECTIONS);
+  if (snapshot.messages.some((message) => !REPLY_LANGUAGES.has(message.replyLanguage) || !REPLY_MODES.has(message.replyMode))
+    || snapshot.turns.some((turn) => !REPLY_LANGUAGES.has(turn.replyLanguage) || !REPLY_MODES.has(turn.replyMode))) {
+    throw new Error('Atomic store state is corrupt');
+  }
   const scopeIds = snapshot.sessions.map((session) => session.clientScopeId);
   if (scopeIds.some((scopeId) => typeof scopeId !== 'string' || !scopeId)
     || new Set(scopeIds).size !== scopeIds.length) {
@@ -77,7 +101,7 @@ function migrateSchemaOne(snapshot) {
   migrated.mediaGenerations = [];
   migrated.mediaDeletionJobs = [];
   migrated.schemaVersion = STORE_SCHEMA_VERSION;
-  return validateSnapshot(migrated);
+  return validateSnapshot(upgradeReplyPreferences(migrated).snapshot);
 }
 
 function clone(value) { return structuredClone(value); }
@@ -219,7 +243,9 @@ export class AtomicFileStore {
         await this.#persist(migrated);
         this.snapshot = migrated;
       } else {
-        this.snapshot = validateSnapshot(parsed);
+        const upgraded = upgradeReplyPreferences(parsed);
+        this.snapshot = validateSnapshot(upgraded.snapshot);
+        if (upgraded.changed) await this.#persist(this.snapshot);
       }
     } catch (error) {
       if (error?.code === 'ENOENT') {
@@ -376,9 +402,15 @@ export class AtomicFileStore {
     });
   }
 
-  async acceptMessage({ sessionId, conversationId, clientMessageId, requestHash, text, voiceDraftId = null, now }) {
+  async acceptMessage({
+    sessionId, conversationId, clientMessageId, requestHash, text, voiceDraftId = null,
+    replyLanguage = DEFAULT_REPLY_LANGUAGE, replyMode = DEFAULT_REPLY_MODE, now,
+  }) {
     return this.#mutate((snapshot) => {
-      return this.#acceptMessage(snapshot, { sessionId, conversationId, clientMessageId, requestHash, text, voiceDraftId, now });
+      return this.#acceptMessage(snapshot, {
+        sessionId, conversationId, clientMessageId, requestHash, text, voiceDraftId,
+        replyLanguage, replyMode, now,
+      });
     });
   }
 
@@ -410,7 +442,13 @@ export class AtomicFileStore {
     return { message, turn, event };
   }
 
-  #acceptMessage(snapshot, { sessionId, conversationId, clientMessageId, requestHash, text, voiceDraftId = null, now }) {
+  #acceptMessage(snapshot, {
+    sessionId, conversationId, clientMessageId, requestHash, text, voiceDraftId = null,
+    replyLanguage = DEFAULT_REPLY_LANGUAGE, replyMode = DEFAULT_REPLY_MODE, now,
+  }) {
+    if (!REPLY_LANGUAGES.has(replyLanguage) || !REPLY_MODES.has(replyMode)) {
+      throw storeError('INVALID_REQUEST', 'Unsupported reply preferences.');
+    }
     const duplicate = this.#findAcceptedMessage(snapshot, { sessionId, conversationId, clientMessageId });
     if (duplicate) {
       if (duplicate.turn.requestHash !== requestHash) throw storeError('IDEMPOTENCY_CONFLICT', 'This client message ID was already used with different content.');
@@ -427,10 +465,12 @@ export class AtomicFileStore {
     const message = {
       id: randomUUID(), sessionId, conversationId, turnId, clientMessageId, sequence,
       role: 'user', kind: voiceDraftId ? 'voice' : 'text', status: 'accepted',
-      failureCode: null, text, voiceDraftId, mediaId: voiceDraft?.id ?? null, createdAt: timestamp,
+      failureCode: null, text, replyLanguage, replyMode,
+      voiceDraftId, mediaId: voiceDraft?.id ?? null, createdAt: timestamp,
     };
     const turn = {
       id: turnId, sessionId, conversationId, userMessageId: message.id, requestHash,
+      replyLanguage, replyMode,
       state: 'accepted', failureCode: null, attempt: 0, leaseExpiresAt: null,
       leaseToken: null, workerId: null, createdAt: timestamp, updatedAt: timestamp,
     };
@@ -591,6 +631,7 @@ export class AtomicFileStore {
         id: randomUUID(), sessionId: turn.sessionId, conversationId: turn.conversationId,
         turnId, sequence: messageSequence(snapshot, turn.conversationId), role: 'assistant',
         kind: 'text', status: 'delivered', text: message.text.trim(),
+        replyLanguage: turn.replyLanguage, replyMode: turn.replyMode,
         citations: clone(message.citations ?? []), cards: clone(message.cards ?? []),
         suggestedReplies: clone(message.suggestedReplies ?? []),
         needsClarification: Boolean(message.needsClarification),

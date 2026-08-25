@@ -32,6 +32,17 @@ export const voiceIngressSpoolLimits = Object.freeze({
 export const defaultVoiceIngressSpoolRoot = join(tmpdir(), 'hong-kong-buddy-v1-voice-ingress');
 
 const VOICE_INGRESS_DIRECTORY = /^voice-ingress-[a-z0-9]{6}$/i;
+const PROVIDER_RESPONSE_LANGUAGE = Object.freeze({
+  en: 'en',
+  'yue-Hant-HK': 'yueHant',
+  'cmn-Hans-CN': 'zhHans',
+});
+
+export function providerResponseLanguage(replyLanguage) {
+  const value = PROVIDER_RESPONSE_LANGUAGE[replyLanguage];
+  if (!value) throw workError('VOICE_SYNTHESIS_REJECTED', 502, false);
+  return value;
+}
 
 function resolvePrivateSpoolRoot(parentDirectory) {
   const root = resolve(parentDirectory ?? defaultVoiceIngressSpoolRoot);
@@ -546,7 +557,10 @@ export function createVoiceService({
     let objectWritten = false;
     try {
       if (!ttsProvider?.synthesize) throw workError('VOICE_PROVIDER_MISCONFIGURED', 503, false);
-      const synthesized = await ttsProvider.synthesize(claim.message.text, { signal: heartbeat.signal });
+      const synthesized = await ttsProvider.synthesize(claim.message.text, {
+        signal: heartbeat.signal,
+        responseLanguage: providerResponseLanguage(claim.message.replyLanguage),
+      });
       const stored = await withOperationDeadline({
         signal: heartbeat.signal,
         deadlineMs: mediaDeadlineMs,
@@ -617,6 +631,13 @@ export function createVoiceService({
     return { httpStatus: 200, data: generationPublic(generation) };
   };
 
+  const prepareAssistantAudio = ({ sessionId, messageId }) => {
+    queueMicrotask(() => {
+      void generateAssistantAudio({ sessionId, messageId }).catch(() => undefined);
+    });
+    return { messageId, state: 'pending' };
+  };
+
   const cancelUpload = async ({ sessionId, clientUploadId }) => {
     const current = currentDate(now);
     const upload = await store.cancelVoiceUpload({
@@ -634,6 +655,7 @@ export function createVoiceService({
     getUploadStatus,
     cancelUpload,
     generateAssistantAudio,
+    prepareAssistantAudio,
     getAssistantAudioStatus,
     revokeVoiceDraft: (input) => store.revokeVoiceDraft({ ...input, now: currentDate(now), cleanupNotBefore: currentDate(now) }),
   };

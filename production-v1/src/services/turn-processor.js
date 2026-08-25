@@ -10,7 +10,7 @@ function publish(eventHub, result) {
   }
 }
 
-export function createTurnProcessor({ store, answerService, eventHub, now = () => new Date() } = {}) {
+export function createTurnProcessor({ store, answerService, voiceService, eventHub, now = () => new Date() } = {}) {
   if (!store || typeof answerService?.answer !== 'function') throw new Error('turn processor dependencies are required');
 
   async function processTurn({ turn, leaseToken, signal }) {
@@ -34,6 +34,8 @@ export function createTurnProcessor({ store, answerService, eventHub, now = () =
       const answer = await answerService.answer({
         turnId: turn.id,
         text: current.text,
+        replyLanguage: turn.replyLanguage,
+        replyMode: turn.replyMode,
         context: context.messages,
         signal,
         beforeProvider: async () => {
@@ -45,6 +47,16 @@ export function createTurnProcessor({ store, answerService, eventHub, now = () =
       await ensureGenerating();
       const delivered = await store.deliverAssistant({ turnId: turn.id, leaseToken, message: answer, now: now() });
       publish(eventHub, delivered);
+      if (turn.replyMode === 'voice') {
+        try {
+          const preparation = voiceService?.prepareAssistantAudio?.({
+            sessionId: turn.sessionId,
+            messageId: delivered.message.id,
+            replyLanguage: turn.replyLanguage,
+          });
+          void Promise.resolve(preparation).catch(() => undefined);
+        } catch { /* grounded text delivery is terminal even when TTS preparation fails */ }
+      }
       return { delivered: true, message: delivered.message };
     } catch (error) {
       if (signal?.aborted || error?.code === 'LEASE_LOST') return { leaseLost: true };

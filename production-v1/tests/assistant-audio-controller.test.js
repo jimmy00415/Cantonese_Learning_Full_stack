@@ -107,6 +107,7 @@ test('factory exposes the bounded audio API and returns immutable snapshots', ()
     'snapshot',
     'generate',
     'refresh',
+    'prepare',
     'play',
     'pause',
     'handleHidden',
@@ -168,6 +169,52 @@ test('one explicit generate gesture only POSTs and exposes ready audio without c
   assert.ok(changes.some((snapshot) => snapshot.entries[MESSAGE_ID]?.state === 'generating'));
   assert.equal(Object.isFrozen(changes.at(-1)), true);
   assert.equal(Object.isFrozen(changes.at(-1).entries[MESSAGE_ID]), true);
+  assert.equal(controller.snapshot().playback, null);
+});
+
+test('voice reply preparation is GET-first, preserves text, and never constructs or plays Audio', async () => {
+  FakeAudio.instances.length = 0;
+  const calls = [];
+  const message = {
+    id: MESSAGE_ID,
+    role: 'assistant',
+    text: 'Grounded text remains visible.',
+    replyMode: 'voice',
+    mediaId: null,
+  };
+  const controller = createAssistantAudioController({
+    fetchImpl: async (url, options) => {
+      calls.push({ url, method: options.method });
+      return envelope({ messageId: MESSAGE_ID, state: 'attached', mediaId: MEDIA_ID, failureCode: null, retryable: false });
+    },
+    AudioClass: FakeAudio,
+    origin: 'https://buddy.example',
+  });
+  const result = await controller.prepare(message);
+  assert.equal(result.state, 'ready');
+  assert.equal(message.text, 'Grounded text remains visible.');
+  assert.deepEqual(calls, [{ url: `/api/v1/messages/${MESSAGE_ID}/audio/status`, method: 'GET' }]);
+  assert.equal(FakeAudio.instances.length, 0);
+  assert.equal(controller.snapshot().playback, null);
+});
+
+test('text replies never prepare audio and voice preparation failure leaves grounded text unchanged', async () => {
+  let calls = 0;
+  const controller = createAssistantAudioController({
+    fetchImpl: async () => {
+      calls += 1;
+      return failure('VOICE_SYNTHESIS_REJECTED', { status: 502 });
+    },
+    AudioClass: ForbiddenAudio,
+    origin: 'https://buddy.example',
+  });
+  const textMessage = { id: MESSAGE_ID, role: 'assistant', text: 'Text only.', replyMode: 'text', mediaId: null };
+  assert.equal(await controller.prepare(textMessage), null);
+  const voiceMessage = { ...textMessage, text: 'Keep this answer.', replyMode: 'voice' };
+  const failed = await controller.prepare(voiceMessage);
+  assert.equal(failed.state, 'failed');
+  assert.equal(voiceMessage.text, 'Keep this answer.');
+  assert.equal(calls, 1);
   assert.equal(controller.snapshot().playback, null);
 });
 

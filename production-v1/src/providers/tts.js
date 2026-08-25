@@ -124,7 +124,7 @@ export function createTtsProvider({
     if (!serverText.trim()) throw speechError('VOICE_SYNTHESIS_REJECTED', 502, false, 'rejected');
     const startedAt = now();
     const azure = config.provider === 'azure';
-    if (google && !GOOGLE_VOICE_KEYS.has(responseLanguage)) {
+    if (!GOOGLE_VOICE_KEYS.has(responseLanguage)) {
       throw speechError('VOICE_SYNTHESIS_REJECTED', 502, false, 'rejected');
     }
     const body = google

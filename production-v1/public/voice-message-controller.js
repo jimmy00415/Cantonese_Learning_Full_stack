@@ -9,6 +9,8 @@ const LIFECYCLE_CANCEL_REASONS = new Set([
   'visible-cancel',
 ]);
 const TERMINAL_LIFECYCLE_REASONS = new Set(['hidden', 'pagehide']);
+const REPLY_LANGUAGES = new Set(['en', 'yue-Hant-HK', 'cmn-Hans-CN']);
+const REPLY_MODES = new Set(['text', 'voice']);
 
 const SAFE_ERRORS = Object.freeze({
   VOICE_CONSENT_REQUIRED: 'Review and allow microphone access before recording.',
@@ -22,6 +24,7 @@ const SAFE_ERRORS = Object.freeze({
   VOICE_TRANSCRIPTION_FAILED: 'The recording could not be transcribed. You can remove it or continue by typing.',
   VOICE_DRAFT_UNAVAILABLE: 'This voice draft is no longer available. Please record it again or type your message.',
   VOICE_MESSAGE_IDENTITY_INVALID: 'The voice message identity is invalid.',
+  VOICE_REPLY_PREFERENCES_INVALID: 'The reply preferences are invalid. Please review them before sending.',
   VOICE_MESSAGE_BIND_FAILED: 'The voice draft could not be prepared for sending. Please reload before retrying.',
   VOICE_MESSAGE_ALREADY_BOUND: 'This voice draft already has a fixed send identity. Use Retry to send it again.',
   VOICE_SEND_NOT_CONFIRMED: 'Sending could not be confirmed. Retry will use the same voice message identity.',
@@ -62,6 +65,11 @@ function normalizeText(value) {
   const text = typeof value === 'string' ? value.trim() : '';
   if (!text || text.length > 4_000) return null;
   return text;
+}
+
+function normalizeReplyPreferences({ replyLanguage = 'en', replyMode = 'text' } = {}) {
+  if (!REPLY_LANGUAGES.has(replyLanguage) || !REPLY_MODES.has(replyMode)) return null;
+  return { replyLanguage, replyMode };
 }
 
 function validDraftId(value) {
@@ -117,6 +125,8 @@ function canonicalAcceptance(messages, binding, voiceDraftId) {
       && message.role === 'user'
       && message.clientMessageId === binding.clientMessageId
       && message.voiceDraftId === voiceDraftId
+      && message.replyLanguage === binding.replyLanguage
+      && message.replyMode === binding.replyMode
   ));
 }
 
@@ -218,8 +228,9 @@ export function createVoiceMessageController({
     let binding = null;
     if (messageBinding !== null) {
       const boundText = normalizeText(messageBinding?.text);
-      if (!UUID.test(String(messageBinding?.clientMessageId ?? '')) || !boundText) return false;
-      binding = { clientMessageId: messageBinding.clientMessageId, text: boundText };
+      const preferences = normalizeReplyPreferences(messageBinding);
+      if (!UUID.test(String(messageBinding?.clientMessageId ?? '')) || !boundText || !preferences) return false;
+      binding = { clientMessageId: messageBinding.clientMessageId, text: boundText, ...preferences };
     }
     const visibleText = binding?.text ?? transcriptText;
     if (!UUID.test(String(clientUploadId ?? '')) || !visibleText || !validDraftId(voiceDraftId)) return false;
@@ -566,7 +577,7 @@ export function createVoiceMessageController({
     return 'VOICE_SEND_NOT_CONFIRMED';
   }
 
-  async function sendDraft({ clientMessageId, text = state.draft?.text } = {}) {
+  async function sendDraft({ clientMessageId, text = state.draft?.text, replyLanguage, replyMode } = {}) {
     assertUsable();
     if (!UUID.test(String(clientMessageId ?? ''))) {
       throw new VoiceMessageControllerError('VOICE_MESSAGE_IDENTITY_INVALID');
@@ -574,6 +585,13 @@ export function createVoiceMessageController({
     if (!state.operation || !state.draft) throw new VoiceMessageControllerError('VOICE_DRAFT_UNAVAILABLE');
     const normalized = normalizeText(text);
     if (!normalized) throw new VoiceMessageControllerError('VOICE_DRAFT_UNAVAILABLE');
+    let currentPreferences = {};
+    try { currentPreferences = chat.snapshot?.() ?? {}; } catch { /* explicit values can still be used */ }
+    const preferences = normalizeReplyPreferences({
+      replyLanguage: replyLanguage ?? currentPreferences.replyLanguage,
+      replyMode: replyMode ?? currentPreferences.replyMode,
+    });
+    if (!preferences) throw new VoiceMessageControllerError('VOICE_REPLY_PREFERENCES_INVALID');
     if (state.binding) throw new VoiceMessageControllerError('VOICE_MESSAGE_ALREADY_BOUND');
     const runEpoch = epoch;
     state.phase = 'binding';
@@ -588,6 +606,7 @@ export function createVoiceMessageController({
         voiceDraftId: state.draft.voiceDraftId,
         clientMessageId,
         text: normalized,
+        ...preferences,
         nowMs: timestamp(),
       });
     } catch {
@@ -596,7 +615,7 @@ export function createVoiceMessageController({
     }
     if (!currentEpoch(runEpoch)) return false;
     if (!bound) throw setFailure('VOICE_MESSAGE_BIND_FAILED');
-    state.binding = { clientMessageId, text: normalized };
+    state.binding = { clientMessageId, text: normalized, ...preferences };
     state.draft = { ...state.draft, text: normalized };
     state.phase = 'sending';
     notify();
@@ -606,6 +625,7 @@ export function createVoiceMessageController({
         clientMessageId,
         voiceDraftId: state.draft.voiceDraftId,
         text: normalized,
+        ...preferences,
       });
       if (!currentEpoch(runEpoch)) return false;
       // Chat notifies canonical state before its send promise settles. A DOM
@@ -642,6 +662,8 @@ export function createVoiceMessageController({
       clientMessageId: state.binding.clientMessageId,
       voiceDraftId: state.draft.voiceDraftId,
       text: state.binding.text,
+      replyLanguage: state.binding.replyLanguage,
+      replyMode: state.binding.replyMode,
     };
     state.phase = 'sending';
     state.error = null;
@@ -749,6 +771,8 @@ export function createVoiceMessageController({
           voiceDraftId: state.draft.voiceDraftId,
           clientMessageId: state.binding.clientMessageId,
           text: state.binding.text,
+          replyLanguage: state.binding.replyLanguage,
+          replyMode: state.binding.replyMode,
           nowMs: timestamp(),
         }
       : null;

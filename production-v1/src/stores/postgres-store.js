@@ -2,6 +2,10 @@ import { randomUUID } from 'node:crypto';
 
 import { contextLimits, retainRecentCompletePairs } from '../context-budget.js';
 import {
+  DEFAULT_REPLY_LANGUAGE,
+  DEFAULT_REPLY_MODE,
+  REPLY_LANGUAGES,
+  REPLY_MODES,
   SAFE_TURN_FAILURE_CODES,
   TURN_STATES,
   TURN_TERMINAL_STATES,
@@ -630,8 +634,12 @@ export class PostgresStore {
   async #acceptMessage(client, input, rateLimits = []) {
     const {
       sessionId, conversationId, clientMessageId, requestHash, text,
-      voiceDraftId = null, now,
+      voiceDraftId = null, replyLanguage = DEFAULT_REPLY_LANGUAGE,
+      replyMode = DEFAULT_REPLY_MODE, now,
     } = input;
+    if (!REPLY_LANGUAGES.has(replyLanguage) || !REPLY_MODES.has(replyMode)) {
+      throw storeError('INVALID_REQUEST', 'Unsupported reply preferences.');
+    }
     await this.#lockSessionConversation(client, sessionId, conversationId);
     const duplicate = await this.#findAcceptedMessage(client, { conversationId, clientMessageId });
     if (duplicate) {
@@ -675,30 +683,33 @@ export class PostgresStore {
       messageResult = await client.query(`
         INSERT INTO messages (
           id, session_id, conversation_id, turn_id, client_message_id, sequence,
-          role, kind, status, failure_code, text, voice_draft_id, media_id,
+          role, kind, status, failure_code, text, reply_language, reply_mode,
+          voice_draft_id, media_id,
           citations, cards, suggested_replies, needs_clarification,
           grounding_status, provider, provider_latency_ms, created_at
         ) VALUES (
           $1, $2, $3, $4, $5, $6,
-          'user', $7, 'accepted', NULL, $8, $9, $10,
+          'user', $7, 'accepted', NULL, $8, $9, $10, $11, $12,
           '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, false,
-          NULL, NULL, NULL, $11
+          NULL, NULL, NULL, $13
         ) RETURNING *
       `, [
         messageId, sessionId, conversationId, turnId, clientMessageId, sequence,
-        voiceDraft ? 'voice' : 'text', text, voiceDraftId, voiceDraft?.id ?? null, timestamp,
+        voiceDraft ? 'voice' : 'text', text, replyLanguage, replyMode,
+        voiceDraftId, voiceDraft?.id ?? null, timestamp,
       ]);
     } catch (error) {
       pgUnique(error, 'IDEMPOTENCY_CONFLICT', 'This client message ID was already used.');
     }
     const turnResult = await client.query(`
       INSERT INTO turns (
-        id, session_id, conversation_id, user_message_id, request_hash, state,
+        id, session_id, conversation_id, user_message_id, request_hash,
+        reply_language, reply_mode, state,
         failure_code, attempt, lease_token, lease_expires_at, worker_id,
         created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, 'accepted', NULL, 0, NULL, NULL, NULL, $6, $6)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'accepted', NULL, 0, NULL, NULL, NULL, $8, $8)
       RETURNING *
-    `, [turnId, sessionId, conversationId, messageId, requestHash, timestamp]);
+    `, [turnId, sessionId, conversationId, messageId, requestHash, replyLanguage, replyMode, timestamp]);
     if (voiceDraft) {
       const attached = await client.query(`
         UPDATE media_assets
@@ -945,18 +956,20 @@ export class PostgresStore {
           INSERT INTO messages (
             id, session_id, conversation_id, turn_id, client_message_id,
             sequence, role, kind, status, failure_code, text,
+            reply_language, reply_mode,
             voice_draft_id, media_id, citations, cards, suggested_replies,
             needs_clarification, grounding_status, provider,
             provider_latency_ms, created_at
           ) VALUES (
             $1, $2, $3, $4, NULL,
-            $5, 'assistant', 'text', 'delivered', NULL, $6,
-            NULL, NULL, $7::jsonb, $8::jsonb, $9::jsonb,
-            $10, $11, $12, $13, $14
+            $5, 'assistant', 'text', 'delivered', NULL, $6, $7, $8,
+            NULL, NULL, $9::jsonb, $10::jsonb, $11::jsonb,
+            $12, $13, $14, $15, $16
           ) RETURNING *
         `, [
           randomUUID(), turn.sessionId, turn.conversationId, turnId,
           Number(sequenceResult.rows[0].next_sequence), message.text.trim(),
+          turn.replyLanguage, turn.replyMode,
           JSON.stringify(message.citations ?? []), JSON.stringify(message.cards ?? []),
           JSON.stringify(message.suggestedReplies ?? []), Boolean(message.needsClarification),
           message.groundingStatus === 'verified' ? 'verified' : 'unverified',

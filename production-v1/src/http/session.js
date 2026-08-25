@@ -4,13 +4,21 @@ import express from 'express';
 import { httpError, sendError } from './errors.js';
 import { createRateLimiter, rateLimitBucket } from '../services/rate-limiter.js';
 import { createEventStreamHandler } from '../services/events.js';
+import { REPLY_LANGUAGES, REPLY_MODES } from '../stores/store-contract.js';
 
 const COOKIE_NAME = 'hb_v1_session';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function tokenHash(token) { return createHash('sha256').update(token).digest('hex'); }
 function parseCookies(header = '') { return Object.fromEntries(header.split(';').map((part) => part.trim().split(/=(.*)/s)).filter(([key]) => key)); }
-function requestHash({ text, voiceDraftId }) { return createHash('sha256').update(JSON.stringify({ text, voiceDraftId: voiceDraftId ?? null })).digest('hex'); }
+function requestHash({ text, voiceDraftId, replyLanguage, replyMode }) {
+  return createHash('sha256').update(JSON.stringify({
+    text,
+    voiceDraftId: voiceDraftId ?? null,
+    replyLanguage,
+    replyMode,
+  })).digest('hex');
+}
 function rateLimited(response, result) { response.set('Retry-After', String(result.retryAfter)); throw httpError(429, 'RATE_LIMITED'); }
 
 function cookieOptions(config) { return { httpOnly: true, sameSite: 'lax', secure: config.nodeEnv === 'production', path: '/', maxAge: 30 * 24 * 60 * 60 * 1000 }; }
@@ -23,6 +31,8 @@ function publicTurn(turn) {
     failureCode: turn.failureCode ?? null,
     createdAt: turn.createdAt,
     updatedAt: turn.updatedAt,
+    replyLanguage: turn.replyLanguage,
+    replyMode: turn.replyMode,
   };
 }
 
@@ -38,6 +48,8 @@ function publicMessage(message) {
     status: message.status ?? (message.role === 'assistant' ? 'delivered' : 'accepted'),
     failureCode: message.failureCode ?? null,
     text: message.text,
+    replyLanguage: message.replyLanguage,
+    replyMode: message.replyMode,
     voiceDraftId: message.voiceDraftId ?? null,
     mediaId: message.mediaId ?? null,
     citations: message.citations ?? [],
@@ -108,12 +120,17 @@ export function createSessionRouter({ config, store, eventHub, dispatcher, clean
       const clientMessageId = request.body?.clientMessageId;
       const text = typeof request.body?.text === 'string' ? request.body.text.trim() : '';
       const voiceDraftId = request.body?.voiceDraftId ?? null;
-      if (!UUID.test(clientMessageId ?? '') || text.length < 1 || text.length > 4000 || (voiceDraftId !== null && typeof voiceDraftId !== 'string')) throw httpError(400, 'INVALID_REQUEST');
-      const payloadHash = requestHash({ text, voiceDraftId });
+      const replyLanguage = request.body?.replyLanguage;
+      const replyMode = request.body?.replyMode;
+      if (!UUID.test(clientMessageId ?? '') || text.length < 1 || text.length > 4000
+        || (voiceDraftId !== null && typeof voiceDraftId !== 'string')
+        || !REPLY_LANGUAGES.has(replyLanguage) || !REPLY_MODES.has(replyMode)) throw httpError(400, 'INVALID_REQUEST');
+      const payloadHash = requestHash({ text, voiceDraftId, replyLanguage, replyMode });
       const subject = sessionData.session.id;
       const now = Date.now();
       const accepted = await store.acceptMessageWithRateLimits({
         sessionId: sessionData.session.id, conversationId: sessionData.conversation.id, clientMessageId, requestHash: payloadHash, text, voiceDraftId,
+        replyLanguage, replyMode,
         rateLimits: [
           rateLimitBucket({ secret: config.sessionSecret ?? 'local-development-session-secret', subject, quota: 'messages-5m', limit: limits.message5m, durationMs: 5 * 60 * 1000, now }),
           rateLimitBucket({ secret: config.sessionSecret ?? 'local-development-session-secret', subject, quota: 'messages-day', limit: limits.messageDaily, durationMs: 24 * 60 * 60 * 1000, now }),

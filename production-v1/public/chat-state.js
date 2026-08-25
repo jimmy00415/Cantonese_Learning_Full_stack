@@ -5,6 +5,14 @@ const EVENT_TYPES = new Set([
   'turn.failed',
   'audio.ready',
 ]);
+const REPLY_LANGUAGES = new Set(['en', 'yue-Hant-HK', 'cmn-Hans-CN']);
+const REPLY_MODES = new Set(['text', 'voice']);
+
+export function normalizeReplyPreferences({ replyLanguage = 'en', replyMode = 'text' } = {}) {
+  if (!REPLY_LANGUAGES.has(replyLanguage)) throw new Error('replyLanguage is unsupported');
+  if (!REPLY_MODES.has(replyMode)) throw new Error('replyMode is unsupported');
+  return { replyLanguage, replyMode };
+}
 
 function validDate(value) {
   const date = value ? new Date(value) : null;
@@ -15,6 +23,8 @@ export function createOptimisticMessage({
   clientMessageId,
   text,
   voiceDraftId = null,
+  replyLanguage = 'en',
+  replyMode = 'text',
   createdAt = new Date().toISOString(),
 }) {
   if (typeof clientMessageId !== 'string' || !clientMessageId) throw new Error('clientMessageId is required');
@@ -22,6 +32,7 @@ export function createOptimisticMessage({
   if (voiceDraftId !== null && (typeof voiceDraftId !== 'string' || !voiceDraftId)) {
     throw new Error('voiceDraftId must be a non-empty string');
   }
+  const preferences = normalizeReplyPreferences({ replyLanguage, replyMode });
   return {
     id: `optimistic:${clientMessageId}`,
     clientMessageId,
@@ -31,6 +42,7 @@ export function createOptimisticMessage({
     status: 'sending',
     failureCode: null,
     text: text.trim(),
+    ...preferences,
     ...(voiceDraftId ? { voiceDraftId } : {}),
     citations: [],
     cards: [],
@@ -48,6 +60,7 @@ export function retryPayload(message) {
   return {
     clientMessageId: message.clientMessageId,
     text: message.text,
+    ...normalizeReplyPreferences(message),
     ...(message.voiceDraftId ? { voiceDraftId: message.voiceDraftId } : {}),
   };
 }

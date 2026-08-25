@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -35,6 +35,8 @@ test('atomic store accepts idempotent messages transactionally and preserves dur
     requestHash: 'request-hash',
     text: '你好',
     voiceDraftId: null,
+    replyLanguage: 'yue-Hant-HK',
+    replyMode: 'voice',
     now: '2026-08-25T00:00:01.000Z',
   };
   const accepted = await store.acceptMessage(input);
@@ -43,6 +45,8 @@ test('atomic store accepts idempotent messages transactionally and preserves dur
 
   assert.equal(accepted.message.sequence, 1);
   assert.equal(accepted.turn.state, 'accepted');
+  assert.equal(accepted.message.replyLanguage, 'yue-Hant-HK');
+  assert.equal(accepted.turn.replyMode, 'voice');
   assert.equal(accepted.event.cursor, 1);
   assert.equal(retry.idempotent, true);
   assert.equal(retry.message.id, accepted.message.id);
@@ -60,6 +64,30 @@ test('atomic store accepts idempotent messages transactionally and preserves dur
   const events = await reopened.listEvents({ sessionId: session.id, conversationId: conversation.id, afterCursor: 0 });
   assert.deepEqual(messages.map((message) => message.sequence), [2]);
   assert.deepEqual(events.map((event) => event.cursor), [1, 2]);
+  assert.equal(messages[0].replyLanguage, 'yue-Hant-HK');
+  assert.equal(messages[0].replyMode, 'voice');
+});
+
+test('atomic store upgrades schema-v2 preference-less snapshots with explicit immutable defaults', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'hb-v1-preference-upgrade-'));
+  const filePath = join(directory, 'store.json');
+  const snapshot = {
+    schemaVersion: 2,
+    sessions: [{ id: 'session', tokenHash: 'token', clientScopeId: 'scope', createdAt: '2026-08-25T00:00:00.000Z', updatedAt: '2026-08-25T00:00:00.000Z' }],
+    conversations: [{ id: 'conversation', sessionId: 'session', eventHighWater: 1, createdAt: '2026-08-25T00:00:00.000Z', updatedAt: '2026-08-25T00:00:00.000Z' }],
+    messages: [{ id: 'message', sessionId: 'session', conversationId: 'conversation', turnId: 'turn', clientMessageId: 'client', sequence: 1, role: 'user', kind: 'text', status: 'accepted', text: 'legacy', createdAt: '2026-08-25T00:00:00.000Z' }],
+    turns: [{ id: 'turn', sessionId: 'session', conversationId: 'conversation', userMessageId: 'message', requestHash: 'hash', state: 'accepted', createdAt: '2026-08-25T00:00:00.000Z', updatedAt: '2026-08-25T00:00:00.000Z' }],
+    events: [{ id: 'event', sessionId: 'session', conversationId: 'conversation', cursor: 1, type: 'message.accepted', messageId: 'message', turnId: 'turn', payloadJson: {}, createdAt: '2026-08-25T00:00:00.000Z' }],
+    mediaAssets: [], voiceUploads: [], mediaGenerations: [], mediaDeletionJobs: [], rateLimitBuckets: [], serviceState: {},
+  };
+  await writeFile(filePath, JSON.stringify(snapshot), 'utf8');
+  const store = new AtomicFileStore({ filePath });
+  await store.init();
+  const messages = await store.listMessages({ sessionId: 'session', conversationId: 'conversation', after: 0 });
+  const persisted = JSON.parse(await readFile(filePath, 'utf8'));
+  assert.deepEqual([messages[0].replyLanguage, messages[0].replyMode], ['en', 'text']);
+  assert.deepEqual([persisted.turns[0].replyLanguage, persisted.turns[0].replyMode], ['en', 'text']);
+  await store.close();
 });
 
 test('atomic store rejects corruption and removes only owned session data', async (t) => {

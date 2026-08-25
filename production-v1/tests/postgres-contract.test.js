@@ -130,6 +130,8 @@ test('postgres migration encodes durable ownership, ordering, fencing, quota, an
   assert.match(sql, /UNIQUE\s*\(\s*owner_message_id\s*,\s*kind\s*\)/i);
   assert.match(sql, /CREATE UNIQUE INDEX[\s\S]*messages[\s\S]*turn_id[\s\S]*role\s*=\s*'assistant'/i);
   assert.match(sql, /request_hash\s+char\s*\(\s*64\s*\)\s+NOT NULL/i);
+  assert.match(sql, /reply_language\s+text\s+NOT NULL\s+CHECK\s*\(\s*reply_language\s+IN\s*\(\s*'en'\s*,\s*'yue-Hant-HK'\s*,\s*'cmn-Hans-CN'\s*\)\s*\)/i);
+  assert.match(sql, /reply_mode\s+text\s+NOT NULL\s+CHECK\s*\(\s*reply_mode\s+IN\s*\(\s*'text'\s*,\s*'voice'\s*\)\s*\)/i);
   assert.match(sql, /lease_token\s+uuid/i);
   assert.match(sql, /lease_expires_at\s+timestamptz/i);
   assert.match(sql, /payload_json\s+jsonb\s+NOT NULL/i);
@@ -459,12 +461,14 @@ test('message acceptance serializes sequence allocation, commits event truth, an
     failure_code: null, text: "Duo'; DROP TABLE sessions; --",
     voice_draft_id: null, media_id: null, citations: [], cards: [],
     suggested_replies: [], needs_clarification: false, grounding_status: null,
+    reply_language: 'cmn-Hans-CN', reply_mode: 'voice',
     provider: null, provider_latency_ms: null, created_at: NOW,
   };
   const turnRow = {
     id: messageRow.turn_id, session_id: sessionRow().id,
     conversation_id: conversationRow().id, user_message_id: messageRow.id,
     request_hash: 'b'.repeat(64), state: 'accepted', failure_code: null,
+    reply_language: 'cmn-Hans-CN', reply_mode: 'voice',
     attempt: 0, lease_token: null, lease_expires_at: null, worker_id: null,
     created_at: NOW, updated_at: NOW,
   };
@@ -492,15 +496,21 @@ test('message acceptance serializes sequence allocation, commits event truth, an
     clientMessageId: messageRow.client_message_id,
     requestHash: turnRow.request_hash,
     text: messageRow.text,
+    replyLanguage: 'cmn-Hans-CN',
+    replyMode: 'voice',
     now: NOW,
   });
 
   assert.equal(accepted.message.text, messageRow.text);
   assert.equal(accepted.message.sequence, 1);
   assert.equal(accepted.event.cursor, 1);
+  assert.equal(accepted.message.replyLanguage, 'cmn-Hans-CN');
+  assert.equal(accepted.turn.replyMode, 'voice');
   assert.deepEqual(transactionWords(pool), ['BEGIN', 'COMMIT']);
   const insert = pool.calls.find((call) => /INSERT INTO messages/i.test(call.text));
   assert.ok(insert.values.includes(messageRow.text));
+  assert.ok(insert.values.includes('cmn-Hans-CN'));
+  assert.ok(insert.values.includes('voice'));
   assert.equal(insert.text.includes(messageRow.text), false);
   const sessionLock = pool.calls.findIndex((call) => /FROM sessions[\s\S]*FOR UPDATE/i.test(call.text));
   const conversationLock = pool.calls.findIndex((call) => /FROM conversations[\s\S]*FOR UPDATE/i.test(call.text));
