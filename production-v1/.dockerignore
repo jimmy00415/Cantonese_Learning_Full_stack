@@ -8,5 +8,13 @@
 !public/**
 !migrations/
 !migrations/**
+!data/
+!data/knowledge/
+!data/knowledge/hkbu-v1.json
 !scripts/
 !scripts/run-migrations.js
+!scripts/image-release-contract.js
+!scripts/create-image-release-manifest.js
+!scripts/provider-smoke.js
+!scripts/real-dependencies-acceptance.js
+!scripts/voice-provider-smoke.js

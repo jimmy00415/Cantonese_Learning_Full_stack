@@ -23,9 +23,12 @@ export async function discoverMigrations({
   readDirectory = readdir,
   readFile: readMigration = readFile,
 } = {}) {
-  const fileNames = (await readDirectory(migrationsDirectory))
-    .filter((fileName) => MIGRATION_FILE.test(fileName))
-    .sort();
+  const discovered = await readDirectory(migrationsDirectory);
+  if (!Array.isArray(discovered)
+    || discovered.some((fileName) => typeof fileName !== 'string' || !MIGRATION_FILE.test(fileName))) {
+    throw migrationSetError();
+  }
+  const fileNames = [...discovered].sort();
   if (fileNames.length < 1) throw migrationSetError();
   const migrations = [];
   const versions = new Set();

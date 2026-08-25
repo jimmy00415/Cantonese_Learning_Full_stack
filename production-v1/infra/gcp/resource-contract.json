@@ -65,6 +65,23 @@
         "id": "hkbuddy-deployer",
         "email": "hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
         "displayName": "Hong Kong Buddy release deployer"
+      },
+      {
+        "id": "hkbuddy-acceptance",
+        "email": "hkbuddy-acceptance@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "displayName": "Hong Kong Buddy dependency acceptance"
+      }
+    ],
+    "customRoles": [
+      {
+        "id": "hkbuddyAcceptanceBucketMetadataReader",
+        "name": "projects/hkbuddy-prod-v1-20260826/roles/hkbuddyAcceptanceBucketMetadataReader",
+        "title": "HK Buddy acceptance bucket metadata reader",
+        "description": "Read fixed media bucket metadata for dependency acceptance",
+        "includedPermissions": [
+          "storage.buckets.get"
+        ],
+        "stage": "GA"
       }
     ],
     "network": {
@@ -197,7 +214,7 @@
       "directVpc": true,
       "egress": "private-ranges-only",
       "startupProbe": {
-        "path": "/api/health/live",
+        "path": "/api/health/ready",
         "port": 8080,
         "initialDelaySeconds": 0,
         "timeoutSeconds": 5,
@@ -487,6 +504,31 @@
         "role": "roles/secretmanager.secretAccessor"
       },
       {
+        "scope": "bucket:hkbuddy-prod-v1-20260826-media",
+        "member": "serviceAccount:hkbuddy-acceptance@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/storage.objectUser"
+      },
+      {
+        "scope": "bucket:hkbuddy-prod-v1-20260826-media",
+        "member": "serviceAccount:hkbuddy-acceptance@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "projects/hkbuddy-prod-v1-20260826/roles/hkbuddyAcceptanceBucketMetadataReader"
+      },
+      {
+        "scope": "secret:hkbuddy-db-app-url",
+        "member": "serviceAccount:hkbuddy-acceptance@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/secretmanager.secretAccessor"
+      },
+      {
+        "scope": "secret:hkbuddy-db-migrator-url",
+        "member": "serviceAccount:hkbuddy-acceptance@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/secretmanager.secretAccessor"
+      },
+      {
+        "scope": "project",
+        "member": "serviceAccount:hkbuddy-acceptance@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/logging.logWriter"
+      },
+      {
         "scope": "secret:hkbuddy-db-migrator-url",
         "member": "serviceAccount:hkbuddy-migrator@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
         "role": "roles/secretmanager.secretAccessor"
@@ -509,7 +551,42 @@
       {
         "scope": "project",
         "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/cloudbuild.builds.editor"
+      },
+      {
+        "scope": "project",
+        "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
         "role": "roles/run.developer"
+      },
+      {
+        "scope": "secret:hkbuddy-legacy-inventory",
+        "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/secretmanager.secretVersionAdder"
+      },
+      {
+        "scope": "secret:hkbuddy-dependency-acceptance",
+        "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/secretmanager.secretVersionAdder"
+      },
+      {
+        "scope": "secret:hkbuddy-llm-smoke",
+        "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/secretmanager.secretVersionAdder"
+      },
+      {
+        "scope": "secret:hkbuddy-asr-smoke",
+        "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/secretmanager.secretVersionAdder"
+      },
+      {
+        "scope": "secret:hkbuddy-tts-smoke",
+        "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/secretmanager.secretVersionAdder"
+      },
+      {
+        "scope": "secret:hkbuddy-ios-voice-acceptance",
+        "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/secretmanager.secretVersionAdder"
       },
       {
         "scope": "service-account:hkbuddy-runtime",
@@ -523,6 +600,11 @@
       },
       {
         "scope": "service-account:hkbuddy-build",
+        "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/iam.serviceAccountUser"
+      },
+      {
+        "scope": "service-account:hkbuddy-acceptance",
         "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
         "role": "roles/iam.serviceAccountUser"
       },

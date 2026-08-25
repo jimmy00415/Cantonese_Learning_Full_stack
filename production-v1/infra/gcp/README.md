@@ -101,6 +101,79 @@ is never placed in an argument or report. This operator authentication path is
 separate from the runtime: Cloud Run uses its attached service account through
 application default credentials.
 
+## Frozen release commands
+
+`scripts/gcp-release.js` is also inert by default. The source archive command
+accepts only one clean lower-case 40-hex `HEAD`, rejects tracked or untracked
+worktree changes, fixes every archive member mtime to that commit's validated
+`%ct`, archives the `production-v1` tree outside the repository, and returns
+its SHA-256:
+
+```text
+node scripts/gcp-release.js --prepare-archive --repository-root=ABSOLUTE_REPOSITORY_ROOT --destination=ABSOLUTE_OUTPUT/source.tar.gz --release-sha=40_HEX_SHA
+node scripts/gcp-release.js --prepare-archive --repository-root=ABSOLUTE_REPOSITORY_ROOT --destination=ABSOLUTE_OUTPUT/source.tar.gz --release-sha=40_HEX_SHA --confirm-archive=40_HEX_SHA
+```
+
+The release manifest is a local JSON control record with exact keys for the
+release SHA, absolute archive path and hash, immutable image digest, numeric DB
+Secret versions, one UUIDv4 acceptance run ID, the four exact generation-bound
+GCS output objects, project number, previous V1 revision, and the six evidence
+artifacts. The legacy inventory is also carried separately because it must be
+published before the dependency Job can run. Each evidence member separates
+its local absolute JSON path, semantic artifact SHA-256, exact object-byte
+SHA-256, fixed Secret ID, and expected numeric Secret version. The release
+runner verifies the file bytes, embedded commit/artifact binding, size, and
+basic secret-safety before its first Secret Manager mutation. It must not
+contain credentials. The first `build` invocation alone accepts
+`imageDigest: null`; its verified receipt returns the digest that must replace
+that null before any later phase is accepted. One phase is selected at a time:
+
+```text
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=build
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=build --confirm-release=40_HEX_SHA
+```
+
+The guarded order is `build`, `migration`, `inventory`, `acceptance`, `collect`,
+`evidence`, `candidate`, then `promote`; `rollback` is the separately confirmed
+recovery phase. Build
+completion requires the custom build identity; a fresh production-only install;
+an exact `DEPENDENCY_SECURITY_EXCEPTION_REVIEWED` gate receipt before the image
+step; verified provenance; successful image/corpus and OCI-label checks; one
+Build ID; the archive hash; and the final digest. A missing, failed, expired, or
+drifted dependency gate is a failed build receipt. `inventory` publishes and
+reads back the legacy inventory's one planned
+numeric Secret version. `acceptance` runs the dependency Job as
+`hkbuddy-acceptance` and the LLM/ASR/TTS Jobs as `hkbuddy-runtime`; every Job is
+digest-pinned and its exact service account is read back before execution. Each
+Job creates one private, release/run-scoped GCS JSON object with an
+overwrite-preventing generation precondition. `collect` first describes one
+exact numeric generation, downloads only that generation to the planned local
+path, and independently derives the semantic artifact and exact object-byte
+SHA-256 values. Evidence publication then accepts only the planned numeric
+version returned and described by Secret Manager. Only after all versions read
+back does it delete those exact GCS generations and require zero SHA-scoped
+output residue. Neither workload identity can publish Secret versions; that
+authority remains with the reviewed deployer. Candidate deployment is
+digest-pinned and
+zero-traffic with `/api/health/ready` as both startup dependency gate and
+readiness probe, plus `/api/health/live` as the liveness probe. Public IAM can
+be changed only after the active account reads back as the reviewed owner
+`admin@motionexp.com`; the deployer is deliberately not granted
+`roles/run.admin` or service-IAM administration.
+
+The manifest is deliberately refreshed between boundaries: `build` supplies
+the immutable image digest; successful Jobs supply numeric GCS generations;
+`collect` supplies the four semantic/object digest pairs; and Secret Manager
+supplies numeric versions. A value from stdout is never accepted on its own:
+the next phase requires the corresponding exact control-plane or file readback.
+
+Every built image contains `/app/release-manifest.json` with exactly the schema
+version, frozen release SHA, source-archive SHA-256, and
+`git-archive:production-v1` source marker. Cloud Build verifies that file
+against its substitutions. Jobs and the service receive
+`V1_RELEASE_MANIFEST_FILE=/app/release-manifest.json` and
+`V1_RELEASE_COMMIT_SHA`; no workload needs a `.git` directory or a mutable tag.
+
 ## Idempotence and failure behavior
 
 Each durable operation follows this sequence:
@@ -133,9 +206,13 @@ repository, secret, and service-account policy after the empty containers exist
 but before any secret value or database user is written. These audits permit
 not-yet-created expected grants but reject every unmodeled entitlement. The
 final readback is mandatory, not advisory: it re-describes every
-resource, re-audits all four service accounts for user-managed keys, rejects a
+resource, re-audits all five service accounts for user-managed keys, rejects a
 public bucket member, and compares the managed project, bucket, repository,
-secret, and service-account IAM policies to exact per-scope allowlists. Any
+secret, and service-account IAM policies to exact per-scope allowlists. It also
+lists project custom roles and requires the one fixed GA
+`hkbuddyAcceptanceBucketMetadataReader` definition with exactly
+`storage.buckets.get`; an extra permission, role, deletion, or stage drift is a
+hard failure. Any
 extra managed workload binding, conditional replacement, or missing binding
 fails the run. Workload principals may never receive
 `roles/iam.serviceAccountTokenCreator`; the only such binding is the expected
@@ -198,13 +275,23 @@ mounts it read-only; startup validation remains fail closed. Runtime receives
 secret-scoped accessor grants for these six containers so no project-wide
 Secret Manager access is needed.
 
-The deployer can act as `hkbuddy-runtime`, `hkbuddy-migrator`, and
-`hkbuddy-build` only through service-account-scoped
+The deployer can act as `hkbuddy-runtime`, `hkbuddy-migrator`,
+`hkbuddy-build`, and `hkbuddy-acceptance` only through service-account-scoped
 `roles/iam.serviceAccountUser` bindings. There is no project-wide `actAs`
 grant. The build identity writes only to the `hkbuddy` repository and project
 logs; the deployer reads only that repository and has `roles/run.developer`.
+The acceptance identity is DB/GCS-only: it can read the app and migrator URL
+Secret containers, exercise and clean up private bucket objects, and write
+platform logs. Its normal object grant is complemented only by the custom
+`storage.buckets.get` permission on the fixed media bucket so the dependency
+Job can attest the bucket's exact production project number; it receives no
+bucket-list or storage-admin role. It has no Vertex AI, STT, TTS,
+runtime-serving, or evidence
+Secret-version publishing role. Provider and voice smoke jobs instead run as
+the exact `hkbuddy-runtime` serving identity; every job readback must record the
+attached identity before its evidence can be accepted.
 
-Final readback also lists user-managed keys for all four service accounts and
+Final readback also lists user-managed keys for all five service accounts and
 fails if any exist. Runtime provider access is via Cloud Run application
 default credentials, never an API key or downloaded service-account key.
 

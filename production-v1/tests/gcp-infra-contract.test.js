@@ -5,6 +5,7 @@ import test from 'node:test';
 import {
   EXPECTED_PROVISION_STEPS,
   GcpControlPlane,
+  assertExactCustomRoleDefinitions,
   assertExactManagedIamPolicies,
   assertNoUserManagedServiceAccountKeys,
   assertCidrAvailable,
@@ -24,6 +25,14 @@ const CONTRACT_URL = new URL('../infra/gcp/resource-contract.json', import.meta.
 const PROJECT = 'hkbuddy-prod-v1-20260826';
 const CHANNEL = `projects/${PROJECT}/notificationChannels/123456789`;
 const PROJECT_NUMBER = '123456789012';
+const ACCEPTANCE_BUCKET_METADATA_ROLE = Object.freeze({
+  id: 'hkbuddyAcceptanceBucketMetadataReader',
+  name: `projects/${PROJECT}/roles/hkbuddyAcceptanceBucketMetadataReader`,
+  title: 'HK Buddy acceptance bucket metadata reader',
+  description: 'Read fixed media bucket metadata for dependency acceptance',
+  includedPermissions: ['storage.buckets.get'],
+  stage: 'GA',
+});
 
 const AUTOMATIC_PROJECT_BINDINGS = Object.freeze([
   { member: 'user:admin@motionexp.com', role: 'roles/owner', required: true },
@@ -76,6 +85,16 @@ test('the executable contract fixes the isolated GCP topology and least-privileg
     repository: 'hkbuddy', format: 'DOCKER', mode: 'STANDARD_REPOSITORY',
     location: 'asia-east2', description: 'Hong Kong Buddy production containers',
   });
+  assert.deepEqual(contract.resources.customRoles, [ACCEPTANCE_BUCKET_METADATA_ROLE]);
+  assert.equal(
+    EXPECTED_PROVISION_STEPS.includes('custom-role:hkbuddyAcceptanceBucketMetadataReader'),
+    true,
+  );
+  assert.equal(
+    EXPECTED_PROVISION_STEPS.indexOf('custom-role:hkbuddyAcceptanceBucketMetadataReader')
+      < EXPECTED_PROVISION_STEPS.indexOf('vpc'),
+    true,
+  );
   assert.deepEqual(contract.apis, [
     'cloudresourcemanager.googleapis.com', 'serviceusage.googleapis.com',
     'cloudbilling.googleapis.com', 'billingbudgets.googleapis.com',
@@ -117,7 +136,7 @@ test('the executable contract fixes the isolated GCP topology and least-privileg
     concurrency: 40, minInstances: 1, maxInstances: 1, cpuThrottling: false,
     startupCpuBoost: true, timeoutSeconds: 60, initialTrafficPercent: 0,
     directVpc: true, egress: 'private-ranges-only',
-    startupProbe: { path: '/api/health/live', port: 8080, initialDelaySeconds: 0, timeoutSeconds: 5, periodSeconds: 10, failureThreshold: 12 },
+    startupProbe: { path: '/api/health/ready', port: 8080, initialDelaySeconds: 0, timeoutSeconds: 5, periodSeconds: 10, failureThreshold: 12 },
     livenessProbe: { path: '/api/health/live', port: 8080, initialDelaySeconds: 30, timeoutSeconds: 5, periodSeconds: 30, failureThreshold: 3 },
     readinessProbe: { path: '/api/health/ready', port: 8080, initialDelaySeconds: 0, timeoutSeconds: 5, periodSeconds: 5, failureThreshold: 3 },
     secretVersionPolicy: 'numeric-only',
@@ -172,6 +191,11 @@ test('the executable contract fixes the isolated GCP topology and least-privileg
       && role === 'roles/storage.objectUser'
   )), true);
   assert.equal(contract.iam.bindings.some(({ scope, member, role }) => (
+    scope === 'bucket:hkbuddy-prod-v1-20260826-media'
+      && member === `serviceAccount:hkbuddy-acceptance@${PROJECT}.iam.gserviceaccount.com`
+      && role === ACCEPTANCE_BUCKET_METADATA_ROLE.name
+  )), true);
+  assert.equal(contract.iam.bindings.some(({ scope, member, role }) => (
     scope === 'secret:hkbuddy-db-migrator-url' && member === runtime
       && role === 'roles/secretmanager.secretAccessor'
   )), false);
@@ -206,12 +230,39 @@ test('contract validation rejects identity drift, public access, broad workload 
     ['IAM same-length external replacement', (value) => { value.iam.bindings[0].member = 'user:external@example.test'; }],
     ['automatic binding replacement', (value) => { value.iam.automaticProjectBindings[1].role = 'roles/editor'; }],
     ['forbidden-role list replacement', (value) => { value.iam.forbiddenWorkloadRoles[0] = 'roles/viewer'; }],
+    ['custom role extra permission', (value) => { value.resources.customRoles[0].includedPermissions.push('storage.buckets.list'); }],
+    ['custom role stage drift', (value) => { value.resources.customRoles[0].stage = 'BETA'; }],
   ];
   for (const [name, mutate] of cases) {
     await t.test(name, () => {
       const candidate = clone(base);
       mutate(candidate);
       assert.throws(() => assertResourceContract(candidate), /GCP resource contract is invalid/);
+    });
+  }
+});
+
+test('acceptance bucket metadata custom role is definition-exact and rejects permission or stage drift', async (t) => {
+  const contract = await contractFixture();
+  const exactRole = { ...ACCEPTANCE_BUCKET_METADATA_ROLE, deleted: false };
+  assert.doesNotThrow(() => assertExactCustomRoleDefinitions({
+    contract, roles: [exactRole],
+  }));
+
+  for (const [name, mutate] of [
+    ['extra permission', (role) => { role.includedPermissions.push('storage.buckets.list'); }],
+    ['stage drift', (role) => { role.stage = 'BETA'; }],
+    ['deleted role', (role) => { role.deleted = true; }],
+    ['unexpected role', (_role, roles) => { roles.push({ ...exactRole, name: `projects/${PROJECT}/roles/unexpected` }); }],
+  ]) {
+    await t.test(name, () => {
+      const role = clone(exactRole);
+      const roles = [role];
+      mutate(role, roles);
+      assert.throws(
+        () => assertExactCustomRoleDefinitions({ contract, roles }),
+        (error) => error.code === 'CUSTOM_ROLE_ALLOWLIST_MISMATCH',
+      );
     });
   }
 });
@@ -648,7 +699,7 @@ test('final key audit uses project-explicit argv and rejects every user-managed 
     contract,
     gcloud: async (args) => { calls.push(args); return []; },
   });
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length, 5);
   assert.equal(calls.every((args) => args.includes('--managed-by=user')
     && args.includes(`--project=${PROJECT}`)), true);
 
@@ -656,6 +707,48 @@ test('final key audit uses project-explicit argv and rejects every user-managed 
     contract,
     gcloud: async () => [{ name: 'projects/example/serviceAccounts/example/keys/1' }],
   }), (error) => error.code === 'USER_MANAGED_SERVICE_ACCOUNT_KEY');
+});
+
+test('custom role provisioning reads, creates, and compares the one-permission GA definition exactly', async () => {
+  const calls = [];
+  const plane = new GcpControlPlane({
+    contract: await contractFixture(), notificationChannel: CHANNEL,
+    gcloud: async (args) => {
+      calls.push(args);
+      if (args[0] === 'iam' && args[1] === 'roles' && args[2] === 'describe') {
+        return { ...ACCEPTANCE_BUCKET_METADATA_ROLE, deleted: false };
+      }
+      if (args[0] === 'iam' && args[1] === 'roles' && args[2] === 'create') {
+        return { ...ACCEPTANCE_BUCKET_METADATA_ROLE, deleted: false };
+      }
+      throw new Error('unexpected gcloud operation');
+    },
+    request: async () => { throw new Error('REST must not run'); },
+  });
+
+  const id = 'custom-role:hkbuddyAcceptanceBucketMetadataReader';
+  const readback = await plane.read(id);
+  assert.deepEqual(readback, {
+    status: 'present', value: { ...ACCEPTANCE_BUCKET_METADATA_ROLE, deleted: false },
+  });
+  assert.equal(plane.compare(id, readback.value), true);
+  assert.equal(plane.compare(id, {
+    ...readback.value, includedPermissions: ['storage.buckets.get', 'storage.buckets.list'],
+  }), false);
+  assert.equal(plane.compare(id, { ...readback.value, stage: 'BETA' }), false);
+
+  await plane.create(id);
+  assert.deepEqual(calls[0], [
+    'iam', 'roles', 'describe', ACCEPTANCE_BUCKET_METADATA_ROLE.id,
+    `--project=${PROJECT}`, '--format=json',
+  ]);
+  assert.deepEqual(calls[1], [
+    'iam', 'roles', 'create', ACCEPTANCE_BUCKET_METADATA_ROLE.id,
+    `--project=${PROJECT}`,
+    `--title=${ACCEPTANCE_BUCKET_METADATA_ROLE.title}`,
+    `--description=${ACCEPTANCE_BUCKET_METADATA_ROLE.description}`,
+    '--permissions=storage.buckets.get', '--stage=GA', '--format=json',
+  ]);
 });
 
 function exactManagedIamPolicies(contract) {
@@ -795,6 +888,37 @@ test('pre-sensitive IAM subset audits reject foreign project owners and secret a
       assert.equal(gcloudCalls.some((args) => args.some((arg) => /add-iam-policy-binding/.test(arg))), false);
     });
   }
+});
+
+test('pre-sensitive managed IAM audit reads the exact custom role definition before secrets', async () => {
+  const contract = await contractFixture();
+  const gcloudCalls = [];
+  let customRole = { ...ACCEPTANCE_BUCKET_METADATA_ROLE, deleted: false };
+  const plane = new GcpControlPlane({
+    contract, notificationChannel: CHANNEL,
+    gcloud: async (args) => {
+      gcloudCalls.push(args);
+      if (args[0] === 'iam' && args[1] === 'roles' && args[2] === 'list') return [customRole];
+      if (args.includes('get-iam-policy')) return { bindings: [] };
+      throw new Error('unexpected gcloud operation');
+    },
+    request: async () => { throw new Error('REST must not run'); },
+  });
+  plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
+
+  await plane.auditManagedIamPolicies({ projectOnly: false });
+  assert.equal(gcloudCalls.some((args) => (
+    args[0] === 'iam' && args[1] === 'roles' && args[2] === 'list'
+      && args.includes(`--project=${PROJECT}`) && args.includes('--format=json')
+  )), true);
+
+  customRole = {
+    ...customRole, includedPermissions: ['storage.buckets.get', 'storage.buckets.list'],
+  };
+  await assert.rejects(
+    () => plane.auditManagedIamPolicies({ projectOnly: false }),
+    (error) => error.code === 'CUSTOM_ROLE_ALLOWLIST_MISMATCH',
+  );
 });
 
 function exactBucket({ projectNumber = '123456789012' } = {}) {

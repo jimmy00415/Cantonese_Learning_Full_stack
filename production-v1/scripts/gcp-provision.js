@@ -76,6 +76,16 @@ const REQUIRED_AUTOMATIC_PROJECT_BINDINGS = Object.freeze([
   { member: 'serviceAccount:__PROJECT_NUMBER__@cloudbuild.gserviceaccount.com', role: 'roles/cloudbuild.builds.builder', required: false },
   { member: 'serviceAccount:__PROJECT_NUMBER__@cloudservices.gserviceaccount.com', role: 'roles/compute.instanceGroupManagerServiceAgent', required: false },
 ]);
+const REQUIRED_CUSTOM_ROLES = Object.freeze([
+  {
+    id: 'hkbuddyAcceptanceBucketMetadataReader',
+    name: `projects/${PROJECT}/roles/hkbuddyAcceptanceBucketMetadataReader`,
+    title: 'HK Buddy acceptance bucket metadata reader',
+    description: 'Read fixed media bucket metadata for dependency acceptance',
+    includedPermissions: ['storage.buckets.get'],
+    stage: 'GA',
+  },
+]);
 const REQUIRED_IAM_BINDINGS = Object.freeze([
   { scope: 'project', member: `serviceAccount:hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/aiplatform.user' },
   { scope: 'project', member: `serviceAccount:hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/speech.client' },
@@ -89,14 +99,27 @@ const REQUIRED_IAM_BINDINGS = Object.freeze([
   { scope: 'secret:hkbuddy-asr-smoke', member: `serviceAccount:hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretAccessor' },
   { scope: 'secret:hkbuddy-tts-smoke', member: `serviceAccount:hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretAccessor' },
   { scope: 'secret:hkbuddy-ios-voice-acceptance', member: `serviceAccount:hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretAccessor' },
+  { scope: 'bucket:hkbuddy-prod-v1-20260826-media', member: `serviceAccount:hkbuddy-acceptance@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/storage.objectUser' },
+  { scope: 'bucket:hkbuddy-prod-v1-20260826-media', member: `serviceAccount:hkbuddy-acceptance@${PROJECT}.iam.gserviceaccount.com`, role: `projects/${PROJECT}/roles/hkbuddyAcceptanceBucketMetadataReader` },
+  { scope: 'secret:hkbuddy-db-app-url', member: `serviceAccount:hkbuddy-acceptance@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretAccessor' },
+  { scope: 'secret:hkbuddy-db-migrator-url', member: `serviceAccount:hkbuddy-acceptance@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretAccessor' },
+  { scope: 'project', member: `serviceAccount:hkbuddy-acceptance@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/logging.logWriter' },
   { scope: 'secret:hkbuddy-db-migrator-url', member: `serviceAccount:hkbuddy-migrator@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretAccessor' },
   { scope: 'repository:hkbuddy', member: `serviceAccount:hkbuddy-build@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/artifactregistry.writer' },
   { scope: 'project', member: `serviceAccount:hkbuddy-build@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/logging.logWriter' },
   { scope: 'repository:hkbuddy', member: `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/artifactregistry.reader' },
+  { scope: 'project', member: `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/cloudbuild.builds.editor' },
   { scope: 'project', member: `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/run.developer' },
+  { scope: 'secret:hkbuddy-legacy-inventory', member: `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretVersionAdder' },
+  { scope: 'secret:hkbuddy-dependency-acceptance', member: `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretVersionAdder' },
+  { scope: 'secret:hkbuddy-llm-smoke', member: `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretVersionAdder' },
+  { scope: 'secret:hkbuddy-asr-smoke', member: `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretVersionAdder' },
+  { scope: 'secret:hkbuddy-tts-smoke', member: `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretVersionAdder' },
+  { scope: 'secret:hkbuddy-ios-voice-acceptance', member: `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretVersionAdder' },
   { scope: 'service-account:hkbuddy-runtime', member: `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/iam.serviceAccountUser' },
   { scope: 'service-account:hkbuddy-migrator', member: `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/iam.serviceAccountUser' },
   { scope: 'service-account:hkbuddy-build', member: `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/iam.serviceAccountUser' },
+  { scope: 'service-account:hkbuddy-acceptance', member: `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/iam.serviceAccountUser' },
   { scope: 'service-account:hkbuddy-build', member: 'serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-cloudbuild.iam.gserviceaccount.com', role: 'roles/iam.serviceAccountTokenCreator' },
 ]);
 const FORBIDDEN_TEXT = Object.freeze([
@@ -169,7 +192,7 @@ export function assertResourceContract(contract) {
 
   const resources = contract.resources;
   requireExact(Object.keys(resources ?? {}).sort(), [
-    'artifactRegistry', 'bucket', 'budget', 'cloudRun', 'cloudSql', 'monitoring',
+    'artifactRegistry', 'bucket', 'budget', 'cloudRun', 'cloudSql', 'customRoles', 'monitoring',
     'network', 'secrets', 'serviceAccounts',
   ]);
   requireExact(resources?.artifactRegistry, {
@@ -181,7 +204,9 @@ export function assertResourceContract(contract) {
     { id: 'hkbuddy-build', email: `hkbuddy-build@${PROJECT}.iam.gserviceaccount.com`, displayName: 'Hong Kong Buddy Cloud Build' },
     { id: 'hkbuddy-migrator', email: `hkbuddy-migrator@${PROJECT}.iam.gserviceaccount.com`, displayName: 'Hong Kong Buddy database migrator' },
     { id: 'hkbuddy-deployer', email: `hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, displayName: 'Hong Kong Buddy release deployer' },
+    { id: 'hkbuddy-acceptance', email: `hkbuddy-acceptance@${PROJECT}.iam.gserviceaccount.com`, displayName: 'Hong Kong Buddy dependency acceptance' },
   ]);
+  requireExact(resources?.customRoles, REQUIRED_CUSTOM_ROLES);
   requireExact(resources?.network, {
     vpc: 'hkbuddy-prod-vpc', subnet: 'hkbuddy-ae2-run', subnetCidr: '10.24.0.0/26',
     privateGoogleAccess: true, psaRange: 'hkbuddy-google-managed-services',
@@ -224,7 +249,7 @@ export function assertResourceContract(contract) {
     startupCpuBoost: true, timeoutSeconds: 60, initialTrafficPercent: 0,
     directVpc: true, egress: 'private-ranges-only',
     startupProbe: {
-      path: '/api/health/live', port: 8080, initialDelaySeconds: 0,
+      path: '/api/health/ready', port: 8080, initialDelaySeconds: 0,
       timeoutSeconds: 5, periodSeconds: 10, failureThreshold: 12,
     },
     livenessProbe: {
@@ -702,6 +727,32 @@ export async function assertNoUserManagedServiceAccountKeys({ contract, gcloud }
   }
 }
 
+export function assertExactCustomRoleDefinitions({ contract, roles }) {
+  if (!contract || !Array.isArray(contract.resources?.customRoles) || !Array.isArray(roles)) {
+    throw commandError('CUSTOM_ROLE_ALLOWLIST_MISMATCH');
+  }
+  const expected = contract.resources.customRoles.map((role) => ({
+    name: role.name,
+    title: role.title,
+    description: role.description,
+    includedPermissions: [...role.includedPermissions].sort(),
+    stage: role.stage,
+    deleted: false,
+  })).sort((left, right) => left.name.localeCompare(right.name));
+  const actual = roles.map((role) => ({
+    name: role?.name,
+    title: role?.title,
+    description: role?.description,
+    includedPermissions: Array.isArray(role?.includedPermissions)
+      ? [...role.includedPermissions].sort()
+      : role?.includedPermissions,
+    stage: role?.stage,
+    deleted: role?.deleted ?? false,
+  })).sort((left, right) => String(left.name).localeCompare(String(right.name)));
+  if (!exact(actual, expected)) throw commandError('CUSTOM_ROLE_ALLOWLIST_MISMATCH');
+  return true;
+}
+
 function managedIamScopes(contract) {
   return [
     'project', `bucket:${contract.resources.bucket.name}`,
@@ -854,6 +905,7 @@ function provisionSteps(contract) {
     ...policyStepIds(contract),
     'artifact-registry',
     ...contract.resources.serviceAccounts.map(({ id }) => `service-account:${id}`),
+    ...contract.resources.customRoles.map(({ id }) => `custom-role:${id}`),
     'vpc', 'subnet', 'psa-range', 'psa-connection', 'cloud-sql-instance', 'database', 'bucket',
     ...contract.resources.secrets.map(({ id }) => `secret-container:${id}`),
     'secret-version:hkbuddy-db-app-url',
@@ -876,12 +928,14 @@ const STATIC_EXPECTED_STEPS = [
   'artifact-registry',
   'service-account:hkbuddy-runtime', 'service-account:hkbuddy-build',
   'service-account:hkbuddy-migrator', 'service-account:hkbuddy-deployer',
+  'service-account:hkbuddy-acceptance',
+  'custom-role:hkbuddyAcceptanceBucketMetadataReader',
   'vpc', 'subnet', 'psa-range', 'psa-connection', 'cloud-sql-instance', 'database', 'bucket',
   ...SECRET_CONTAINER_IDS.map((id) => `secret-container:${id}`),
   'secret-version:hkbuddy-db-app-url', 'secret-version:hkbuddy-db-migrator-url',
   'secret-version:hkbuddy-session-secret', 'db-user:hkbuddy_app',
   'db-user:hkbuddy_migrator', 'secret-version:hkbuddy-db-bootstrap-state',
-  ...Array.from({ length: 21 }, (_, index) => `iam:${String(index + 1).padStart(2, '0')}`),
+  ...Array.from({ length: 34 }, (_, index) => `iam:${String(index + 1).padStart(2, '0')}`),
 ];
 
 export const EXPECTED_PROVISION_STEPS = Object.freeze(STATIC_EXPECTED_STEPS);
@@ -1204,12 +1258,14 @@ export class GcpControlPlane {
     const policyEntries = await Promise.all(scopes.map(async (scope) => (
       [scope, await this.#iamPolicy(scope)]
     )));
-    return assertManagedIamPoliciesSubset({
+    assertManagedIamPoliciesSubset({
       contract: this.contract,
       projectNumber: this.#projectNumber(),
       policiesByScope: new Map(policyEntries),
       scopes,
     });
+    if (!projectOnly) await this.#auditCustomRoles();
+    return true;
   }
 
   async read(id, context = {}) {
@@ -1290,6 +1346,19 @@ export class GcpControlPlane {
     return binding;
   }
 
+  #customRole(id) {
+    const role = this.contract.resources.customRoles.find(({ id: candidate }) => candidate === id);
+    if (!role) throw commandError('CUSTOM_ROLE_UNSUPPORTED');
+    return role;
+  }
+
+  async #auditCustomRoles() {
+    const roles = requireObjectList(await this.#gcloud([
+      'iam', 'roles', 'list', `--project=${PROJECT}`, '--format=json',
+    ]));
+    return assertExactCustomRoleDefinitions({ contract: this.contract, roles });
+  }
+
   async #read(id, context) {
     if (id === 'project') {
       return { status: 'present', value: await this.#gcloud([
@@ -1322,6 +1391,12 @@ export class GcpControlPlane {
       return { status: 'present', value: await this.#gcloud([
         'iam', 'service-accounts', 'describe', account.email,
         `--project=${PROJECT}`, '--format=json',
+      ]) };
+    }
+    if (id.startsWith('custom-role:')) {
+      const role = this.#customRole(id.slice('custom-role:'.length));
+      return { status: 'present', value: await this.#gcloud([
+        'iam', 'roles', 'describe', role.id, `--project=${PROJECT}`, '--format=json',
       ]) };
     }
     if (id === 'vpc') {
@@ -1421,6 +1496,15 @@ export class GcpControlPlane {
       return this.#gcloud([
         'iam', 'service-accounts', 'create', account.id, `--display-name=${account.displayName}`,
         `--project=${PROJECT}`, '--format=json',
+      ]);
+    }
+    if (id.startsWith('custom-role:')) {
+      const role = this.#customRole(id.slice('custom-role:'.length));
+      return this.#gcloud([
+        'iam', 'roles', 'create', role.id, `--project=${PROJECT}`,
+        `--title=${role.title}`, `--description=${role.description}`,
+        `--permissions=${role.includedPermissions.join(',')}`, `--stage=${role.stage}`,
+        '--format=json',
       ]);
     }
     if (id === 'vpc') return this.#gcloud([
@@ -1545,6 +1629,26 @@ export class GcpControlPlane {
       const account = this.contract.resources.serviceAccounts.find(({ id: name }) => name === id.slice('service-account:'.length));
       return value.email === account.email && value.displayName === account.displayName
         && value.disabled !== true && !value.oauth2ClientId?.startsWith('key:');
+    }
+    if (id.startsWith('custom-role:')) {
+      const role = this.#customRole(id.slice('custom-role:'.length));
+      return exact({
+        name: value.name,
+        title: value.title,
+        description: value.description,
+        includedPermissions: Array.isArray(value.includedPermissions)
+          ? [...value.includedPermissions].sort()
+          : value.includedPermissions,
+        stage: value.stage,
+        deleted: value.deleted ?? false,
+      }, {
+        name: role.name,
+        title: role.title,
+        description: role.description,
+        includedPermissions: [...role.includedPermissions].sort(),
+        stage: role.stage,
+        deleted: false,
+      });
     }
     if (id === 'vpc') return value.name === 'hkbuddy-prod-vpc'
       && value.autoCreateSubnetworks === false && String(value.routingConfig?.routingMode ?? '').toUpperCase() === 'REGIONAL';
@@ -1997,6 +2101,7 @@ export class GcpControlPlane {
       throw commandError('FINAL_READBACK_FAILED');
     }
     const scopes = managedIamScopes(this.contract);
+    await this.#auditCustomRoles();
     const policyEntries = await Promise.all(scopes.map(async (scope) => (
       [scope, await this.#iamPolicy(scope)]
     )));

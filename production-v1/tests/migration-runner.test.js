@@ -6,7 +6,7 @@ import { discoverMigrations, runMigrations } from '../scripts/run-migrations.js'
 test('migration discovery accepts only one contiguous versioned set with self-recording SQL', async () => {
   const migrations = await discoverMigrations({
     migrationsDirectory: 'controlled-migrations',
-    readDirectory: async () => ['notes.txt', '002_second.sql', '001_initial.sql'],
+    readDirectory: async () => ['002_second.sql', '001_initial.sql'],
     readFile: async (filePath) => (
       filePath.endsWith('001_initial.sql')
         ? 'BEGIN; INSERT INTO schema_migrations (version) VALUES (1); COMMIT;'
@@ -23,6 +23,10 @@ test('migration discovery accepts only one contiguous versioned set with self-re
     ['002_second.sql'],
     ['001_initial.sql', '003_third.sql'],
     ['001_initial.sql', '001_duplicate.sql'],
+    ['001_initial.sql', 'notes.txt'],
+    ['001_initial.sql', '002_Bad.sql'],
+    ['001_initial.sql', '002_second.SQL'],
+    ['001_initial.sql', '.hidden.sql'],
   ]) await assert.rejects(discoverMigrations({
     migrationsDirectory: 'controlled-migrations',
     readDirectory: async () => files,

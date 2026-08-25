@@ -330,8 +330,10 @@ It is not Project Owner and has no service-account key. The deployer can build
 and update only the V1 runtime and can act as the runtime service account; it is
 not used by the application.
 
-The project budget is USD 300 per month with alerts at 50%, 80%, 100%, and a
-forecast threshold. Budget alerts do not stop usage, so product limits also cap
+The binding project budget is HKD 2300 per month in the billing account's native
+currency, with actual alerts at 50%, 80%, and 100% plus a 100% forecast
+threshold. The earlier USD 300 draft is superseded and must not be used for
+provisioning or acceptance. Budget alerts do not stop usage, so product limits also cap
 message count, audio duration/bytes, TTS generations, context bytes, output
 tokens, Cloud Run instances, and database connections. Logs exclude message
 text, transcripts, audio, credentials, signed URLs, and raw provider bodies.
@@ -362,13 +364,35 @@ Singapore STT, and TTS latency are measured rather than assumed.
 1. Commit the GCP adapter, deployment, language, knowledge, and test changes.
 2. Freeze a clean commit SHA.
 3. Create and configure only the named GCP project/resources.
-4. Apply the database migration to the new database.
-5. Build the frozen commit into Artifact Registry and deploy with zero public
-   traffic until configuration and dependency gates pass.
-6. Run guarded dependency, LLM, ASR, TTS, mobile, retention, readiness, and
-   latency acceptance against the same resource identities and commit.
-7. Promote the Cloud Run revision only when every release artifact is green.
-8. Return the HTTPS URL and a QR code generated from that exact URL.
+   The dependency-acceptance identity receives object access plus one fixed GA
+   custom role containing only `storage.buckets.get`, bound only on the media
+   bucket, so it can attest the exact bucket project without gaining bucket
+   listing or administration.
+4. Archive exactly that clean commit. In Cloud Build, install production
+   dependencies without lifecycle scripts, run the time-boxed fail-closed
+   dependency security gate, and require its exact reviewed PASS receipt before
+   the image step. Then build into Artifact Registry and capture the build ID,
+   source-archive SHA-256, verified provenance, OCI revision/source labels, and
+   immutable image digest; the final build receipt must include the successful
+   gate step.
+5. Apply and verify the database migration through the digest-pinned one-shot
+   migration job.
+6. Publish and read back the reviewed legacy inventory first. Run the
+   digest-pinned dependency Job as the dedicated DB/GCS-only acceptance
+   identity and the LLM/ASR/TTS Jobs as the exact runtime identity. Each Job
+   writes one create-only private GCS object under the frozen release/run
+   prefix. Describe and download one exact numeric generation, independently
+   verify the semantic artifact SHA-256 and exact object-byte SHA-256, then
+   publish and read back the accepted numeric Secret Manager versions. Delete
+   only those verified generations and prove zero release-output residue.
+   Artifact SHA-256 values remain separate from Secret version numbers.
+7. Only after those evidence versions exist, boot the digest-pinned Cloud Run
+   candidate at zero traffic with the evidence mounted as read-only files.
+8. Run candidate-specific mobile, retention, readiness, and latency acceptance
+   against the same resource identities, image digest, and frozen commit.
+9. Promote the Cloud Run revision only when every release artifact is green.
+10. Return the stable HTTPS URL and generate a decode-verified QR code from that
+    exact URL outside tracked source.
 
 Rollback moves traffic to the previous evidenced Cloud Run revision. It does
 not mutate the legacy Azure app, database, Blob container, workflow, hostname,
