@@ -37,16 +37,22 @@ parallel Task 7A/7C batches and are not part of this task's commit.
 - `hkbuddy_migrator` is used only for isolated schema creation, migration,
   grants, zero-object proof, and schema teardown. `hkbuddy_app` performs all
   functional checks. The two URLs must resolve to the same database identity
-  and exact distinct users; the app role is proved unable to create schemas or
-  databases.
+  and exact distinct users with distinct decoded passwords; the app role is
+  proved unable to create schemas or databases.
 - Before PostgreSQL or GCS acquisition, a bounded metadata-server request with
   `Metadata-Flavor: Google` must attest exactly
   `hkbuddy-acceptance@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com`.
-  Evidence records only a non-secret check and identity digest.
+  The actual Storage client's ADC must independently resolve a metadata-backed
+  `Compute` credential with that same email, and bucket metadata must report
+  project number `93662314720`. Well-known-file, cross-account, and
+  cross-project drift fail before either isolation scope is acquired. Evidence
+  records only non-secret checks and the execution-identity digest.
 - GCS acceptance proves exact intended IAM permissions, absence of forbidden
   permissions, anonymous non-public access, conditional create-only writes,
   bounded full/range reads, HEAD metadata, pagination, delete, hostile response
-  normalization, cancellation, and deadlines. It neither produces nor accepts
+  normalization, cancellation, and deadlines. Provider metadata above the
+  eight-MiB hard cap is rejected before a full or range stream opens, and upload
+  inputs are size-checked before copying. It neither produces nor accepts
   signed/public URLs, key files, API keys, or credential JSON.
 - PostgreSQL checks cover migration health, transaction and lease fencing,
   replay/idempotency, message preferences, event/cascade/rate-window behavior,
@@ -55,7 +61,8 @@ parallel Task 7A/7C batches and are not part of this task's commit.
 - Cleanup is fail closed. Evidence can be handed off only after the functional
   GCS prefix is proved empty, the UUID schema is proved absent, and all opened
   providers are closed. Pre-existing scopes are never acquired, swept, or
-  dropped.
+  dropped. Once absence was proved and acquisition began, cleanup also discovers
+  and removes a prefix/schema create that committed before its transport failed.
 
 ## Frozen release and handoff interface
 
@@ -74,7 +81,10 @@ match. The script never consults `.git` or a mutable/latest reference.
 The GCS handoff is create-only and then read back at the exact generation. Full
 canonical JSON never appears on stdout. The safe receipt contains only object
 name, generation, semantic artifact digest, exact object-byte digest, checks,
-and cleanup proof.
+and cleanup proof. If upload commits but later verification fails, the script
+discovers that exact generation, deletes it with a generation precondition,
+proves the object absent, and permits a clean rerun. An ambiguous upload error
+may delete only bytes that exactly match the intended object digest.
 
 ## Evidence schema and digest semantics
 
@@ -115,21 +125,40 @@ metadata identity interface: import-time failure because the export was absent
 bounded metadata body: exposed a null-signal/Web-stream compatibility defect
 ```
 
+Independent review then returned five Important blockers. Each was reproduced
+before its implementation:
+
+```text
+ambiguous prefix/schema create RED: 76 tests, 74 pass, 2 fail, exit 1
+generation-fenced evidence compensation RED: 77 tests, 76 pass, 1 fail, exit 1
+Storage ADC/bucket ownership RED: 81 tests, 76 pass, 5 reported failures, exit 1
+oversized metadata pre-read cap RED: 82 tests, 81 pass, 1 fail, exit 1
+decoded-password separation RED: 84 tests, 81 pass, 3 reported failures, exit 1
+```
+
 Each RED was resolved without weakening the fail-closed assertions. The final
 focused run was:
 
 ```text
 node --test tests/real-dependency-acceptance.test.js
-74 tests: 74 pass, 0 fail, 0 skip, exit 0
-duration 248 ms
+84 tests: 84 pass, 0 fail, 0 skip, exit 0
+duration 297 ms
 ```
 
-Relevant PostgreSQL/GCS/storage contract suite:
+Relevant PostgreSQL/GCS/storage/readiness contract suite:
 
 ```text
-node --test tests/real-dependency-acceptance.test.js tests/postgres-contract.test.js tests/gcs-media-store.test.js tests/storage-runtime.test.js
-131 tests: 130 pass, 0 fail, 1 approved real-PostgreSQL skip, exit 0
-duration 741 ms
+node --test tests/real-dependency-acceptance.test.js tests/readiness.test.js tests/postgres-contract.test.js tests/gcs-media-store.test.js tests/storage-runtime.test.js
+216 tests: 215 pass, 0 fail, 1 approved real-PostgreSQL skip, exit 0
+duration 1.09 s
+```
+
+Repository full suite:
+
+```text
+npm.cmd test
+1334 tests: 1333 pass, 0 fail, 1 approved real-PostgreSQL skip, exit 0
+duration 5.80 s
 ```
 
 Static verification:
@@ -145,11 +174,8 @@ git diff --check -- production-v1/scripts/real-dependencies-acceptance.js produc
 exit 0 (line-ending warnings only)
 ```
 
-The combined suite that includes `tests/readiness.test.js` and the repository
-full suite are intentionally deferred to the parent integration ladder because
-Task 7C's config/readiness fixtures are concurrently mid-change. The parent will
-run both after the three Task 7 commits are fixed. This deferral does not change
-the scoped 74/74 or relevant 130/130 executable-test result above.
+The focused, combined readiness, and repository full suites all passed after
+Task 7C's shared fixtures stabilized.
 
 ## Residual live boundary
 

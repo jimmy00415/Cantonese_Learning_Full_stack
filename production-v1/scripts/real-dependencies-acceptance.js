@@ -21,6 +21,7 @@ const GCS_PREFIX = /^v1-accept\/([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9
 const EVIDENCE_OUTPUT_OBJECT = /^release-evidence\/([0-9a-f]{40})\/dependency-acceptance\/([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.json$/;
 const CHECK_NAME = /^[a-z0-9][a-z0-9-]{0,79}$/;
 const PROJECT_ID = 'hkbuddy-prod-v1-20260826';
+const PROJECT_NUMBER = '93662314720';
 const BUCKET_NAME = 'hkbuddy-prod-v1-20260826-media';
 const APP_DATABASE_USER = 'hkbuddy_app';
 const MIGRATOR_DATABASE_USER = 'hkbuddy_migrator';
@@ -63,6 +64,7 @@ const DEFAULT_COMMAND_DEADLINE_MS = 15 * 60_000;
 const DEFAULT_CLEANUP_DEADLINE_MS = 90_000;
 const DEFAULT_CLEANUP_OPERATION_DEADLINE_MS = 20_000;
 const MAX_DEADLINE_MS = 60 * 60_000;
+const MAX_GCS_OBJECT_BYTES = 8 * 1024 * 1024;
 const migrationFile = fileURLToPath(new URL('../migrations/001_initial.sql', import.meta.url));
 
 function sha256(value) {
@@ -223,6 +225,27 @@ export async function attestGcpExecutionIdentity({
   }
 }
 
+async function attestStorageAdcIdentity(storage) {
+  try {
+    const auth = storage?.authClient;
+    if (!auth || typeof auth.getClient !== 'function' || typeof auth.getCredentials !== 'function'
+      || auth.keyFilename || auth.jsonContent || auth.apiKey) {
+      throw new Error('invalid storage auth client');
+    }
+    const [client, credentials] = await Promise.all([
+      auth.getClient(),
+      auth.getCredentials(),
+    ]);
+    if (client?.constructor?.name !== 'Compute'
+      || credentials?.client_email !== ACCEPTANCE_SERVICE_ACCOUNT) {
+      throw new Error('invalid storage ADC identity');
+    }
+    return ACCEPTANCE_SERVICE_ACCOUNT;
+  } catch {
+    throw deadlineError('DEPENDENCY_GCS_IDENTITY_INVALID');
+  }
+}
+
 function createBoundedGcsClient(rawBucket, {
   getParentSignal,
   operationDeadlineMs,
@@ -251,6 +274,15 @@ function createBoundedGcsClient(rawBucket, {
     }
   };
   return {
+    async assertBucketIdentity() {
+      const result = await normalize(() => rawBucket.getMetadata(),
+        'DEPENDENCY_GCS_RESOURCE_INVALID');
+      const metadata = result?.[0];
+      if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)
+        || metadata.name !== BUCKET_NAME || metadata.projectNumber !== PROJECT_NUMBER) {
+        throw gcsError('DEPENDENCY_GCS_RESOURCE_INVALID');
+      }
+    },
     async assertIntendedAccess() {
       const result = await normalize(() => rawBucket.iam.testPermissions(GCS_TEST_PERMISSIONS),
         'DEPENDENCY_GCS_ACCESS_INVALID');
@@ -275,11 +307,14 @@ function createBoundedGcsClient(rawBucket, {
     },
     async putObject({ name, bytes, contentType, ifAbsent = false } = {}) {
       validateName(name);
-      const body = Buffer.from(bytes ?? []);
-      if (body.length < 1 || body.length > 8 * 1024 * 1024
+      const byteLength = Buffer.isBuffer(bytes) || bytes instanceof Uint8Array
+        ? bytes.byteLength
+        : -1;
+      if (byteLength < 1 || byteLength > MAX_GCS_OBJECT_BYTES
         || typeof contentType !== 'string' || !contentType || contentType.length > 255) {
         throw gcsError('DEPENDENCY_GCS_RESPONSE_INVALID');
       }
+      const body = Buffer.from(bytes);
       await normalize(async (signal) => {
         const options = {
           resumable: false,
@@ -290,12 +325,21 @@ function createBoundedGcsClient(rawBucket, {
         await pipeline(Readable.from([body]), rawBucket.file(name).createWriteStream(options), { signal });
       });
     },
-    async headObject({ name } = {}) {
+    async headObject({ name, allowMissing = false } = {}) {
       validateName(name);
-      const result = await normalize(() => rawBucket.file(name).getMetadata());
+      let result;
+      try {
+        result = await bounded(() => rawBucket.file(name).getMetadata());
+      } catch (error) {
+        if (allowMissing && isGcsNotFound(error)) return null;
+        if (['DEPENDENCY_OPERATION_DEADLINE_EXCEEDED', 'DEPENDENCY_OPERATION_CANCELLED']
+          .includes(error?.code)) throw error;
+        throw gcsError('DEPENDENCY_GCS_RESPONSE_INVALID');
+      }
       const metadata = result?.[0];
       const size = Number(metadata?.size);
       if (metadata?.name !== name || !Number.isSafeInteger(size) || size < 1
+        || size > MAX_GCS_OBJECT_BYTES
         || String(size) !== String(metadata.size)) {
         throw gcsError('DEPENDENCY_GCS_RESPONSE_INVALID');
       }
@@ -341,10 +385,16 @@ function createBoundedGcsClient(rawBucket, {
       }
       return { names, cursor: next };
     },
-    async deleteObject({ name } = {}) {
+    async deleteObject({ name, generation = null } = {}) {
       validateName(name);
+      if (generation !== null && !/^[1-9]\d*$/.test(String(generation))) {
+        throw gcsError('DEPENDENCY_GCS_RESPONSE_INVALID');
+      }
       try {
-        await bounded(() => rawBucket.file(name).delete());
+        const file = generation === null
+          ? rawBucket.file(name)
+          : rawBucket.file(name, { generation: String(generation) });
+        await bounded(() => file.delete());
         return true;
       } catch (error) {
         if (isGcsNotFound(error)) return false;
@@ -367,6 +417,18 @@ function nonEmpty(value, maximum = 8_192) {
 function postgresUser(databaseUrl) {
   try {
     return decodeURIComponent(new URL(databaseUrl).username);
+  } catch {
+    return null;
+  }
+}
+
+function postgresPassword(databaseUrl) {
+  try {
+    const password = decodeURIComponent(new URL(databaseUrl).password);
+    return password.length > 0 && password.length <= 8_192
+      && !/[\u0000-\u001f\u007f]/.test(password)
+      ? password
+      : null;
   } catch {
     return null;
   }
@@ -1438,6 +1500,9 @@ export async function createRealAcceptanceRuntime({
     || databaseUrl === migratorDatabaseUrl || !databaseIdentitiesValid
     || postgresUser(databaseUrl) !== APP_DATABASE_USER
     || postgresUser(migratorDatabaseUrl) !== MIGRATOR_DATABASE_USER
+    || postgresPassword(databaseUrl) === null
+    || postgresPassword(migratorDatabaseUrl) === null
+    || postgresPassword(databaseUrl) === postgresPassword(migratorDatabaseUrl)
     || typeof PoolClass !== 'function' || typeof StorageClass !== 'function'
     || typeof fetchImpl !== 'function'
     || deadlineValue(operationDeadlineMs, null) === null
@@ -1479,6 +1544,9 @@ export async function createRealAcceptanceRuntime({
   const storage = new StorageClass({ projectId });
   const rawBucket = storage.bucket(bucketName);
   if (!rawBucket || (rawBucket.name !== undefined && rawBucket.name !== bucketName)
+    || typeof storage?.authClient?.getClient !== 'function'
+    || typeof storage?.authClient?.getCredentials !== 'function'
+    || typeof rawBucket.getMetadata !== 'function'
     || !rawBucket.iam || typeof rawBucket.iam.testPermissions !== 'function'
     || typeof rawBucket.file !== 'function' || typeof rawBucket.getFiles !== 'function') {
     throw new Error('Real acceptance runtime configuration is invalid');
@@ -1498,6 +1566,8 @@ export async function createRealAcceptanceRuntime({
   });
   let schemaOwned = false;
   let gcsPrefixOwned = false;
+  let schemaAcquisitionAttempted = false;
+  let gcsPrefixAcquisitionAttempted = false;
   let gcsCleanupVerified = false;
   let schemaCleanupVerified = false;
   let closed = false;
@@ -1540,7 +1610,21 @@ export async function createRealAcceptanceRuntime({
         if (executionIdentity !== ACCEPTANCE_SERVICE_ACCOUNT) {
           throw deadlineError('DEPENDENCY_GCP_IDENTITY_INVALID');
         }
+        const storageIdentityStartedAt = performance.now();
+        const storageIdentity = await withDeadline(
+          () => attestStorageAdcIdentity(storage),
+          {
+            timeoutMs: operationDeadlineMs,
+            code: 'DEPENDENCY_OPERATION_DEADLINE_EXCEEDED',
+            parentSignal: activeSignal,
+          },
+        );
+        if (storageIdentity !== ACCEPTANCE_SERVICE_ACCOUNT) {
+          throw deadlineError('DEPENDENCY_GCS_IDENTITY_INVALID');
+        }
+        await gcsClient.assertBucketIdentity();
         const identityLatencyMs = Math.max(0, performance.now() - identityStartedAt);
+        const storageIdentityLatencyMs = Math.max(0, performance.now() - storageIdentityStartedAt);
         const identityChecks = [
           { name: 'gcp-execution-identity', status: 'pass', latencyMs: identityLatencyMs },
           {
@@ -1548,6 +1632,8 @@ export async function createRealAcceptanceRuntime({
             status: 'pass',
             latencyMs: identityLatencyMs,
           },
+          { name: 'gcs-adc-identity', status: 'pass', latencyMs: storageIdentityLatencyMs },
+          { name: 'gcs-bucket-project', status: 'pass', latencyMs: storageIdentityLatencyMs },
         ];
         const version = await adminPool.query('SHOW server_version_num');
         const versionNumber = Number(version.rows[0]?.server_version_num);
@@ -1572,6 +1658,7 @@ export async function createRealAcceptanceRuntime({
         if (await prefixObjectCount({ stopAfterFirst: true }) !== 0) {
           throw new Error('Acceptance GCS prefix is not fresh');
         }
+        gcsPrefixAcquisitionAttempted = true;
         await gcsClient.putObject({
           name: `${gcsPrefix}.acceptance-owner`,
           bytes: Buffer.from(runId, 'utf8'),
@@ -1579,6 +1666,7 @@ export async function createRealAcceptanceRuntime({
           ifAbsent: true,
         });
         gcsPrefixOwned = true;
+        schemaAcquisitionAttempted = true;
         await adminPool.query(`CREATE SCHEMA "${schema}"`);
         schemaOwned = true;
         const migration = await withDeadline((operationSignal) => readMigration({ signal: operationSignal }), {
@@ -1623,7 +1711,7 @@ export async function createRealAcceptanceRuntime({
         if (prefix !== gcsPrefix || !GCS_PREFIX.test(prefix)) {
           throw new Error('GCS cleanup scope is invalid');
         }
-        if (!gcsPrefixOwned) {
+        if (!gcsPrefixOwned && !gcsPrefixAcquisitionAttempted) {
           const remaining = await prefixObjectCount({ stopAfterFirst: true });
           gcsCleanupVerified = remaining === 0;
           return remaining;
@@ -1640,7 +1728,10 @@ export async function createRealAcceptanceRuntime({
         }
         const remaining = await prefixObjectCount();
         gcsCleanupVerified = remaining === 0;
-        if (gcsCleanupVerified) gcsPrefixOwned = false;
+        if (gcsCleanupVerified) {
+          gcsPrefixOwned = false;
+          gcsPrefixAcquisitionAttempted = false;
+        }
         return remaining;
       } finally {
         activeSignal = null;
@@ -1650,7 +1741,7 @@ export async function createRealAcceptanceRuntime({
       activeSignal = signal;
       try {
         if (scope !== schema || !SCHEMA.test(scope)) throw new Error('Schema cleanup scope is invalid');
-        if (!schemaOwned) {
+        if (!schemaOwned && !schemaAcquisitionAttempted) {
           const existing = await adminPool.query(
             'SELECT count(*)::int AS count FROM pg_namespace WHERE nspname = $1',
             [schema],
@@ -1665,7 +1756,10 @@ export async function createRealAcceptanceRuntime({
         );
         const absent = Number(result.rows[0]?.count) === 0;
         schemaCleanupVerified = absent;
-        if (absent) schemaOwned = false;
+        if (absent) {
+          schemaOwned = false;
+          schemaAcquisitionAttempted = false;
+        }
         return absent;
       } finally {
         activeSignal = null;
@@ -1709,27 +1803,63 @@ export async function createRealAcceptanceRuntime({
           || finalizeReleaseEvidenceRecord(parsedRecord ?? {}).artifactSha256 !== artifactSha256) {
           throw deadlineError('DEPENDENCY_EVIDENCE_OUTPUT_INVALID');
         }
-        await evidenceGcsClient.putObject({
-          name: objectName,
-          bytes: body,
-          contentType: 'application/json',
-          ifAbsent: true,
-        });
-        const metadata = await evidenceGcsClient.headObject({ name: objectName });
-        const readback = await evidenceGcsClient.readObject({ name: objectName });
-        await evidenceGcsClient.assertObjectPrivate(objectName);
-        if (!/^[1-9]\d*$/.test(String(metadata.generation ?? ''))
-          || metadata.size !== body.length
-          || Buffer.compare(readback, body) !== 0
-          || sha256(readback) !== objectSha256) {
-          throw deadlineError('DEPENDENCY_EVIDENCE_OUTPUT_INVALID');
+        let writeCompleted = false;
+        try {
+          await evidenceGcsClient.putObject({
+            name: objectName,
+            bytes: body,
+            contentType: 'application/json',
+            ifAbsent: true,
+          });
+          writeCompleted = true;
+          const metadata = await evidenceGcsClient.headObject({ name: objectName });
+          const readback = await evidenceGcsClient.readObject({ name: objectName });
+          await evidenceGcsClient.assertObjectPrivate(objectName);
+          if (!/^[1-9]\d*$/.test(String(metadata.generation ?? ''))
+            || metadata.size !== body.length
+            || Buffer.compare(readback, body) !== 0
+            || sha256(readback) !== objectSha256) {
+            throw deadlineError('DEPENDENCY_EVIDENCE_OUTPUT_INVALID');
+          }
+          return {
+            objectName,
+            generation: String(metadata.generation),
+            artifactSha256,
+            objectSha256,
+          };
+        } catch (error) {
+          try {
+            const discovered = await evidenceGcsClient.headObject({
+              name: objectName,
+              allowMissing: true,
+            });
+            if (discovered) {
+              if (!writeCompleted) {
+                const discoveredBody = await evidenceGcsClient.readObject({ name: objectName });
+                if (Buffer.compare(discoveredBody, body) !== 0
+                  || sha256(discoveredBody) !== objectSha256) {
+                  throw deadlineError('DEPENDENCY_EVIDENCE_OUTPUT_CLEANUP_FAILED');
+                }
+              }
+              if (!/^[1-9]\d*$/.test(String(discovered.generation ?? ''))) {
+                throw deadlineError('DEPENDENCY_EVIDENCE_OUTPUT_CLEANUP_FAILED');
+              }
+              await evidenceGcsClient.deleteObject({
+                name: objectName,
+                generation: String(discovered.generation),
+              });
+              if (await evidenceGcsClient.headObject({
+                name: objectName,
+                allowMissing: true,
+              }) !== null) {
+                throw deadlineError('DEPENDENCY_EVIDENCE_OUTPUT_CLEANUP_FAILED');
+              }
+            }
+          } catch {
+            throw deadlineError('DEPENDENCY_EVIDENCE_OUTPUT_CLEANUP_FAILED');
+          }
+          throw error;
         }
-        return {
-          objectName,
-          generation: String(metadata.generation),
-          artifactSha256,
-          objectSha256,
-        };
       } finally {
         activeSignal = null;
       }
@@ -1860,6 +1990,10 @@ function validateConfiguration(environment) {
     || environment.V1_ACCEPTANCE_MIGRATOR_DATABASE_URL === environment.V1_ACCEPTANCE_DATABASE_URL
     || postgresUser(environment.V1_ACCEPTANCE_DATABASE_URL) !== APP_DATABASE_USER
     || postgresUser(environment.V1_ACCEPTANCE_MIGRATOR_DATABASE_URL) !== MIGRATOR_DATABASE_USER
+    || postgresPassword(environment.V1_ACCEPTANCE_DATABASE_URL) === null
+    || postgresPassword(environment.V1_ACCEPTANCE_MIGRATOR_DATABASE_URL) === null
+    || postgresPassword(environment.V1_ACCEPTANCE_DATABASE_URL)
+      === postgresPassword(environment.V1_ACCEPTANCE_MIGRATOR_DATABASE_URL)
     || environment.V1_ACCEPTANCE_POSTGRES_RESOURCE_ID !== environment.V1_POSTGRES_RESOURCE_ID
     || environment.V1_ACCEPTANCE_GOOGLE_CLOUD_PROJECT !== environment.V1_GOOGLE_CLOUD_PROJECT
     || environment.V1_ACCEPTANCE_GCS_BUCKET !== environment.V1_GCS_BUCKET

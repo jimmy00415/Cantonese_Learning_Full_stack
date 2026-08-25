@@ -24,6 +24,7 @@ const RUN_ID = '123e4567-e89b-42d3-a456-426614174000';
 const SCHEMA = `v1_accept_${RUN_ID.replaceAll('-', '')}`;
 const GCS_PREFIX = `v1-accept/${RUN_ID}/`;
 const PROJECT_ID = 'hkbuddy-prod-v1-20260826';
+const PROJECT_NUMBER = '93662314720';
 const BUCKET_NAME = 'hkbuddy-prod-v1-20260826-media';
 const GCS_RESOURCE_ID = `//storage.googleapis.com/projects/_/buckets/${BUCKET_NAME}`;
 const POSTGRES_RESOURCE_ID = `//sqladmin.googleapis.com/projects/${PROJECT_ID}/instances/hkbuddy-pg/databases/hkbuddy_v1`;
@@ -207,10 +208,15 @@ function createFakeBucket({
   initialObjects = [],
   permissions = permissionMap(),
   publicStatus = 403,
+  publicStatuses = null,
   hangList = false,
   malformedListName = null,
   malformedListPrefix = null,
   malformedMetadata = null,
+  commitWriteThenErrorName = null,
+  storageClientEmail = ACCEPTANCE_SERVICE_ACCOUNT,
+  storageCredentialType = 'Compute',
+  bucketProjectNumber = PROJECT_NUMBER,
 } = {}) {
   const objects = new Map(initialObjects.map(([name, bytes]) => [name, {
     bytes: Buffer.from(bytes),
@@ -220,12 +226,17 @@ function createFakeBucket({
   }]));
   const calls = {
     writes: [], reads: [], metadata: [], deletes: [], lists: [], permissions: [],
-    publicFetches: [], storageOptions: [], signedUrls: 0,
+    publicFetches: [], storageOptions: [], storageCredentials: [], bucketMetadata: [], signedUrls: 0,
   };
   let generation = objects.size;
+  let committedWriteErrorRaised = false;
 
   const bucket = {
     name: BUCKET_NAME,
+    async getMetadata() {
+      calls.bucketMetadata.push(BUCKET_NAME);
+      return [{ name: BUCKET_NAME, projectNumber: bucketProjectNumber }];
+    },
     iam: {
       async testPermissions(requested) {
         calls.permissions.push([...requested]);
@@ -233,7 +244,7 @@ function createFakeBucket({
           .filter(([, allowed]) => allowed).map(([name]) => name) }];
       },
     },
-    file(name) {
+    file(name, fileOptions = {}) {
       return {
         name,
         getSignedUrl() {
@@ -260,6 +271,11 @@ function createFakeBucket({
                 generation: String(generation),
                 contentType: options?.metadata?.contentType ?? 'application/octet-stream',
               });
+              if (name === commitWriteThenErrorName && !committedWriteErrorRaised) {
+                committedWriteErrorRaised = true;
+                callback(new Error('transport failed after committed write'));
+                return;
+              }
               callback();
             },
           });
@@ -286,7 +302,12 @@ function createFakeBucket({
           return Readable.from([object.bytes.subarray(start, end + 1)]);
         },
         async delete(options) {
-          calls.deletes.push({ name, options });
+          calls.deletes.push({ name, options, generation: fileOptions.generation });
+          const object = objects.get(name);
+          if (object && fileOptions.generation !== undefined
+            && String(fileOptions.generation) !== object.generation) {
+            throw providerError(412);
+          }
           if (!objects.delete(name)) throw providerError(404);
           return [{}];
         },
@@ -317,16 +338,37 @@ function createFakeBucket({
     },
   };
 
+  let publicFetchIndex = 0;
   const fetchImpl = async (url, options = {}) => {
     calls.publicFetches.push({ url, options });
-    return new Response(publicStatus === 200 ? 'private-object-content' : 'not public', {
-      status: publicStatus,
+    const status = Array.isArray(publicStatuses)
+      ? (publicStatuses[publicFetchIndex++] ?? publicStatuses.at(-1))
+      : publicStatus;
+    return new Response(status === 200 ? 'private-object-content' : 'not public', {
+      status,
     });
   };
 
   class StorageClass {
     constructor(options) {
       calls.storageOptions.push(options);
+      const Credential = storageCredentialType === 'Compute'
+        ? class Compute {}
+        : class JWT {};
+      const credential = new Credential();
+      this.authClient = {
+        jsonContent: null,
+        keyFilename: null,
+        apiKey: null,
+        async getClient() {
+          calls.storageCredentials.push(['client', credential.constructor.name]);
+          return credential;
+        },
+        async getCredentials() {
+          calls.storageCredentials.push(['credentials', storageClientEmail]);
+          return { client_email: storageClientEmail };
+        },
+      };
     }
 
     bucket(name) {
@@ -338,9 +380,14 @@ function createFakeBucket({
   return { bucket, calls, fetchImpl, objects, StorageClass };
 }
 
-function createFakePoolClass({ schemaInitiallyExists = false, serverVersion = '160004' } = {}) {
+function createFakePoolClass({
+  schemaInitiallyExists = false,
+  serverVersion = '160004',
+  commitCreateThenError = false,
+} = {}) {
   const state = { schemaExists: schemaInitiallyExists, ended: [], options: [], sql: [] };
   let poolIndex = 0;
+  let committedCreateErrorRaised = false;
   class PoolClass {
     constructor(options) {
       this.index = poolIndex;
@@ -367,7 +414,13 @@ function createFakePoolClass({ schemaInitiallyExists = false, serverVersion = '1
       if (/pg_namespace/i.test(text)) {
         return { rows: [{ count: state.schemaExists ? 1 : 0 }], rowCount: 1 };
       }
-      if (/CREATE SCHEMA/i.test(text)) state.schemaExists = true;
+      if (/CREATE SCHEMA/i.test(text)) {
+        state.schemaExists = true;
+        if (commitCreateThenError && !committedCreateErrorRaised) {
+          committedCreateErrorRaised = true;
+          throw new Error('transport failed after committed schema create');
+        }
+      }
       if (/DROP SCHEMA/i.test(text)) state.schemaExists = false;
       return { rows: [], rowCount: 0 };
     }
@@ -500,6 +553,12 @@ test('GCP identities, attached ADC, and matching UUID scopes are mandatory befor
     ['wrong database resource', { V1_ACCEPTANCE_POSTGRES_RESOURCE_ID: `${POSTGRES_RESOURCE_ID}-other` }],
     ['different database URL', { V1_ACCEPTANCE_DATABASE_URL: DATABASE_URL.replace('hkbuddy_app', 'other_user') }],
     ['same app and migrator identity', { V1_ACCEPTANCE_MIGRATOR_DATABASE_URL: DATABASE_URL }],
+    ['same decoded app and migrator password', {
+      V1_ACCEPTANCE_MIGRATOR_DATABASE_URL: MIGRATOR_DATABASE_URL.replace(
+        'private-migrator-password',
+        'private%2Dpassword',
+      ),
+    }],
     ['wrong migrator identity', { V1_ACCEPTANCE_MIGRATOR_DATABASE_URL: MIGRATOR_DATABASE_URL.replace('hkbuddy_migrator', 'postgres') }],
     ['wrong migrator resource', { V1_ACCEPTANCE_MIGRATOR_DATABASE_URL: MIGRATOR_DATABASE_URL.replace('10.25.0.3', '10.25.0.4') }],
     ['broad prefix', { V1_ACCEPTANCE_GCS_PREFIX: 'v1-accept/' }],
@@ -518,6 +577,21 @@ test('GCP identities, attached ADC, and matching UUID scopes are mandatory befor
       assert.equal(fixture.artifacts.length, 0);
     });
   }
+});
+
+test('direct runtime rejects equal decoded database passwords before provider construction', async () => {
+  const fixture = realRuntimeOptions();
+  fixture.options.migratorDatabaseUrl = MIGRATOR_DATABASE_URL.replace(
+    'private-migrator-password',
+    'private%2Dpassword',
+  );
+
+  await assert.rejects(
+    createRealAcceptanceRuntime(fixture.options),
+    /Real acceptance runtime configuration is invalid/,
+  );
+  assert.equal(fixture.postgres.state.options.length, 0);
+  assert.equal(fixture.provider.calls.storageOptions.length, 0);
 });
 
 test('Azure-only or mixed Azure acceptance configuration fails closed instead of selecting legacy storage', async () => {
@@ -800,6 +874,28 @@ test('real acceptance rejects unavailable or wrong execution identity before tou
   }
 });
 
+test('storage ADC and bucket project ownership must match the dedicated production identity', async (t) => {
+  const cases = [
+    ['well-known-file credential', { storageCredentialType: 'JWT' }, 'DEPENDENCY_GCS_IDENTITY_INVALID'],
+    ['cross-account credential', {
+      storageClientEmail: `hkbuddy-runtime@${PROJECT_ID}.iam.gserviceaccount.com`,
+    }, 'DEPENDENCY_GCS_IDENTITY_INVALID'],
+    ['cross-project bucket', { bucketProjectNumber: '1234567890' }, 'DEPENDENCY_GCS_RESOURCE_INVALID'],
+  ];
+  for (const [name, providerOptions, code] of cases) {
+    await t.test(name, async () => {
+      const fixture = realRuntimeOptions({ provider: createFakeBucket(providerOptions) });
+      const runtime = await createRealAcceptanceRuntime(fixture.options);
+      await assert.rejects(runtime.runChecks(), (error) => (
+        error?.code === code && error.message === code
+      ));
+      assert.equal(fixture.postgres.state.sql.length, 0);
+      assert.equal(fixture.provider.calls.writes.length, 0);
+      await runtime.close();
+    });
+  }
+});
+
 test('real acceptance rejects every PostgreSQL major other than 16 before acquiring either scope', async () => {
   const fixture = realRuntimeOptions({
     postgres: createFakePoolClass({ serverVersion: '150012' }),
@@ -855,11 +951,22 @@ test('real runtime uses project-scoped attached ADC and proves intended GCS life
   assert.equal(checks.some(({ name, status }) => (
     name === `gcp-identity-${sha256(ACCEPTANCE_SERVICE_ACCOUNT)}` && status === 'pass'
   )), true);
+  assert.equal(checks.some(({ name, status }) => (
+    name === 'gcs-adc-identity' && status === 'pass'
+  )), true);
+  assert.equal(checks.some(({ name, status }) => (
+    name === 'gcs-bucket-project' && status === 'pass'
+  )), true);
   assert.equal(await runtime.cleanupGcsPrefix(GCS_PREFIX), 0);
   assert.equal(await runtime.dropSchema(SCHEMA), true);
   await runtime.close();
 
   assert.deepEqual(fixture.provider.calls.storageOptions, [{ projectId: PROJECT_ID }]);
+  assert.deepEqual(fixture.provider.calls.storageCredentials, [
+    ['client', 'Compute'],
+    ['credentials', ACCEPTANCE_SERVICE_ACCOUNT],
+  ]);
+  assert.deepEqual(fixture.provider.calls.bucketMetadata, [BUCKET_NAME]);
   assert.deepEqual(
     fixture.provider.calls.permissions[0].filter((name) => REQUIRED_GCS_PERMISSIONS.includes(name)),
     REQUIRED_GCS_PERMISSIONS,
@@ -918,6 +1025,36 @@ test('real runtime uses migrator only for isolated DDL and publishes canonical e
   assert.equal(/CREATE SCHEMA|DROP SCHEMA|GRANT USAGE ON SCHEMA/.test(appSql), false);
 });
 
+test('failed evidence verification deletes the exact committed generation and permits a clean rerun', async () => {
+  const provider = createFakeBucket({ publicStatuses: [200, 403] });
+  const fixture = realRuntimeOptions({ provider });
+  const runtime = await createRealAcceptanceRuntime(fixture.options);
+  const record = legacyInventory();
+  const contents = `${JSON.stringify(record, null, 2)}\n`;
+  const input = {
+    objectName: OUTPUT_OBJECT,
+    contents,
+    artifactSha256: record.artifactSha256,
+    objectSha256: sha256(contents),
+  };
+
+  await runtime.runChecks();
+  assert.equal(await runtime.cleanupGcsPrefix(GCS_PREFIX), 0);
+  assert.equal(await runtime.dropSchema(SCHEMA), true);
+  await runtime.close();
+
+  await assert.rejects(runtime.writeEvidenceObject(input), (error) => (
+    error?.code === 'DEPENDENCY_GCS_ACCESS_INVALID'
+  ));
+  assert.equal(provider.objects.has(OUTPUT_OBJECT), false);
+  const compensatingDelete = provider.calls.deletes.find(({ name }) => name === OUTPUT_OBJECT);
+  assert.equal(compensatingDelete?.generation, '2');
+
+  const receipt = await runtime.writeEvidenceObject(input);
+  assert.equal(receipt.generation, '3');
+  assert.equal(provider.objects.has(OUTPUT_OBJECT), true);
+});
+
 test('hostile GCS permissions, public access, metadata, and list responses fail closed without provider detail', async (t) => {
   const cases = [
     ['forbidden permission', createFakeBucket({ permissions: permissionMap({ 'storage.buckets.setIamPolicy': true }) }),
@@ -964,6 +1101,41 @@ test('hostile GCS permissions, public access, metadata, and list responses fail 
       await runtime.close();
     });
   }
+});
+
+test('oversized object metadata is rejected before any range stream opens', async () => {
+  const name = `${GCS_PREFIX}oversized.bin`;
+  const provider = createFakeBucket({
+    malformedMetadata: {
+      name,
+      size: String((8 * 1024 * 1024) + 1),
+      generation: '1',
+      contentType: 'application/octet-stream',
+    },
+  });
+  const fixture = realRuntimeOptions({
+    provider,
+    exerciseChecks: async ({ gcsClient }) => {
+      await gcsClient.putObject({
+        name,
+        bytes: Buffer.from('x'),
+        contentType: 'application/octet-stream',
+        ifAbsent: true,
+      });
+      await assert.rejects(
+        gcsClient.readObject({ name, start: 0, end: 0 }),
+        (error) => error?.code === 'DEPENDENCY_GCS_RESPONSE_INVALID',
+      );
+      assert.equal(provider.calls.reads.length, 0);
+      return passChecks();
+    },
+  });
+  const runtime = await createRealAcceptanceRuntime(fixture.options);
+
+  await runtime.runChecks();
+  assert.equal(await runtime.cleanupGcsPrefix(GCS_PREFIX), 0);
+  assert.equal(await runtime.dropSchema(SCHEMA), true);
+  await runtime.close();
 });
 
 test('hung GCS provider work is bounded by both operation deadline and parent cancellation', async (t) => {
@@ -1015,6 +1187,41 @@ test('pre-existing PostgreSQL schema or GCS prefix is never acquired, swept, or 
     assert.equal(fixture.provider.calls.deletes.length, 0);
     assert.equal(fixture.postgres.state.sql.some(([, sql]) => /CREATE SCHEMA/i.test(sql)), false);
   });
+});
+
+test('GCS cleanup recovers a create that committed before the transport failed', async () => {
+  const owner = `${GCS_PREFIX}.acceptance-owner`;
+  const fixture = realRuntimeOptions({
+    provider: createFakeBucket({ commitWriteThenErrorName: owner }),
+  });
+  const runtime = await createRealAcceptanceRuntime(fixture.options);
+
+  await assert.rejects(runtime.runChecks(), (error) => (
+    error?.code === 'DEPENDENCY_GCS_RESPONSE_INVALID'
+  ));
+  assert.equal(fixture.provider.objects.has(owner), true, 'the simulated provider committed first');
+  assert.equal(await runtime.cleanupGcsPrefix(GCS_PREFIX), 0);
+  assert.equal(await runtime.dropSchema(SCHEMA), true);
+  await runtime.close();
+
+  assert.equal(fixture.provider.objects.size, 0);
+  assert.equal(fixture.provider.calls.deletes.some(({ name }) => name === owner), true);
+});
+
+test('PostgreSQL cleanup recovers a schema create that committed before the transport failed', async () => {
+  const fixture = realRuntimeOptions({
+    postgres: createFakePoolClass({ commitCreateThenError: true }),
+  });
+  const runtime = await createRealAcceptanceRuntime(fixture.options);
+
+  await assert.rejects(runtime.runChecks());
+  assert.equal(fixture.postgres.state.schemaExists, true, 'the simulated server committed first');
+  assert.equal(await runtime.cleanupGcsPrefix(GCS_PREFIX), 0);
+  assert.equal(await runtime.dropSchema(SCHEMA), true);
+  await runtime.close();
+
+  assert.equal(fixture.postgres.state.schemaExists, false);
+  assert.equal(fixture.postgres.state.sql.some(([, sql]) => /DROP SCHEMA/i.test(sql)), true);
 });
 
 test('owned cleanup deletes every paginated object and proves zero schema objects and zero prefix objects', async () => {
