@@ -142,12 +142,13 @@ export class AzureBlobMediaStore {
 
   async listAttemptKeys({ prefix, before, limit = 100, cursor, signal } = {}) {
     if (!/^attempts\/(voice|tts)\/$/.test(prefix ?? '')) throw mediaError('INVALID_STORAGE_KEY');
+    if (signal?.aborted) throw mediaError('MEDIA_OPERATION_ABORTED', signal.reason);
     const beforeMs = new Date(before).getTime();
     if (!Number.isFinite(beforeMs)) throw new Error('before must be a valid instant');
     const maximum = Math.max(1, Math.min(Number(limit) || 100, 1_000));
     const keys = [];
     try {
-      for await (const blob of this.containerClient.listBlobsFlat({ prefix })) {
+      for await (const blob of this.containerClient.listBlobsFlat({ prefix, abortSignal: signal })) {
         if (signal?.aborted) throw mediaError('MEDIA_OPERATION_ABORTED', signal.reason);
         if (!STORAGE_KEY.test(blob.name) || (cursor && blob.name <= cursor)) continue;
         const lastModified = blob.properties?.lastModified;
@@ -164,6 +165,7 @@ export class AzureBlobMediaStore {
       return { keys, cursor: keys.length === maximum ? keys.at(-1).storageKey : null };
     } catch (error) {
       if (error?.code === 'MEDIA_OPERATION_ABORTED') throw error;
+      if (signal?.aborted) throw mediaError('MEDIA_OPERATION_ABORTED', signal.reason ?? error);
       throw mediaError('MEDIA_UNAVAILABLE', error);
     }
   }

@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 export const mediaCleanupLimits = Object.freeze({
   sweepLimit: 100,
   sweepMinimumAgeMs: 120_000,
+  sweepDeadlineMs: 15_000,
 });
 
 function addMilliseconds(value, milliseconds) {
@@ -24,6 +25,46 @@ function sweepObservation(entry) {
   })).digest('hex');
 }
 
+function sweepAbortError(signal) {
+  if (signal?.reason?.code === 'MEDIA_OPERATION_ABORTED') return signal.reason;
+  const error = new Error('Media cleanup sweep aborted', signal?.reason ? { cause: signal.reason } : undefined);
+  error.code = 'MEDIA_OPERATION_ABORTED';
+  return error;
+}
+
+function throwIfSweepAborted(signal) {
+  if (signal?.aborted) throw sweepAbortError(signal);
+}
+
+async function withSweepAbort(operation, signal) {
+  throwIfSweepAborted(signal);
+  if (!signal) return operation();
+  let removeAbortListener = () => undefined;
+  const aborted = new Promise((resolve, reject) => {
+    void resolve;
+    const onAbort = () => reject(sweepAbortError(signal));
+    signal.addEventListener('abort', onAbort, { once: true });
+    removeAbortListener = () => signal.removeEventListener('abort', onAbort);
+  });
+  const operationPromise = Promise.resolve().then(operation);
+  try {
+    const outcome = await Promise.race([
+      operationPromise.then(
+        (value) => ({ source: 'operation', value }),
+        (error) => ({ source: 'operation', error }),
+      ),
+      aborted.then(
+        (value) => ({ source: 'abort', value }),
+        (error) => ({ source: 'abort', error }),
+      ),
+    ]);
+    if (outcome.error) throw outcome.error;
+    return outcome.value;
+  } finally {
+    removeAbortListener();
+  }
+}
+
 export function createMediaCleanupService({
   store,
   mediaStore,
@@ -34,17 +75,23 @@ export function createMediaCleanupService({
   pollMs = 5_000,
   sweepLimit = mediaCleanupLimits.sweepLimit,
   sweepMinimumAgeMs = mediaCleanupLimits.sweepMinimumAgeMs,
+  sweepDeadlineMs = mediaCleanupLimits.sweepDeadlineMs,
 } = {}) {
   if (!store || !mediaStore) throw new Error('Media cleanup requires store and mediaStore');
   let timer = null;
   let stopped = false;
   let scheduledCycle = null;
+  let scheduledCycleController = null;
   const sweepCursors = new Map([
     ['attempts/voice/', null],
     ['attempts/tts/', null],
   ]);
   const boundedSweepLimit = Math.max(1, Math.min(Number(sweepLimit) || mediaCleanupLimits.sweepLimit, mediaCleanupLimits.sweepLimit));
   const safeSweepAgeMs = Math.max(Number(sweepMinimumAgeMs) || 0, mediaCleanupLimits.sweepMinimumAgeMs);
+  const safeSweepDeadlineMs = Math.max(1, Math.min(
+    Number(sweepDeadlineMs) || mediaCleanupLimits.sweepDeadlineMs,
+    60_000,
+  ));
 
   const drainOnce = async () => {
     const current = new Date(now());
@@ -81,12 +128,23 @@ export function createMediaCleanupService({
     }
   };
 
-  const sweepAttemptPrefix = async ({ prefix, before, limit = mediaCleanupLimits.sweepLimit, cursor }) => {
+  const sweepAttemptPrefix = async ({ prefix, before, limit = mediaCleanupLimits.sweepLimit, cursor, signal }) => {
     const current = new Date(now());
-    const listed = await mediaStore.listAttemptKeys({ prefix, before, limit, cursor });
+    const listed = await withSweepAbort(
+      () => mediaStore.listAttemptKeys({ prefix, before, limit, cursor, signal }),
+      signal,
+    );
+    throwIfSweepAborted(signal);
     let enqueued = 0;
     for (const entry of listed.keys) {
-      if (await store.isStorageKeyLive({ storageKey: entry.storageKey, now: current })) continue;
+      throwIfSweepAborted(signal);
+      const live = await withSweepAbort(
+        () => store.isStorageKeyLive({ storageKey: entry.storageKey, now: current }),
+        signal,
+      );
+      throwIfSweepAborted(signal);
+      if (live) continue;
+      throwIfSweepAborted(signal);
       await store.rearmMediaDeletionFromSweep({
         storageKey: entry.storageKey,
         sweepObservation: sweepObservation(entry),
@@ -101,8 +159,17 @@ export function createMediaCleanupService({
 
   const runScheduledCycle = () => {
     if (scheduledCycle) return scheduledCycle;
+    const controller = new AbortController();
+    scheduledCycleController = controller;
+    const deadlineTimer = setTimeout(() => {
+      const error = new Error('Media cleanup sweep deadline exceeded');
+      error.code = 'MEDIA_OPERATION_ABORTED';
+      controller.abort(error);
+    }, safeSweepDeadlineMs);
+    deadlineTimer.unref?.();
     scheduledCycle = (async () => {
       await drainOnce();
+      if (controller.signal.aborted) return { sweeps: [], aborted: true };
       const before = addMilliseconds(new Date(now()), -safeSweepAgeMs);
       const sweeps = [];
       for (const prefix of sweepCursors.keys()) {
@@ -112,16 +179,22 @@ export function createMediaCleanupService({
             before,
             limit: boundedSweepLimit,
             cursor: sweepCursors.get(prefix),
+            signal: controller.signal,
           });
           sweepCursors.set(prefix, result.cursor ?? null);
           sweeps.push({ prefix, ...result });
         } catch {
           sweeps.push({ prefix, scanned: 0, enqueued: 0, cursor: sweepCursors.get(prefix), failed: true });
         }
+        if (controller.signal.aborted) break;
       }
-      await drainOnce();
-      return { sweeps };
-    })().finally(() => { scheduledCycle = null; });
+      if (!controller.signal.aborted) await drainOnce();
+      return { sweeps, aborted: controller.signal.aborted };
+    })().finally(() => {
+      clearTimeout(deadlineTimer);
+      if (scheduledCycleController === controller) scheduledCycleController = null;
+      scheduledCycle = null;
+    });
     return scheduledCycle;
   };
 
@@ -136,6 +209,11 @@ export function createMediaCleanupService({
     stopped = true;
     if (timer) clearInterval(timer);
     timer = null;
+    if (scheduledCycleController && !scheduledCycleController.signal.aborted) {
+      const error = new Error('Media cleanup is stopping');
+      error.code = 'MEDIA_OPERATION_ABORTED';
+      scheduledCycleController.abort(error);
+    }
     await scheduledCycle?.catch(() => undefined);
   };
 

@@ -128,6 +128,21 @@ async function pathExists(path) {
   }
 }
 
+async function settleWithin(promise, milliseconds, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((resolve, reject) => {
+        void resolve;
+        timer = setTimeout(() => reject(new Error(message)), milliseconds);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function createStore(t, prefix = 'hb-v1-voice-store-') {
   const directory = await mkdtemp(join(tmpdir(), prefix));
   const filePath = join(directory, 'store.json');
@@ -334,6 +349,22 @@ test('media local adapter aborts and removes a private attempt at 8 MiB plus one
     { code: 'VOICE_UPLOAD_TOO_LARGE' },
   );
   assert.deepEqual((await mediaStore.listAttemptKeys({ prefix: 'attempts/voice/', before: new Date(Date.now() + 60_000), limit: 10 })).keys, []);
+});
+
+test('media local attempt listing rejects an already-aborted sweep before touching an absent prefix', async (t) => {
+  const { LocalMediaStore } = await import('../src/stores/local-media-store.js');
+  const rootDirectory = await mkdtemp(join(tmpdir(), 'hb-v1-local-media-list-abort-'));
+  const mediaStore = new LocalMediaStore({ rootDirectory });
+  await mediaStore.init();
+  t.after(() => mediaStore.close());
+  const controller = new AbortController();
+  controller.abort(new Error('fake cleanup stop'));
+  await assert.rejects(mediaStore.listAttemptKeys({
+    prefix: 'attempts/tts/',
+    before: new Date(Date.now() + 60_000),
+    limit: 10,
+    signal: controller.signal,
+  }), { code: 'MEDIA_OPERATION_ABORTED' });
 });
 
 test('voice and chat multi-window quota blocks at the latest expiry without mutation or bucket-order dependence', async (t) => {
@@ -950,6 +981,7 @@ test('media Azure Blob adapter requires a private container and mediates bounded
   const { AzureBlobMediaStore } = await import('../src/stores/azure-blob-media-store.js');
   const blobs = new Map();
   const metadata = new Map();
+  let listOptions = null;
   const containerClient = {
     getProperties: async () => ({ etag: 'safe' }),
     getAccessPolicy: async () => ({ blobPublicAccess: undefined }),
@@ -976,7 +1008,9 @@ test('media Azure Blob adapter requires a private container and mediates bounded
         deleteIfExists: async () => ({ succeeded: blobs.delete(storageKey) }),
       };
     },
-    async *listBlobsFlat({ prefix }) {
+    async *listBlobsFlat(options) {
+      listOptions = options;
+      const { prefix } = options;
       for (const [name, value] of [...blobs.entries()].sort()) {
         if (name.startsWith(prefix)) {
           yield {
@@ -1002,9 +1036,14 @@ test('media Azure Blob adapter requires a private container and mediates bounded
   const opened = await mediaStore.open({ storageKey, start: 1, end: 2 });
   assert.deepEqual(await readableBuffer(opened.readable), bytes.subarray(1, 3));
   assert.equal(Object.hasOwn(opened, 'url'), false);
-  const listed = await mediaStore.listAttemptKeys({ prefix: 'attempts/tts/', before: new Date('2026-08-25T00:00:00.000Z'), limit: 10 });
+  const listController = new AbortController();
+  const listed = await mediaStore.listAttemptKeys({
+    prefix: 'attempts/tts/', before: new Date('2026-08-25T00:00:00.000Z'), limit: 10,
+    signal: listController.signal,
+  });
   assert.deepEqual(listed.keys.map((entry) => entry.storageKey), [storageKey]);
   assert.equal(listed.keys[0].version, '"fake-etag-1"');
+  assert.equal(listOptions.abortSignal, listController.signal);
   assert.deepEqual(await mediaStore.delete({ storageKey }), { deleted: true, notFound: false });
   assert.deepEqual(await mediaStore.delete({ storageKey }), { deleted: false, notFound: true });
 
@@ -1158,6 +1197,284 @@ test('scheduled media cleanup bounds and paginates both attempt-prefix sweeps un
   assert.ok(listCalls.every((call) => call.before === '2026-08-25T03:58:00.000Z'));
   assert.ok(listCalls.some((call) => call.prefix === 'attempts/voice/'
     && call.cursor === 'attempts/voice/11111111-1111-4111-8111-111111111111'));
+});
+
+test('media cleanup stop aborts and releases a never-settling attempt listing', async (t) => {
+  const { createMediaCleanupService } = await import('../src/services/media-cleanup.js');
+  const { store } = await createStore(t, 'hb-v1-cleanup-stop-list-');
+  let listingStartedResolve;
+  const listingStarted = new Promise((resolve) => { listingStartedResolve = resolve; });
+  let releaseListing;
+  const stalledListing = new Promise((resolve) => { releaseListing = resolve; });
+  let listingSignal = null;
+  let listCalls = 0;
+  const mediaStore = {
+    delete: async () => ({ deleted: false, notFound: true }),
+    listAttemptKeys: ({ signal }) => {
+      listCalls += 1;
+      listingSignal = signal;
+      listingStartedResolve();
+      return listCalls === 1 ? stalledListing : Promise.resolve({ keys: [], cursor: null });
+    },
+  };
+  const cleanup = createMediaCleanupService({ store, mediaStore, pollMs: 60_000 });
+  cleanup.start();
+  await settleWithin(listingStarted, 250, 'cleanup never entered its scheduled attempt listing');
+  const stopping = cleanup.stop();
+  try {
+    await settleWithin(stopping, 100, 'cleanup stop waited indefinitely for attempt listing');
+  } finally {
+    releaseListing({ keys: [], cursor: null });
+    await stopping;
+  }
+  assert.equal(listingSignal.aborted, true);
+});
+
+test('media cleanup sweep deadline bounds a provider listing that ignores abort', async (t) => {
+  const { createMediaCleanupService } = await import('../src/services/media-cleanup.js');
+  const { store } = await createStore(t, 'hb-v1-cleanup-list-deadline-');
+  let listingStartedResolve;
+  const listingStarted = new Promise((resolve) => { listingStartedResolve = resolve; });
+  let releaseListing;
+  const stalledListing = new Promise((resolve) => { releaseListing = resolve; });
+  let listingSignal = null;
+  let listCalls = 0;
+  const mediaStore = {
+    delete: async () => ({ deleted: false, notFound: true }),
+    listAttemptKeys: ({ signal }) => {
+      listCalls += 1;
+      listingSignal = signal;
+      listingStartedResolve();
+      return listCalls === 1 ? stalledListing : Promise.resolve({ keys: [], cursor: null });
+    },
+  };
+  const cleanup = createMediaCleanupService({ store, mediaStore, sweepDeadlineMs: 10 });
+  const cycle = cleanup.runScheduledCycle();
+  await settleWithin(listingStarted, 250, 'cleanup never entered its deadline-bound attempt listing');
+  let result;
+  try {
+    result = await settleWithin(cycle, 200, 'cleanup sweep deadline did not release stalled listing');
+  } finally {
+    releaseListing({ keys: [], cursor: null });
+    await cycle;
+    await cleanup.stop();
+  }
+  assert.equal(listingSignal.aborted, true);
+  assert.equal(result.sweeps[0].failed, true);
+  assert.equal(listCalls, 1, 'an aborted cycle does not start another prefix listing');
+});
+
+test('media cleanup sweep deadline bounds a liveness lookup that ignores abort and consumes its late rejection', async (t) => {
+  const { createMediaCleanupService } = await import('../src/services/media-cleanup.js');
+  const { store } = await createStore(t, 'hb-v1-cleanup-live-deadline-');
+  const storageKey = 'attempts/voice/66666666-6666-4666-8666-666666666666';
+  let livenessStartedResolve;
+  const livenessStarted = new Promise((resolve) => { livenessStartedResolve = resolve; });
+  let rejectLiveness;
+  const stalledLiveness = new Promise((resolve, reject) => {
+    void resolve;
+    rejectLiveness = reject;
+  });
+  store.isStorageKeyLive = () => {
+    livenessStartedResolve();
+    return stalledLiveness;
+  };
+  let listCalls = 0;
+  const mediaStore = {
+    delete: async () => ({ deleted: false, notFound: true }),
+    listAttemptKeys: async () => {
+      listCalls += 1;
+      return {
+        keys: listCalls === 1
+          ? [{ storageKey, lastModified: '2026-08-25T03:00:00.000Z', byteLength: 12, version: 'late-live-read' }]
+          : [],
+        cursor: null,
+      };
+    },
+  };
+  const cleanup = createMediaCleanupService({
+    store,
+    mediaStore,
+    now: () => new Date('2026-08-25T04:00:00.000Z'),
+    sweepDeadlineMs: 10,
+  });
+  const cycle = cleanup.runScheduledCycle();
+  await settleWithin(livenessStarted, 250, 'cleanup never entered its deadline-bound liveness lookup');
+  let result;
+  try {
+    result = await settleWithin(cycle, 200, 'cleanup sweep deadline did not release stalled liveness lookup');
+  } finally {
+    const lateError = new Error('late liveness failure after sweep cancellation');
+    lateError.code = 'LATE_LIVENESS_FAILURE';
+    rejectLiveness(lateError);
+    await cycle;
+    await cleanup.stop();
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(result.sweeps[0].failed, true);
+  assert.equal(result.aborted, true);
+  assert.equal(listCalls, 1, 'an aborted liveness lookup does not start another prefix sweep');
+});
+
+test('media cleanup stop aborts after liveness and before starting a new durable rearm', async (t) => {
+  const { createMediaCleanupService } = await import('../src/services/media-cleanup.js');
+  const { store } = await createStore(t, 'hb-v1-cleanup-stop-before-rearm-');
+  const storageKey = 'attempts/voice/77777777-7777-4777-8777-777777777777';
+  let cleanup;
+  let stopping;
+  let rearmCalls = 0;
+  const originalRearm = store.rearmMediaDeletionFromSweep.bind(store);
+  store.rearmMediaDeletionFromSweep = async (input) => {
+    rearmCalls += 1;
+    return originalRearm(input);
+  };
+  store.isStorageKeyLive = async () => {
+    stopping = cleanup.stop();
+    return false;
+  };
+  const mediaStore = {
+    delete: async () => ({ deleted: false, notFound: true }),
+    listAttemptKeys: async ({ prefix }) => ({
+      keys: prefix === 'attempts/voice/'
+        ? [{ storageKey, lastModified: '2026-08-25T03:00:00.000Z', byteLength: 13, version: 'stop-before-rearm' }]
+        : [],
+      cursor: null,
+    }),
+  };
+  cleanup = createMediaCleanupService({
+    store,
+    mediaStore,
+    now: () => new Date('2026-08-25T04:00:00.000Z'),
+  });
+  const result = await settleWithin(cleanup.runScheduledCycle(), 250, 'cleanup did not stop after liveness cancellation');
+  await settleWithin(stopping, 250, 'cleanup stop did not settle after liveness cancellation');
+  assert.equal(result.sweeps[0].failed, true);
+  assert.equal(result.aborted, true);
+  assert.equal(rearmCalls, 0, 'sweep cancellation fences a not-yet-started durable rearm');
+});
+
+test('media cleanup stop awaits an already-started durable rearm before shutdown completes', async (t) => {
+  const { createMediaCleanupService } = await import('../src/services/media-cleanup.js');
+  const { filePath, store } = await createStore(t, 'hb-v1-cleanup-stop-durable-rearm-');
+  const storageKey = 'attempts/voice/88888888-8888-4888-8888-888888888888';
+  let rearmStartedResolve;
+  const rearmStarted = new Promise((resolve) => { rearmStartedResolve = resolve; });
+  let releaseRearm;
+  const rearmGate = new Promise((resolve) => { releaseRearm = resolve; });
+  const originalRearm = store.rearmMediaDeletionFromSweep.bind(store);
+  store.isStorageKeyLive = async () => false;
+  store.rearmMediaDeletionFromSweep = async (input) => {
+    rearmStartedResolve();
+    await rearmGate;
+    return originalRearm(input);
+  };
+  const mediaStore = {
+    delete: async () => ({ deleted: false, notFound: true }),
+    listAttemptKeys: async ({ prefix }) => ({
+      keys: prefix === 'attempts/voice/'
+        ? [{ storageKey, lastModified: '2026-08-25T03:00:00.000Z', byteLength: 14, version: 'durable-rearm' }]
+        : [],
+      cursor: null,
+    }),
+  };
+  const cleanup = createMediaCleanupService({
+    store,
+    mediaStore,
+    now: () => new Date('2026-08-25T04:00:00.000Z'),
+  });
+  void cleanup.runScheduledCycle();
+  await settleWithin(rearmStarted, 250, 'cleanup never began the durable rearm');
+  let stopped = false;
+  const stopping = cleanup.stop().then(() => { stopped = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(stopped, false, 'shutdown awaits the already-started durable rearm');
+  releaseRearm();
+  await settleWithin(stopping, 250, 'cleanup did not finish after durable rearm persisted');
+  const persisted = JSON.parse(await readFile(filePath, 'utf8'));
+  const job = persisted.mediaDeletionJobs.find((entry) => entry.storageKey === storageKey);
+  assert.equal(job.state, 'pending');
+  assert.equal(job.reason, 'orphan-attempt-sweep');
+});
+
+test('media cleanup stop does not abort a claimed deletion before durable completion', async (t) => {
+  const { createMediaCleanupService } = await import('../src/services/media-cleanup.js');
+  const { filePath, store } = await createStore(t, 'hb-v1-cleanup-stop-delete-');
+  const storageKey = 'attempts/voice/55555555-5555-4555-8555-555555555555';
+  const current = new Date('2026-08-25T04:00:00.000Z');
+  await store.enqueueMediaDeletion({ storageKey, reason: 'shutdown-delete', notBefore: current, now: current });
+  let deletionStartedResolve;
+  const deletionStarted = new Promise((resolve) => { deletionStartedResolve = resolve; });
+  let releaseDeletion;
+  const deletion = new Promise((resolve) => { releaseDeletion = resolve; });
+  let deletionSignal = null;
+  const mediaStore = {
+    delete: ({ signal }) => {
+      deletionSignal = signal;
+      deletionStartedResolve();
+      return deletion;
+    },
+    listAttemptKeys: async () => ({ keys: [], cursor: null }),
+  };
+  const cleanup = createMediaCleanupService({ store, mediaStore, now: () => current });
+  void cleanup.runScheduledCycle();
+  await settleWithin(deletionStarted, 250, 'cleanup never claimed the durable deletion');
+  let stopped = false;
+  const stopping = cleanup.stop().then(() => { stopped = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(stopped, false, 'shutdown waits for the claimed deletion outcome');
+  assert.equal(deletionSignal.aborted, false, 'sweep cancellation is isolated from deletion lease cancellation');
+  releaseDeletion({ deleted: true, notFound: false });
+  await settleWithin(stopping, 250, 'cleanup did not persist the claimed deletion outcome');
+  await store.close();
+  const persisted = JSON.parse(await readFile(filePath, 'utf8'));
+  assert.equal(persisted.mediaDeletionJobs.find((job) => job.storageKey === storageKey).state, 'completed');
+});
+
+test('server shutdown aborts a stalled cleanup listing and closes within a bounded window', async (t) => {
+  const { startServer } = await import('../src/server.js');
+  const directory = await mkdtemp(join(tmpdir(), 'hb-v1-server-cleanup-stop-'));
+  let listingStartedResolve;
+  const listingStarted = new Promise((resolve) => { listingStartedResolve = resolve; });
+  let releaseListing;
+  const stalledListing = new Promise((resolve) => { releaseListing = resolve; });
+  let listingSignal = null;
+  let listCalls = 0;
+  const mediaStore = {
+    init: async () => undefined,
+    close: async () => undefined,
+    createAttemptKey: () => 'attempts/voice/66666666-6666-4666-8666-666666666666',
+    delete: async () => ({ deleted: false, notFound: true }),
+    listAttemptKeys: ({ signal }) => {
+      listCalls += 1;
+      listingSignal = signal;
+      listingStartedResolve();
+      return listCalls === 1 ? stalledListing : Promise.resolve({ keys: [], cursor: null });
+    },
+  };
+  const server = await startServer({
+    environment: {
+      NODE_ENV: 'test',
+      V1_PUBLIC_ORIGIN: 'https://voice.example.test',
+      V1_SESSION_SECRET: 's'.repeat(32),
+      V1_ATOMIC_FILE_PATH: join(directory, 'store.json'),
+      V1_LOCAL_MEDIA_PATH: join(directory, 'media'),
+      V1_LLM_PROVIDER: 'deterministic',
+    },
+    host: '127.0.0.1',
+    port: 0,
+    mediaStore,
+    llmProvider: { provider: 'shutdown-list-test', generate: async () => { throw new Error('must not run'); } },
+  });
+  t.after(() => server.shutdown());
+  await settleWithin(listingStarted, 250, 'server cleanup never entered attempt listing');
+  const shutdown = server.shutdown();
+  try {
+    await settleWithin(shutdown, 150, 'server shutdown waited indefinitely for cleanup listing');
+  } finally {
+    releaseListing({ keys: [], cursor: null });
+    await shutdown;
+  }
+  assert.equal(listingSignal.aborted, true);
 });
 
 test('orphan sweep evidence reopens a completed deletion exactly once across cleanup workers', async (t) => {

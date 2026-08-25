@@ -116,12 +116,16 @@ export class LocalMediaStore {
 
   async listAttemptKeys({ prefix, before, limit = 100, cursor, signal } = {}) {
     if (!/^attempts\/(voice|tts)\/$/.test(prefix ?? '')) throw mediaError('INVALID_STORAGE_KEY');
+    const initialSignalError = abortError(signal);
+    if (initialSignalError) throw initialSignalError;
     const maximum = Math.max(1, Math.min(Number(limit) || 100, 1_000));
     const beforeMs = new Date(before).getTime();
     if (!Number.isFinite(beforeMs)) throw new Error('before must be a valid instant');
     const directory = resolve(this.rootDirectory, ...prefix.split('/').filter(Boolean));
     let entries;
     try { entries = await readdir(directory, { withFileTypes: true }); } catch (error) {
+      const signalError = abortError(signal);
+      if (signalError) throw signalError;
       if (error?.code === 'ENOENT') return { keys: [], cursor: null };
       throw mediaError('MEDIA_UNAVAILABLE', error);
     }
@@ -132,6 +136,8 @@ export class LocalMediaStore {
       const storageKey = `${prefix}${entry.name}`;
       if (!entry.isFile() || (cursor && storageKey <= cursor) || !STORAGE_KEY.test(storageKey)) continue;
       const details = await stat(this.#path(storageKey), { bigint: true });
+      const statSignalError = abortError(signal);
+      if (statSignalError) throw statSignalError;
       const modifiedMs = Number(details.mtimeNs) / 1_000_000;
       if (modifiedMs < beforeMs) {
         keys.push({
