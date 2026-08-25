@@ -70,6 +70,68 @@ test('ui contract keeps four starter questions and the composer after the timeli
   assert.match(html, /id="send-button"[^>]+disabled/i);
 });
 
+test('ui contract exposes one consented asynchronous voice-message flow inside the composer', async () => {
+  const html = await text('index.html');
+  const app = await text('app.js');
+  const css = await text('styles.css');
+
+  assert.match(html, /id="voice-draft"[^>]+hidden/i);
+  assert.match(html, /id="voice-draft-state"[^>]+role="status"[^>]+aria-live="polite"/i);
+  assert.match(html, /id="voice-draft-help"/i);
+  assert.match(html, /id="remove-voice-draft"[^>]+type="button"/i);
+  assert.match(html, /id="retry-voice-cleanup"[^>]+type="button"[^>]+hidden/i);
+  assert.match(html, /id="voice-button"[^>]+aria-pressed="false"[^>]+aria-describedby="voice-hint"/i);
+  assert.match(html, /id="voice-hint"/i);
+  assert.match(html, /id="cancel-voice"[^>]+type="button"/i);
+  assert.match(html, /id="retry-voice-transcription"[^>]+type="button"[^>]+hidden/i);
+  assert.match(html, /<dialog[^>]+id="voice-consent"[^>]+aria-labelledby="voice-consent-title"/i);
+  assert.match(html, /id="voice-consent-continue"[^>]+type="button"/i);
+  assert.match(html, /id="voice-consent-cancel"[^>]+type="button"/i);
+  assert.match(html, /not sent to the chat until you tap Send/i);
+  assert.doesNotMatch(html, /auto(?:matically)?[- ]send/i);
+
+  assert.match(app, /from ['"]\.\/voice-capture\.js['"]/);
+  assert.match(app, /from ['"]\.\/voice-upload-store\.js['"]/);
+  assert.match(app, /from ['"]\.\/voice-transport\.js['"]/);
+  assert.match(app, /from ['"]\.\/voice-upload-coordinator\.js['"]/);
+  assert.match(app, /from ['"]\.\/voice-message-controller\.js['"]/);
+  assert.match(app, /from ['"]\.\/assistant-audio-controller\.js['"]/);
+  assert.match(app, /from ['"]\.\/assistant-audio-actions\.js['"]/);
+  assert.match(app, /from ['"]\.\/voice-ui-guards\.js['"]/);
+  assert.match(app, /pointerdown/i);
+  assert.match(app, /pointerup/i);
+  assert.match(app, /pointercancel/i);
+  assert.match(app, /lostpointercapture/i);
+  assert.match(app, /voiceButton\.addEventListener\(['"]click['"]/i);
+  assert.match(app, /voiceButton\.addEventListener\(['"]keyup['"][\s\S]{0,180}markDirectActivation\(\)/i);
+  assert.match(app, /addEventListener\(['"]pointerup['"][\s\S]{0,180}markDirectActivation\(\)[\s\S]{0,180}activePointerId\s*!==/i);
+  assert.match(app, /voicePhaseCanCancelInteraction\(phase\)/i);
+  assert.match(app, /createVoiceHoldFence/);
+  assert.match(app, /currentVoiceIdentity\(identity\)[\s\S]{0,180}voiceHoldFence\.clear\(token\)/i);
+  assert.match(app, /hasVoiceOperation\s*&&\s*!hasVoiceDraft\s*&&\s*VOICE_RETAINED_PHASES\.has\(phase\)/i);
+  assert.match(app, /controller\.retryTranscription\(\)/i);
+  assert.match(app, /phase\s*===\s*['"]processing['"][\s\S]{0,400}controller\.remove\(\)/i);
+  assert.match(app, /performAssistantAudioAction\(/i);
+  assert.doesNotMatch(app, /void\s+assistantAudioController\.(?:generate|play)\(/i);
+  assert.match(app, /assistantAudioController\.handleHidden\(\)/i);
+  assert.match(app, /visibilitychange/i);
+  assert.match(app, /pagehide/i);
+  assert.match(app, /Escape/);
+  const supportedCancelReasons = new Set([
+    'cancel', 'escape', 'hidden', 'lostpointercapture', 'pagehide',
+    'pointercancel', 'visible-cancel',
+  ]);
+  const wiredCancelReasons = [...app.matchAll(/cancelVoiceInteraction\(['"]([^'"]+)['"]\)/g)]
+    .map(([, reason]) => reason);
+  assert.ok(wiredCancelReasons.length >= 6);
+  assert.deepEqual(wiredCancelReasons.filter((reason) => !supportedCancelReasons.has(reason)), []);
+
+  assert.match(css, /#voice-button\s*\{[^}]*min-width:\s*(?:9[6-9]|1\d{2})px/is);
+  assert.match(css, /#voice-button\s*\{[^}]*touch-action:\s*none/is);
+  assert.match(css, /\.voice-draft\s*\{[^}]*background:\s*var\(--surface\)/is);
+  assert.match(css, /\.voice-consent\s*\{[^}]*max-height:\s*min\(/is);
+});
+
 test('ui contract preserves the exact source assets and serves an optimized avatar derivative', async () => {
   const html = await text('index.html');
   const wordmark = await readFile(new URL('assets/simplify-wordmark.svg', publicUrl));
@@ -171,4 +233,8 @@ test('ui contract syntax check covers every shipped client module', async () => 
   assert.match(check, /node --check public\/chat-copy\.js/);
   assert.match(check, /node --check public\/voice-transport\.js/);
   assert.match(check, /node --check public\/voice-upload-coordinator\.js/);
+  assert.match(check, /node --check public\/voice-message-controller\.js/);
+  assert.match(check, /node --check public\/assistant-audio-controller\.js/);
+  assert.match(check, /node --check public\/assistant-audio-actions\.js/);
+  assert.match(check, /node --check public\/voice-ui-guards\.js/);
 });

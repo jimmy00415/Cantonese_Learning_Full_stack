@@ -51,10 +51,27 @@
         <p id="turn-status" class="turn-status" role="status" aria-live="polite" aria-atomic="true"></p>
 
         <form id="composer" class="composer" aria-label="Message Campus AI Senior">
+          <div id="voice-draft" class="voice-draft" hidden>
+            <div class="voice-draft-copy">
+              <p id="voice-draft-state" role="status" aria-live="polite" aria-atomic="true">Voice draft · Not sent</p>
+              <p id="voice-draft-help">Review the transcript in the chat box, then tap Send.</p>
+            </div>
+            <div class="voice-draft-actions">
+              <button id="retry-voice-cleanup" type="button" hidden>Finish cleanup</button>
+              <button id="remove-voice-draft" type="button">Remove voice</button>
+            </div>
+          </div>
+          <div id="voice-live" class="voice-live" hidden>
+            <p id="voice-hint">Hold while speaking. Release to create an editable transcript.</p>
+            <div class="voice-live-actions">
+              <button id="retry-voice-transcription" type="button" hidden>Retry transcription</button>
+              <button id="cancel-voice" type="button">Cancel</button>
+            </div>
+          </div>
           <div class="composer-panel">
             <label class="sr-only" for="message-input">Your message</label>
             <textarea id="message-input" name="message" rows="1" maxlength="4000" placeholder="Ask your AI senior…" autocomplete="off" disabled></textarea>
-            <button id="voice-button" type="button" aria-label="Voice input is not available in this build" title="Voice input is not available in this build" disabled>Voice unavailable</button>
+            <button id="voice-button" type="button" aria-pressed="false" aria-describedby="voice-hint" aria-label="Hold to record a voice message" disabled>Hold to talk</button>
             <button id="send-button" type="submit" disabled>Send</button>
           </div>
           <p id="composer-feedback" class="composer-feedback" aria-live="polite" aria-atomic="true"></p>
@@ -65,6 +82,18 @@
         </form>
       </div>
     </div>
+
+    <dialog id="voice-consent" class="voice-consent" aria-labelledby="voice-consent-title" aria-describedby="voice-consent-copy">
+      <div class="voice-consent-card">
+        <p class="sheet-eyebrow">Optional voice message</p>
+        <h2 id="voice-consent-title">Use your microphone?</h2>
+        <p id="voice-consent-copy">When you hold the voice button, your recording is uploaded for transcription. You can edit the transcript, and it is not sent to the chat until you tap Send.</p>
+        <div class="voice-consent-actions">
+          <button id="voice-consent-continue" type="button">Use voice messages</button>
+          <button id="voice-consent-cancel" type="button">Not now</button>
+        </div>
+      </div>
+    </dialog>
 
     <dialog id="assistant-info" class="assistant-info" aria-labelledby="assistant-info-title">
       <div class="sheet-heading">
@@ -91,7 +120,7 @@
         </section>
         <section>
           <h3>Draft privacy notice</h3>
-          <p>Text you send may be processed by the configured AI provider to produce an answer. Voice input is disabled in this build. Use Clear conversation below to revoke this guest session and queue its stored data for deletion.</p>
+          <p>Text you send may be processed by the configured AI provider to produce an answer. Voice is optional: a recording is uploaded only after you choose the voice feature, and its transcript remains editable and unsent until you tap Send. Use Clear conversation below to revoke this guest session and queue its stored data for deletion.</p>
         </section>
       </div>
 

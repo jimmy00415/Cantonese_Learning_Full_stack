@@ -74,6 +74,25 @@ export function createMessageElement(document, message, {
   bubble.append(element(document, 'p', 'message-text', message?.text ?? ''));
   stack.append(bubble);
 
+  if (role === 'assistant') {
+    const audioControl = element(document, 'div', 'assistant-audio');
+    audioControl.hidden = true;
+    audioControl.dataset.messageId = String(message?.id ?? '');
+    audioControl.dataset.mediaId = String(message?.mediaId ?? '');
+    const audioButton = element(document, 'button', 'assistant-audio-button', 'Generate voice');
+    audioButton.type = 'button';
+    audioButton.dataset.messageId = String(message?.id ?? '');
+    audioButton.setAttribute('aria-pressed', 'false');
+    audioButton.setAttribute('aria-label', 'Generate an optional AI voice for this answer');
+    const audioStatus = element(document, 'span', 'assistant-audio-status');
+    audioStatus.setAttribute('role', 'status');
+    audioStatus.setAttribute('aria-live', 'polite');
+    audioStatus.setAttribute('aria-atomic', 'true');
+    const audioDisclosure = element(document, 'span', 'assistant-audio-disclosure', 'Optional AI-generated voice');
+    audioControl.append(audioButton, audioStatus, audioDisclosure);
+    stack.append(audioControl);
+  }
+
   const sources = element(document, 'div', 'message-sources');
   appendSources(document, sources, message?.citations);
   stack.append(sources);

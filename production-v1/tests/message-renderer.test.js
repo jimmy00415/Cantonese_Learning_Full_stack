@@ -111,3 +111,29 @@ test('message renderer labels a retryable rate-limit rejection honestly and keep
   assert.equal(nodes.find((node) => node.className === 'message-state').textContent, 'Not sent · wait to retry');
   assert.equal(nodes.find((node) => node.className === 'retry-message').hidden, false);
 });
+
+test('assistant answers expose a hidden text-primary AI voice control without audio or autoplay', () => {
+  const assistant = createMessageElement(fakeDocument, {
+    id: '11111111-1111-4111-8111-111111111111',
+    role: 'assistant', status: 'delivered', text: 'The text answer stays primary.',
+    mediaId: '22222222-2222-4222-8222-222222222222',
+    createdAt: '2026-08-25T08:00:00.000Z',
+  });
+  const user = createMessageElement(fakeDocument, {
+    id: '33333333-3333-4333-8333-333333333333',
+    role: 'user', status: 'accepted', text: 'Question',
+    createdAt: '2026-08-25T08:00:00.000Z',
+  });
+
+  const assistantNodes = all(assistant);
+  const control = assistantNodes.find((node) => node.className === 'assistant-audio');
+  const button = assistantNodes.find((node) => node.className === 'assistant-audio-button');
+  assert.equal(control.hidden, true);
+  assert.equal(control.dataset.messageId, '11111111-1111-4111-8111-111111111111');
+  assert.equal(control.dataset.mediaId, '22222222-2222-4222-8222-222222222222');
+  assert.equal(button.type, 'button');
+  assert.equal(button.textContent, 'Generate voice');
+  assert.equal(assistantNodes.find((node) => node.className === 'assistant-audio-disclosure').textContent, 'Optional AI-generated voice');
+  assert.equal(assistantNodes.some((node) => node.tagName === 'audio'), false);
+  assert.equal(all(user).some((node) => node.className === 'assistant-audio'), false);
+});

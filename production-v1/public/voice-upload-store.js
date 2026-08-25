@@ -687,6 +687,46 @@ export function createVoiceUploadStore({
     }, { metadata: true });
   }
 
+  async function releaseMessageBinding({
+    clientUploadId,
+    clientSessionScope,
+    voiceDraftId,
+    clientMessageId,
+    text,
+    nowMs = now(),
+  }) {
+    const id = requireString(clientUploadId, 'clientUploadId');
+    const scope = requireString(clientSessionScope, 'clientSessionScope');
+    const draftId = requireString(voiceDraftId, 'voiceDraftId');
+    const messageId = requireString(clientMessageId, 'clientMessageId');
+    if (typeof text !== 'string' || !text.trim() || text.length > 4_000) {
+      throw new TypeError('text must contain between 1 and 4000 characters');
+    }
+    const at = requireTime(nowMs);
+    const binding = localBinding(scope);
+    if (!binding) return false;
+    return transact('readwrite', async (store, _transaction, metadataStore) => {
+      const metadata = await requestResult(metadataStore.get(ACTIVE_SCOPE_KEY));
+      if (!bindingStillCurrent(binding) || !metadataMatches(metadata, binding)) return false;
+      const operation = await requestResult(store.get(id));
+      if (!operation
+        || operation.clientSessionScope !== scope
+        || operation.scopeGeneration !== binding.scopeGeneration
+        || operation.state !== 'ready'
+        || operation.voiceDraftId !== draftId
+        || operation.messageBinding?.clientMessageId !== messageId
+        || operation.messageBinding?.text !== text) return false;
+      const released = {
+        ...operation,
+        messageBinding: null,
+        updatedAt: at,
+        revision: operation.revision + 1,
+      };
+      store.put(released);
+      return released;
+    }, { metadata: true });
+  }
+
   async function dispose() {
     instanceEpoch += 1;
     boundScope = null;
@@ -712,6 +752,7 @@ export function createVoiceUploadStore({
     get,
     listByScope,
     readActiveScope,
+    releaseMessageBinding,
     renewLease,
     transition,
     writeResult,

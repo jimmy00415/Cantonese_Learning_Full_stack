@@ -52,6 +52,51 @@ async function blobBytes(blob) {
   return [...new Uint8Array(await blob.arrayBuffer())];
 }
 
+async function createBoundReadyOperation(store, {
+  clientMessageId = '44444444-4444-4444-8444-444444444444',
+  text = 'Where exactly is Academic Registry?',
+  voiceDraftId = '33333333-3333-4333-8333-333333333333',
+} = {}) {
+  const operation = await store.commitRecording({
+    clientSessionScope: SCOPE,
+    audio: wav(),
+    durationMs: 700,
+  });
+  const lease = await store.claimById({
+    clientUploadId: operation.clientUploadId,
+    clientSessionScope: SCOPE,
+    workerId: 'worker-release-fixture',
+    nowMs: START_MS,
+  });
+  await store.writeResult({
+    clientUploadId: operation.clientUploadId,
+    clientSessionScope: SCOPE,
+    workerId: lease.leaseOwnerId,
+    leaseToken: lease.leaseToken,
+    leaseGeneration: lease.leaseGeneration,
+    nowMs: START_MS + 1,
+    patch: { state: 'ready', transcript: 'Where is Academic Registry?', voiceDraftId },
+  });
+  const bound = await store.bindMessage({
+    clientUploadId: operation.clientUploadId,
+    clientSessionScope: SCOPE,
+    voiceDraftId,
+    clientMessageId,
+    text,
+    nowMs: START_MS + 2,
+  });
+  return {
+    bound,
+    identity: {
+      clientUploadId: operation.clientUploadId,
+      clientSessionScope: SCOPE,
+      voiceDraftId,
+      clientMessageId,
+      text,
+    },
+  };
+}
+
 test('commitRecording stores exact WAV identity atomically with lowercase SHA and fixed one-hour TTL', async () => {
   const store = await createStore();
   const audio = wav();
@@ -487,6 +532,70 @@ test('ready transcript can be durably bound to one exact outgoing message before
     text: 'Must not overwrite',
     nowMs: START_MS + 3,
   }), false);
+});
+
+test('releaseMessageBinding atomically clears only the exact current binding and preserves the ready draft', async () => {
+  const store = await createStore();
+  const { bound, identity } = await createBoundReadyOperation(store);
+
+  for (const mismatch of [
+    { clientUploadId: '99999999-9999-4999-8999-999999999999' },
+    { clientSessionScope: 'scope-other' },
+    { voiceDraftId: '88888888-8888-4888-8888-888888888888' },
+    { clientMessageId: '77777777-7777-4777-8777-777777777777' },
+    { text: 'Different exact text' },
+  ]) {
+    assert.equal(await store.releaseMessageBinding({
+      ...identity,
+      ...mismatch,
+      nowMs: START_MS + 3,
+    }), false);
+    assert.deepEqual((await store.get(identity.clientUploadId)).messageBinding, bound.messageBinding);
+  }
+
+  const released = await store.releaseMessageBinding({ ...identity, nowMs: START_MS + 4 });
+
+  assert.equal(released.messageBinding, null);
+  assert.equal(released.state, 'ready');
+  assert.equal(released.voiceDraftId, identity.voiceDraftId);
+  assert.equal(released.transcript, 'Where is Academic Registry?');
+  assert.equal(released.blob, bound.blob);
+  assert.equal(released.revision, bound.revision + 1);
+  assert.equal((await store.get(identity.clientUploadId)).messageBinding, null);
+  assert.equal(await store.releaseMessageBinding({ ...identity, nowMs: START_MS + 5 }), false);
+});
+
+test('releaseMessageBinding is generation-fenced and only one concurrent exact release can win', async () => {
+  const indexedDBImpl = new IDBFactory();
+  const databaseName = `voice-binding-release-${globalThis.crypto.randomUUID()}`;
+  const firstTab = newStore({ indexedDBImpl, databaseName });
+  const secondTab = newStore({ indexedDBImpl, databaseName });
+  await firstTab.bindScope(SCOPE, { nowMs: START_MS });
+  await bindExisting(secondTab, SCOPE, START_MS);
+  const { identity } = await createBoundReadyOperation(firstTab);
+
+  const outcomes = await Promise.all([
+    firstTab.releaseMessageBinding({ ...identity, nowMs: START_MS + 3 }),
+    secondTab.releaseMessageBinding({ ...identity, nowMs: START_MS + 3 }),
+  ]);
+  assert.equal(outcomes.filter(Boolean).length, 1);
+  assert.equal((await firstTab.get(identity.clientUploadId)).messageBinding, null);
+
+  await firstTab.clearScope(SCOPE);
+  await bindExisting(firstTab, SCOPE, START_MS + 4);
+  const replacement = await createBoundReadyOperation(firstTab, {
+    clientMessageId: '66666666-6666-4666-8666-666666666666',
+    text: 'Replacement binding',
+    voiceDraftId: '55555555-5555-4555-8555-555555555555',
+  });
+  assert.equal(await secondTab.releaseMessageBinding({
+    ...replacement.identity,
+    nowMs: START_MS + 5,
+  }), false);
+  assert.deepEqual(
+    (await firstTab.get(replacement.identity.clientUploadId)).messageBinding,
+    { clientMessageId: '66666666-6666-4666-8666-666666666666', text: 'Replacement binding' },
+  );
 });
 
 test('a new recording never erases a ready draft already bound to an ambiguously sent message', async () => {
