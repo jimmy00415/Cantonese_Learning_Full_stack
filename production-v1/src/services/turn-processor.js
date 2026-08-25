@@ -10,7 +10,9 @@ function publish(eventHub, result) {
   }
 }
 
-export function createTurnProcessor({ store, answerService, voiceService, eventHub, now = () => new Date() } = {}) {
+export function createTurnProcessor({
+  store, answerService, voiceService, voiceOutputGate, eventHub, now = () => new Date(),
+} = {}) {
   if (!store || typeof answerService?.answer !== 'function') throw new Error('turn processor dependencies are required');
 
   async function processTurn({ turn, leaseToken, signal }) {
@@ -49,6 +51,10 @@ export function createTurnProcessor({ store, answerService, voiceService, eventH
       publish(eventHub, delivered);
       if (turn.replyMode === 'voice') {
         try {
+          if (typeof voiceOutputGate !== 'function') {
+            throw Object.assign(new Error('VOICE_NOT_RELEASE_VERIFIED'), { code: 'VOICE_NOT_RELEASE_VERIFIED' });
+          }
+          voiceOutputGate();
           const preparation = voiceService?.prepareAssistantAudio?.({
             sessionId: turn.sessionId,
             messageId: delivered.message.id,

@@ -127,6 +127,9 @@ export function createTtsProvider({
     if (!GOOGLE_VOICE_KEYS.has(responseLanguage)) {
       throw speechError('VOICE_SYNTHESIS_REJECTED', 502, false, 'rejected');
     }
+    if (!google && responseLanguage !== 'yueHant') {
+      throw speechError('VOICE_SYNTHESIS_REJECTED', 502, false, 'rejected');
+    }
     const body = google
       ? JSON.stringify({
         input: { text: serverText },

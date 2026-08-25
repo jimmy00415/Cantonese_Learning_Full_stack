@@ -2,7 +2,7 @@ import express from 'express';
 
 import { sendError } from './errors.js';
 import { createSessionResolver } from './session.js';
-import { createVoiceService, voiceLimits } from '../services/voice.js';
+import { assertVoiceOutputCapability, createVoiceService, voiceLimits } from '../services/voice.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -173,8 +173,9 @@ export function createVoiceRouter({
     try {
       const { session } = await resolveSession(request);
       if (!UUID.test(request.params.messageId ?? '')) throw voiceError(404, 'NOT_FOUND');
-      await store.getOwnedAssistantMessage({ sessionId: session.id, messageId: request.params.messageId });
-      assertCapability(config, 'voiceOutput', now);
+      const message = await store.getOwnedAssistantMessage({ sessionId: session.id, messageId: request.params.messageId });
+      if (message.replyMode !== 'voice') throw voiceError(404, 'NOT_FOUND');
+      assertVoiceOutputCapability(config, now());
       const result = await service.generateAssistantAudio({
         sessionId: session.id, messageId: request.params.messageId, signal: disconnect.signal,
       });

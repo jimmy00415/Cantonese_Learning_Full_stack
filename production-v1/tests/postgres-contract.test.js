@@ -713,6 +713,7 @@ test('live ASR and TTS claims are observed under row locks instead of double-cla
     id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', session_id: sessionRow().id,
     conversation_id: conversationRow().id, turn_id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
     sequence: '2', role: 'assistant', kind: 'text', status: 'delivered', text: 'answer',
+    reply_language: 'en', reply_mode: 'voice',
     created_at: NOW,
   };
   const generation = {
@@ -756,6 +757,39 @@ test('live ASR and TTS claims are observed under row locks instead of double-cla
   assert.equal(activeSessionQueries.length, 2);
   assert.equal(activeSessionQueries.every((call) => /FOR UPDATE/i.test(call.text)), true,
     'voice claims must serialize with session deletion before choosing an attempt key');
+  const assistantClaim = pool.calls.find((call) => /FROM messages[\s\S]*role\s*=\s*'assistant'[\s\S]*FOR UPDATE/i.test(call.text));
+  assert.match(assistantClaim.text, /reply_mode\s*=\s*'voice'/i);
+  pool.assertDrained();
+});
+
+test('assistant audio recovery query is bounded to delivered voice-mode messages missing media', async () => {
+  const candidate = {
+    id: 'abababab-abab-4bab-8bab-abababababab',
+    session_id: sessionRow().id,
+    reply_language: 'yue-Hant-HK',
+    reply_mode: 'voice',
+    created_at: NOW,
+  };
+  const pool = new RecordingPool([
+    { match: /FROM messages/i, result: result([candidate]) },
+  ]);
+  const store = new PostgresStore({ pool });
+
+  const candidates = await store.listAssistantAudioRecoveryCandidates({ limit: 2 });
+  assert.deepEqual(candidates, [{
+    id: candidate.id,
+    sessionId: candidate.session_id,
+    replyLanguage: 'yue-Hant-HK',
+    replyMode: 'voice',
+    createdAt: NOW,
+  }]);
+  const query = pool.calls.find((call) => /FROM messages/i.test(call.text));
+  assert.match(query.text, /role\s*=\s*'assistant'/i);
+  assert.match(query.text, /status\s*=\s*'delivered'/i);
+  assert.match(query.text, /reply_mode\s*=\s*'voice'/i);
+  assert.match(query.text, /media_id\s+IS\s+NULL/i);
+  assert.match(query.text, /LIMIT\s+\$1/i);
+  assert.deepEqual(query.values, [2]);
   pool.assertDrained();
 });
 

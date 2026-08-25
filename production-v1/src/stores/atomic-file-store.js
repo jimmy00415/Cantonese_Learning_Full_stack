@@ -909,7 +909,7 @@ export class AtomicFileStore {
       this.#activeSession(snapshot, sessionId);
       const message = snapshot.messages.find((item) => (
         item.id === messageId && item.sessionId === sessionId
-        && item.role === 'assistant' && item.status === 'delivered'
+        && item.role === 'assistant' && item.status === 'delivered' && item.replyMode === 'voice'
       ));
       if (!message || kind !== 'assistant_voice') return noChange({ status: 'conflict' });
       const timestamp = nowIso(now);
@@ -1016,6 +1016,24 @@ export class AtomicFileStore {
       if (!message) throw storeError('NOT_FOUND', 'The requested assistant message was not found.');
       return clone(message);
     });
+  }
+
+  async listAssistantAudioRecoveryCandidates({ limit = 25 } = {}) {
+    const maximum = Math.max(1, Math.min(Number(limit) || 25, 25));
+    return this.#read((snapshot) => clone(snapshot.messages
+      .filter((message) => (
+        message.role === 'assistant' && message.status === 'delivered'
+        && message.replyMode === 'voice' && !message.mediaId
+      ))
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
+      .slice(0, maximum)
+      .map((message) => ({
+        id: message.id,
+        sessionId: message.sessionId,
+        replyLanguage: message.replyLanguage,
+        replyMode: message.replyMode,
+        createdAt: message.createdAt,
+      }))));
   }
 
   async completeMediaGeneration({ generationId, leaseToken, mediaAsset, now }) {

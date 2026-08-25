@@ -676,6 +676,45 @@ test('server creates one shared ADC adapter for all configured Google providers'
   assert.equal(server.runtime.ttsProvider.provider, 'google-tts');
 });
 
+test('server triggers bounded assistant audio recovery without waiting for TTS completion', async (t) => {
+  const config = productionConfig();
+  const order = [];
+  const { store, mediaStore, cleanupService } = runtimeFixture(order);
+  const retentionWorker = {
+    firstRun: Promise.resolve({ ok: true }),
+    readiness: async () => ({ status: 'ready', healthy: true, policyVersion: 'retention-v1' }),
+    stop: async () => undefined,
+  };
+  const recovery = deferred();
+  let recoveryCalls = 0;
+  const voiceService = {
+    recoverAssistantAudio() {
+      recoveryCalls += 1;
+      return recovery.promise;
+    },
+  };
+  const server = await startServer({
+    config,
+    host: '127.0.0.1',
+    port: 0,
+    store,
+    mediaStore,
+    cleanupService,
+    retentionWorker,
+    voiceService,
+    corpus: {
+      schemaVersion: 'hkbu-campus-v1', snapshotAt: '2026-08-25T12:00:00+08:00', sources: [{ id: 'official-source' }],
+    },
+    llmProvider: { provider: 'fake-real', generate: async () => ({ text: 'unused' }) },
+    evaluateReadiness: async () => safeReadiness(true),
+    dispatcherOptions: { pollIntervalMs: 60_000 },
+  });
+  t.after(() => server.shutdown());
+  assert.equal(recoveryCalls, 1);
+  recovery.resolve({ scanned: 0, attempted: 0, attached: 0, limit: 25 });
+  await server.runtime.voiceRecovery;
+});
+
 test('the single-flight readiness supervisor revokes, gates, and recovers while public ready stays cached', async (t) => {
   const config = productionConfig();
   const order = [];

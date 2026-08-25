@@ -224,6 +224,35 @@ test('Google STT rejects unsupported response locales before ADC transport', asy
   assert.equal(requests, 0);
 });
 
+test('legacy Cantonese-only TTS adapters reject English and Mandarin before provider transport', async () => {
+  const configurations = [
+    { provider: 'azure', settings: { apiKey: 'azure-key', region: 'eastasia' } },
+    {
+      provider: 'minimax',
+      settings: {
+        apiKey: 'minimax-key', baseUrl: 'https://minimax.test', model: 'speech-02-hd', voice: 'Cantonese_KindWoman',
+      },
+    },
+  ];
+  for (const config of configurations) {
+    let requests = 0;
+    const provider = createTtsProvider({
+      config,
+      fetchImpl: async () => {
+        requests += 1;
+        throw new Error('provider transport must not run');
+      },
+    });
+    for (const responseLanguage of ['en', 'zhHans']) {
+      await assert.rejects(
+        provider.synthesize('Immutable server text', { responseLanguage }),
+        (error) => error.code === 'VOICE_SYNTHESIS_REJECTED' && error.retryable === false,
+      );
+    }
+    assert.equal(requests, 0, config.provider);
+  }
+});
+
 function smokeEnvironment(overrides = {}) {
   return {
     NODE_ENV: 'production',

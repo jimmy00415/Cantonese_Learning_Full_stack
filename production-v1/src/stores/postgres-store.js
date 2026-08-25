@@ -1370,7 +1370,7 @@ export class PostgresStore {
       const messageResult = await client.query(`
         SELECT * FROM messages
         WHERE id = $1 AND session_id = $2
-          AND role = 'assistant' AND status = 'delivered'
+          AND role = 'assistant' AND status = 'delivered' AND reply_mode = 'voice'
         FOR UPDATE
       `, [messageId, sessionId]);
       if (messageResult.rowCount !== 1 || kind !== 'assistant_voice') return { status: 'conflict' };
@@ -1517,6 +1517,19 @@ export class PostgresStore {
     `, [messageId, sessionId]);
     if (selected.rowCount !== 1) throw storeError('NOT_FOUND', 'The requested assistant message was not found.');
     return mapRow(selected.rows[0]);
+  }
+
+  async listAssistantAudioRecoveryCandidates({ limit = 25 } = {}) {
+    const maximum = Math.max(1, Math.min(Number(limit) || 25, 25));
+    const selected = await this.pool.query(`
+      SELECT id, session_id, reply_language, reply_mode, created_at
+      FROM messages
+      WHERE role = 'assistant' AND status = 'delivered'
+        AND reply_mode = 'voice' AND media_id IS NULL
+      ORDER BY created_at ASC, id ASC
+      LIMIT $1
+    `, [maximum]);
+    return mapRows(selected.rows);
   }
 
   async completeMediaGeneration({ generationId, leaseToken, mediaAsset, now }) {

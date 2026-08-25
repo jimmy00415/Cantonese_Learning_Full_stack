@@ -214,13 +214,17 @@ async function createStore(t, prefix = 'hb-v1-voice-store-') {
   return { directory, filePath, store };
 }
 
-async function createDeliveredAssistant(store, session, conversation) {
+async function createDeliveredAssistant(store, session, conversation, {
+  replyLanguage = 'yue-Hant-HK', replyMode = 'voice',
+} = {}) {
   const accepted = await store.acceptMessage({
     sessionId: session.id,
     conversationId: conversation.id,
     clientMessageId: '12345678-1234-4234-8234-1234567890ab',
     requestHash: 'assistant-fixture-request',
     text: 'Tell me something useful',
+    replyLanguage,
+    replyMode,
     now: '2026-08-25T00:00:01.000Z',
   });
   const claimed = await store.claimNextTurn({
@@ -3552,6 +3556,127 @@ test('missing TTS provider durably records one permanent generation for POST rep
   assert.equal(replay.response.status, 503);
   assert.equal(replay.body.error.code, 'VOICE_PROVIDER_MISCONFIGURED');
   assert.equal(await readFile(filePath, 'utf8'), beforeReplay, 'permanent replay never reclaims quota or creates another generation');
+});
+
+test('text-mode assistant audio is rejected before HTTP provider work and by the atomic claim fence', async (t) => {
+  let ttsCalls = 0;
+  const { baseUrl, origin, store, mediaStore } = await startVoiceApp(t, {
+    ttsProvider: {
+      provider: 'azure',
+      synthesize: async () => {
+        ttsCalls += 1;
+        return { buffer: Buffer.from([0x49, 0x44, 0x33, 0x04]), mimeType: 'audio/mpeg', provider: 'azure', latencyMs: 1 };
+      },
+    },
+  });
+  const session = await fetchJson(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin } });
+  const cookie = session.response.headers.getSetCookie()[0].split(';')[0];
+  const assistant = await createDeliveredAssistant(
+    store, session.body.data.session, session.body.data.conversation,
+    { replyLanguage: 'en', replyMode: 'text' },
+  );
+
+  const response = await fetchJson(`${baseUrl}/api/v1/messages/${assistant.id}/audio`, {
+    method: 'POST', headers: { Origin: origin, Cookie: cookie },
+  });
+  assert.equal(response.response.status, 404);
+  assert.equal(response.body.error.code, 'NOT_FOUND');
+  const claim = await store.claimAssistantAudioWithRateLimits({
+    sessionId: session.body.data.session.id,
+    messageId: assistant.id,
+    kind: 'assistant_voice',
+    rateLimits: [],
+    leaseToken: 'text-mode-lease',
+    attemptStorageKey: mediaStore.createAttemptKey({ kind: 'tts' }),
+    configVersion: 'test',
+    leaseExpiresAt: new Date(Date.now() + 30_000),
+    attemptDeadlineAt: new Date(Date.now() + 60_000),
+    now: new Date(),
+  });
+  assert.equal(claim.status, 'conflict');
+  assert.equal(ttsCalls, 0);
+});
+
+test('durable voice recovery after store restart is bounded and does not duplicate attached TTS', async (t) => {
+  const { LocalMediaStore } = await import('../src/stores/local-media-store.js');
+  const { createVoiceService } = await import('../src/services/voice.js');
+  const directory = await mkdtemp(join(tmpdir(), 'hb-v1-voice-recovery-'));
+  const filePath = join(directory, 'store.json');
+  const firstStore = new AtomicFileStore({ filePath });
+  await firstStore.init();
+  const owner = await firstStore.createOrResumeSession({
+    tokenHash: 'd'.repeat(64), now: '2026-08-25T00:00:00.000Z',
+  });
+  const assistant = await createDeliveredAssistant(
+    firstStore, owner.session, owner.conversation,
+    { replyLanguage: 'yue-Hant-HK', replyMode: 'voice' },
+  );
+  await firstStore.close();
+
+  const store = new AtomicFileStore({ filePath });
+  const mediaStore = new LocalMediaStore({ rootDirectory: join(directory, 'media') });
+  await store.init();
+  await mediaStore.init();
+  t.after(async () => { await mediaStore.close(); await store.close(); });
+  const config = loadConfig({
+    NODE_ENV: 'test', V1_PUBLIC_ORIGIN: 'https://voice.example.test', V1_SESSION_SECRET: 'v'.repeat(32),
+    V1_TTS_PROVIDER: 'azure', AZURE_SPEECH_KEY: 'fake-only', AZURE_SPEECH_REGION: 'eastasia',
+  });
+  let ttsCalls = 0;
+  const service = createVoiceService({
+    config,
+    store,
+    mediaStore,
+    ttsProvider: {
+      provider: 'azure',
+      async synthesize() {
+        ttsCalls += 1;
+        return { buffer: Buffer.from([0x49, 0x44, 0x33, 0x04]), mimeType: 'audio/mpeg', provider: 'azure', latencyMs: 1 };
+      },
+    },
+  });
+
+  const recovered = await service.recoverAssistantAudio({ limit: 1 });
+  assert.deepEqual(recovered, { scanned: 1, attempted: 1, attached: 1, limit: 1 });
+  const message = await store.getOwnedAssistantMessage({ sessionId: owner.session.id, messageId: assistant.id });
+  assert.match(message.mediaId, /^[0-9a-f-]{36}$/i);
+  assert.equal(ttsCalls, 1);
+  assert.deepEqual(
+    await service.recoverAssistantAudio({ limit: 1 }),
+    { scanned: 0, attempted: 0, attached: 0, limit: 1 },
+  );
+  assert.equal(ttsCalls, 1);
+});
+
+test('durable voice recovery checks release evidence before scanning storage or provider readiness', async () => {
+  const { createVoiceService } = await import('../src/services/voice.js');
+  const config = loadConfig({
+    NODE_ENV: 'test', V1_PUBLIC_ORIGIN: 'https://voice.example.test', V1_SESSION_SECRET: 'v'.repeat(32),
+    V1_TTS_PROVIDER: 'azure', AZURE_SPEECH_KEY: 'fake-only', AZURE_SPEECH_REGION: 'eastasia',
+  });
+  config.publicStatus = { ...config.publicStatus, voiceOutputPreview: false };
+  config.getPublicStatus = () => ({ ...config.publicStatus });
+  let scans = 0;
+  let providerCalls = 0;
+  const service = createVoiceService({
+    config,
+    store: {
+      async listAssistantAudioRecoveryCandidates() { scans += 1; return []; },
+    },
+    mediaStore: {},
+    ttsProvider: { async synthesize() { providerCalls += 1; } },
+  });
+
+  await assert.rejects(
+    service.recoverAssistantAudio(),
+    (error) => error.code === 'VOICE_NOT_RELEASE_VERIFIED',
+  );
+  await assert.rejects(
+    service.generateAssistantAudio({ sessionId: 'owned-session', messageId: 'owned-assistant' }),
+    (error) => error.code === 'VOICE_NOT_RELEASE_VERIFIED',
+  );
+  assert.equal(scans, 0);
+  assert.equal(providerCalls, 0);
 });
 
 test('voice HTTP opt-in TTS keeps text, generates once, and media GET Range HEAD 416 and ownership stay private', async (t) => {

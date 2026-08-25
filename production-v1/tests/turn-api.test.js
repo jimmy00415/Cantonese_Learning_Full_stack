@@ -513,6 +513,7 @@ test('turn processor owns reply preferences from the claimed turn and prepares v
     voiceService: {
       prepareAssistantAudio(input) { calls.push({ type: 'voice', ...input }); }
     },
+    voiceOutputGate: () => undefined,
     now: () => new Date(base + 1),
   });
   const result = await processor.processTurn({ turn: claimed, leaseToken: 'preference-token', signal: new AbortController().signal });
@@ -525,6 +526,39 @@ test('turn processor owns reply preferences from the claimed turn and prepares v
   assert.equal(result.message.replyLanguage, 'yue-Hant-HK');
   assert.equal(result.message.replyMode, 'voice');
   assert.equal(accepted.turn.replyLanguage, 'yue-Hant-HK');
+});
+
+test('automatic voice preparation fails closed when release evidence does not verify voice output', async (t) => {
+  const { store } = await createStore(t);
+  const owner = await createOwnedConversation(store, 'unverified-voice-output');
+  await store.acceptMessage({
+    sessionId: owner.session.id,
+    conversationId: owner.conversation.id,
+    clientMessageId: '78010000-0000-4000-8000-000000000000',
+    requestHash: 'unverified-voice-output-hash',
+    text: 'Deliver text but do not expose it to unverified TTS',
+    replyLanguage: 'en',
+    replyMode: 'voice',
+    now: '2026-08-25T00:00:01.000Z',
+  });
+  const base = Date.parse('2026-08-25T00:01:00.000Z');
+  const claimed = await store.claimNextTurn(lease('unverified-worker', 'unverified-token', base));
+  let voiceCalls = 0;
+  const processor = createTurnProcessor({
+    store,
+    eventHub: new EventHub(),
+    answerService: { async answer() { return finalMessage('Grounded text remains delivered.'); } },
+    voiceOutputGate() {
+      throw Object.assign(new Error('unverified'), { code: 'VOICE_NOT_RELEASE_VERIFIED' });
+    },
+    voiceService: { prepareAssistantAudio() { voiceCalls += 1; } },
+    now: () => new Date(base + 1),
+  });
+
+  const result = await processor.processTurn({ turn: claimed, leaseToken: 'unverified-token', signal: new AbortController().signal });
+  assert.equal(result.delivered, true);
+  assert.equal(result.message.text, 'Grounded text remains delivered.');
+  assert.equal(voiceCalls, 0);
 });
 
 test('voice locale mapping is explicit and asynchronous TTS failure cannot revoke delivered text', async (t) => {
@@ -557,6 +591,7 @@ test('voice locale mapping is explicit and asynchronous TTS failure cannot revok
         throw Object.assign(new Error('private tts failure'), { code: 'VOICE_SYNTHESIS_REJECTED' });
       },
     },
+    voiceOutputGate: () => undefined,
     now: () => new Date(base + 1),
   });
   const result = await processor.processTurn({ turn: claimed, leaseToken: 'async-tts-token', signal: new AbortController().signal });

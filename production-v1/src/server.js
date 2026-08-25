@@ -16,6 +16,7 @@ import { createRuntimeReadinessChecks } from './services/runtime-readiness.js';
 import { createStorageRuntime } from './services/storage-runtime.js';
 import { createTurnProcessor } from './services/turn-processor.js';
 import {
+  assertVoiceOutputCapability,
   defaultVoiceIngressSpoolRoot,
   createVoiceService,
   recoverStaleVoiceIngressSpools,
@@ -191,6 +192,7 @@ export async function startServer({
   let cleanupService = null;
   let retentionWorker = null;
   let eventHub = null;
+  let voiceRecovery = null;
   let server = null;
   let shutdownPromise = null;
   let cachedReadiness = config.nodeEnv === 'production'
@@ -440,7 +442,14 @@ export async function startServer({
       config, store, mediaStore, asrProvider, ttsProvider, cleanupService,
       eventHub, now, spoolParentDirectory,
     });
-    const turnProcessor = createTurnProcessor({ store, answerService, voiceService, eventHub, now });
+    const turnProcessor = createTurnProcessor({
+      store,
+      answerService,
+      voiceService,
+      voiceOutputGate: () => assertVoiceOutputCapability(config, now()),
+      eventHub,
+      now,
+    });
     dispatcher = createDispatcher({
       store,
       processTurn: turnProcessor.processTurn,
@@ -542,6 +551,9 @@ export async function startServer({
       applyReadinessState(cachedReadiness);
       startWatchdog();
     }
+    voiceRecovery = Promise.resolve()
+      .then(() => voiceService.recoverAssistantAudio?.())
+      .catch(() => ({ scanned: 0, attempted: 0, attached: 0, limit: 0 }));
 
     server.shutdown = stopRuntime;
     server.runtime = {
@@ -553,6 +565,8 @@ export async function startServer({
       asrProvider,
       ttsProvider,
       cleanupService,
+      voiceService,
+      voiceRecovery,
       retentionWorker,
       readiness,
       runtimeState,

@@ -29,6 +29,8 @@ export const voiceIngressSpoolLimits = Object.freeze({
   recoveryScanMultiplier: 8,
 });
 
+export const assistantAudioRecoveryLimit = 25;
+
 export const defaultVoiceIngressSpoolRoot = join(tmpdir(), 'hong-kong-buddy-v1-voice-ingress');
 
 const VOICE_INGRESS_DIRECTORY = /^voice-ingress-[a-z0-9]{6}$/i;
@@ -42,6 +44,15 @@ export function providerResponseLanguage(replyLanguage) {
   const value = PROVIDER_RESPONSE_LANGUAGE[replyLanguage];
   if (!value) throw workError('VOICE_SYNTHESIS_REJECTED', 502, false);
   return value;
+}
+
+export function assertVoiceOutputCapability(config, at = new Date()) {
+  const status = config?.getPublicStatus?.(at) ?? config?.publicStatus ?? {};
+  const available = config?.nodeEnv === 'production'
+    ? status.voiceOutput === true
+    : status.voiceOutputPreview === true;
+  if (!available) throw workError('VOICE_NOT_RELEASE_VERIFIED', 503, false);
+  return true;
 }
 
 function resolvePrivateSpoolRoot(parentDirectory) {
@@ -531,6 +542,7 @@ export function createVoiceService({
   };
 
   const generateAssistantAudio = async ({ sessionId, messageId, signal }) => {
+    assertVoiceOutputCapability(config, currentDate(now));
     const current = currentDate(now);
     const hardDeadline = addMs(current, voiceLimits.ttsAttemptMs);
     const leaseToken = randomUUID();
@@ -632,10 +644,39 @@ export function createVoiceService({
   };
 
   const prepareAssistantAudio = ({ sessionId, messageId }) => {
+    assertVoiceOutputCapability(config, currentDate(now));
+    if (!config.tts?.available || typeof ttsProvider?.synthesize !== 'function') {
+      throw workError('VOICE_PROVIDER_MISCONFIGURED', 503, false);
+    }
     queueMicrotask(() => {
       void generateAssistantAudio({ sessionId, messageId }).catch(() => undefined);
     });
     return { messageId, state: 'pending' };
+  };
+
+  const recoverAssistantAudio = async ({ limit = assistantAudioRecoveryLimit } = {}) => {
+    assertVoiceOutputCapability(config, currentDate(now));
+    if (!config.tts?.available || typeof ttsProvider?.synthesize !== 'function') {
+      throw workError('VOICE_PROVIDER_MISCONFIGURED', 503, false);
+    }
+    if (typeof store.listAssistantAudioRecoveryCandidates !== 'function') {
+      throw workError('VOICE_PROVIDER_MISCONFIGURED', 503, false);
+    }
+    const maximum = Math.max(1, Math.min(Number(limit) || assistantAudioRecoveryLimit, assistantAudioRecoveryLimit));
+    const candidates = await store.listAssistantAudioRecoveryCandidates({ limit: maximum });
+    let attempted = 0;
+    let attached = 0;
+    for (const candidate of candidates) {
+      attempted += 1;
+      try {
+        const result = await generateAssistantAudio({
+          sessionId: candidate.sessionId,
+          messageId: candidate.id,
+        });
+        if (result?.data?.state === 'attached') attached += 1;
+      } catch { /* durable generation state remains authoritative for later recovery */ }
+    }
+    return { scanned: candidates.length, attempted, attached, limit: maximum };
   };
 
   const cancelUpload = async ({ sessionId, clientUploadId }) => {
@@ -656,6 +697,7 @@ export function createVoiceService({
     cancelUpload,
     generateAssistantAudio,
     prepareAssistantAudio,
+    recoverAssistantAudio,
     getAssistantAudioStatus,
     revokeVoiceDraft: (input) => store.revokeVoiceDraft({ ...input, now: currentDate(now), cleanupNotBefore: currentDate(now) }),
   };
