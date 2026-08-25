@@ -1,6 +1,6 @@
 {
   "schemaVersion": "1.0.0",
-  "snapshotAt": "2026-08-25T12:00:00+08:00",
+  "snapshotAt": "2026-08-26T12:00:00+08:00",
   "governance": {
     "owner": "Hong Kong Buddy knowledge owner",
     "reviewCadence": "Weekly for high-volatility claims; monthly for stable service facts",
@@ -14,6 +14,7 @@
       "canonicalUrl": "https://ar.hkbu.edu.hk/student-services/new-student-orientation/student-card-collection-schedule",
       "verifiedAt": "2026-08-25T12:00:00+08:00",
       "risk": "time_sensitive",
+      "sourceGovernance": {"ownerOffice":"HKBU Academic Registry","categories":["student_card"],"languages":["en"],"volatility":"daily","reviewCadence":"daily","evidenceWindowDays":1,"reviewAttestation":{"reviewer":"HKBU source review 2026-08-25","reviewedAt":"2026-08-25T12:00:00+08:00","captureMethod":"manual_review","sourceHash":null}},
       "intentGroups": ["student_card"],
       "tags": ["student card", "collection", "photo upload", "JUPAS", "Non-JUPAS", "學生證", "学生证"],
       "exampleQuestions": ["When can I collect my student card?", "學生證幾時拎", "学生证什么时候领"],
@@ -69,6 +70,7 @@
       "canonicalUrl": "https://ar.hkbu.edu.hk/student-services/useful-information/student-e-card",
       "verifiedAt": "2026-08-25T12:00:00+08:00",
       "risk": "normal",
+      "sourceGovernance": {"ownerOffice":"HKBU Academic Registry","categories":["student_card"],"languages":["en"],"volatility":"monthly","reviewCadence":"monthly","evidenceWindowDays":31,"reviewAttestation":{"reviewer":"HKBU source review 2026-08-25","reviewedAt":"2026-08-25T12:00:00+08:00","captureMethod":"manual_review","sourceHash":null}},
       "intentGroups": ["student_card"],
       "tags": ["e-Card", "QR code", "accessible locations", "電子學生證", "电子学生证"],
       "exampleQuestions": ["Can e-Card replace my physical card everywhere?", "電子學生證邊度用到", "电子学生证在哪里能用"],
@@ -96,6 +98,7 @@
       "canonicalUrl": "https://ar.hkbu.edu.hk/student-services/student-record/replacement-of-student-card",
       "verifiedAt": "2026-08-25T12:00:00+08:00",
       "risk": "time_sensitive",
+      "sourceGovernance": {"ownerOffice":"HKBU Academic Registry","categories":["student_card"],"languages":["en"],"volatility":"biweekly","reviewCadence":"biweekly","evidenceWindowDays":14,"reviewAttestation":{"reviewer":"HKBU source review 2026-08-25","reviewedAt":"2026-08-25T12:00:00+08:00","captureMethod":"manual_review","sourceHash":null}},
       "intentGroups": ["student_card"],
       "tags": ["replacement", "lost card", "HK$100", "補領", "补领"],
       "exampleQuestions": ["How much is a replacement student card?", "學生證唔見咗", "学生证丢了"],
@@ -123,6 +126,7 @@
       "canonicalUrl": "https://ito.hkbu.edu.hk/services/account-password.html",
       "verifiedAt": "2026-08-25T12:00:00+08:00",
       "risk": "normal",
+      "sourceGovernance": {"ownerOffice":"HKBU Office of Information Technology","categories":["account_password"],"languages":["en"],"volatility":"monthly","reviewCadence":"monthly","evidenceWindowDays":31,"reviewAttestation":{"reviewer":"HKBU source review 2026-08-25","reviewedAt":"2026-08-25T12:00:00+08:00","captureMethod":"manual_review","sourceHash":null}},
       "intentGroups": ["account_password"],
       "tags": ["SSOid", "account activation", "reset", "帳戶", "账户"],
       "exampleQuestions": ["How do I activate my SSOid?", "忘記 SSOid 密碼", "忘记 SSOid 密码"],
@@ -158,6 +162,7 @@
       "canonicalUrl": "https://ito.hkbu.edu.hk/services/it-security/mfa.html",
       "verifiedAt": "2026-08-25T12:00:00+08:00",
       "risk": "normal",
+      "sourceGovernance": {"ownerOffice":"HKBU Office of Information Technology","categories":["duo"],"languages":["en"],"volatility":"monthly","reviewCadence":"monthly","evidenceWindowDays":31,"reviewAttestation":{"reviewer":"HKBU source review 2026-08-25","reviewedAt":"2026-08-25T12:00:00+08:00","captureMethod":"manual_review","sourceHash":null}},
       "intentGroups": ["duo"],
       "tags": ["Duo", "MFA", "new phone", "reinstall", "lost phone", "push notification", "雙重認證", "双重认证"],
       "exampleQuestions": ["Duo 换手机怎么办", "Duo push not arriving", "Duo 手機唔見咗"],
@@ -196,6 +201,7 @@
       "canonicalUrl": "https://ito.hkbu.edu.hk/contact-us.html",
       "verifiedAt": "2026-08-25T12:00:00+08:00",
       "risk": "time_sensitive",
+      "sourceGovernance": {"ownerOffice":"HKBU Office of Information Technology","categories":["it_help"],"languages":["en"],"volatility":"monthly","reviewCadence":"monthly","evidenceWindowDays":31,"reviewAttestation":{"reviewer":"HKBU source review 2026-08-25","reviewedAt":"2026-08-25T12:00:00+08:00","captureMethod":"manual_review","sourceHash":null}},
       "intentGroups": ["it_help"],
       "tags": ["ITO", "3411 7899", "hotline@hkbu.edu.hk", "RRS303", "IT help"],
       "exampleQuestions": ["How do I contact ITO?", "ITO 在哪", "ITO 在哪里"],
@@ -214,6 +220,7 @@
       "canonicalUrl": "https://sa.hkbu.edu.hk/en/accm/on-campus-accommodation/village-care/check-in-procedures.html",
       "verifiedAt": "2026-08-25T12:00:00+08:00",
       "risk": "time_sensitive",
+      "sourceGovernance": {"ownerOffice":"HKBU Office of Student Affairs / Accommodation and Campus Management (ACCM)","categories":["residence_check_in"],"languages":["en"],"volatility":"daily","reviewCadence":"daily","evidenceWindowDays":1,"reviewAttestation":{"reviewer":"HKBU source review 2026-08-25","reviewedAt":"2026-08-25T12:00:00+08:00","captureMethod":"manual_review","sourceHash":null}},
       "intentGroups": ["residence_check_in"],
       "tags": ["Village CARE", "check-in", "non-local freshman", "local freshman", "exchange student", "exchange students", "JC3"],
       "exampleQuestions": ["Village CARE check-in 2026", "Village CARE 入住", "Village CARE 入住时间"],
@@ -271,10 +278,11 @@
       "title": "Student Residence Halls Check-in Procedures",
       "publisher": "HKBU Office of Student Affairs",
       "canonicalUrl": "https://sa.hkbu.edu.hk/en/accm/on-campus-accommodation/student-residence-halls/check-in-procedures.html",
-      "verifiedAt": "2026-08-25T12:00:00+08:00",
+      "verifiedAt": "2026-08-26T11:30:00+08:00",
       "risk": "time_sensitive",
-      "intentGroups": ["residence_check_in"],
-      "tags": ["Student Residence Halls", "SRH", "check-in", "non-local freshman", "local freshman", "returning student"],
+      "sourceGovernance": {"ownerOffice":"HKBU Office of Student Affairs / Accommodation and Campus Management (ACCM)","categories":["residence_check_in","hall_facilities","hall_maintenance"],"languages":["en"],"volatility":"daily","reviewCadence":"daily","evidenceWindowDays":1,"reviewAttestation":{"reviewer":"HKBU first-party source review 2026-08-26","reviewedAt":"2026-08-26T11:30:00+08:00","captureMethod":"manual_review","sourceHash":null}},
+      "intentGroups": ["residence_check_in", "hall_facilities", "hall_maintenance"],
+      "tags": ["Student Residence Halls", "SRH", "check-in", "laundry payment", "defect reporting", "non-local freshman", "local freshman", "returning student"],
       "exampleQuestions": ["Residence Halls check-in 2026", "學生宿舍入住", "学生宿舍入住"],
       "claims": [
         {
@@ -302,6 +310,20 @@
           "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Check-in Date and Time table: Local Freshmen row", "captureMethod": "manual_review", "sourceHash": null}
         },
         {
+          "id": "evidence.sa.residence-halls.laundry-payment",
+          "text": {"en": "SRH laundry credit can be added at the 1/F Octopus payment kiosks or through HKBU Mobile App under Student Hostel Payment.", "zhHant": "SRH 洗衣額可在一樓八達通付款機增值，或在 HKBU Mobile App 選擇 Student Hostel Payment 付款。", "zhHans": "SRH 洗衣额度可在一楼八达通付款机充值，或在 HKBU Mobile App 选择 Student Hostel Payment 付款。"},
+          "sourceId": "hkbu.sa.residence-halls-check-in", "sourceLocator": "Air-conditioning and Laundry Service: laundry payment channels", "evidenceNote": "Manually reviewed the two official laundry-payment channels; no fee amount was inferred.",
+          "verifiedAt": "2026-08-26T11:30:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-02T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"paymentChannelsOnly": true}, "keywords": ["srh laundry", "laundry payment", "pay for", "洗衣點樣畀錢", "洗衣怎么付款", "hkbu mobile app", "student hostel payment"],
+          "reviewAttestation": {"reviewer": "HKBU first-party source review 2026-08-26", "reviewedAt": "2026-08-26T11:30:00+08:00", "sourceLocator": "Air-conditioning and Laundry Service: laundry payment channels", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.sa.residence-halls.defect-route",
+          "text": {"en": "Report an SRH room defect through Student Residence Online System under Defect; for immediate attention, contact the ACCM General Office, or the North Tower security counter after office hours.", "zhHant": "SRH 房間故障可在 Student Residence Online System 的 Defect 項目申報；如需即時處理，請聯絡 ACCM 總辦事處，或在辦公時間外聯絡北座保安櫃檯。", "zhHans": "SRH 房间故障可在 Student Residence Online System 的 Defect 项目申报；如需立即处理，请联系 ACCM 总办事处，或在办公时间外联系北座保安柜台。"},
+          "sourceId": "hkbu.sa.residence-halls-check-in", "sourceLocator": "Reporting Defects", "evidenceNote": "Manually reviewed the official defect-reporting route and immediate-attention escalation; emergencies remain on the safety route.",
+          "verifiedAt": "2026-08-26T11:30:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-02T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"emergencyRouteExcluded": true}, "keywords": ["room has a defect", "report a defect", "房有故障", "房間有故障", "房间有故障", "申報故障", "申报故障", "student residence online system"],
+          "reviewAttestation": {"reviewer": "HKBU first-party source review 2026-08-26", "reviewedAt": "2026-08-26T11:30:00+08:00", "sourceLocator": "Reporting Defects", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
           "id": "evidence.sa.residence-halls-check-in.stale-reminder-2025", "text": {"en": "The page's 2025/26 welcome reminder is conflicted for current 2026/27 schedule answers and cannot support them.", "zhHant": "頁面的 2025/26 歡迎提示與現時 2026/27 時間表衝突，不可用作依據。", "zhHans": "页面的 2025/26 欢迎提示与目前 2026/27 时间表冲突，不可用作依据。"},
           "sourceId": "hkbu.sa.residence-halls-check-in", "sourceLocator": "Check-In Reminder: Welcome to Student Residence Halls in 2025/26", "evidenceNote": "Reviewed and quarantined stale sibling content.",
           "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": "2026-08-31T23:59:59+08:00", "reviewAfter": "2026-08-28T23:59:59+08:00", "volatility": "daily", "verificationStatus": "conflicted", "facts": {"academicYear": "2025/26", "mustNotPromote": true}, "keywords": ["2025", "reminder"],
@@ -316,6 +338,7 @@
       "canonicalUrl": "https://eo.hkbu.edu.hk/eo-services/campus-map.html",
       "verifiedAt": "2026-08-25T12:00:00+08:00",
       "risk": "normal",
+      "sourceGovernance": {"ownerOffice":"HKBU Estates Office","categories":["campus_ar_navigation","transport"],"languages":["en"],"volatility":"monthly","reviewCadence":"monthly","evidenceWindowDays":31,"reviewAttestation":{"reviewer":"HKBU source review 2026-08-25","reviewedAt":"2026-08-25T12:00:00+08:00","captureMethod":"manual_review","sourceHash":null}},
       "intentGroups": ["campus_ar_navigation", "transport"],
       "tags": ["campus map", "JC3", "Kowloon Tong", "MTR", "minibus", "校園地圖", "校园地图"],
       "exampleQuestions": ["Where is JC³?", "How do I get to campus?", "JC3 在哪"],
@@ -329,7 +352,7 @@
         {
           "id": "evidence.eo.campus-map.kowloon-tong-route", "text": {"en": "For Kowloon Tong Campus, the official map says Kowloon Tong MTR is nearest; walking from Exit A2 takes roughly 10-15 minutes, with minibuses also listed.", "zhHant": "前往九龍塘校園，官方地圖列九龍塘港鐵站為最近車站；由 A2 出口步行約 10 至 15 分鐘，亦列有小巴路線。", "zhHans": "前往九龙塘校园，官方地图列九龙塘地铁站为最近车站；由 A2 出口步行约 10 至 15 分钟，也列有小巴路线。"},
           "sourceId": "hkbu.eo.campus-map", "sourceLocator": "Campus Map: Kowloon Tong Campus - Getting There", "evidenceNote": "Reviewed official MTR walking and minibus route summary; no stale student-fare scheme is included.",
-          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-25T23:59:59+08:00", "volatility": "monthly", "verificationStatus": "official_verified", "facts": {"nearestMtr": "Kowloon Tong", "walkingExit": "A2", "walkingMinutes": "10-15"}, "keywords": ["mtr", "transport", "kowloon tong", "walk", "minibus", "交通", "港鐵", "港铁", "小巴"],
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-25T23:59:59+08:00", "volatility": "monthly", "verificationStatus": "official_verified", "facts": {"nearestMtr": "Kowloon Tong", "walkingExit": "A2", "walkingMinutes": "10-15"}, "keywords": ["mtr", "transport", "kowloon tong", "walk", "walking", "how far", "minibus", "交通", "港鐵", "港铁", "小巴", "行去校園", "走到校园", "幾耐", "多久"],
           "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Campus Map: Kowloon Tong Campus - Getting There", "captureMethod": "manual_review", "sourceHash": null}
         }
       ]
@@ -341,14 +364,15 @@
       "canonicalUrl": "https://ar.hkbu.edu.hk/about-ar/contact-us",
       "verifiedAt": "2026-08-25T12:00:00+08:00",
       "risk": "time_sensitive",
+      "sourceGovernance": {"ownerOffice":"HKBU Academic Registry","categories":["campus_ar_navigation"],"languages":["en"],"volatility":"biweekly","reviewCadence":"biweekly","evidenceWindowDays":14,"reviewAttestation":{"reviewer":"HKBU source review 2026-08-25","reviewedAt":"2026-08-25T12:00:00+08:00","captureMethod":"manual_review","sourceHash":null}},
       "intentGroups": ["campus_ar_navigation"],
       "tags": ["Academic Registry", "SCE301", "office hours", "AR", "教務處", "教务处"],
       "exampleQuestions": ["Where is Academic Registry?", "AR 幾點關門", "教务处几点关门"],
       "claims": [
         {
-          "id": "evidence.ar.contact.location", "text": {"en": "Academic Registry, except its Academic Quality Support Section, is at Room 301 on 3/F of SCE Tower.", "zhHant": "除學術質素支援組外，教務處位於 SCE 大樓 3 樓 301 室。", "zhHans": "除学术质量支援组外，教务处位于 SCE 大楼 3 楼 301 室。"},
+          "id": "evidence.ar.contact.location", "text": {"en": "Academic Registry, except its Academic Quality Support Section, is at SCE301 on 3/F of SCE Tower.", "zhHant": "除學術質素支援組外，教務處位於 SCE 大樓三樓 SCE301。", "zhHans": "除学术质量支援组外，教务处位于 SCE 大楼三楼 SCE301。"},
           "sourceId": "hkbu.ar.contact", "sourceLocator": "Contact Us: Academic Registry address", "evidenceNote": "Reviewed AR location separately from service-hour facts.",
-          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-25T23:59:59+08:00", "volatility": "monthly", "verificationStatus": "official_verified", "facts": {"room": "SCE301", "floor": "3/F"}, "keywords": ["where", "location", "SCE301", "地址", "位置", "邊度", "哪里"],
+          "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-25T23:59:59+08:00", "volatility": "monthly", "verificationStatus": "official_verified", "facts": {"room": "SCE301", "floor": "3/F"}, "keywords": ["where", "location", "SCE301", "地址", "位置", "邊度", "喺邊", "哪里", "在哪里"],
           "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Contact Us: Academic Registry address", "captureMethod": "manual_review", "sourceHash": null}
         },
         {
@@ -366,6 +390,7 @@
       "canonicalUrl": "https://library.hkbu.edu.hk/using-the-library/opening-hours/regular-service-hours/",
       "verifiedAt": "2026-08-25T12:00:00+08:00",
       "risk": "time_sensitive",
+      "sourceGovernance": {"ownerOffice":"HKBU Library","categories":["library"],"languages":["en"],"volatility":"weekly","reviewCadence":"weekly","evidenceWindowDays":7,"reviewAttestation":{"reviewer":"HKBU source review 2026-08-25","reviewedAt":"2026-08-25T12:00:00+08:00","captureMethod":"manual_review","sourceHash":null}},
       "intentGroups": ["library"],
       "tags": ["Main Library", "CML", "SMCL", "opening hours", "summer hours", "主館", "主馆", "圖書館", "图书馆"],
       "exampleQuestions": ["When does Main Library close?", "中醫藥圖書館幾點關門", "石门图书馆几点关门"],
@@ -401,9 +426,10 @@
       "title": "Catering Services",
       "publisher": "HKBU Estates Office",
       "canonicalUrl": "https://eo.hkbu.edu.hk/eo-services/services-facilities/Catering-Services.html",
-      "verifiedAt": "2026-08-25T12:00:00+08:00",
+      "verifiedAt": "2026-08-26T11:30:00+08:00",
       "risk": "time_sensitive",
-      "intentGroups": ["dining"],
+      "sourceGovernance": {"ownerOffice":"HKBU Estates Office","categories":["dining","dining_inventory"],"languages":["en"],"volatility":"weekly","reviewCadence":"weekly","evidenceWindowDays":7,"reviewAttestation":{"reviewer":"HKBU first-party source review 2026-08-26","reviewedAt":"2026-08-26T11:30:00+08:00","captureMethod":"manual_review","sourceHash":null}},
+      "intentGroups": ["dining", "dining_inventory"],
       "tags": ["catering outlets", "summer break", "special operating hours", "飯堂", "饭堂"],
       "exampleQuestions": ["What food outlets are on campus?", "暑假飯堂開唔開", "暑假食堂开不开"],
       "claims": [{
@@ -411,6 +437,21 @@
         "sourceId": "hkbu.eo.dining-overview", "sourceLocator": "Catering Services: Special Operating Hours and Catering Outlets", "evidenceNote": "Reviewed override links and outlet grouping; retrieval must clarify current special hours.",
         "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-01T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"specialHoursOverrideRegular": true}, "keywords": ["outlets", "summer", "special hours", "暑假", "惡劣天氣", "恶劣天气"],
         "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Catering Services: Special Operating Hours and Catering Outlets", "captureMethod": "manual_review", "sourceHash": null}
+      }, {
+        "id": "evidence.eo.dining-inventory.jc3", "text": {"en": "The JC³ catering inventory lists UG/F Cafe and G/F Cafe; this inventory does not establish current opening status.", "zhHant": "JC³ 餐飲店清單列有 UG/F Cafe 及 G/F Cafe；清單不能證明現時營業狀態。", "zhHans": "JC³ 餐饮店清单列有 UG/F Cafe 及 G/F Cafe；清单不能证明目前营业状态。"},
+        "sourceId": "hkbu.eo.dining-overview", "sourceLocator": "Catering Outlets: Jockey Club Campus of Creativity", "evidenceNote": "Manually reviewed the campus-grouped outlet inventory; live status was deliberately excluded.",
+        "verifiedAt": "2026-08-26T11:30:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-02T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"inventoryOnly": true, "campus": "JC3"}, "keywords": ["jc3", "jc³", "jockey club campus of creativity"],
+        "reviewAttestation": {"reviewer": "HKBU first-party source review 2026-08-26", "reviewedAt": "2026-08-26T11:30:00+08:00", "sourceLocator": "Catering Outlets: Jockey Club Campus of Creativity", "captureMethod": "manual_review", "sourceHash": null}
+      }, {
+        "id": "evidence.eo.dining-inventory.ho-sin-hang", "text": {"en": "The Ho Sin Hang Campus catering inventory lists Harmony Cafeteria and Harmony Lounge; this inventory does not establish current opening status.", "zhHant": "善衡校園餐飲店清單列有 Harmony Cafeteria 及 Harmony Lounge；清單不能證明現時營業狀態。", "zhHans": "善衡校园餐饮店清单列有 Harmony Cafeteria 及 Harmony Lounge；清单不能证明目前营业状态。"},
+        "sourceId": "hkbu.eo.dining-overview", "sourceLocator": "Catering Outlets: Ho Sin Hang Campus", "evidenceNote": "Manually reviewed the campus-grouped outlet inventory; live status was deliberately excluded.",
+        "verifiedAt": "2026-08-26T11:30:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-02T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"inventoryOnly": true, "campus": "Ho Sin Hang Campus"}, "keywords": ["ho sin hang campus", "善衡校園", "善衡校园"],
+        "reviewAttestation": {"reviewer": "HKBU first-party source review 2026-08-26", "reviewedAt": "2026-08-26T11:30:00+08:00", "sourceLocator": "Catering Outlets: Ho Sin Hang Campus", "captureMethod": "manual_review", "sourceHash": null}
+      }, {
+        "id": "evidence.eo.dining-inventory.burc", "text": {"en": "The Baptist University Road Campus catering inventory lists Books 'n Bites, Main Canteen, Cafe@CVA Commons, BU Fiesta, Bistro NTT, and Deli; this inventory does not establish current opening status.", "zhHant": "浸會大學道校園餐飲店清單列有 Books 'n Bites、Main Canteen、Cafe@CVA Commons、BU Fiesta、Bistro NTT 及 Deli；清單不能證明現時營業狀態。", "zhHans": "浸会大学道校园餐饮店清单列有 Books 'n Bites、Main Canteen、Cafe@CVA Commons、BU Fiesta、Bistro NTT 及 Deli；清单不能证明目前营业状态。"},
+        "sourceId": "hkbu.eo.dining-overview", "sourceLocator": "Catering Outlets: Baptist University Road Campus", "evidenceNote": "Manually reviewed the exact campus-grouped outlet inventory; live status was deliberately excluded.",
+        "verifiedAt": "2026-08-26T11:30:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-02T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"inventoryOnly": true, "campus": "Baptist University Road Campus"}, "keywords": ["baptist university road campus", "浸會大學道校園", "浸会大学道校园", "burc"],
+        "reviewAttestation": {"reviewer": "HKBU first-party source review 2026-08-26", "reviewedAt": "2026-08-26T11:30:00+08:00", "sourceLocator": "Catering Outlets: Baptist University Road Campus", "captureMethod": "manual_review", "sourceHash": null}
       }]
     },
     {
@@ -420,6 +461,7 @@
       "canonicalUrl": "https://eo.hkbu.edu.hk/eo-services/services-facilities/Catering-Services/Main-Canteen.html",
       "verifiedAt": "2026-08-25T12:00:00+08:00",
       "risk": "time_sensitive",
+      "sourceGovernance": {"ownerOffice":"HKBU Estates Office","categories":["dining"],"languages":["en"],"volatility":"weekly","reviewCadence":"weekly","evidenceWindowDays":7,"reviewAttestation":{"reviewer":"HKBU source review 2026-08-25","reviewedAt":"2026-08-25T12:00:00+08:00","captureMethod":"manual_review","sourceHash":null}},
       "intentGroups": ["dining"],
       "tags": ["Main Canteen", "WYS Level 5", "opening hours", "主飯堂", "主食堂"],
       "exampleQuestions": ["Where is Main Canteen?", "Main Canteen 今日開到幾點"],
@@ -437,6 +479,7 @@
       "canonicalUrl": "https://eo.hkbu.edu.hk/eo-services/services-facilities/Catering-Services/BU-Fiesta.html",
       "verifiedAt": "2026-08-25T12:00:00+08:00",
       "risk": "time_sensitive",
+      "sourceGovernance": {"ownerOffice":"HKBU Estates Office","categories":["dining"],"languages":["en"],"volatility":"weekly","reviewCadence":"weekly","evidenceWindowDays":7,"reviewAttestation":{"reviewer":"HKBU source review 2026-08-25","reviewedAt":"2026-08-25T12:00:00+08:00","captureMethod":"manual_review","sourceHash":null}},
       "intentGroups": ["dining"],
       "tags": ["BU Fiesta", "closed", "renovation", "餐廳", "餐厅"],
       "exampleQuestions": ["BU Fiesta 今日開嗎", "Is BU Fiesta open today?"],
@@ -455,6 +498,7 @@
       "canonicalUrl": "https://eo.hkbu.edu.hk/eo-services/services-facilities/medical-services.html",
       "verifiedAt": "2026-08-25T12:00:00+08:00",
       "risk": "high_stakes",
+      "sourceGovernance": {"ownerOffice":"HKBU Estates Office","categories":["medical"],"languages":["en"],"volatility":"daily","reviewCadence":"daily","evidenceWindowDays":1,"reviewAttestation":{"reviewer":"HKBU source review 2026-08-25","reviewedAt":"2026-08-25T12:00:00+08:00","captureMethod":"manual_review","sourceHash":null}},
       "intentGroups": ["medical"],
       "tags": ["Health Centre", "medical", "dental", "3411 2011", "健康中心", "牙科"],
       "exampleQuestions": ["Where is the Health Centre?", "How do I book a doctor?", "牙科計劃仲有效嗎"],
@@ -480,6 +524,7 @@
       "canonicalUrl": "https://sa.hkbu.edu.hk/en/contact-us.html",
       "verifiedAt": "2026-08-25T12:00:00+08:00",
       "risk": "time_sensitive",
+      "sourceGovernance": {"ownerOffice":"HKBU Office of Student Affairs","categories":["osa_counselling"],"languages":["en"],"volatility":"monthly","reviewCadence":"monthly","evidenceWindowDays":31,"reviewAttestation":{"reviewer":"HKBU source review 2026-08-25","reviewedAt":"2026-08-25T12:00:00+08:00","captureMethod":"manual_review","sourceHash":null}},
       "intentGroups": ["osa_counselling"],
       "tags": ["OSA", "Office of Student Affairs", "WLB401", "sa@hkbu.edu.hk", "學生事務處", "学生事务处"],
       "exampleQuestions": ["Where is OSA?", "點樣搵學生事務處", "学生事务处在哪里"],
@@ -497,11 +542,12 @@
       "canonicalUrl": "https://sa.hkbu.edu.hk/en/cdc/counselling/counselling-and-consultation.html",
       "verifiedAt": "2026-08-25T12:00:00+08:00",
       "risk": "high_stakes",
+      "sourceGovernance": {"ownerOffice":"HKBU Office of Student Affairs","categories":["osa_counselling"],"languages":["en"],"volatility":"biweekly","reviewCadence":"biweekly","evidenceWindowDays":14,"reviewAttestation":{"reviewer":"HKBU source review 2026-08-25","reviewedAt":"2026-08-25T12:00:00+08:00","captureMethod":"manual_review","sourceHash":null}},
       "intentGroups": ["osa_counselling"],
       "tags": ["counselling", "consultation", "CDC", "輔導", "辅导"],
       "exampleQuestions": ["How can I talk to a counsellor?", "我想搵輔導員", "我想找辅导员"],
       "claims": [{
-        "id": "evidence.sa.counselling.official-service", "text": {"en": "HKBU's Counselling and Development Centre provides counselling and consultation; use its official page for the current appointment route. Immediate danger is handled through the emergency path instead.", "zhHant": "浸大輔導及發展中心提供輔導及諮詢；應由官方頁查看最新預約方式。即時危險則改走緊急支援。", "zhHans": "浸大辅导及发展中心提供辅导及咨询；应通过官方页面查看最新预约方式。即时危险则改走紧急支援。"},
+        "id": "evidence.sa.counselling.official-service", "text": {"en": "HKBU's Counselling and Development Centre (CDC) provides counselling and consultation; use its official page for the current appointment route. Immediate danger is handled through the emergency path instead.", "zhHant": "浸大輔導及發展中心（CDC）提供輔導及諮詢；應由官方頁查看最新預約方式。即時危險則改走緊急支援。", "zhHans": "浸大辅导及发展中心（CDC）提供辅导及咨询；应通过官方页面查看最新预约方式。即时危险则改走紧急支援。"},
         "sourceId": "hkbu.sa.counselling", "sourceLocator": "Counselling and Consultation: service overview", "evidenceNote": "Reviewed service scope without inferring an unverified booking detail.",
         "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-08T23:59:59+08:00", "volatility": "biweekly", "verificationStatus": "official_verified", "facts": {"immediateDangerUsesEmergencyRoute": true}, "keywords": ["counselling", "counselor", "counsellor", "consultation", "輔導", "辅导", "諮詢", "咨询"],
         "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Counselling and Consultation: service overview", "captureMethod": "manual_review", "sourceHash": null}
@@ -514,6 +560,7 @@
       "canonicalUrl": "https://sa.hkbu.edu.hk/en/cdc/counselling/emergency-hotlines-and-community-services.html",
       "verifiedAt": "2026-08-25T12:00:00+08:00",
       "risk": "high_stakes",
+      "sourceGovernance": {"ownerOffice":"HKBU Office of Student Affairs","categories":["emergency"],"languages":["en"],"volatility":"weekly","reviewCadence":"weekly","evidenceWindowDays":7,"reviewAttestation":{"reviewer":"HKBU source review 2026-08-25","reviewedAt":"2026-08-25T12:00:00+08:00","captureMethod":"manual_review","sourceHash":null}},
       "intentGroups": ["emergency"],
       "tags": ["emergency", "999", "crisis", "緊急", "紧急"],
       "exampleQuestions": ["What do I do in an immediate emergency?", "有緊急危險點算", "有紧急危险怎么办"],
@@ -531,6 +578,7 @@
       "canonicalUrl": "https://eo.hkbu.edu.hk/eo-services/services-facilities/Security-Control-Rooms-and-Security-Hotline.html",
       "verifiedAt": "2026-08-25T12:00:00+08:00",
       "risk": "high_stakes",
+      "sourceGovernance": {"ownerOffice":"HKBU Estates Office","categories":["emergency"],"languages":["en"],"volatility":"weekly","reviewCadence":"weekly","evidenceWindowDays":7,"reviewAttestation":{"reviewer":"HKBU source review 2026-08-25","reviewedAt":"2026-08-25T12:00:00+08:00","captureMethod":"manual_review","sourceHash":null}},
       "intentGroups": ["emergency"],
       "tags": ["HKBU Security", "3411 7777", "security hotline", "保安"],
       "exampleQuestions": ["What is HKBU Security's number?", "浸大保安電話", "浸大保安电话"],
@@ -539,6 +587,193 @@
         "sourceId": "hkbu.eo.security", "sourceLocator": "Security Control Rooms and Security Hotline: hotline contact", "evidenceNote": "Reviewed canonical Estates Office security page and fixed hotline used by safety routing.",
         "verifiedAt": "2026-08-25T12:00:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-01T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"phone": "3411 7777", "immediateEmergencyFirst": "999"}, "keywords": ["security", "hotline", "3411 7777", "保安"],
         "reviewAttestation": {"reviewer": "HKBU source review 2026-08-25", "reviewedAt": "2026-08-25T12:00:00+08:00", "sourceLocator": "Security Control Rooms and Security Hotline: hotline contact", "captureMethod": "manual_review", "sourceHash": null}
+      }]
+    },
+    {
+      "id": "hkbu.sa.hall-facilities",
+      "title": "Student Residence Halls Facilities",
+      "publisher": "HKBU Office of Student Affairs",
+      "canonicalUrl": "https://sa.hkbu.edu.hk/en/accm/on-campus-accommodation/student-residence-halls/hall-facilities.html",
+      "verifiedAt": "2026-08-26T11:30:00+08:00",
+      "risk": "time_sensitive",
+      "sourceGovernance": {"ownerOffice":"HKBU Office of Student Affairs / Accommodation and Campus Management (ACCM)","categories":["hall_facilities"],"languages":["en"],"volatility":"weekly","reviewCadence":"weekly","evidenceWindowDays":7,"reviewAttestation":{"reviewer":"HKBU first-party source review 2026-08-26","reviewedAt":"2026-08-26T11:30:00+08:00","captureMethod":"manual_review","sourceHash":null}},
+      "intentGroups": ["hall_facilities"],
+      "tags": ["Student Residence Halls", "Facilities User Guide", "common facilities", "music practice rooms", "laundry rooms"],
+      "exampleQuestions": ["Can residents use common facilities?", "What is in the hall laundry?", "音樂練習室有咩安排？"],
+      "claims": [
+        {
+          "id": "evidence.sa.hall-facilities.user-guide", "text": {"en": "Student Residence Halls residents may use facilities listed in the Facilities User Guide; some require booking, and the official table sets the method and listed hours.", "zhHant": "學生宿舍住客可使用 Facilities User Guide 列出的設施；部分設施須預約，使用方法及表列時間以官方表格為準。", "zhHans": "学生宿舍住客可使用 Facilities User Guide 列出的设施；部分设施须预约，使用方法及表列时间以官方表格为准。"},
+          "sourceId": "hkbu.sa.hall-facilities", "sourceLocator": "Common Rooms and Facilities: Facilities User Guide", "evidenceNote": "Manually reviewed the resident-use and booking boundary without inferring current availability.",
+          "verifiedAt": "2026-08-26T11:30:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-02T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"bookingMayBeRequired": true}, "keywords": ["common facilities", "public facilities", "公共設施", "公共设施", "facilities user guide"],
+          "reviewAttestation": {"reviewer": "HKBU first-party source review 2026-08-26", "reviewedAt": "2026-08-26T11:30:00+08:00", "sourceLocator": "Common Rooms and Facilities: Facilities User Guide", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.sa.hall-facilities.music-practice", "text": {"en": "The Facilities User Guide lists Music Practice Rooms 106A and 119B from 09:00 to 23:00 with booking on the sheet posted at the door; these are listed hours, not live availability.", "zhHant": "Facilities User Guide 列出音樂練習室 106A 及 119B 的時間為 09:00 至 23:00，須在門上預約表登記；這是表列時間，不代表即時可用。", "zhHans": "Facilities User Guide 列出音乐练习室 106A 及 119B 的时间为 09:00 至 23:00，须在门上预约表登记；这是表列时间，不代表实时可用。"},
+          "sourceId": "hkbu.sa.hall-facilities", "sourceLocator": "Facilities User Guide: Music Practice Rooms row", "evidenceNote": "Manually reviewed rooms, listed hours, and booking method; current availability and summer-block assignment were excluded.",
+          "verifiedAt": "2026-08-26T11:30:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-02T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"listedHoursOnly": true, "rooms": ["106A", "119B"]}, "keywords": ["music practice room", "106a", "119b", "音樂練習室", "音乐练习室"],
+          "reviewAttestation": {"reviewer": "HKBU first-party source review 2026-08-26", "reviewedAt": "2026-08-26T11:30:00+08:00", "sourceLocator": "Facilities User Guide: Music Practice Rooms row", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.sa.hall-facilities.laundry", "text": {"en": "Laundry Rooms and Drying Yards 111 and 113 list washers, dryers, irons, ironing boards, a sink, and hanging racks.", "zhHant": "洗衣房及晾衣場 111、113 列有洗衣機、乾衣機、熨斗、熨衣板、水槽及晾掛架。", "zhHans": "洗衣房及晾衣场 111、113 列有洗衣机、干衣机、熨斗、熨衣板、水槽及晾挂架。"},
+          "sourceId": "hkbu.sa.hall-facilities", "sourceLocator": "Facilities User Guide: Laundry Rooms and Drying Yards row", "evidenceNote": "Manually reviewed the named rooms and equipment inventory only.",
+          "verifiedAt": "2026-08-26T11:30:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-26T23:59:59+08:00", "volatility": "monthly", "verificationStatus": "official_verified", "facts": {"inventoryOnly": true, "rooms": ["111", "113"]}, "keywords": ["hall laundry", "student residence halls laundry", "laundry room", "washing facilities", "洗衣房", "洗衣設施", "洗衣设施"],
+          "reviewAttestation": {"reviewer": "HKBU first-party source review 2026-08-26", "reviewedAt": "2026-08-26T11:30:00+08:00", "sourceLocator": "Facilities User Guide: Laundry Rooms and Drying Yards row", "captureMethod": "manual_review", "sourceHash": null}
+        }
+      ]
+    },
+    {
+      "id": "hkbu.sa.nttih-overview",
+      "title": "Dr. Ng Tor Tai International House Overview",
+      "publisher": "HKBU Office of Student Affairs",
+      "canonicalUrl": "https://sa.hkbu.edu.hk/en/accm/on-campus-accommodation/pg-housing/overview.html",
+      "verifiedAt": "2026-08-26T11:30:00+08:00", "risk": "normal",
+      "sourceGovernance": {"ownerOffice":"HKBU Office of Student Affairs / Accommodation and Campus Management (ACCM)","categories":["hall_facilities"],"languages":["en"],"volatility":"monthly","reviewCadence":"monthly","evidenceWindowDays":31,"reviewAttestation":{"reviewer":"HKBU first-party source review 2026-08-26","reviewedAt":"2026-08-26T11:30:00+08:00","captureMethod":"manual_review","sourceHash":null}},
+      "intentGroups": ["hall_facilities"],
+      "tags": ["NTTIH", "Dr. Ng Tor Tai International House", "full-time non-local students"],
+      "exampleQuestions": ["Who is NTTIH for?"],
+      "claims": [{
+        "id": "evidence.sa.nttih.scope", "text": {"en": "NTTIH provides about 290 hostel places for full-time non-local HKBU students; this describes its scope, not current vacancy.", "zhHant": "NTTIH 為浸大全日制非本地學生提供約 290 個宿位；這是服務範圍，不代表現時有空位。", "zhHans": "NTTIH 为浸大全日制非本地学生提供约 290 个宿位；这是服务范围，不代表目前有空位。"},
+        "sourceId": "hkbu.sa.nttih-overview", "sourceLocator": "Overview of Dr. Ng Tor Tai International House", "evidenceNote": "Manually reviewed population scope and approximate capacity; no vacancy was inferred.",
+        "verifiedAt": "2026-08-26T11:30:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-26T23:59:59+08:00", "volatility": "monthly", "verificationStatus": "official_verified", "facts": {"scopeOnly": true, "approximatePlaces": 290}, "keywords": ["full time non local", "full-time non-local", "非本地學生", "非本地学生", "290"],
+        "reviewAttestation": {"reviewer": "HKBU first-party source review 2026-08-26", "reviewedAt": "2026-08-26T11:30:00+08:00", "sourceLocator": "Overview of Dr. Ng Tor Tai International House", "captureMethod": "manual_review", "sourceHash": null}
+      }]
+    },
+    {
+      "id": "hkbu.sa.nttih-facilities",
+      "title": "NTTIH Facilities and Residence Services",
+      "publisher": "HKBU Office of Student Affairs",
+      "canonicalUrl": "https://sa.hkbu.edu.hk/en/accm/on-campus-accommodation/pg-housing/hall-facilities-and-residence-services.html",
+      "verifiedAt": "2026-08-26T11:30:00+08:00", "risk": "time_sensitive",
+      "sourceGovernance": {"ownerOffice":"HKBU Office of Student Affairs / Accommodation and Campus Management (ACCM)","categories":["hall_facilities"],"languages":["en"],"volatility":"weekly","reviewCadence":"weekly","evidenceWindowDays":7,"reviewAttestation":{"reviewer":"HKBU first-party source review 2026-08-26","reviewedAt":"2026-08-26T11:30:00+08:00","captureMethod":"manual_review","sourceHash":null}},
+      "intentGroups": ["hall_facilities"],
+      "tags": ["NTTIH", "room facilities", "reception", "self-service laundry"],
+      "exampleQuestions": ["What should I bring to NTTIH?", "When is NTTIH reception open?"],
+      "claims": [
+        {
+          "id": "evidence.sa.nttih.room-inclusions", "text": {"en": "NTTIH rooms list basic furniture and appliances and include basic bedding; residents should bring a blanket and daily-use items.", "zhHant": "NTTIH 房間列有基本傢俬及電器，並提供基本床上用品；住客應自備毛毯及日常用品。", "zhHans": "NTTIH 房间列有基本家具及电器，并提供基本床上用品；住客应自带毛毯及日常用品。"},
+          "sourceId": "hkbu.sa.nttih-facilities", "sourceLocator": "In-room Facilities and Amenities", "evidenceNote": "Manually reviewed inclusions and the stated self-bring boundary; no product or vendor recommendation was added.",
+          "verifiedAt": "2026-08-26T11:30:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-26T23:59:59+08:00", "volatility": "monthly", "verificationStatus": "official_verified", "facts": {"inventoryOnly": true}, "keywords": ["what should i bring", "bring to nttih", "自備", "自备", "自帶", "自带", "basic bedding", "bedding", "床品", "床上用品", "blanket"],
+          "reviewAttestation": {"reviewer": "HKBU first-party source review 2026-08-26", "reviewedAt": "2026-08-26T11:30:00+08:00", "sourceLocator": "In-room Facilities and Amenities", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.sa.nttih.service-hours", "text": {"en": "NTTIH lists G/F lobby reception Monday to Saturday, 09:00-18:00, and 5/F self-service laundry daily, 07:30-00:30; these are listed hours only.", "zhHant": "NTTIH 列出地下大堂接待處星期一至六 09:00-18:00，五樓自助洗衣設施每日 07:30-00:30；以上只屬表列時間。", "zhHans": "NTTIH 列出地下大堂接待处周一至六 09:00-18:00，五楼自助洗衣设施每日 07:30-00:30；以上仅为表列时间。"},
+          "sourceId": "hkbu.sa.nttih-facilities", "sourceLocator": "Residence Services: reception and self-service laundry", "evidenceNote": "Manually reviewed listed service hours; live open state was excluded.",
+          "verifiedAt": "2026-08-26T11:30:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-02T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"listedHoursOnly": true}, "keywords": ["nttih reception", "reception open", "接待處", "接待处", "self service laundry"],
+          "reviewAttestation": {"reviewer": "HKBU first-party source review 2026-08-26", "reviewedAt": "2026-08-26T11:30:00+08:00", "sourceLocator": "Residence Services: reception and self-service laundry", "captureMethod": "manual_review", "sourceHash": null}
+        }
+      ]
+    },
+    {
+      "id": "hkbu.sa.accm-contact", "title": "ACCM Contact Us", "publisher": "HKBU Office of Student Affairs",
+      "canonicalUrl": "https://sa.hkbu.edu.hk/en/accm/contact-us.html", "verifiedAt": "2026-08-26T11:30:00+08:00", "risk": "normal",
+      "sourceGovernance": {"ownerOffice":"HKBU Office of Student Affairs / Accommodation and Campus Management (ACCM)","categories":["transport"],"languages":["en"],"volatility":"monthly","reviewCadence":"monthly","evidenceWindowDays":31,"reviewAttestation":{"reviewer":"HKBU first-party source review 2026-08-26","reviewedAt":"2026-08-26T11:30:00+08:00","captureMethod":"manual_review","sourceHash":null}},
+      "intentGroups": ["transport"],
+      "tags": ["ACCM", "Village CARE", "25M", "25M(S)", "Kowloon Tong"], "exampleQuestions": ["How do I get to Village CARE by minibus?"],
+      "claims": [{
+        "id": "evidence.sa.accm-contact.village-care-minibus", "text": {"en": "From Kowloon Tong Station, the ACCM route table lists green minibuses 25M and 25M(S) for Village CARE; 25M drops off outside Rev. James Mau Memorial Chapel on Baptist University Road.", "zhHant": "由九龍塘站前往 Village CARE，ACCM 路線表列出綠色小巴 25M 及 25M(S)；25M 在浸會大學道麥理浩紀念禮拜堂外下車。", "zhHans": "从九龙塘站前往 Village CARE，ACCM 路线表列出绿色小巴 25M 及 25M(S)；25M 在浸会大学道麦理浩纪念礼拜堂外下车。"},
+        "sourceId": "hkbu.sa.accm-contact", "sourceLocator": "Contact Us: Village CARE minibus table", "evidenceNote": "Manually reviewed the listed route; no frequency, journey time, or live-operation claim was added.",
+        "verifiedAt": "2026-08-26T11:30:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-26T23:59:59+08:00", "volatility": "monthly", "verificationStatus": "official_verified", "facts": {"routeReferenceOnly": true}, "keywords": ["village care", "25m", "25m s", "kowloon tong", "九龍塘", "九龙塘"],
+        "reviewAttestation": {"reviewer": "HKBU first-party source review 2026-08-26", "reviewedAt": "2026-08-26T11:30:00+08:00", "sourceLocator": "Contact Us: Village CARE minibus table", "captureMethod": "manual_review", "sourceHash": null}
+      }]
+    },
+    {
+      "id": "hkbu.sa.fye", "title": "First Year Experience", "publisher": "HKBU Office of Student Affairs",
+      "canonicalUrl": "https://sa.hkbu.edu.hk/en/fye.html", "verifiedAt": "2026-08-26T11:30:00+08:00", "risk": "normal",
+      "sourceGovernance": {"ownerOffice":"HKBU Office of Student Affairs / First Year Experience (FYE)","categories":["orientation"],"languages":["en"],"volatility":"monthly","reviewCadence":"monthly","evidenceWindowDays":31,"reviewAttestation":{"reviewer":"HKBU first-party source review 2026-08-26","reviewedAt":"2026-08-26T11:30:00+08:00","captureMethod":"manual_review","sourceHash":null}},
+      "intentGroups": ["orientation"],
+      "tags": ["FYE", "First Year Experience", "New Student Orientation", "Starting a New Life in HK", "international students"], "exampleQuestions": ["Where are orientation resources for international students?"],
+      "claims": [{
+        "id": "evidence.sa.fye.orientation-directory", "text": {"en": "The First Year Experience directory links New Student Orientation resources and Starting a New Life in HK resources for international students; it does not state one universal event date.", "zhHant": "First Year Experience 目錄連結新生迎新資源及國際學生的 Starting a New Life in HK 資源；頁面沒有列出劃一活動日期。", "zhHans": "First Year Experience 目录链接新生迎新资源及国际学生的 Starting a New Life in HK 资源；页面没有列出统一活动日期。"},
+        "sourceId": "hkbu.sa.fye", "sourceLocator": "First Year Experience directory: New Student Orientation and Starting a New Life in HK", "evidenceNote": "Manually reviewed the route directory only; no universal date was inferred.",
+        "verifiedAt": "2026-08-26T11:30:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-26T23:59:59+08:00", "volatility": "monthly", "verificationStatus": "official_verified", "facts": {"directoryOnly": true}, "keywords": ["orientation resources", "international students", "迎新資源", "迎新资源", "starting a new life in hk"],
+        "reviewAttestation": {"reviewer": "HKBU first-party source review 2026-08-26", "reviewedAt": "2026-08-26T11:30:00+08:00", "sourceLocator": "First Year Experience directory: New Student Orientation and Starting a New Life in HK", "captureMethod": "manual_review", "sourceHash": null}
+      }]
+    },
+    {
+      "id": "hkbu.sa.international-support", "title": "Services for International Students", "publisher": "HKBU Office of Student Affairs",
+      "canonicalUrl": "https://sa.hkbu.edu.hk/en/cla/student-amenities-and-welfare/services-for-international-students.html", "verifiedAt": "2026-08-26T11:30:00+08:00", "risk": "time_sensitive",
+      "sourceGovernance": {"ownerOffice":"HKBU Office of Student Affairs / Campus Life & Amenities","categories":["international_support"],"languages":["en"],"volatility":"weekly","reviewCadence":"weekly","evidenceWindowDays":7,"reviewAttestation":{"reviewer":"HKBU first-party source review 2026-08-26","reviewedAt":"2026-08-26T11:30:00+08:00","captureMethod":"manual_review","sourceHash":null}},
+      "intentGroups": ["international_support"],
+      "tags": ["HKBU International Association", "Cultural Ambassador", "international students"], "exampleQuestions": ["Can I join the HKBU International Association?", "Can I apply for a Cultural Ambassador today?"],
+      "claims": [
+        {
+          "id": "evidence.sa.international.association", "text": {"en": "HKBU International Association is a liaison platform between international students and university management, and all HKBU students may join.", "zhHant": "HKBU International Association 是國際學生與大學管理層之間的聯繫平台，所有浸大學生均可加入。", "zhHans": "HKBU International Association 是国际学生与大学管理层之间的联系平台，所有浸大学生均可加入。"},
+          "sourceId": "hkbu.sa.international-support", "sourceLocator": "HKBU International Association", "evidenceNote": "Manually reviewed the association purpose and inclusive membership statement.",
+          "verifiedAt": "2026-08-26T11:30:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-26T23:59:59+08:00", "volatility": "monthly", "verificationStatus": "official_verified", "facts": {"allHkbuStudentsMayJoin": true}, "keywords": ["international association", "hkbu international association", "加入", "join"],
+          "reviewAttestation": {"reviewer": "HKBU first-party source review 2026-08-26", "reviewedAt": "2026-08-26T11:30:00+08:00", "sourceLocator": "HKBU International Association", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.sa.international.cultural-ambassador", "text": {"en": "The 2026-27 Cultural Ambassador Programme describes pairing new international students with experienced senior students from their country or region; this does not confirm current application availability.", "zhHant": "2026-27 Cultural Ambassador Programme 說明會把新國際學生與來自其國家或地區的資深學生配對；這不能確認現時可否申請。", "zhHans": "2026-27 Cultural Ambassador Programme 说明会把新国际学生与来自其国家或地区的高年级学生配对；这不能确认目前能否申请。"},
+          "sourceId": "hkbu.sa.international-support", "sourceLocator": "Meet our Cultural Ambassadors 2026-27", "evidenceNote": "Manually reviewed programme purpose; current recruitment and application availability were not present and were excluded.",
+          "verifiedAt": "2026-08-26T11:30:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-02T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"scopeOnly": true, "academicYear": "2026/27"}, "keywords": ["cultural ambassador", "文化大使"],
+          "reviewAttestation": {"reviewer": "HKBU first-party source review 2026-08-26", "reviewedAt": "2026-08-26T11:30:00+08:00", "sourceLocator": "Meet our Cultural Ambassadors 2026-27", "captureMethod": "manual_review", "sourceHash": null}
+        }
+      ]
+    },
+    {
+      "id": "hkbu.sa.u-life", "title": "University Life Requirements", "publisher": "HKBU Office of Student Affairs",
+      "canonicalUrl": "https://sa.hkbu.edu.hk/en/U-Life-Requirements.html", "verifiedAt": "2026-08-26T11:30:00+08:00", "risk": "time_sensitive",
+      "sourceGovernance": {"ownerOffice":"HKBU Office of Student Affairs","categories":["orientation"],"languages":["en"],"volatility":"weekly","reviewCadence":"weekly","evidenceWindowDays":7,"reviewAttestation":{"reviewer":"HKBU first-party source review 2026-08-26","reviewedAt":"2026-08-26T11:30:00+08:00","captureMethod":"manual_review","sourceHash":null}},
+      "intentGroups": ["orientation"],
+      "tags": ["U-Life", "UOW", "University Orientation Workshops", "BUniPort", "Make-up Arrangements"], "exampleQuestions": ["When are UOW workshops held?", "Where is my UOW schedule?", "I missed UOW"],
+      "claims": [
+        {
+          "id": "evidence.sa.u-life.uow-timing", "text": {"en": "UOW workshops are usually held in mid to late August during orientation before the semester formally starts.", "zhHant": "UOW 工作坊通常在正式開學前的迎新期，即八月中至下旬舉行。", "zhHans": "UOW 工作坊通常在正式开学前的迎新期，即八月中至下旬举行。"},
+          "sourceId": "hkbu.sa.u-life", "sourceLocator": "University Orientation Workshops FAQ 1", "evidenceNote": "Manually reviewed normal timing only; no personal assignment date was inferred.",
+          "verifiedAt": "2026-08-26T11:30:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-02T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"normalTimingOnly": true}, "keywords": ["normally held", "usually held", "通常幾時", "通常什么时候", "mid to late august"],
+          "reviewAttestation": {"reviewer": "HKBU first-party source review 2026-08-26", "reviewedAt": "2026-08-26T11:30:00+08:00", "sourceLocator": "University Orientation Workshops FAQ 1", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.sa.u-life.uow-schedule-route", "text": {"en": "Eligible UGC-funded students can view their UOW schedule in BUniPort under Studies, My Studies, Registration and Progress, Study Progression, then University Life Workshop Schedule.", "zhHant": "合資格的 UGC 資助學生可在 BUniPort 依次進入 Studies、My Studies、Registration and Progress、Study Progression，再查看 UOW 的 University Life Workshop Schedule。", "zhHans": "符合条件的 UGC 资助学生可在 BUniPort 依次进入 Studies、My Studies、Registration and Progress、Study Progression，再查看 UOW 的 University Life Workshop Schedule。"},
+          "sourceId": "hkbu.sa.u-life", "sourceLocator": "University Orientation Workshops FAQ 3", "evidenceNote": "Manually reviewed the eligibility boundary and exact BUniPort navigation labels.",
+          "verifiedAt": "2026-08-26T11:30:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-02T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"eligibleUgcFundedStudents": true}, "keywords": ["uow schedule", "my uow", "時間表", "时间表", "buniport"],
+          "reviewAttestation": {"reviewer": "HKBU first-party source review 2026-08-26", "reviewedAt": "2026-08-26T11:30:00+08:00", "sourceLocator": "University Orientation Workshops FAQ 3", "captureMethod": "manual_review", "sourceHash": null}
+        },
+        {
+          "id": "evidence.sa.u-life.uow-makeup-route", "text": {"en": "If you miss an assigned UOW during orientation, use the UOW Make-up Arrangements tab for the route that applies to your admission year.", "zhHant": "如在迎新期錯過獲安排的 UOW，請到 UOW 的 Make-up Arrangements 分頁，按入學年份查看補做安排。", "zhHans": "如在迎新期错过已安排的 UOW，请到 UOW 的 Make-up Arrangements 页面，按入学年份查看补做安排。"},
+          "sourceId": "hkbu.sa.u-life", "sourceLocator": "University Orientation Workshops FAQ 4 and Make-up Arrangements tabs", "evidenceNote": "Manually reviewed the make-up route; no uncaptured deadline was added.",
+          "verifiedAt": "2026-08-26T11:30:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-02T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"admissionYearRouteRequired": true}, "keywords": ["missed uow", "miss uow", "錯過", "错过", "make up arrangements"],
+          "reviewAttestation": {"reviewer": "HKBU first-party source review 2026-08-26", "reviewedAt": "2026-08-26T11:30:00+08:00", "sourceLocator": "University Orientation Workshops FAQ 4 and Make-up Arrangements tabs", "captureMethod": "manual_review", "sourceHash": null}
+        }
+      ]
+    },
+    {
+      "id": "hkbu.eo.dining.shaw-closure-conflict", "title": "Shaw Campus Temporary Catering Closure", "publisher": "HKBU Estates Office",
+      "canonicalUrl": "https://eo.hkbu.edu.hk/news-and-announcements/Announcements/2026-07-16-Shaw-Campus---Temporary-Closure-of-Nan-Yuan-and-H-F-C----Scholars-Court,-Level-2,-David-C--Lam-Building.html", "verifiedAt": "2026-08-26T11:30:00+08:00", "risk": "time_sensitive",
+      "sourceGovernance": {"ownerOffice":"HKBU Estates Office","categories":["dining"],"languages":["en"],"volatility":"daily","reviewCadence":"daily","evidenceWindowDays":1,"reviewAttestation":{"reviewer":"HKBU first-party source review 2026-08-26","reviewedAt":"2026-08-26T11:30:00+08:00","captureMethod":"manual_review","sourceHash":null}},
+      "intentGroups": ["dining"],
+      "tags": ["Nan Yuan", "H.F.C.@Scholars Court", "temporary closure", "Shaw Campus"], "exampleQuestions": ["Is Nan Yuan open today?", "Is H.F.C.@Scholars Court open today?"],
+      "claims": [{
+        "id": "evidence.eo.dining.shaw-closure-conflict", "text": {"en": "A 16 July 2026 notice recorded temporary closures of Nan Yuan and H.F.C.@Scholars Court from 19 July, with a target rather than confirmed reopening date; it cannot establish today's status.", "zhHant": "2026 年 7 月 16 日的公告記錄 Nan Yuan 及 H.F.C.@Scholars Court 自 7 月 19 日暫停營業，並只列目標而非已確認重開日期；不能用來確認今日狀態。", "zhHans": "2026 年 7 月 16 日的公告记录 Nan Yuan 及 H.F.C.@Scholars Court 自 7 月 19 日暂停营业，并仅列目标而非已确认重开日期；不能用来确认今天状态。"},
+        "sourceId": "hkbu.eo.dining.shaw-closure-conflict", "sourceLocator": "Announcement dated 2026-07-16: temporary closure notice", "evidenceNote": "Manually reviewed the historical notice and current directory conflict; quarantined from live-status answers pending a newer official update.",
+        "verifiedAt": "2026-08-26T11:30:00+08:00", "validFrom": "2026-07-19T00:00:00+08:00", "validUntil": null, "reviewAfter": "2026-08-27T23:59:59+08:00", "volatility": "daily", "verificationStatus": "conflicted", "facts": {"mustNotPromote": true, "historicalNotice": true}, "keywords": ["nan yuan", "h f c scholars court", "shaw campus", "今日", "今天", "open"],
+        "reviewAttestation": {"reviewer": "HKBU first-party source review 2026-08-26", "reviewedAt": "2026-08-26T11:30:00+08:00", "sourceLocator": "Announcement dated 2026-07-16: temporary closure notice", "captureMethod": "manual_review", "sourceHash": null}
+      }]
+    },
+    {
+      "id": "hkbu.ar.exchange-language-courses", "title": "Fall 2026-27 Physical Exchange Course List", "publisher": "HKBU Academic Registry",
+      "canonicalUrl": "https://ar.hkbu.edu.hk/student-services/incoming-exchange-and-extended-study-programme/course-list/for-2026-27-fall-semester-physical-exchange", "verifiedAt": "2026-08-26T11:30:00+08:00", "risk": "time_sensitive",
+      "sourceGovernance": {"ownerOffice":"HKBU Academic Registry","categories":["language_learning"],"languages":["en"],"volatility":"weekly","reviewCadence":"weekly","evidenceWindowDays":7,"reviewAttestation":{"reviewer":"HKBU first-party source review 2026-08-26","reviewedAt":"2026-08-26T11:30:00+08:00","captureMethod":"manual_review","sourceHash":null}},
+      "intentGroups": ["language_learning"],
+      "tags": ["physical exchange", "Fall 2026-27", "LANG1035", "LANG1036", "LANG1107"], "exampleQuestions": ["Which Cantonese courses are on the Fall 2026-27 physical exchange list?"],
+      "claims": [{
+        "id": "evidence.ar.exchange-language-courses.cantonese", "text": {"en": "The Fall 2026-27 physical-exchange list includes LANG1035 Foundation Cantonese I, LANG1036 Foundation Cantonese II, and LANG1107 Introductory Cantonese for Non-Chinese Speakers; listing does not guarantee enrolment.", "zhHant": "2026-27 秋季實體交換生課程表列有 LANG1035 Foundation Cantonese I、LANG1036 Foundation Cantonese II 及 LANG1107 Introductory Cantonese for Non-Chinese Speakers；列入清單不保證可註冊。", "zhHans": "2026-27 秋季实体交换生课程表列有 LANG1035 Foundation Cantonese I、LANG1036 Foundation Cantonese II 及 LANG1107 Introductory Cantonese for Non-Chinese Speakers；列入清单不保证可注册。"},
+        "sourceId": "hkbu.ar.exchange-language-courses", "sourceLocator": "LC course rows in Fall 2026-27 physical exchange list", "evidenceNote": "Manually reviewed the three course rows and exchange-list scope; capacity and general eligibility were excluded.",
+        "verifiedAt": "2026-08-26T11:30:00+08:00", "validFrom": "2026-07-09T00:00:00+08:00", "validUntil": "2026-12-31T23:59:59+08:00", "reviewAfter": "2026-09-02T23:59:59+08:00", "volatility": "weekly", "verificationStatus": "official_verified", "facts": {"scopeOnly": true, "academicYear": "2026/27", "semester": "fall", "physicalExchangeOnly": true}, "keywords": ["physical exchange", "fall 2026", "2026 27", "lang1035", "lang1036", "lang1107"],
+        "reviewAttestation": {"reviewer": "HKBU first-party source review 2026-08-26", "reviewedAt": "2026-08-26T11:30:00+08:00", "sourceLocator": "LC course rows in Fall 2026-27 physical exchange list", "captureMethod": "manual_review", "sourceHash": null}
+      }]
+    },
+    {
+      "id": "hkbu.sa.student-welfare-shop", "title": "Student Welfare Shop", "publisher": "HKBU Office of Student Affairs",
+      "canonicalUrl": "https://sa.hkbu.edu.hk/en/cla/student-amenities-and-welfare/Student-Welfare-Shop.html", "verifiedAt": "2026-08-26T11:30:00+08:00", "risk": "normal",
+      "sourceGovernance": {"ownerOffice":"HKBU Office of Student Affairs / Campus Life & Amenities","categories":["living_supplies"],"languages":["en"],"volatility":"monthly","reviewCadence":"monthly","evidenceWindowDays":31,"reviewAttestation":{"reviewer":"HKBU first-party source review 2026-08-26","reviewedAt":"2026-08-26T11:30:00+08:00","captureMethod":"manual_review","sourceHash":null}},
+      "intentGroups": ["living_supplies"],
+      "tags": ["Student Welfare Shop", "WYS308", "stationery", "daily necessities"], "exampleQuestions": ["Where is the Student Welfare Shop?"],
+      "claims": [{
+        "id": "evidence.sa.student-welfare-shop.categories", "text": {"en": "The Student Welfare Shop at WYS308 lists snacks and drinks, stationery and study essentials, and some daily necessities; it does not verify bedding, groceries, SIM cards, prices, brands, or recommendations.", "zhHant": "位於 WYS308 的 Student Welfare Shop 列有小食飲品、文具及學習用品，以及部分日用品；頁面沒有確認床品、雜貨、SIM 卡、價格、品牌或推薦。", "zhHans": "位于 WYS308 的 Student Welfare Shop 列有零食饮品、文具及学习用品，以及部分日用品；页面没有确认床品、杂货、SIM 卡、价格、品牌或推荐。"},
+        "sourceId": "hkbu.sa.student-welfare-shop", "sourceLocator": "Student Welfare Shop: location and product categories", "evidenceNote": "Manually reviewed bounded categories and location; unsupported shopping categories and recommendations were explicitly excluded.",
+        "verifiedAt": "2026-08-26T11:30:00+08:00", "validFrom": null, "validUntil": null, "reviewAfter": "2026-09-26T23:59:59+08:00", "volatility": "monthly", "verificationStatus": "official_verified", "facts": {"scopeOnly": true, "location": "WYS308"}, "keywords": ["student welfare shop", "學生福利店", "学生福利店", "wys308", "stationery", "daily necessities", "文具", "日用品"],
+        "reviewAttestation": {"reviewer": "HKBU first-party source review 2026-08-26", "reviewedAt": "2026-08-26T11:30:00+08:00", "sourceLocator": "Student Welfare Shop: location and product categories", "captureMethod": "manual_review", "sourceHash": null}
       }]
     }
   ]

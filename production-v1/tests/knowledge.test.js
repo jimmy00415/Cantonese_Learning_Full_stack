@@ -30,8 +30,10 @@ test('knowledge corpus validates the reviewed official source and evidence contr
   assert.deepEqual(
     [...intentGroups].sort(),
     [
-      'account_password', 'campus_ar_navigation', 'dining', 'duo', 'emergency', 'it_help',
-      'library', 'medical', 'osa_counselling', 'residence_check_in', 'student_card', 'transport',
+      'account_password', 'campus_ar_navigation', 'dining', 'dining_inventory', 'duo',
+      'emergency', 'hall_facilities', 'hall_maintenance', 'international_support', 'it_help',
+      'language_learning', 'library', 'living_supplies', 'medical', 'orientation',
+      'osa_counselling', 'residence_check_in', 'student_card', 'transport',
     ],
   );
 
@@ -42,12 +44,91 @@ test('knowledge corpus validates the reviewed official source and evidence contr
     assert.equal(url.password, '');
     assert.equal(url.search, '');
     assert.equal(url.hash, '');
+    assert.ok(source.sourceGovernance.ownerOffice.startsWith('HKBU '));
+    assert.deepEqual([...source.sourceGovernance.categories].sort(), [...source.intentGroups].sort());
+    assert.deepEqual(source.sourceGovernance.languages, ['en']);
+    assert.ok(['daily', 'weekly', 'biweekly', 'monthly', 'quarterly'].includes(source.sourceGovernance.volatility));
+    assert.ok(['daily', 'weekly', 'biweekly', 'monthly', 'quarterly'].includes(source.sourceGovernance.reviewCadence));
+    assert.ok(Number.isInteger(source.sourceGovernance.evidenceWindowDays));
+    assert.equal(source.sourceGovernance.reviewAttestation.reviewedAt, source.verifiedAt);
+    assert.equal(source.sourceGovernance.reviewAttestation.captureMethod, 'manual_review');
+    assert.equal(source.sourceGovernance.reviewAttestation.sourceHash, null);
     for (const claim of source.claims) {
       assert.deepEqual(Object.keys(claim.text).sort(), ['en', 'zhHans', 'zhHant']);
       assert.equal(claim.reviewAttestation.sourceLocator, claim.sourceLocator);
       assert.ok(claim.evidenceNote.length > 0);
     }
   }
+  assert.equal(
+    validated.sources.find((source) => source.id === 'hkbu.sa.residence-halls-check-in')
+      .sourceGovernance.ownerOffice,
+    'HKBU Office of Student Affairs / Accommodation and Campus Management (ACCM)',
+  );
+  assert.equal(
+    validated.sources.find((source) => source.id === 'hkbu.sa.fye').sourceGovernance.ownerOffice,
+    'HKBU Office of Student Affairs / First Year Experience (FYE)',
+  );
+  assert.equal(
+    validated.sources.find((source) => source.id === 'hkbu.sa.international-support')
+      .sourceGovernance.ownerOffice,
+    'HKBU Office of Student Affairs / Campus Life & Amenities',
+  );
+});
+
+test('knowledge snapshot locks exact governed counts, hosts, and review-instant status distribution', () => {
+  const claims = corpus.sources.flatMap((source) => source.claims);
+  const intentGroups = new Set(corpus.sources.flatMap((source) => source.intentGroups));
+  const hosts = [...new Set(corpus.sources.map((source) => new URL(source.canonicalUrl).hostname))].sort();
+  const statuses = claims.reduce((counts, claim) => {
+    const status = evaluateClaimFreshness(claim, new Date(corpus.snapshotAt));
+    counts[status] = (counts[status] ?? 0) + 1;
+    return counts;
+  }, {});
+
+  assert.equal(corpus.sources.length, 29);
+  assert.equal(claims.length, 61);
+  assert.equal(intentGroups.size, 19);
+  assert.deepEqual(hosts, [
+    'ar.hkbu.edu.hk',
+    'eo.hkbu.edu.hk',
+    'ito.hkbu.edu.hk',
+    'library.hkbu.edu.hk',
+    'sa.hkbu.edu.hk',
+  ]);
+  assert.deepEqual(statuses, { verified: 56, conflicted: 4, not_yet_valid: 1 });
+});
+
+test('knowledge corpus rejects missing, loose, or fabricated source governance', () => {
+  const cases = [
+    [(source) => { delete source.sourceGovernance; }, /sourceGovernance/],
+    [(source) => { source.sourceGovernance.ownerOffice = ''; }, /ownerOffice/],
+    [(source) => { source.sourceGovernance.categories = []; }, /categories/],
+    [(source) => { source.sourceGovernance.ownerOffice = 'Some invented office'; }, /ownerOffice/],
+    [(source) => { source.sourceGovernance.languages = []; }, /languages/],
+    [(source) => { source.sourceGovernance.languages = ['en', 'fr']; }, /languages/],
+    [(source) => { source.sourceGovernance.volatility = 'yearly'; }, /volatility/],
+    [(source) => { source.sourceGovernance.reviewCadence = 'monthly'; }, /reviewCadence.*looser/i],
+    [(source) => { source.sourceGovernance.evidenceWindowDays = 0; }, /evidenceWindowDays/],
+    [(source) => { source.sourceGovernance.evidenceWindowDays = 31; }, /evidenceWindowDays.*looser/i],
+    [(source) => { source.sourceGovernance.reviewAttestation.reviewedAt = '2026-08-24T12:00:00+08:00'; }, /reviewedAt.*verifiedAt/i],
+    [(source) => { source.sourceGovernance.reviewAttestation.sourceHash = '0'.repeat(64); }, /sourceHash/],
+  ];
+
+  for (const [mutate, expected] of cases) {
+    const invalid = copy(corpus);
+    mutate(invalid.sources[0]);
+    assert.throws(() => validateCorpus(invalid), expected);
+  }
+
+  const looseActualHorizon = copy(corpus);
+  const accountSource = looseActualHorizon.sources.find((source) => source.id === 'hkbu.ito.account');
+  accountSource.sourceGovernance.volatility = 'quarterly';
+  accountSource.sourceGovernance.reviewCadence = 'quarterly';
+  accountSource.sourceGovernance.evidenceWindowDays = 92;
+  assert.throws(
+    () => validateCorpus(looseActualHorizon),
+    /actual claim review horizon/i,
+  );
 });
 
 test('knowledge corpus rejects unsafe or polluted canonical URLs', () => {
@@ -111,8 +192,184 @@ test('knowledge corpus fails closed when a required campus intent group is missi
   const incomplete = copy(corpus);
   for (const source of incomplete.sources) {
     source.intentGroups = source.intentGroups.filter((intent) => intent !== 'transport');
+    source.sourceGovernance.categories = source.sourceGovernance.categories
+      .filter((category) => category !== 'transport');
   }
+  incomplete.sources = incomplete.sources.filter((source) => source.intentGroups.length > 0);
   assert.throws(() => validateCorpus(incomplete), /missing required intent group: transport/);
+});
+
+test('knowledge corpus validates fail-closed operational qualifiers instead of trusting truthy metadata', () => {
+  const supportedFlags = ['inventoryOnly', 'listedHoursOnly', 'scopeOnly'];
+  for (const flag of supportedFlags) {
+    const invalid = copy(corpus);
+    firstClaim(invalid).facts = { ...(firstClaim(invalid).facts ?? {}), [flag]: 'yes' };
+    assert.throws(() => validateCorpus(invalid), new RegExp(`${flag}.*boolean`, 'i'));
+  }
+
+  const promotableConflict = copy(corpus);
+  const conflict = promotableConflict.sources
+    .flatMap((source) => source.claims)
+    .find((claim) => claim.facts?.mustNotPromote);
+  conflict.verificationStatus = 'official_verified';
+  assert.throws(() => validateCorpus(promotableConflict), /mustNotPromote.*cannot.*official_verified/i);
+
+  const malformedConflict = copy(corpus);
+  const malformed = malformedConflict.sources
+    .flatMap((source) => source.claims)
+    .find((claim) => claim.facts?.mustNotPromote);
+  malformed.facts.mustNotPromote = 1;
+  assert.throws(() => validateCorpus(malformedConflict), /mustNotPromote.*boolean/i);
+});
+
+test('current dining-inventory wording fails closed in every supported query language', () => {
+  const queries = [
+    'Which food outlets at JC³ are open now?',
+    'JC³ 餐飲店而家邊間開門？',
+    'JC³ 餐饮店现在哪间开门？',
+  ];
+  for (const query of queries) {
+    const result = retrieve(query);
+    assert.equal(result.intent, 'dining_inventory');
+    assert.deepEqual(result.evidenceIds, []);
+    assert.ok(result.ambiguityCodes.includes('CURRENT_AVAILABILITY_REQUIRED'));
+    assert.equal(result.handoffSourceId, 'hkbu.eo.dining-overview');
+  }
+});
+
+test('bare open and operating wording fails closed for inventory and listed-hours claims', () => {
+  const cases = [
+    ['Is NTTIH reception open?', 'hall_facilities', 'hkbu.sa.nttih-facilities'],
+    ['Is Music Practice Room 106A open?', 'hall_facilities', 'hkbu.sa.hall-facilities'],
+    ['Which food outlets at JC³ are open?', 'dining_inventory', 'hkbu.eo.dining-overview'],
+    ['NTTIH reception 係咪營業？', 'hall_facilities', 'hkbu.sa.nttih-facilities'],
+    ['NTTIH 接待处营业吗？', 'hall_facilities', 'hkbu.sa.nttih-facilities'],
+  ];
+  const freshRetrieve = createRetriever({
+    corpus,
+    now: () => new Date('2026-08-26T12:00:00+08:00'),
+  }).retrieve;
+
+  for (const [query, intent, handoff] of cases) {
+    const result = freshRetrieve(query);
+    assert.equal(result.intent, intent, query);
+    assert.deepEqual(result.evidenceIds, [], query);
+    assert.ok(result.ambiguityCodes.includes('CURRENT_AVAILABILITY_REQUIRED'), query);
+    assert.equal(result.handoffSourceId, handoff, query);
+  }
+});
+
+test('natural trilingual category questions reach only their governed HKBU route', () => {
+  const freshRetrieve = createRetriever({
+    corpus,
+    now: () => new Date('2026-08-26T12:00:00+08:00'),
+  }).retrieve;
+  const cases = [
+    ['Where is the Student Welfare Shop?', 'living_supplies', 'evidence.sa.student-welfare-shop.categories'],
+    ['學生福利店喺邊？', 'living_supplies', 'evidence.sa.student-welfare-shop.categories'],
+    ['学生福利店在哪里？', 'living_supplies', 'evidence.sa.student-welfare-shop.categories'],
+    ['Where can international students get support?', 'international_support', 'evidence.sa.international.association'],
+    ['國際學生可以去邊度搵支援？', 'international_support', 'evidence.sa.international.association'],
+    ['国际学生可以去哪里找支持？', 'international_support', 'evidence.sa.international.association'],
+    ['What support is available for international students?', 'international_support', 'evidence.sa.international.association'],
+    ['國際學生有咩支援？', 'international_support', 'evidence.sa.international.association'],
+    ['国际学生有哪些支持？', 'international_support', 'evidence.sa.international.association'],
+  ];
+
+  for (const [query, intent, evidenceId] of cases) {
+    const result = freshRetrieve(query);
+    assert.equal(result.intent, intent, query);
+    assert.ok(result.evidenceIds.includes(evidenceId), query);
+    assert.equal(result.needsClarification, false, query);
+  }
+
+  for (const query of ['How can I learn Cantonese?', '廣東話可以點學？', '广东话怎么学？']) {
+    const result = freshRetrieve(query);
+    assert.equal(result.intent, 'language_learning', query);
+    assert.deepEqual(result.evidenceIds, [], query);
+    assert.ok(result.ambiguityCodes.includes('NO_CURRENT_PROGRAMME_EVIDENCE'), query);
+    assert.equal(result.handoffSourceId, 'hkbu.ar.exchange-language-courses', query);
+  }
+
+  for (const query of ['Where can I find FYE?', 'FYE 喺邊度？', 'FYE 在哪里？']) {
+    const result = freshRetrieve(query);
+    assert.equal(result.intent, 'orientation', query);
+    assert.deepEqual(result.evidenceIds, ['evidence.sa.fye.orientation-directory'], query);
+    assert.equal(result.needsClarification, false, query);
+  }
+
+  // The captured U-Life claims cover specific UOW timing and routes, not a
+  // definition of the whole U-Life requirement. Keep generic questions on the
+  // category-owned page instead of expanding three narrow claims into an
+  // unsupported overview.
+  for (const query of ['What is U-Life?', 'U-Life 係咩？', 'U-Life 是什么？']) {
+    const result = freshRetrieve(query);
+    assert.equal(result.intent, 'orientation', query);
+    assert.deepEqual(result.evidenceIds, [], query);
+    assert.ok(result.ambiguityCodes.includes('NO_MATCHING_OFFICIAL_EVIDENCE'), query);
+    assert.equal(result.handoffSourceId, 'hkbu.sa.u-life', query);
+  }
+});
+
+test('generic hall-facility questions stay on the general SRH guide without NTTIH or check-in leakage', () => {
+  const freshRetrieve = createRetriever({
+    corpus,
+    now: () => new Date('2026-08-26T12:00:00+08:00'),
+  }).retrieve;
+  for (const query of [
+    'What hall facilities are there?',
+    '宿舍設施有啲咩？',
+    '宿舍设施有哪些？',
+    'What services are in the residence halls?',
+  ]) {
+    const result = freshRetrieve(query);
+    assert.equal(result.intent, 'hall_facilities', query);
+    assert.deepEqual(result.sources.map((source) => source.id), ['hkbu.sa.hall-facilities'], query);
+    assert.equal(result.supportableClaims.every((claim) => claim.sourceId === 'hkbu.sa.hall-facilities'), true, query);
+    assert.equal(result.staleClaims.length, 0, query);
+    assert.equal(result.ambiguityCodes.some((code) => code.startsWith('RESIDENCE_')), false, query);
+    assert.equal(result.ambiguityCodes.includes('CONFLICTED_LIVE_STATUS'), false, query);
+  }
+});
+
+test('explicit NTTIH bedding questions use the reviewed room-inclusions claim', () => {
+  const freshRetrieve = createRetriever({
+    corpus,
+    now: () => new Date('2026-08-26T12:00:00+08:00'),
+  }).retrieve;
+  for (const query of [
+    'Does NTTIH provide bedding?',
+    'NTTIH 有冇床品？',
+    'NTTIH 提供床上用品吗？',
+  ]) {
+    const result = freshRetrieve(query);
+    assert.equal(result.intent, 'hall_facilities', query);
+    assert.deepEqual(result.evidenceIds, ['evidence.sa.nttih.room-inclusions'], query);
+    assert.deepEqual(result.sources.map((source) => source.id), ['hkbu.sa.nttih-facilities'], query);
+    assert.deepEqual(result.ambiguityCodes, [], query);
+  }
+});
+
+test('NTTIH context never promotes unsupported SIM-card or grocery guidance', () => {
+  const freshRetrieve = createRetriever({
+    corpus,
+    now: () => new Date('2026-08-26T12:00:00+08:00'),
+  }).retrieve;
+  for (const query of [
+    'Where can I buy a SIM card near NTTIH?',
+    'NTTIH 附近邊度可以買 SIM 卡？',
+    'NTTIH 附近哪里可以买 SIM 卡？',
+    'Is there a grocery store near NTTIH?',
+    'NTTIH 附近有冇雜貨店？',
+    'NTTIH 附近有杂货店吗？',
+  ]) {
+    const result = freshRetrieve(query);
+    assert.equal(result.intent, 'living_supplies', query);
+    assert.deepEqual(result.evidenceIds, [], query);
+    assert.deepEqual(result.sources.map((source) => source.id), ['hkbu.sa.student-welfare-shop'], query);
+    assert.deepEqual(result.ambiguityCodes, ['NO_MATCHING_OFFICIAL_EVIDENCE'], query);
+    assert.equal(result.handoffSourceId, 'hkbu.sa.accm-contact', query);
+  }
 });
 
 test('knowledge freshness is claim-level and only current official evidence is supportable', () => {

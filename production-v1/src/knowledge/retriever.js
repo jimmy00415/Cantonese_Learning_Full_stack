@@ -9,11 +9,18 @@ const INTENT_ALIASES = Object.freeze({
   residence_check_in: ['residence check in', 'residence hall', 'student residence', 'village care', 'hostel check in', 'hostel', 'residence', '宿舍', '住宿', '入住', '入宿', 'check in'],
   campus_ar_navigation: ['campus map', 'academic registry', 'ar office', 'ar', 'sce tower', 'jc3', 'jockey club campus of creativity', '校園地圖', '校园地图', '教務處', '教务处', '學術註冊處', '学术注册处'],
   library: ['library', 'main library', 'chinese medicine library', 'shek mun campus library', 'cml', 'smcl', '主館', '主馆', '圖書館', '图书馆', '書館', '书馆'],
-  dining: ['canteen', 'catering', 'restaurant', 'food', 'bu fiesta', 'main canteen', '飯堂', '饭堂', '餐廳', '餐厅', '食堂', '食嘢', '吃饭'],
+  dining: ['canteen', 'catering', 'restaurant', 'food', 'bu fiesta', 'main canteen', 'nan yuan', 'h f c scholars court', '飯堂', '饭堂', '餐廳', '餐厅', '食堂', '食嘢', '吃饭'],
   medical: ['health centre', 'health center', 'medical', 'doctor', 'dental', 'clinic', '健康中心', '醫療', '医疗', '睇醫生', '看医生', '牙科'],
   osa_counselling: ['office of student affairs', 'osa', 'student affairs', 'counselling', 'counseling', 'cdc', '學生事務處', '学生事务处', '輔導', '辅导', '心理諮詢', '心理咨询'],
-  transport: ['transport', 'mtr', 'minibus', 'bus', 'kowloon tong station', '交通', '港鐵', '港铁', '地鐵', '地铁', '小巴', '巴士'],
+  transport: ['transport', 'mtr', 'minibus', 'bus', 'kowloon tong station', 'kowloon tong', '交通', '港鐵', '港铁', '地鐵', '地铁', '小巴', '巴士', '九龍塘', '九龙塘'],
   emergency: ['emergency contacts', 'hkbu security', 'security hotline', '保安', '緊急聯絡', '紧急联络'],
+  hall_facilities: ['hall facilities', 'common facilities', 'residence hall services', 'services in the residence halls', 'services are in the residence halls', 'music practice room', 'hall laundry', 'student residence halls laundry', 'srh laundry', 'nttih', 'dr ng tor tai international house', '宿舍設施', '宿舍设施', '宿舍服務', '宿舍服务', '公共設施', '公共设施', '音樂練習室', '音乐练习室', '洗衣房', 'srh 洗衣', '洗衣點樣畀錢', '洗衣怎么付款', '接待處', '接待处'],
+  hall_maintenance: ['hall room has a defect', 'room has a defect', 'report a defect', 'hall maintenance', '宿舍房有故障', '宿舍房間有故障', '宿舍房间有故障', '申報故障', '申报故障', '宿舍維修', '宿舍维修'],
+  international_support: ['international association', 'cultural ambassador', 'international student support', 'support for international students', 'support is available for international students', 'international students get support', 'services for international students', '國際學生支援', '国际学生支援', '國際學生支持', '国际学生支持', '國際學生服務', '国际学生服务', '國際學生可以去邊度搵支援', '國際學生去邊度搵支援', '國際學生有咩支援', '国际学生可以去哪里找支持', '国际学生去哪里找支持', '国际学生有哪些支持', '文化大使'],
+  orientation: ['orientation resources', 'new student orientation', 'university orientation workshop', 'uow', 'fye', 'first year experience', 'u life', '迎新資源', '迎新资源', '新生迎新', '迎新工作坊'],
+  dining_inventory: ['food outlets', 'catering outlets', 'outlets at', 'what outlets', '餐飲店', '餐饮店', '餐飲點', '餐饮点', '有咩餐廳', '有哪些餐厅'],
+  language_learning: ['cantonese course', 'cantonese courses', 'learn cantonese', 'learning cantonese', 'cantonese peer tutoring', 'cantonese speaking coaching', 'language course', '廣東話', '广东话', '粵語課', '粤语课', '粵語學習', '粤语学习', '粵語口語輔導', '粤语口语辅导', '學習夥伴', '学习伙伴'],
+  living_supplies: ['student welfare shop', 'welfare shop', 'bedding', 'grocery', 'groceries', 'grocery store', 'sim card', 'sim 卡', 'daily necessities', 'stationery', 'living supplies', '學生福利店', '学生福利店', '床品', '床上用品', '雜貨', '杂货', '日用品', '生活用品', '文具'],
 });
 
 const BRANCH_ALIASES = ['main library', '主館', '主馆', '主圖書館', '主图书馆', 'fong shu chuen library', 'cml', 'chinese medicine library', '中醫藥圖書館', '中医药图书馆', 'smcl', 'shek mun', '石門', '石门'];
@@ -25,12 +32,33 @@ const STUDENT_PHOTO_DEADLINES = Object.freeze([
   Object.freeze({ value: '2026-09-01', aliases: ['1 september 2026', 'september 1 2026', '1 sep 2026', '2026-09-01', '2026年9月1日', '9月1日'] }),
 ]);
 const CURRENT_HOURS_ALIASES = ['today', 'current', 'now', '今日', '今天', '而家', '現在', '现在', '幾點', '几点'];
-const DINING_OUTLET_ALIASES = ['bu fiesta', 'main canteen', '主飯堂', '主食堂'];
+const CURRENT_AVAILABILITY_ALIASES = [
+  ...CURRENT_HOURS_ALIASES,
+  'open', 'currently', 'availability', 'right now', 'can i get', 'can i join', 'apply today',
+  '有冇得用', '可唔可以用', '可以用嗎', '可以用吗', '可唔可以申請', '可以申請', '可以申请',
+  '開唔開', '开不开', '開門', '开门', '營業', '营业', '開放', '开放',
+];
+const DINING_OUTLET_ALIASES = [
+  'bu fiesta', 'main canteen', 'nan yuan', 'h f c scholars court', '主飯堂', '主食堂',
+];
 const DINING_OPEN_STATE_ALIASES = ['open', 'closed', '營業', '营业', '開門', '开门', '開', '开'];
 const DINING_OPEN_SET_ALIASES = [
   'what food', 'which canteen', 'what canteen', 'which restaurant', 'what restaurant',
   'what else', 'where else', 'anything else', 'other than', 'besides',
   '其他', '其它', '仲有', '還有', '还有', '有咩食', '有什么吃', '邊間', '边间', '哪間', '哪间',
+];
+const TRANSPORT_DIRECTION_ALIASES = [
+  'how do i get', 'how to get', 'get from', 'route from', 'route to',
+  '點去', '点去', '點樣去', '点样去', '怎麼去', '怎么去', '如何去',
+];
+const GENERIC_HALL_FACILITY_ALIASES = [
+  'hall facilities', 'residence hall services', 'services in the residence halls',
+  'services are in the residence halls',
+  '宿舍設施', '宿舍设施', '宿舍服務', '宿舍服务',
+];
+const NTTIH_REVIEWED_INCLUSION_ALIASES = [
+  'provide bedding', 'include bedding', 'bedding provided', 'basic bedding',
+  '有冇床品', '提供床品', '提供床上用品', '有床上用品',
 ];
 
 function escapeRegExp(value) {
@@ -78,6 +106,35 @@ function matchedIntents(query) {
     if (score > 0) matches.push({ intent, score });
   }
   return matches;
+}
+
+function primaryIntent(query) {
+  const matches = matchedIntents(query);
+  const available = new Set(matches.map(({ intent }) => intent));
+  if (available.has('hall_facilities')
+    && hasAny(query, ['nttih', 'dr ng tor tai international house'])
+    && (!available.has('living_supplies') || hasAny(query, NTTIH_REVIEWED_INCLUSION_ALIASES))) {
+    return 'hall_facilities';
+  }
+  const contextualPriority = [
+    ['living_supplies', INTENT_ALIASES.living_supplies],
+    ['hall_maintenance', INTENT_ALIASES.hall_maintenance],
+    ['orientation', INTENT_ALIASES.orientation],
+    ['dining_inventory', INTENT_ALIASES.dining_inventory],
+    ['language_learning', INTENT_ALIASES.language_learning],
+    ['international_support', INTENT_ALIASES.international_support],
+    ['hall_facilities', INTENT_ALIASES.hall_facilities],
+  ];
+  for (const [intent, aliases] of contextualPriority) {
+    if (available.has(intent) && hasAny(query, aliases)) return intent;
+  }
+  if (available.has('transport') && hasAny(query, [
+    'mtr', 'minibus', 'bus', '港鐵', '港铁', '地鐵', '地铁', '小巴', '巴士',
+    ...TRANSPORT_DIRECTION_ALIASES,
+  ])) {
+    return 'transport';
+  }
+  return matches.sort((left, right) => right.score - left.score || left.intent.localeCompare(right.intent))[0]?.intent ?? null;
 }
 
 function sourceSpecificity(source, query) {
@@ -188,6 +245,11 @@ function selectClaims(source, query) {
     }
   }
   const maximum = Math.max(0, ...rows.map(({ claimScore }) => claimScore));
+  if (maximum === 0 && [
+    'hkbu.ar.exchange-language-courses',
+    'hkbu.sa.student-welfare-shop',
+    'hkbu.sa.u-life',
+  ].includes(source.id)) return [];
   if (maximum === 0) return rows;
   return rows.filter(({ claimScore }) => claimScore === maximum);
 }
@@ -196,7 +258,7 @@ function hasAny(query, aliases) {
   return aliases.some((alias) => phraseMatches(query, alias));
 }
 
-function rankSources(corpus, query) {
+function rankSources(corpus, query, intent) {
   const selected = new Map();
   const asksCurrentHours = hasAny(query, CURRENT_HOURS_ALIASES);
   const asksCurrentDining = asksCurrentHours || hasAny(query, DINING_OPEN_STATE_ALIASES);
@@ -204,13 +266,20 @@ function rankSources(corpus, query) {
   const hasExplicitDiningOutlet = !hasDiningOpenSetIntent && hasAny(query, DINING_OUTLET_ALIASES);
   const requiresDiningSetGuard = hasDiningOpenSetIntent
     || (asksCurrentDining && !hasExplicitDiningOutlet);
-  for (const { intent, score: intentScore } of matchedIntents(query)) {
+  const asksGenericHallFacilities = intent === 'hall_facilities'
+    && hasAny(query, GENERIC_HALL_FACILITY_ALIASES)
+    && !hasAny(query, ['nttih', 'dr ng tor tai international house']);
+  for (const { intent: matchedIntent, score: intentScore } of matchedIntents(query)) {
+    if (matchedIntent !== intent) continue;
     const candidates = corpus.sources
-      .filter((source) => source.intentGroups.includes(intent))
+      .filter((source) => source.intentGroups.includes(matchedIntent))
       .filter((source) => (
-        intent !== 'dining'
+        matchedIntent !== 'dining'
         || !requiresDiningSetGuard
         || source.id === 'hkbu.eo.dining-overview'
+      ))
+      .filter((source) => (
+        !asksGenericHallFacilities || source.id === 'hkbu.sa.hall-facilities'
       ))
       .map((source) => ({ source, specificity: sourceSpecificity(source, query) }));
     const maximum = Math.max(0, ...candidates.map(({ specificity }) => specificity));
@@ -312,6 +381,17 @@ function ambiguityFor(query, ranked, selectedClaims) {
   if (asksCurrentDining && diningClaims.length > 0 && !hasDefinitiveClosure) {
     codes.push('CATERING_SPECIAL_HOURS_REQUIRED');
   }
+  const asksCurrentAvailability = hasAny(query, CURRENT_AVAILABILITY_ALIASES);
+  if (!codes.includes('CATERING_SPECIAL_HOURS_REQUIRED')
+    && asksCurrentAvailability && relevantOfficialClaims.some((claim) => (
+    claim.facts?.inventoryOnly || claim.facts?.listedHoursOnly || claim.facts?.scopeOnly
+  ))) {
+    codes.push('CURRENT_AVAILABILITY_REQUIRED');
+  }
+  if (!codes.some((code) => code.startsWith('RESIDENCE_'))
+    && selectedClaims.some(({ claim }) => claim.facts?.mustNotPromote)) {
+    codes.push('CONFLICTED_LIVE_STATUS');
+  }
   return [...new Set(codes)];
 }
 
@@ -321,12 +401,44 @@ function isBlockedByClarification(claim, ambiguityCodes, query) {
   if (claim.facts?.branch && ambiguityCodes.includes('LIBRARY_BRANCH_REQUIRED')) return true;
   if (claim.facts?.residenceType
     && ambiguityCodes.some((code) => code.startsWith('RESIDENCE_'))) return true;
+  if (claim.sourceId === 'hkbu.sa.residence-halls-check-in'
+    && !claim.facts?.mustNotPromote
+    && ambiguityCodes.some((code) => code.startsWith('RESIDENCE_'))) return true;
   if (claim.facts?.regularHoursOnly
     && ambiguityCodes.includes('CATERING_SPECIAL_HOURS_REQUIRED')) return true;
+  if ((claim.facts?.inventoryOnly || claim.facts?.listedHoursOnly || claim.facts?.scopeOnly)
+    && (ambiguityCodes.includes('CURRENT_AVAILABILITY_REQUIRED')
+      || (claim.facts?.inventoryOnly
+        && ambiguityCodes.includes('CATERING_SPECIAL_HOURS_REQUIRED')))) return true;
   if (claim.facts?.open === false
     && ambiguityCodes.includes('CATERING_SPECIAL_HOURS_REQUIRED')
     && (!hasAny(query, ['bu fiesta']) || isDiningOpenSetQuery(query))) return true;
   return false;
+}
+
+function handoffFor(intent, ranked, ambiguityCodes) {
+  const topSourceId = ranked[0]?.source.id ?? null;
+  if (ambiguityCodes.includes('CURRENT_AVAILABILITY_REQUIRED') && topSourceId) return topSourceId;
+  const fixed = {
+    student_card: 'hkbu.ar.contact',
+    account_password: 'hkbu.ito.contact',
+    duo: 'hkbu.ito.contact',
+    it_help: 'hkbu.ito.contact',
+    residence_check_in: 'hkbu.sa.accm-contact',
+    hall_facilities: 'hkbu.sa.accm-contact',
+    hall_maintenance: 'hkbu.sa.accm-contact',
+    international_support: 'hkbu.sa.international-support',
+    orientation: topSourceId,
+    library: 'hkbu.library.hours',
+    dining: 'hkbu.eo.dining-overview',
+    dining_inventory: 'hkbu.eo.dining-overview',
+    transport: 'hkbu.eo.campus-map',
+    language_learning: 'hkbu.ar.exchange-language-courses',
+    living_supplies: 'hkbu.sa.accm-contact',
+    medical: 'hkbu.eo.medical',
+    osa_counselling: 'hkbu.sa.counselling',
+  };
+  return fixed[intent] ?? null;
 }
 
 function conflictMetadataRows(ranked, selectedClaims) {
@@ -352,6 +464,7 @@ export function createRetriever({ corpus, now = () => new Date() }) {
     if (safety.kind === 'emergency') {
       return {
         ...safety,
+        intent: 'emergency',
         topSourceId: 'hkbu.eo.security',
         claims: [],
         supportableClaims: [],
@@ -360,14 +473,25 @@ export function createRetriever({ corpus, now = () => new Date() }) {
         sources: [],
         needsClarification: false,
         ambiguityCodes: [],
+        handoffSourceId: null,
       };
     }
 
     const query = normalizeKnowledgeQuery(input);
-    const ranked = query ? rankSources(corpus, query) : [];
+    const intent = query ? primaryIntent(query) : null;
+    const ranked = query && intent ? rankSources(corpus, query, intent) : [];
     const selectedClaims = ranked.flatMap(({ source }) => selectClaims(source, query));
     const ambiguityCodes = query ? ambiguityFor(query, ranked, selectedClaims) : ['QUERY_REQUIRED'];
-    if (query && ranked.length === 0) ambiguityCodes.push('NO_MATCHING_OFFICIAL_EVIDENCE');
+    if (query && intent !== 'language_learning'
+      && (ranked.length === 0 || selectedClaims.length === 0)) {
+      ambiguityCodes.push('NO_MATCHING_OFFICIAL_EVIDENCE');
+    }
+    if (intent === 'language_learning' && selectedClaims.length === 0) {
+      ambiguityCodes.push('NO_CURRENT_PROGRAMME_EVIDENCE');
+    }
+    if (intent === 'living_supplies' && selectedClaims.length === 0) {
+      ambiguityCodes.push('NO_MATCHING_OFFICIAL_EVIDENCE');
+    }
 
     const current = now();
     if (!(current instanceof Date) || Number.isNaN(current.getTime())) throw new Error('injected clock returned an invalid instant');
@@ -402,6 +526,7 @@ export function createRetriever({ corpus, now = () => new Date() }) {
 
     return {
       kind: 'knowledge',
+      intent,
       query,
       topSourceId: ranked[0]?.source.id ?? null,
       claims: supportableClaims,
@@ -410,7 +535,10 @@ export function createRetriever({ corpus, now = () => new Date() }) {
       evidenceIds: supportableClaims.map((claim) => claim.id),
       sources,
       needsClarification: ambiguityCodes.length > 0,
-      ambiguityCodes,
+      ambiguityCodes: [...new Set(ambiguityCodes)],
+      handoffSourceId: supportableClaims.length === 0
+        ? handoffFor(intent, ranked, ambiguityCodes)
+        : null,
     };
   }
 

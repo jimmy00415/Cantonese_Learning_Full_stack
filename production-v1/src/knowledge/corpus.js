@@ -15,8 +15,32 @@ const FORBIDDEN_DATA_KEYS = new Set(['apikey', 'password', 'passcode', 'secret',
 const REQUIRED_INTENT_GROUPS = Object.freeze([
   'student_card', 'account_password', 'duo', 'it_help', 'residence_check_in',
   'campus_ar_navigation', 'library', 'dining', 'medical', 'osa_counselling',
-  'transport', 'emergency',
+  'transport', 'emergency', 'hall_facilities', 'hall_maintenance',
+  'international_support', 'orientation', 'dining_inventory', 'language_learning',
+  'living_supplies',
 ]);
+const OPERATIONAL_QUALIFIERS = Object.freeze([
+  'inventoryOnly', 'listedHoursOnly', 'scopeOnly', 'mustNotPromote',
+]);
+const REVIEW_WINDOW_DAYS = Object.freeze({
+  daily: 1,
+  weekly: 7,
+  biweekly: 14,
+  monthly: 31,
+  quarterly: 92,
+});
+const APPROVED_SOURCE_LANGUAGES = new Set(['en', 'zhHant', 'zhHans']);
+const APPROVED_OWNER_OFFICES = new Set([
+  'HKBU Academic Registry',
+  'HKBU Office of Information Technology',
+  'HKBU Office of Student Affairs',
+  'HKBU Office of Student Affairs / Accommodation and Campus Management (ACCM)',
+  'HKBU Office of Student Affairs / First Year Experience (FYE)',
+  'HKBU Office of Student Affairs / Campus Life & Amenities',
+  'HKBU Estates Office',
+  'HKBU Library',
+]);
+const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1_000;
 
 function requiredString(value, field) {
   if (typeof value !== 'string' || value.trim() === '') {
@@ -127,7 +151,104 @@ function validateClaim(claim, source, field, seen) {
   if (!VERIFICATION_STATUSES.has(claim.verificationStatus)) {
     throw new Error(`${field}.verificationStatus is unsupported`);
   }
+  if (claim.facts !== undefined) {
+    if (!claim.facts || typeof claim.facts !== 'object' || Array.isArray(claim.facts)) {
+      throw new Error(`${field}.facts must be an object`);
+    }
+    for (const qualifier of OPERATIONAL_QUALIFIERS) {
+      if (claim.facts[qualifier] !== undefined && typeof claim.facts[qualifier] !== 'boolean') {
+        throw new Error(`${field}.facts.${qualifier} must be boolean`);
+      }
+    }
+    if (claim.facts.mustNotPromote === true && claim.verificationStatus === 'official_verified') {
+      throw new Error(`${field}.facts.mustNotPromote cannot be official_verified`);
+    }
+  }
+  if (!Object.hasOwn(REVIEW_WINDOW_DAYS, claim.volatility)) {
+    throw new Error(`${field}.volatility is unsupported`);
+  }
   validateReviewAttestation(claim, field);
+}
+
+function validateSourceGovernance(source, field) {
+  const governance = source.sourceGovernance;
+  if (!governance || typeof governance !== 'object' || Array.isArray(governance)) {
+    throw new Error(`${field}.sourceGovernance is required`);
+  }
+  requiredString(governance.ownerOffice, `${field}.sourceGovernance.ownerOffice`);
+  if (!APPROVED_OWNER_OFFICES.has(governance.ownerOffice)) {
+    throw new Error(`${field}.sourceGovernance.ownerOffice is not a reviewed HKBU owner office`);
+  }
+  if (!Array.isArray(governance.categories) || governance.categories.length === 0) {
+    throw new Error(`${field}.sourceGovernance.categories is required`);
+  }
+  const expectedCategories = [...new Set(source.intentGroups)].sort();
+  const actualCategories = [...new Set(governance.categories)].sort();
+  if (actualCategories.length !== governance.categories.length
+    || actualCategories.length !== expectedCategories.length
+    || actualCategories.some((category, index) => category !== expectedCategories[index])) {
+    throw new Error(`${field}.sourceGovernance.categories must exactly cover intentGroups`);
+  }
+  if (!Array.isArray(governance.languages) || governance.languages.length === 0
+    || new Set(governance.languages).size !== governance.languages.length
+    || governance.languages.some((language) => !APPROVED_SOURCE_LANGUAGES.has(language))) {
+    throw new Error(`${field}.sourceGovernance.languages must identify unique reviewed source languages`);
+  }
+  requiredString(governance.volatility, `${field}.sourceGovernance.volatility`);
+  requiredString(governance.reviewCadence, `${field}.sourceGovernance.reviewCadence`);
+  if (!Object.hasOwn(REVIEW_WINDOW_DAYS, governance.volatility)) {
+    throw new Error(`${field}.sourceGovernance.volatility is unsupported`);
+  }
+  if (!Object.hasOwn(REVIEW_WINDOW_DAYS, governance.reviewCadence)) {
+    throw new Error(`${field}.sourceGovernance.reviewCadence is unsupported`);
+  }
+  const strictestClaimWindowDays = Math.min(
+    ...source.claims.map((claim) => REVIEW_WINDOW_DAYS[claim.volatility]),
+  );
+  const strictestActualReviewHorizonDays = Math.min(...source.claims.map((claim) => (
+    Math.max(1, Math.ceil(
+      (new Date(claim.reviewAfter).getTime() - new Date(claim.verifiedAt).getTime())
+      / MILLISECONDS_PER_DAY,
+    ))
+  )));
+  if (REVIEW_WINDOW_DAYS[governance.volatility] > strictestClaimWindowDays) {
+    throw new Error(`${field}.sourceGovernance.volatility cannot be looser than its claims`);
+  }
+  if (REVIEW_WINDOW_DAYS[governance.reviewCadence] > strictestClaimWindowDays) {
+    throw new Error(`${field}.sourceGovernance.reviewCadence cannot be looser than its claims`);
+  }
+  if (REVIEW_WINDOW_DAYS[governance.volatility] > strictestActualReviewHorizonDays) {
+    throw new Error(`${field}.sourceGovernance.volatility cannot exceed the actual claim review horizon`);
+  }
+  if (REVIEW_WINDOW_DAYS[governance.reviewCadence] > strictestActualReviewHorizonDays) {
+    throw new Error(`${field}.sourceGovernance.reviewCadence cannot exceed the actual claim review horizon`);
+  }
+  if (!Number.isInteger(governance.evidenceWindowDays)
+    || governance.evidenceWindowDays < 1
+    || governance.evidenceWindowDays > 92) {
+    throw new Error(`${field}.sourceGovernance.evidenceWindowDays must be a positive bounded integer`);
+  }
+  if (governance.evidenceWindowDays > strictestClaimWindowDays) {
+    throw new Error(`${field}.sourceGovernance.evidenceWindowDays cannot be looser than its claims`);
+  }
+  if (governance.evidenceWindowDays > strictestActualReviewHorizonDays) {
+    throw new Error(`${field}.sourceGovernance.evidenceWindowDays cannot exceed the actual claim review horizon`);
+  }
+  const attestation = governance.reviewAttestation;
+  if (!attestation || typeof attestation !== 'object' || Array.isArray(attestation)) {
+    throw new Error(`${field}.sourceGovernance.reviewAttestation is required`);
+  }
+  requiredString(attestation.reviewer, `${field}.sourceGovernance.reviewAttestation.reviewer`);
+  parseHktInstant(attestation.reviewedAt, `${field}.sourceGovernance.reviewAttestation.reviewedAt`);
+  if (attestation.reviewedAt !== source.verifiedAt) {
+    throw new Error(`${field}.sourceGovernance.reviewAttestation.reviewedAt must equal source verifiedAt`);
+  }
+  if (attestation.captureMethod !== 'manual_review') {
+    throw new Error(`${field}.sourceGovernance.reviewAttestation.captureMethod must be manual_review`);
+  }
+  if (attestation.sourceHash !== null) {
+    throw new Error(`${field}.sourceGovernance.reviewAttestation.sourceHash must be null for manual_review`);
+  }
 }
 
 export function validateCorpus(input) {
@@ -163,6 +284,7 @@ export function validateCorpus(input) {
     for (const [claimIndex, claim] of source.claims.entries()) {
       validateClaim(claim, source, `${field}.claims[${claimIndex}]`, seen);
     }
+    validateSourceGovernance(source, field);
     if (source.actions !== undefined) {
       if (!Array.isArray(source.actions)) throw new Error(`${field}.actions must be an array`);
       for (const [actionIndex, action] of source.actions.entries()) {

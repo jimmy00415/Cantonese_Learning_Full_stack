@@ -210,10 +210,10 @@ function sourceCitation(source, claim = null, status = 'unverified') {
   };
 }
 
-function mapValidatedDraft(draft, corpus) {
+function mapValidatedDraft(draft, corpus, { language, needsClarification } = {}) {
   const { claims, actions } = corpusIndexes(corpus);
-  const citations = draft.evidenceIds.map((id) => {
-    const row = claims.get(id);
+  const selectedRows = draft.evidenceIds.map((id) => claims.get(id));
+  const citations = selectedRows.map((row) => {
     return sourceCitation(row.source, row.claim, 'verified');
   });
   const cards = draft.actionIds.map((id) => {
@@ -227,12 +227,15 @@ function mapValidatedDraft(draft, corpus) {
     };
   });
   return {
-    text: draft.replyText,
+    text: selectedRows
+      .map((row) => row.claim.text?.[language] ?? row.claim.text?.en)
+      .filter(Boolean)
+      .join('\n\n'),
     citations,
     cards,
-    suggestedReplies: draft.suggestedReplies,
-    needsClarification: draft.needsClarification,
-    groundingStatus: draft.groundingStatus,
+    suggestedReplies: [],
+    needsClarification: Boolean(needsClarification),
+    groundingStatus: selectedRows.length > 0 ? 'verified' : 'unverified',
   };
 }
 
@@ -248,26 +251,90 @@ function groundedFallback(retrieval, corpus, language, capturedEvidence, instant
     needsClarification: Boolean(retrieval.needsClarification),
     groundingStatus: selected.length > 0 ? 'verified' : 'unverified',
   };
-  return { ...mapValidatedDraft(draft, corpus), fallback: true };
+  return {
+    ...mapValidatedDraft(draft, corpus, {
+      language,
+      needsClarification: retrieval.needsClarification,
+    }),
+    provider: 'deterministic',
+    providerLatencyMs: 0,
+    fallback: true,
+  };
+}
+
+function controlledClarificationSubject(retrieval) {
+  const query = retrieval.query ?? '';
+  const subjects = [
+    [/\bh f c scholars court\b/u, 'H.F.C.@Scholars Court'],
+    [/\bcultural ambassador\b/u, 'Cultural Ambassador'],
+    [/\bnan yuan\b/u, 'Nan Yuan'],
+    [/\bnttih\b/u, 'NTTIH'],
+    [/\b106a\b/u, '106A'],
+    [/\bsim(?: card)?\b/u, 'SIM'],
+  ];
+  return subjects.find(([pattern]) => pattern.test(query))?.[1] ?? null;
+}
+
+function unverifiedMessage(retrieval, language) {
+  const subject = controlledClarificationSubject(retrieval);
+  const codes = new Set(retrieval.ambiguityCodes ?? []);
+  if (codes.has('CONFLICTED_LIVE_STATUS')) {
+    return {
+      en: `I could not confirm whether ${subject ?? 'that outlet'} is open now because the reviewed HKBU pages conflict. Please check the current official catering update.`,
+      zhHant: `已審核的浸大頁面互有衝突，我未能確認 ${subject ?? '該餐飲店'} 現時是否營業。請查看最新官方餐飲安排。`,
+      zhHans: `已审核的浸大页面互有冲突，我未能确认 ${subject ?? '该餐饮点'} 目前是否营业。请查看最新官方餐饮安排。`,
+    }[language];
+  }
+  if (codes.has('CURRENT_AVAILABILITY_REQUIRED')) {
+    return {
+      en: `I could not confirm the current availability of ${subject ?? 'that service'} from the reviewed HKBU information. Please check the linked official page.`,
+      zhHant: `我未能從已審核的浸大資料確認 ${subject ?? '該項服務'} 現時是否可用。請查看連結的官方頁面。`,
+      zhHans: `我未能从已审核的浸大资料确认 ${subject ?? '该项服务'} 目前是否可用。请查看链接的官方页面。`,
+    }[language];
+  }
+  if (codes.has('NO_CURRENT_PROGRAMME_EVIDENCE')) {
+    return {
+      en: 'I found no current reviewed HKBU evidence for that programme. Please use the linked official course page and confirm the programme or semester.',
+      zhHant: '我找不到該計劃的最新已審核浸大資料。請查看連結的官方課程頁，並確認計劃或學期。',
+      zhHans: '我找不到该项目的最新已审核浸大资料。请查看链接的官方课程页面，并确认项目或学期。',
+    }[language];
+  }
+  if (codes.has('NO_MATCHING_OFFICIAL_EVIDENCE') && subject) {
+    return {
+      en: `I could not confirm an official HKBU answer for ${subject}. The linked office page is a category handoff, not evidence for a shop or recommendation.`,
+      zhHant: `我未能確認浸大有關 ${subject} 的官方答案。連結的辦事處頁只作分類轉介，不是商店或推薦依據。`,
+      zhHans: `我未能确认浸大有关 ${subject} 的官方答案。链接的办公室页面只作分类转介，不是商店或推荐依据。`,
+    }[language];
+  }
+  return {
+    en: 'I could not confirm that from the reviewed HKBU information. Please clarify the exact service you mean.',
+    zhHant: '我未能從已審核的浸大資料確認這件事。請告訴我你指的是哪項服務。',
+    zhHans: '我未能从已审核的浸大资料确认这件事。请告诉我你指的是哪项服务。',
+  }[language];
 }
 
 function unverifiedAnswer(retrieval, corpus, language) {
   const { sources } = corpusIndexes(corpus);
-  const source = (retrieval.sources ?? []).map((item) => sources.get(item.id)).find(Boolean)
-    ?? sources.get('hkbu.ar.contact')
-    ?? sources.get('hkbu.ito.contact')
-    ?? [...sources.values()][0];
-  const messages = {
-    en: 'I could not confirm that from the reviewed HKBU information. Please check the official directory or clarify the exact service you mean.',
-    zhHant: '我未能從已審核的浸大資料確認這件事。請查看官方聯絡頁，或告訴我你指的是哪項服務。',
-    zhHans: '我未能从已审核的浸大资料确认这件事。请查看官方联系页，或告诉我你指的是哪项服务。',
-  };
+  const source = retrieval.handoffSourceId
+    ? sources.get(retrieval.handoffSourceId)
+    : null;
+  const handoffLabel = {
+    en: 'Open official HKBU guidance',
+    zhHant: '查看浸大官方指引',
+    zhHans: '查看浸大官方指引',
+  }[language];
   return {
-    text: messages[language],
-    citations: source ? [sourceCitation(source)] : [],
-    cards: [],
+    text: unverifiedMessage(retrieval, language),
+    citations: [],
+    cards: source ? [{
+      kind: 'handoff',
+      sourceId: source.id,
+      title: source.title,
+      label: handoffLabel,
+      url: source.canonicalUrl,
+    }] : [],
     suggestedReplies: [],
-    needsClarification: true,
+    needsClarification: Boolean(retrieval.needsClarification),
     groundingStatus: 'unverified',
     fallback: true,
   };
@@ -319,6 +386,9 @@ export function createAnswerService({ corpus, retriever, llmProvider, now = () =
     if (retrieval.kind === 'emergency') return safetyAnswer(retrieval, corpus, language, now);
     const reference = groundingSnapshot(retrieval, corpus, asInstant(now()));
     if (reference.evidence.length === 0) return unverifiedAnswer(retrieval, corpus, language);
+    if (retrieval.needsClarification) {
+      return groundedFallback(retrieval, corpus, language, reference.evidence, asInstant(now()));
+    }
 
     await beforeProvider();
     if (signal?.aborted) throw Object.assign(new Error('LEASE_LOST'), { code: 'LEASE_LOST' });
@@ -341,8 +411,12 @@ export function createAnswerService({ corpus, retriever, llmProvider, now = () =
         actionSnapshot: reference.actions,
         now: asInstant(now()),
       });
+      if (draft.evidenceIds.length === 0) return unverifiedAnswer(retrieval, corpus, language);
       return {
-        ...mapValidatedDraft(draft, corpus),
+        ...mapValidatedDraft(draft, corpus, {
+          language,
+          needsClarification: retrieval.needsClarification,
+        }),
         provider: providerResult.provider,
         providerLatencyMs: providerResult.latencyMs,
       };

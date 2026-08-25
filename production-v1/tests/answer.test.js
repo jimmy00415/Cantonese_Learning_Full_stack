@@ -75,7 +75,7 @@ test('answer parser downgrades unsupported verified status instead of promoting 
   assert.equal(parsed.groundingStatus, 'unverified');
 });
 
-test('answer service maps only corpus evidence/actions into citations and cards', async () => {
+test('answer service maps only corpus evidence/actions and renders selected claim text', async () => {
   let providerInput;
   const provider = {
     provider: 'hkbu',
@@ -88,7 +88,10 @@ test('answer service maps only corpus evidence/actions into citations and cards'
   let generatingCalls = 0;
   const answer = await service.answer({ turnId: 'turn-1', text: 'Duo 换手机怎么办', context: [], beforeProvider: async () => { generatingCalls += 1; } });
   assert.equal(generatingCalls, 1);
-  assert.equal(answer.text, validDraft().replyText);
+  const selectedClaim = corpus.sources
+    .flatMap((source) => source.claims)
+    .find((claim) => claim.id === 'evidence.ito.duo.new-phone');
+  assert.equal(answer.text, selectedClaim.text.en);
   assert.equal(answer.groundingStatus, 'verified');
   assert.deepEqual(answer.citations.map((citation) => citation.evidenceId), ['evidence.ito.duo.new-phone']);
   assert.equal(answer.citations[0].url, 'https://ito.hkbu.edu.hk/services/it-security/mfa.html');
@@ -197,7 +200,83 @@ test('answer service falls back deterministically to selected evidence and sourc
   assert.equal(first.citations.every((citation) => citation.url.endsWith('.hkbu.edu.hk/services/it-security/mfa.html')), true);
 });
 
-test('answer service is honestly unverified when retrieval is insufficient and still offers an official directory source', async () => {
+test('clarification-required retrieval never lets a successful model invent current operating status', async () => {
+  let providerCalls = 0;
+  const freshNow = new Date('2026-08-26T12:00:00+08:00');
+  const freshRetriever = createRetriever({ corpus, now: () => freshNow });
+  const provider = {
+    provider: 'hkbu',
+    async generate() {
+      providerCalls += 1;
+      return {
+        rawText: JSON.stringify({
+          replyText: 'Yes, Main Canteen is open now.',
+          evidenceIds: ['evidence.eo.dining-overview.special-hours'],
+          actionIds: [],
+          suggestedReplies: [],
+          needsClarification: false,
+          groundingStatus: 'verified',
+        }),
+        provider: 'hkbu',
+        latencyMs: 1,
+        usage: null,
+        finishReason: 'stop',
+        providerRequestId: null,
+      };
+    },
+  };
+  const service = createAnswerService({ corpus, retriever: freshRetriever, llmProvider: provider, now: () => freshNow });
+  const answer = await service.answer({
+    turnId: 'turn-current-canteen',
+    text: 'Is Main Canteen open now?',
+    context: [],
+    beforeProvider: async () => {},
+  });
+
+  assert.equal(providerCalls, 0);
+  assert.equal(answer.needsClarification, true);
+  assert.equal(answer.groundingStatus, 'verified');
+  assert.deepEqual(answer.citations.map((citation) => citation.evidenceId), ['evidence.eo.dining-overview.special-hours']);
+  assert.doesNotMatch(answer.text, /yes,? main canteen is open now/i);
+});
+
+test('verified answers render selected claim text instead of unrelated successful-model prose', async () => {
+  const maliciousText = 'NTTIH reception is open 24 hours and the Welfare Shop sells SIM cards.';
+  const provider = {
+    provider: 'hkbu',
+    async generate() {
+      return {
+        rawText: JSON.stringify(validDraft({
+          replyText: maliciousText,
+          suggestedReplies: ['Which SIM card should I buy?'],
+        })),
+        provider: 'hkbu',
+        latencyMs: 1,
+        usage: null,
+        finishReason: 'stop',
+        providerRequestId: null,
+      };
+    },
+  };
+  const service = createAnswerService({ corpus, retriever, llmProvider: provider, now: () => FIXED_NOW });
+  const answer = await service.answer({
+    turnId: 'turn-adversarial-grounding',
+    text: 'Duo changed phone',
+    context: [],
+    beforeProvider: async () => {},
+  });
+  const duoClaim = corpus.sources
+    .flatMap((source) => source.claims)
+    .find((claim) => claim.id === 'evidence.ito.duo.new-phone');
+
+  assert.equal(answer.text, duoClaim.text.en);
+  assert.doesNotMatch(answer.text, /NTTIH|SIM card|24 hours/i);
+  assert.deepEqual(answer.suggestedReplies, []);
+  assert.equal(answer.groundingStatus, 'verified');
+  assert.deepEqual(answer.citations.map((citation) => citation.evidenceId), [duoClaim.id]);
+});
+
+test('answer service is honestly unverified and never invents a global directory handoff', async () => {
   let providerCalls = 0;
   const provider = { provider: 'hkbu', async generate() { providerCalls += 1; throw new Error('must not be called'); } };
   const service = createAnswerService({ corpus, retriever, llmProvider: provider, now: () => FIXED_NOW });
@@ -206,7 +285,8 @@ test('answer service is honestly unverified when retrieval is insufficient and s
   assert.equal(answer.groundingStatus, 'unverified');
   assert.equal(answer.needsClarification, true);
   assert.match(answer.text, /could not confirm|未能確認|未能确认/i);
-  assert.equal(answer.citations.every((citation) => citation.url.startsWith('https://') && citation.url.includes('hkbu.edu.hk')), true);
+  assert.deepEqual(answer.citations, []);
+  assert.deepEqual(answer.cards, []);
 });
 
 test('answer service safety bypass is deterministic, multilingual, and never calls the model', async () => {

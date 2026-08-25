@@ -43,6 +43,7 @@ export function routeSafety(input) {
     /\b(?:someone|my (?:friend|roommate)|a student) is unconscious and not breathing\b/,
     /(?:受傷|受伤).*(?:流好多血|流很多血|大量出血|昏迷)/,
     /(?:流好多血|流很多血|大量出血).*(?:受傷|受伤|有人)/,
+    /(?:有人|同學|同学|學生|学生).{0,20}(?:重傷|重伤|嚴重受傷|严重受伤)/,
   ]);
   if (injury) return emergency('injury');
 

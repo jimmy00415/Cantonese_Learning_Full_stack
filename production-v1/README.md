@@ -61,6 +61,48 @@ validated before startup and re-read on every readiness evaluation; readiness
 never calls the provider. There is no production fallback to the local drivers
 or deterministic model.
 
+## Governed HKBU knowledge boundary
+
+The 2026-08-26 snapshot contains exactly 29 manually reviewed first-party HKBU
+page sources, 61 atomic claims, and 19 closed intent groups. At the snapshot
+review instant, 56 claims are supportable, four historical/conflicted claims are
+quarantined, and one future-dated library claim is not yet valid. A source count
+is not permission to answer: each claim must also pass its own verification,
+validity, review, query-scope, and clarification gates.
+
+Normal answers never run a web search. Verified citations come only from the
+bundled reviewed corpus. An official directory used to hand a student to the
+right office is rendered as a separate handoff card, never as factual evidence.
+Inventory, listed-hours, and programme-scope claims cannot establish current
+availability; conflicted or overdue facts fail closed.
+
+The following remain deliberately excluded or unconfirmed:
+
+- the Cantonese Peer Tutoring current-semester offer, because the current English
+  route fails and the located schedule is still 2025/26;
+- `lc.hkbu.edu.hk` and `www.hkbu.edu.hk`, which are not V1 allowlisted hosts;
+- current opening status for Nan Yuan and H.F.C.@Scholars Court pending a newer,
+  internally consistent Estates Office update;
+- general bedding-purchase, grocery, SIM-card vendor, price, brand, and shopping
+  recommendations. NTTIH bedding is only a reviewed room inclusion; the Welfare
+  Shop claim covers only its reviewed categories.
+
+The monitor-only command fetches only validated canonical corpus URLs and emits
+safe digests and review candidates. It never edits attestations or promotes web
+content:
+
+```powershell
+npm.cmd run monitor:knowledge -- --baseline-file C:\absolute\reviewed-baseline.json
+```
+
+The baseline is a knowledge-owner-reviewed JSON object that maps every exact
+corpus `sourceId` to its lowercase SHA-256 content digest, with no missing or
+extra keys. A missing, relative, malformed, or incomplete baseline fails before
+any network request. A content change, fetch failure, conflict, expiry, or
+overdue review produces a non-green/unknown candidate and a nonzero exit. A
+knowledge owner must compare the safe output, manually reopen the first-party
+page, and ship any approved corpus change through a new frozen release.
+
 After startup, one low-frequency single-flight watchdog owns live dependency
 evaluation. A red result pauses turn dispatch and rejects every state-changing
 API request with `503`; a later green result resumes both. Public
