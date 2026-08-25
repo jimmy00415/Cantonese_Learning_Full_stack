@@ -208,6 +208,56 @@ test('chat controller reconciles a 202 optimistic send by clientMessageId and cl
   });
 });
 
+test('chat controller preserves a caller-bound voice message identity and draft through an ambiguous retry', async () => {
+  const clientMessageId = '44444444-4444-4444-8444-444444444444';
+  const voiceDraftId = '55555555-5555-4555-8555-555555555555';
+  const text = 'Where can I collect my student card?';
+  const accepted = message({
+    id: 'persisted-voice-user', sequence: 1, role: 'user', kind: 'voice', status: 'accepted',
+    clientMessageId, text, voiceDraftId, mediaId: voiceDraftId,
+  });
+  const network = queuedFetch(
+    envelope(bootstrapData()),
+    new Error('voice message response was lost'),
+    envelope({ idempotent: true, message: accepted, turn: { id: 'turn-voice', state: 'accepted' } }, 202),
+  );
+  const controller = controllerFor(network.fetchImpl);
+  await controller.start();
+  controller.setDraft(text);
+
+  await assert.rejects(
+    controller.sendMessage({ text, voiceDraftId, clientMessageId }),
+    /response was lost/i,
+  );
+  const unconfirmed = controller.snapshot().messages[0];
+  assert.equal(unconfirmed.kind, 'voice');
+  assert.equal(unconfirmed.voiceDraftId, voiceDraftId);
+  assert.equal(unconfirmed.clientMessageId, clientMessageId);
+  assert.deepEqual(JSON.parse(network.calls[1].options.body), { clientMessageId, text, voiceDraftId });
+
+  assert.equal(await controller.retryUnconfirmed(clientMessageId), true);
+  assert.deepEqual(JSON.parse(network.calls[2].options.body), { clientMessageId, text, voiceDraftId });
+  assert.equal(controller.snapshot().messages[0].id, accepted.id);
+  assert.equal(controller.snapshot().draft, '');
+});
+
+test('chat controller rejects malformed caller-bound voice identities before creating an optimistic send', async () => {
+  const network = queuedFetch(envelope(bootstrapData()));
+  const controller = controllerFor(network.fetchImpl);
+  await controller.start();
+
+  await assert.rejects(
+    controller.sendMessage({
+      text: 'Do not send this',
+      voiceDraftId: 'not-a-draft-id',
+      clientMessageId: 'not-a-message-id',
+    }),
+    (error) => error.code === 'INVALID_MESSAGE_IDENTITY',
+  );
+  assert.deepEqual(controller.snapshot().messages, []);
+  assert.equal(network.calls.length, 1);
+});
+
 test('chat controller preserves an unconfirmed draft and retries with the exact original identity', async () => {
   const accepted = message({
     id: 'persisted-user', sequence: 1, role: 'user', status: 'accepted',
@@ -261,6 +311,36 @@ test('chat controller requires clear confirmation then closes SSE, clears scoped
   assert.equal(controller.snapshot().clientSessionScope, 'scope-new');
   assert.deepEqual(controller.snapshot().messages, []);
   assert.equal(FakeEventSource.instances.length, 2);
+});
+
+test('chat controller fences Retry send while a confirmed clear is waiting for DELETE', async () => {
+  let resolveDelete;
+  const deleteResponse = new Promise((resolve) => { resolveDelete = resolve; });
+  const network = queuedFetch(
+    envelope(bootstrapData({ scope: 'scope-old' })),
+    new Error('send response was lost'),
+    () => deleteResponse,
+    envelope(bootstrapData({ scope: 'scope-new' }), 201),
+  );
+  const controller = controllerFor(network.fetchImpl);
+  await controller.start();
+  controller.setDraft('Keep this exact retry');
+  await assert.rejects(controller.sendText(controller.snapshot().draft), /response was lost/i);
+  const clientMessageId = controller.snapshot().messages[0].clientMessageId;
+
+  const clearing = controller.clearSession({ confirmed: true });
+  await eventually(() => network.calls.length === 3);
+  assert.equal(controller.snapshot().ready, false);
+  await assert.rejects(
+    controller.retryUnconfirmed(clientMessageId),
+    (error) => error.code === 'CHAT_NOT_READY',
+  );
+  assert.equal(network.calls.length, 3, 'Retry cannot create a POST during clear');
+
+  resolveDelete(envelope({ deleted: true }));
+  await clearing;
+  assert.equal(controller.snapshot().clientSessionScope, 'scope-new');
+  assert.equal(network.calls.length, 4);
 });
 
 test('chat controller defaults voice capability false without permanently deciding the UI control', async () => {
@@ -755,11 +835,17 @@ test('chat controller clears a normalized matching draft but preserves a substan
 });
 
 test('chat controller distinguishes known HTTP rejection from an ambiguous network outcome and obeys Retry-After', async () => {
+  let clock = new Date('2026-08-25T08:00:00.000Z');
+  const accepted = message({
+    id: 'accepted-after-rate-limit', sequence: 1, role: 'user', status: 'accepted',
+    clientMessageId: '11111111-1111-4111-8111-111111111111', text: 'Please accept this later',
+  });
   const network = queuedFetch(
     envelope(bootstrapData()),
     failure('RATE_LIMITED', 429, { 'Retry-After': '10' }),
+    envelope({ idempotent: false, message: accepted, turn: { id: 'turn-later', state: 'accepted' } }, 202),
   );
-  const controller = controllerFor(network.fetchImpl);
+  const controller = controllerFor(network.fetchImpl, { now: () => new Date(clock) });
   await controller.start();
   controller.setDraft('Please accept this later');
 
@@ -767,14 +853,21 @@ test('chat controller distinguishes known HTTP rejection from an ambiguous netwo
     controller.sendText(controller.snapshot().draft),
     (error) => error.code === 'RATE_LIMITED' && error.status === 429 && error.retryAfter === '10',
   );
-  assert.equal(controller.snapshot().messages[0].sendState, 'rejected');
+  assert.equal(controller.snapshot().messages[0].sendState, 'retryable-rejection');
   assert.equal(controller.snapshot().draft, 'Please accept this later');
-  assert.equal(controller.retryUnconfirmed(controller.snapshot().messages[0].clientMessageId), false);
+  const clientMessageId = controller.snapshot().messages[0].clientMessageId;
   await assert.rejects(
-    controller.sendText(controller.snapshot().draft),
+    controller.retryUnconfirmed(clientMessageId),
     (error) => error.code === 'RATE_LIMITED' && error.retryAfter === '10',
   );
   assert.equal(network.calls.length, 2);
+  clock = new Date(clock.getTime() + 10_000);
+  assert.equal(await controller.retryUnconfirmed(clientMessageId), true);
+  assert.deepEqual(JSON.parse(network.calls[2].options.body), {
+    clientMessageId,
+    text: 'Please accept this later',
+  });
+  assert.equal(controller.snapshot().messages[0].id, accepted.id);
 });
 
 test('chat controller marks an explicit 401 rejection as rejected without offering idempotent retry', async () => {

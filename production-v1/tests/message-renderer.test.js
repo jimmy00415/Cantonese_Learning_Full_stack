@@ -99,3 +99,15 @@ test('message renderer labels an explicit rejection without offering ambiguous r
   assert.equal(nodes.find((node) => node.className === 'retry-message').hidden, true);
   assert.equal(nodes.find((node) => node.className.includes('message-avatar')).src, '/assets/ai-senior-avatar-128.png');
 });
+
+test('message renderer labels a retryable rate-limit rejection honestly and keeps exact-ID Retry available', () => {
+  const retryable = createMessageElement(fakeDocument, {
+    id: 'optimistic:3', clientMessageId: 'client-3', role: 'user', text: 'Question',
+    optimistic: true, sendState: 'retryable-rejection', failureCode: 'RATE_LIMITED', retryAfter: '10',
+    createdAt: '2026-08-25T08:00:00.000Z',
+  }, { onRetry: () => undefined });
+
+  const nodes = all(retryable);
+  assert.equal(nodes.find((node) => node.className === 'message-state').textContent, 'Not sent · wait to retry');
+  assert.equal(nodes.find((node) => node.className === 'retry-message').hidden, false);
+});

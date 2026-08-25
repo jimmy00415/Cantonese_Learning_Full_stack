@@ -102,6 +102,9 @@ export function createMessageElement(document, message, {
   if (message?.sendState === 'unconfirmed') {
     status.textContent = 'Send not confirmed';
     status.dataset.state = 'failed';
+  } else if (message?.sendState === 'retryable-rejection') {
+    status.textContent = 'Not sent · wait to retry';
+    status.dataset.state = 'failed';
   } else if (message?.sendState === 'rejected') {
     status.textContent = message?.failureCode === 'RATE_LIMITED'
       ? 'Not sent · rate limit'
@@ -114,7 +117,8 @@ export function createMessageElement(document, message, {
   const retry = element(document, 'button', 'retry-message', 'Retry send');
   retry.type = 'button';
   retry.hidden = true;
-  if (message?.sendState === 'unconfirmed' && typeof onRetry === 'function') {
+  if (['unconfirmed', 'retryable-rejection'].includes(message?.sendState)
+    && typeof onRetry === 'function') {
     retry.hidden = false;
     retry.dataset.clientMessageId = String(message.clientMessageId ?? '');
     retry.addEventListener('click', () => onRetry(message.clientMessageId));

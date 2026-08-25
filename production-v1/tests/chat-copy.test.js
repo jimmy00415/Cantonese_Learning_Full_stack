@@ -17,6 +17,12 @@ test('chat copy distinguishes ambiguous send, explicit rejection, and recovered 
   assert.match(sendErrorCopy({ code: 'SESSION_RECOVERED' }), /new guest chat.*draft.*kept/i);
 });
 
+test('chat copy does not tell the user to retry while a clear or session transition blocks sending', () => {
+  const copy = sendErrorCopy({ code: 'CHAT_NOT_READY' });
+  assert.match(copy, /chat.*changing|conversation.*ready/i);
+  assert.doesNotMatch(copy, /send not confirmed|use Retry send/i);
+});
+
 test('chat copy tells the truth when clear succeeded but guest restart failed', () => {
   const partial = clearErrorCopy({ code: 'CLEARED_RESTART_FAILED', deleted: true });
   assert.match(partial, /^Conversation cleared\./i);

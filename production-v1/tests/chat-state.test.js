@@ -62,6 +62,23 @@ test('chat state retries a failed optimistic send with the original idempotency 
   });
 });
 
+test('chat state preserves the exact voice draft identity through an ambiguous message retry', () => {
+  const pending = createOptimisticMessage({
+    clientMessageId: '44444444-4444-4444-8444-444444444444',
+    text: 'Where can I collect my student card?',
+    voiceDraftId: '55555555-5555-4555-8555-555555555555',
+    createdAt: '2026-08-25T10:00:00.000Z',
+  });
+
+  assert.equal(pending.kind, 'voice');
+  assert.equal(pending.voiceDraftId, '55555555-5555-4555-8555-555555555555');
+  assert.deepEqual(retryPayload(markOptimisticFailed(pending, 'NETWORK_UNAVAILABLE')), {
+    clientMessageId: '44444444-4444-4444-8444-444444444444',
+    text: 'Where can I collect my student card?',
+    voiceDraftId: '55555555-5555-4555-8555-555555555555',
+  });
+});
+
 test('chat state treats SSE as a forward-only backfill hint', () => {
   assert.deepEqual(eventHint({ type: 'turn.state', lastEventId: '12' }, 10), {
     cursor: 12, shouldBackfill: true, shouldReconnect: false,

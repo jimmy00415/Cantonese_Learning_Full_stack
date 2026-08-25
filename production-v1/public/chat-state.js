@@ -11,18 +11,27 @@ function validDate(value) {
   return date && Number.isFinite(date.getTime()) ? date : null;
 }
 
-export function createOptimisticMessage({ clientMessageId, text, createdAt = new Date().toISOString() }) {
+export function createOptimisticMessage({
+  clientMessageId,
+  text,
+  voiceDraftId = null,
+  createdAt = new Date().toISOString(),
+}) {
   if (typeof clientMessageId !== 'string' || !clientMessageId) throw new Error('clientMessageId is required');
   if (typeof text !== 'string' || !text.trim()) throw new Error('message text is required');
+  if (voiceDraftId !== null && (typeof voiceDraftId !== 'string' || !voiceDraftId)) {
+    throw new Error('voiceDraftId must be a non-empty string');
+  }
   return {
     id: `optimistic:${clientMessageId}`,
     clientMessageId,
     sequence: null,
     role: 'user',
-    kind: 'text',
+    kind: voiceDraftId ? 'voice' : 'text',
     status: 'sending',
     failureCode: null,
     text: text.trim(),
+    ...(voiceDraftId ? { voiceDraftId } : {}),
     citations: [],
     cards: [],
     suggestedReplies: [],
@@ -36,7 +45,11 @@ export function markOptimisticFailed(message, failureCode = 'MESSAGE_SEND_FAILED
 }
 
 export function retryPayload(message) {
-  return { clientMessageId: message.clientMessageId, text: message.text };
+  return {
+    clientMessageId: message.clientMessageId,
+    text: message.text,
+    ...(message.voiceDraftId ? { voiceDraftId: message.voiceDraftId } : {}),
+  };
 }
 
 export function reconcileTimeline(canonicalMessages = [], optimisticMessages = []) {

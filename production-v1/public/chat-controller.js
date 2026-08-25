@@ -6,6 +6,8 @@ import {
   retryPayload,
 } from './chat-state.js';
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 const ROOT_SCOPE_KEY = 'hk-buddy:v1:scope';
 const MUTATING_EXISTING_MESSAGE_EVENTS = new Set(['turn.failed', 'audio.ready']);
 const SSE_EVENTS = ['message.accepted', 'turn.state', 'message.delivered', 'turn.failed', 'audio.ready', 'resync_required'];
@@ -421,7 +423,9 @@ export function createChatController({
         message.clientMessageId === clientMessageId
           ? {
               ...markOptimisticFailed(message, error.code),
-              sendState: explicitRejection ? 'rejected' : 'unconfirmed',
+              sendState: error.status === 429
+                ? 'retryable-rejection'
+                : explicitRejection ? 'rejected' : 'unconfirmed',
               retryAfter: error.retryAfter ?? null,
             }
           : message
@@ -433,16 +437,26 @@ export function createChatController({
     }
   }
 
-  function sendText(text) {
+  function rateLimitError() {
+    const error = new Error('Please wait before sending another message.');
+    error.code = 'RATE_LIMITED';
+    error.status = 429;
+    error.retryAfter = sendRetryAfter;
+    return error;
+  }
+
+  function sendMessage({ text, voiceDraftId = null, clientMessageId = uuid() } = {}) {
     const normalized = typeof text === 'string' ? text.trim() : '';
     if (!state.ready || state.disposed) return Promise.reject(new Error('The chat is not ready.'));
     if (!normalized || normalized.length > 4000) return Promise.reject(new Error('Enter a message between 1 and 4000 characters.'));
-    if (sendBlockedUntil > now().getTime()) {
-      const error = new Error('Please wait before sending another message.');
-      error.code = 'RATE_LIMITED';
-      error.status = 429;
-      error.retryAfter = sendRetryAfter;
+    if (!UUID.test(String(clientMessageId ?? ''))
+      || (voiceDraftId !== null && !UUID.test(String(voiceDraftId ?? '')))) {
+      const error = new Error('The message identity is invalid.');
+      error.code = 'INVALID_MESSAGE_IDENTITY';
       return Promise.reject(error);
+    }
+    if (sendBlockedUntil > now().getTime()) {
+      return Promise.reject(rateLimitError());
     }
     if (inFlightClientIds.size > 0) {
       const error = new Error('Wait for the current message to be accepted.');
@@ -450,7 +464,12 @@ export function createChatController({
       return Promise.reject(error);
     }
     const optimistic = {
-      ...createOptimisticMessage({ clientMessageId: uuid(), text: normalized, createdAt: now().toISOString() }),
+      ...createOptimisticMessage({
+        clientMessageId,
+        text: normalized,
+        voiceDraftId,
+        createdAt: now().toISOString(),
+      }),
       sendState: 'sending',
     };
     state.optimisticMessages.push(optimistic);
@@ -458,11 +477,22 @@ export function createChatController({
     return submitOptimistic(optimistic);
   }
 
+  function sendText(text) {
+    return sendMessage({ text });
+  }
+
   function retryUnconfirmed(clientMessageId) {
+    if (!state.ready || state.disposed) {
+      const error = new Error('The chat is not ready to retry this message.');
+      error.code = 'CHAT_NOT_READY';
+      return Promise.reject(error);
+    }
     const optimistic = state.optimisticMessages.find((message) => (
-      message.clientMessageId === clientMessageId && message.sendState === 'unconfirmed'
+      message.clientMessageId === clientMessageId
+        && ['unconfirmed', 'retryable-rejection'].includes(message.sendState)
     ));
     if (!optimistic) return false;
+    if (sendBlockedUntil > now().getTime()) return Promise.reject(rateLimitError());
     return submitOptimistic(optimistic).then(() => true);
   }
 
@@ -582,6 +612,7 @@ export function createChatController({
   return {
     start: bootstrap,
     snapshot,
+    sendMessage,
     sendText,
     retryUnconfirmed,
     setDraft,

@@ -3,6 +3,9 @@ export function startErrorCopy() {
 }
 
 export function sendErrorCopy(error = {}) {
+  if (error.code === 'CHAT_NOT_READY') {
+    return 'The chat is changing. Wait until the conversation is ready before trying again.';
+  }
   if (error.code === 'SESSION_RECOVERED') {
     return 'A new guest chat is ready. Your draft was kept; send it again when you are ready.';
   }
