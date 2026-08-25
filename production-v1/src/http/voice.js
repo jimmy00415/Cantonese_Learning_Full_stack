@@ -36,6 +36,27 @@ function operationResponse(response, result) {
   return response.status(result.httpStatus).json(envelope(response, result.data));
 }
 
+function canWriteResponse(response) {
+  return !response.destroyed && !response.writableEnded;
+}
+
+function createDisconnectController(request, response) {
+  const controller = new AbortController();
+  const abort = () => controller.abort(voiceError(408, 'VOICE_UPLOAD_ABORTED'));
+  const abortPrematureResponse = () => {
+    if (!response.writableFinished) abort();
+  };
+  request.once('aborted', abort);
+  response.once('close', abortPrematureResponse);
+  return {
+    signal: controller.signal,
+    dispose() {
+      request.off('aborted', abort);
+      response.off('close', abortPrematureResponse);
+    },
+  };
+}
+
 function parseRange(header, size) {
   if (!header) return null;
   if (header.includes(',')) return false;
@@ -86,6 +107,7 @@ export function createVoiceRouter({
   });
 
   router.post('/voice/transcriptions', async (request, response) => {
+    const disconnect = createDisconnectController(request, response);
     try {
       const { session } = await resolveSession(request);
       assertCapability(config, 'voiceInput', now);
@@ -96,21 +118,18 @@ export function createVoiceRouter({
       if (declared !== undefined && (!/^\d+$/.test(declared) || !Number.isSafeInteger(Number(declared)))) throw voiceError(400, 'INVALID_REQUEST');
       if (declared !== undefined && Number(declared) > voiceLimits.uploadBytes) throw voiceError(413, 'VOICE_UPLOAD_TOO_LARGE');
       if (request.get('content-type') !== 'audio/wav') throw voiceError(415, 'VOICE_UNSUPPORTED_MEDIA_TYPE');
-      const controller = new AbortController();
-      const abort = () => controller.abort(voiceError(408, 'VOICE_UPLOAD_ABORTED'));
-      request.once('aborted', abort);
-      try {
-        const result = await service.transcribe({
-          sessionId: session.id, clientUploadId, requestSha256, mimeType: 'audio/wav',
-          readable: request, signal: controller.signal,
-        });
-        return operationResponse(response, result);
-      } finally {
-        request.off('aborted', abort);
-      }
+      const result = await service.transcribe({
+        sessionId: session.id, clientUploadId, requestSha256, mimeType: 'audio/wav',
+        readable: request, signal: disconnect.signal,
+      });
+      if (!canWriteResponse(response)) return undefined;
+      return operationResponse(response, result);
     } catch (error) {
+      if (!canWriteResponse(response)) return undefined;
       if (error.retryAfter) response.set('Retry-After', String(error.retryAfter));
       return sendError(response, error);
+    } finally {
+      disconnect.dispose();
     }
   });
 
@@ -138,25 +157,23 @@ export function createVoiceRouter({
   });
 
   router.post('/messages/:messageId/audio', async (request, response) => {
+    const disconnect = createDisconnectController(request, response);
     try {
       const { session } = await resolveSession(request);
       if (!UUID.test(request.params.messageId ?? '')) throw voiceError(404, 'NOT_FOUND');
       await store.getOwnedAssistantMessage({ sessionId: session.id, messageId: request.params.messageId });
       assertCapability(config, 'voiceOutput', now);
-      const controller = new AbortController();
-      const abort = () => controller.abort(voiceError(408, 'VOICE_UPLOAD_ABORTED'));
-      request.once('aborted', abort);
-      try {
-        const result = await service.generateAssistantAudio({
-          sessionId: session.id, messageId: request.params.messageId, signal: controller.signal,
-        });
-        return operationResponse(response, result);
-      } finally {
-        request.off('aborted', abort);
-      }
+      const result = await service.generateAssistantAudio({
+        sessionId: session.id, messageId: request.params.messageId, signal: disconnect.signal,
+      });
+      if (!canWriteResponse(response)) return undefined;
+      return operationResponse(response, result);
     } catch (error) {
+      if (!canWriteResponse(response)) return undefined;
       if (error.retryAfter) response.set('Retry-After', String(error.retryAfter));
       return sendError(response, error);
+    } finally {
+      disconnect.dispose();
     }
   });
 

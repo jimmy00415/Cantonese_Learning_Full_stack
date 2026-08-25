@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, stat, utimes, writeFile } from 'node:fs/promises';
+import { Agent as HttpAgent, request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -80,6 +81,7 @@ async function startVoiceApp(t, {
   return {
     baseUrl: `http://127.0.0.1:${server.address().port}`,
     origin,
+    server,
     directory,
     filePath,
     store,
@@ -91,6 +93,52 @@ async function startVoiceApp(t, {
 async function fetchJson(url, options = {}) {
   const response = await fetch(url, options);
   return { response, body: await response.json() };
+}
+
+function openHttpRequest(url, { method = 'GET', headers = {}, agent } = {}) {
+  let receivedResponse = null;
+  const request = httpRequest(url, { method, headers, agent }, (response) => {
+    receivedResponse = response;
+    response.resume();
+  });
+  request.on('error', () => undefined);
+  const closed = new Promise((resolve) => request.once('close', resolve));
+  return { request, closed, receivedResponse: () => receivedResponse };
+}
+
+function requestJsonOverHttp(url, { method = 'GET', headers = {}, body, agent } = {}) {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(url, { method, headers, agent }, (response) => {
+      const socket = response.socket;
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+      response.once('error', reject);
+      response.once('end', () => {
+        const bytes = Buffer.concat(chunks);
+        resolve({
+          status: response.statusCode,
+          body: bytes.length > 0 ? JSON.parse(bytes.toString('utf8')) : null,
+          socket,
+        });
+      });
+    });
+    request.once('error', reject);
+    request.end(body);
+  });
+}
+
+function observeServerRequest(t, server, path) {
+  let listener;
+  const observed = new Promise((resolve) => {
+    listener = (request) => {
+      if (request.url !== path) return;
+      server.off('request', listener);
+      resolve(request);
+    };
+    server.prependListener('request', listener);
+  });
+  t.after(() => server.off('request', listener));
+  return observed;
 }
 
 function canonicalWav(durationMs = 1_000) {
@@ -2307,6 +2355,298 @@ test('late-rejecting ASR and TTS writes return bounded HTTP 503 and rearm cleanu
     assert.equal(job?.state, 'completed', storageKey);
     assert.ok(job?.generation >= 2, storageKey);
   }
+});
+
+test('post-body ASR client disconnect aborts provider work and durably fails without attaching a draft', async (t) => {
+  let providerStartedResolve;
+  const providerStarted = new Promise((resolve) => { providerStartedResolve = resolve; });
+  let providerAbortedResolve;
+  const providerAborted = new Promise((resolve) => { providerAbortedResolve = resolve; });
+  let rejectProvider;
+  const providerWork = new Promise((resolve, reject) => {
+    void resolve;
+    rejectProvider = reject;
+  });
+  let providerSignal = null;
+  let providerContinued = false;
+  const uploadId = 'aaaaaaaa-1111-4111-8111-111111111111';
+  const { baseUrl, origin, server, store, filePath } = await startVoiceApp(t, {
+    asrProvider: {
+      provider: 'azure',
+      transcribe: async (bytes, { signal }) => {
+        assert.deepEqual(bytes, canonicalWav(10));
+        providerSignal = signal;
+        const abort = () => {
+          providerAbortedResolve();
+          rejectProvider(signal.reason);
+        };
+        if (signal.aborted) abort();
+        else signal.addEventListener('abort', abort, { once: true });
+        providerStartedResolve();
+        await providerWork;
+        providerContinued = true;
+        return { transcript: 'must not attach after disconnect', provider: 'azure', latencyMs: 1 };
+      },
+    },
+  });
+  const session = await fetchJson(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin } });
+  const cookie = session.response.headers.getSetCookie()[0].split(';')[0];
+  const audio = canonicalWav(10);
+  const serverRequest = observeServerRequest(t, server, '/api/v1/voice/transcriptions');
+  const client = openHttpRequest(`${baseUrl}/api/v1/voice/transcriptions`, {
+    method: 'POST',
+    headers: {
+      Origin: origin,
+      Cookie: cookie,
+      'Content-Type': 'audio/wav',
+      'Content-Length': String(audio.length),
+      'X-Client-Upload-Id': uploadId,
+      'X-Content-SHA256': createHash('sha256').update(audio).digest('hex'),
+    },
+  });
+  client.request.end(audio);
+  await settleWithin(providerStarted, 2_000, 'ASR provider did not start after the canonical body completed');
+  assert.equal((await serverRequest).complete, true, 'ASR disconnect occurs only after the server parsed the full body');
+  let observedAbort = false;
+  try {
+    client.request.destroy();
+    await settleWithin(providerAborted, 1_000, 'post-body ASR disconnect did not abort the provider signal');
+    observedAbort = true;
+  } finally {
+    if (!observedAbort) {
+      rejectProvider(Object.assign(new Error('release ASR provider after RED'), {
+        code: 'VOICE_UPLOAD_ABORTED', status: 408, retryable: true,
+      }));
+    }
+    await settleWithin(client.closed, 1_000, 'destroyed ASR client request did not close');
+  }
+  assert.equal(providerSignal.aborted, true);
+  assert.equal(providerSignal.reason.code, 'VOICE_UPLOAD_ABORTED');
+  assert.equal(providerContinued, false, 'paid ASR work does not continue after disconnect');
+  assert.equal(client.receivedResponse(), null, 'a destroyed client receives no late error response');
+
+  const failed = await waitForCondition(async () => {
+    const status = await store.getVoiceUploadStatus({
+      sessionId: session.body.data.session.id,
+      clientUploadId: uploadId,
+    });
+    return status.state === 'failed' ? status : false;
+  }, { message: 'ASR disconnect did not durably fail the upload' });
+  assert.equal(failed.failureCode, 'VOICE_UPLOAD_ABORTED');
+  assert.equal(failed.failureHttpStatus, 408);
+  assert.equal(failed.retryable, true);
+  await store.close();
+  const snapshot = JSON.parse(await readFile(filePath, 'utf8'));
+  const upload = snapshot.voiceUploads.find((entry) => entry.clientUploadId === uploadId);
+  assert.equal(upload.mediaAssetId, null);
+  assert.equal(snapshot.mediaAssets.some((asset) => asset.kind === 'user_voice'), false);
+});
+
+test('post-body TTS client disconnect aborts provider work and durably fails without audio delivery', async (t) => {
+  let providerStartedResolve;
+  const providerStarted = new Promise((resolve) => { providerStartedResolve = resolve; });
+  let providerAbortedResolve;
+  const providerAborted = new Promise((resolve) => { providerAbortedResolve = resolve; });
+  let rejectProvider;
+  const providerWork = new Promise((resolve, reject) => {
+    void resolve;
+    rejectProvider = reject;
+  });
+  let providerSignal = null;
+  let providerContinued = false;
+  const { baseUrl, origin, server, store, filePath } = await startVoiceApp(t, {
+    ttsProvider: {
+      provider: 'azure',
+      synthesize: async (text, { signal }) => {
+        assert.equal(text, 'Durable assistant text survives TTS.');
+        providerSignal = signal;
+        const abort = () => {
+          providerAbortedResolve();
+          rejectProvider(signal.reason);
+        };
+        if (signal.aborted) abort();
+        else signal.addEventListener('abort', abort, { once: true });
+        providerStartedResolve();
+        await providerWork;
+        providerContinued = true;
+        return { buffer: Buffer.from([0x49, 0x44, 0x33, 0x04]), mimeType: 'audio/mpeg', provider: 'azure', latencyMs: 1 };
+      },
+    },
+  });
+  const session = await fetchJson(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin } });
+  const cookie = session.response.headers.getSetCookie()[0].split(';')[0];
+  const assistant = await createDeliveredAssistant(store, session.body.data.session, session.body.data.conversation);
+  const audioPath = `/api/v1/messages/${assistant.id}/audio`;
+  const serverRequest = observeServerRequest(t, server, audioPath);
+  const client = openHttpRequest(`${baseUrl}/api/v1/messages/${assistant.id}/audio`, {
+    method: 'POST', headers: { Origin: origin, Cookie: cookie },
+  });
+  client.request.end();
+  await settleWithin(providerStarted, 2_000, 'TTS provider did not start after the POST body completed');
+  const completedRequest = await serverRequest;
+  const requestEnded = completedRequest.readableEnded
+    ? Promise.resolve()
+    : new Promise((resolve) => completedRequest.once('end', resolve));
+  completedRequest.resume();
+  await settleWithin(requestEnded, 1_000, 'TTS disconnect test never observed the request end event');
+  assert.equal(completedRequest.complete, true, 'TTS disconnect occurs only after the server parsed the full body');
+  let observedAbort = false;
+  try {
+    client.request.destroy();
+    await settleWithin(providerAborted, 1_000, 'post-body TTS disconnect did not abort the provider signal');
+    observedAbort = true;
+  } finally {
+    if (!observedAbort) {
+      rejectProvider(Object.assign(new Error('release TTS provider after RED'), {
+        code: 'VOICE_UPLOAD_ABORTED', status: 408, retryable: true,
+      }));
+    }
+    await settleWithin(client.closed, 1_000, 'destroyed TTS client request did not close');
+  }
+  assert.equal(providerSignal.aborted, true);
+  assert.equal(providerSignal.reason.code, 'VOICE_UPLOAD_ABORTED');
+  assert.equal(providerContinued, false, 'paid TTS work does not continue after disconnect');
+  assert.equal(client.receivedResponse(), null, 'a destroyed client receives no late error response');
+
+  const failed = await waitForCondition(async () => {
+    const generation = await store.getAssistantAudioStatus({
+      sessionId: session.body.data.session.id,
+      messageId: assistant.id,
+      kind: 'assistant_voice',
+    });
+    return generation.state === 'failed' ? generation : false;
+  }, { message: 'TTS disconnect did not durably fail the generation' });
+  assert.equal(failed.failureCode, 'VOICE_UPLOAD_ABORTED');
+  assert.equal(failed.failureHttpStatus, 408);
+  assert.equal(failed.retryable, true);
+  assert.equal(failed.mediaAssetId, null);
+  const ownedMessage = await store.getOwnedAssistantMessage({
+    sessionId: session.body.data.session.id,
+    messageId: assistant.id,
+  });
+  assert.equal(ownedMessage.mediaId ?? null, null);
+  await store.close();
+  const snapshot = JSON.parse(await readFile(filePath, 'utf8'));
+  assert.equal(snapshot.mediaAssets.some((asset) => asset.kind === 'assistant_voice'), false);
+  assert.equal(snapshot.events.some((event) => event.type === 'audio.ready' && event.messageId === assistant.id), false);
+});
+
+test('normal canonical ASR and TTS responses reuse keep-alive without false provider aborts', async (t) => {
+  const providerSignals = [];
+  const audioBytes = Buffer.from([0x49, 0x44, 0x33, 0x04, 0x05]);
+  const { baseUrl, origin, store } = await startVoiceApp(t, {
+    asrProvider: {
+      provider: 'azure',
+      transcribe: async (bytes, { signal }) => {
+        assert.deepEqual(bytes, canonicalWav(10));
+        providerSignals.push(signal);
+        return { transcript: '正常完成', provider: 'azure', latencyMs: 1, confidence: null };
+      },
+    },
+    ttsProvider: {
+      provider: 'azure',
+      synthesize: async (text, { signal }) => {
+        assert.equal(text, 'Durable assistant text survives TTS.');
+        providerSignals.push(signal);
+        return { buffer: audioBytes, mimeType: 'audio/mpeg', provider: 'azure', latencyMs: 1 };
+      },
+    },
+  });
+  const session = await fetchJson(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin } });
+  const cookie = session.response.headers.getSetCookie()[0].split(';')[0];
+  const assistant = await createDeliveredAssistant(store, session.body.data.session, session.body.data.conversation);
+  const agent = new HttpAgent({ keepAlive: true, maxSockets: 1 });
+  t.after(() => agent.destroy());
+  const audio = canonicalWav(10);
+  const transcription = await requestJsonOverHttp(`${baseUrl}/api/v1/voice/transcriptions`, {
+    method: 'POST',
+    agent,
+    headers: {
+      Origin: origin,
+      Cookie: cookie,
+      'Content-Type': 'audio/wav',
+      'Content-Length': String(audio.length),
+      'X-Client-Upload-Id': 'aaaaaaaa-2222-4222-8222-222222222222',
+      'X-Content-SHA256': createHash('sha256').update(audio).digest('hex'),
+    },
+    body: audio,
+  });
+  const synthesis = await requestJsonOverHttp(`${baseUrl}/api/v1/messages/${assistant.id}/audio`, {
+    method: 'POST', agent, headers: { Origin: origin, Cookie: cookie },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(transcription.status, 201);
+  assert.equal(transcription.body.data.transcript, '正常完成');
+  assert.equal(synthesis.status, 201);
+  assert.equal(synthesis.body.data.state, 'attached');
+  assert.equal(synthesis.socket, transcription.socket, 'both normal responses reuse one keep-alive socket');
+  assert.equal(providerSignals.length, 2);
+  assert.equal(providerSignals.some((signal) => signal.aborted), false);
+});
+
+test('mid-body ASR disconnect remains a durable retryable abort without provider or spool continuation', async (t) => {
+  let asrCalls = 0;
+  const uploadId = 'aaaaaaaa-3333-4333-8333-333333333333';
+  const { baseUrl, origin, directory, store, filePath } = await startVoiceApp(t, {
+    asrProvider: {
+      provider: 'azure',
+      transcribe: async () => {
+        asrCalls += 1;
+        return { transcript: 'must not run', provider: 'azure', latencyMs: 1 };
+      },
+    },
+  });
+  const session = await fetchJson(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin } });
+  const cookie = session.response.headers.getSetCookie()[0].split(';')[0];
+  const audio = canonicalWav(100);
+  const client = openHttpRequest(`${baseUrl}/api/v1/voice/transcriptions`, {
+    method: 'POST',
+    headers: {
+      Origin: origin,
+      Cookie: cookie,
+      'Content-Type': 'audio/wav',
+      'Content-Length': String(audio.length),
+      'X-Client-Upload-Id': uploadId,
+      'X-Content-SHA256': createHash('sha256').update(audio).digest('hex'),
+    },
+  });
+  client.request.write(audio.subarray(0, 44));
+  await waitForCondition(async () => {
+    try {
+      const status = await store.getVoiceUploadStatus({
+        sessionId: session.body.data.session.id,
+        clientUploadId: uploadId,
+      });
+      return status.state === 'uploading';
+    } catch (error) {
+      if (error.code === 'NOT_FOUND') return false;
+      throw error;
+    }
+  }, { message: 'mid-body ASR request did not enter durable uploading state' });
+  client.request.destroy();
+  await settleWithin(client.closed, 1_000, 'destroyed mid-body ASR request did not close');
+
+  const failed = await waitForCondition(async () => {
+    const status = await store.getVoiceUploadStatus({
+      sessionId: session.body.data.session.id,
+      clientUploadId: uploadId,
+    });
+    return status.state === 'failed' ? status : false;
+  }, { message: 'mid-body ASR disconnect did not durably fail the upload' });
+  assert.equal(failed.failureCode, 'VOICE_UPLOAD_ABORTED');
+  assert.equal(failed.failureHttpStatus, 408);
+  assert.equal(failed.retryable, true);
+  assert.equal(asrCalls, 0);
+  assert.equal(client.receivedResponse(), null);
+  const spoolEntries = await readdir(join(directory, 'voice-spool')).catch((error) => {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  });
+  assert.deepEqual(spoolEntries.filter((name) => name.startsWith('voice-ingress-')), []);
+  await store.close();
+  const snapshot = JSON.parse(await readFile(filePath, 'utf8'));
+  assert.equal(snapshot.mediaAssets.some((asset) => asset.kind === 'user_voice'), false);
 });
 
 test('voice HTTP transcription is owned, idempotent, editable, status-recoverable, and permanent failures do no ASR retry', async (t) => {
