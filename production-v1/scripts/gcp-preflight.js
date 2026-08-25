@@ -1,0 +1,185 @@
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+import {
+  assertResourceContract,
+  createDefaultGcloudAuthenticatedRequest,
+  createDefaultGcloudExecutor,
+  loadResourceContract,
+  REQUIRED_OPERATOR_ACCOUNT,
+} from './gcp-provision.js';
+
+const PROJECT = 'hkbuddy-prod-v1-20260826';
+const ORGANIZATION = '797368190621';
+const BILLING_ACCOUNT = '01F9FD-24EA9B-A9232C';
+const CHANNEL_NAME = new RegExp(`^projects/${PROJECT}/notificationChannels/[1-9]\\d*$`);
+
+function publish(writeOutput, exitCode, publicReport) {
+  writeOutput(`${JSON.stringify(publicReport)}\n`);
+  return { exitCode, publicReport };
+}
+
+function parseArguments(argv) {
+  if (!Array.isArray(argv) || argv.some((value) => typeof value !== 'string')) return null;
+  if (argv.length === 0) return { notificationChannel: null };
+  if (argv.length !== 1 || !argv[0].startsWith('--notification-channel=')) return null;
+  const notificationChannel = argv[0].slice('--notification-channel='.length);
+  return CHANNEL_NAME.test(notificationChannel) ? { notificationChannel } : null;
+}
+
+function projectMatches(project) {
+  const parent = project?.parent?.id ?? String(project?.parent ?? '').split('/').at(-1);
+  return project?.projectId === PROJECT && String(parent) === ORGANIZATION
+    && project?.lifecycleState === 'ACTIVE';
+}
+
+function safeFailure(code, details = {}) {
+  return {
+    status: 'failed', code, projectId: PROJECT, mutationPerformed: false,
+    ...details,
+  };
+}
+
+export async function runGcpPreflight({
+  argv = process.argv.slice(2),
+  contract,
+  gcloud,
+  request,
+  getRestPrincipal,
+  environment = process.env,
+  writeOutput = (line) => process.stdout.write(line),
+} = {}) {
+  let selectedContract;
+  try { selectedContract = assertResourceContract(contract ?? await loadResourceContract()); } catch {
+    return publish(writeOutput, 2, safeFailure('RESOURCE_CONTRACT_INVALID'));
+  }
+  const selection = parseArguments(argv);
+  if (!selection) return publish(writeOutput, 2, safeFailure('PREFLIGHT_ARGUMENTS_INVALID'));
+
+  let runCommand;
+  let authenticatedRequest = request;
+  try {
+    runCommand = gcloud ?? createDefaultGcloudExecutor({ environment });
+  } catch {
+    return publish(writeOutput, 1, safeFailure('CONTROL_PLANE_UNAVAILABLE'));
+  }
+
+  let activeAccounts;
+  try {
+    activeAccounts = await runCommand([
+      'auth', 'list', '--filter=status:ACTIVE', `--project=${PROJECT}`, '--format=json',
+    ]);
+  } catch {
+    return publish(writeOutput, 1, safeFailure('GCP_AUTH_UNKNOWN'));
+  }
+  if (!Array.isArray(activeAccounts) || activeAccounts.length !== 1
+    || activeAccounts[0]?.status !== 'ACTIVE' || typeof activeAccounts[0]?.account !== 'string') {
+    return publish(writeOutput, 1, safeFailure('GCP_AUTH_INVALID'));
+  }
+  if (activeAccounts[0].account !== REQUIRED_OPERATOR_ACCOUNT) {
+    return publish(writeOutput, 1, safeFailure('GCP_AUTH_INVALID'));
+  }
+
+  let restPrincipal;
+  try {
+    authenticatedRequest ??= createDefaultGcloudAuthenticatedRequest({
+      environment, account: activeAccounts[0].account,
+    });
+    const identify = getRestPrincipal ?? authenticatedRequest.getPrincipal;
+    if (typeof identify !== 'function') throw new Error('REST identity unavailable');
+    restPrincipal = await identify();
+  } catch {
+    return publish(writeOutput, 1, safeFailure('CONTROL_PLANE_IDENTITY_UNKNOWN'));
+  }
+  if (restPrincipal !== activeAccounts[0].account) {
+    return publish(writeOutput, 1, safeFailure('CONTROL_PLANE_IDENTITY_MISMATCH'));
+  }
+
+  let organization;
+  try {
+    organization = await runCommand([
+      'organizations', 'describe', ORGANIZATION, `--project=${PROJECT}`, '--format=json',
+    ]);
+  } catch {
+    return publish(writeOutput, 1, safeFailure('ORGANIZATION_STATE_UNKNOWN'));
+  }
+  if (String(organization?.name ?? '').split('/').at(-1) !== ORGANIZATION) {
+    return publish(writeOutput, 1, safeFailure('ORGANIZATION_DRIFT'));
+  }
+
+  let billing;
+  try {
+    billing = await runCommand([
+      'billing', 'accounts', 'describe', BILLING_ACCOUNT,
+      `--project=${PROJECT}`, '--format=json',
+    ]);
+  } catch {
+    return publish(writeOutput, 1, safeFailure('BILLING_STATE_UNKNOWN'));
+  }
+  if (String(billing?.name ?? '').split('/').at(-1) !== BILLING_ACCOUNT || billing?.open !== true) {
+    return publish(writeOutput, 1, safeFailure('BILLING_ACCOUNT_INACTIVE'));
+  }
+  if (billing.currencyCode !== selectedContract.resources.budget.currency) {
+    return publish(writeOutput, 1, safeFailure('BUDGET_CURRENCY_MISMATCH'));
+  }
+
+  let projectState = 'present';
+  let project;
+  try {
+    project = await runCommand([
+      'projects', 'describe', PROJECT, `--project=${PROJECT}`, '--format=json',
+    ]);
+  } catch (error) {
+    if (error?.code === 'NOT_FOUND') projectState = 'absent';
+    else if (error?.code === 'FORBIDDEN') projectState = 'create-probe-required';
+    else return publish(writeOutput, 1, safeFailure('PROJECT_STATE_UNKNOWN', { readyForProjectCreation: false }));
+  }
+  if (projectState === 'present' && !projectMatches(project)) {
+    return publish(writeOutput, 1, safeFailure('PROJECT_COLLISION_OR_DRIFT', {
+      projectState, readyForProjectCreation: false,
+    }));
+  }
+
+  let alertChannel = 'not-supplied';
+  if (selection.notificationChannel) {
+    if (projectState !== 'present') {
+      alertChannel = projectState === 'absent' ? 'target-project-absent' : 'target-project-unresolved';
+    } else {
+      let channel;
+      try {
+        channel = await authenticatedRequest({
+          method: 'GET',
+          url: `https://monitoring.googleapis.com/v3/${selection.notificationChannel}`,
+        });
+      } catch {
+        return publish(writeOutput, 1, safeFailure('ALERT_CHANNEL_UNVERIFIED', {
+          projectState, readyForProjectCreation: false,
+        }));
+      }
+      if (channel?.name !== selection.notificationChannel
+        || channel?.type !== 'email' || channel?.enabled !== true
+        || channel?.verificationStatus !== 'VERIFIED') {
+        return publish(writeOutput, 1, safeFailure('ALERT_CHANNEL_UNVERIFIED', {
+          projectState, readyForProjectCreation: false,
+        }));
+      }
+      alertChannel = 'verified';
+    }
+  }
+
+  const requiresConfirmedCreateProbe = projectState === 'create-probe-required';
+  return publish(writeOutput, 0, {
+    status: 'dry-run', code: requiresConfirmedCreateProbe ? 'PROJECT_ID_UNRESOLVED' : 'GCP_PREFLIGHT_COMPLETE', projectId: PROJECT,
+    projectState, readyForProjectCreation: projectState === 'absent',
+    ...(requiresConfirmedCreateProbe ? { requiresConfirmedCreateProbe: true } : {}),
+    alertChannel, mutationPerformed: false,
+  });
+}
+
+const isMain = process.argv[1]
+  && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (isMain) {
+  const result = await runGcpPreflight();
+  process.exitCode = result.exitCode;
+}

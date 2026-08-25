@@ -1,0 +1,1713 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import test from 'node:test';
+
+import {
+  EXPECTED_PROVISION_STEPS,
+  GcpControlPlane,
+  assertExactManagedIamPolicies,
+  assertNoUserManagedServiceAccountKeys,
+  assertCidrAvailable,
+  assertResourceContract,
+  createAuthenticatedRequest,
+  createGcloudExecutor,
+  createGcloudAuthenticatedRequest,
+  ensureExactResource,
+  ensureProjectResource,
+  loadResourceContract,
+  monitoringGroupByField,
+  runGcpProvision,
+} from '../scripts/gcp-provision.js';
+import { runGcpPreflight } from '../scripts/gcp-preflight.js';
+
+const CONTRACT_URL = new URL('../infra/gcp/resource-contract.json', import.meta.url);
+const PROJECT = 'hkbuddy-prod-v1-20260826';
+const CHANNEL = `projects/${PROJECT}/notificationChannels/123456789`;
+const PROJECT_NUMBER = '123456789012';
+
+const AUTOMATIC_PROJECT_BINDINGS = Object.freeze([
+  { member: 'user:admin@motionexp.com', role: 'roles/owner', required: true },
+  { member: 'serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-cloudbuild.iam.gserviceaccount.com', role: 'roles/cloudbuild.serviceAgent', required: true },
+  { member: 'serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-artifactregistry.iam.gserviceaccount.com', role: 'roles/artifactregistry.serviceAgent', required: false },
+  { member: 'serviceAccount:service-__PROJECT_NUMBER__@compute-system.iam.gserviceaccount.com', role: 'roles/compute.serviceAgent', required: false },
+  { member: 'serviceAccount:service-__PROJECT_NUMBER__@service-networking.iam.gserviceaccount.com', role: 'roles/servicenetworking.serviceAgent', required: false },
+  { member: 'serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-cloud-sql.iam.gserviceaccount.com', role: 'roles/cloudsql.serviceAgent', required: false },
+  { member: 'serviceAccount:service-__PROJECT_NUMBER__@serverless-robot-prod.iam.gserviceaccount.com', role: 'roles/run.serviceAgent', required: false },
+  { member: 'serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-aiplatform.iam.gserviceaccount.com', role: 'roles/aiplatform.serviceAgent', required: false },
+  { member: 'serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-speech.iam.gserviceaccount.com', role: 'roles/speech.serviceAgent', required: false },
+  { member: 'serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-monitoring-notification.iam.gserviceaccount.com', role: 'roles/monitoring.notificationServiceAgent', required: false },
+  { member: 'serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-logging.iam.gserviceaccount.com', role: 'roles/logging.serviceAgent', required: false },
+  { member: 'serviceAccount:__PROJECT_NUMBER__@cloudbuild.gserviceaccount.com', role: 'roles/cloudbuild.builds.builder', required: false },
+  { member: 'serviceAccount:__PROJECT_NUMBER__@cloudservices.gserviceaccount.com', role: 'roles/compute.instanceGroupManagerServiceAgent', required: false },
+]);
+
+const OFFICIAL_LOG_FILTERS = Object.freeze({
+  'sql-backup-failure': `logName="projects/${PROJECT}/logs/cloudaudit.googleapis.com%2Fsystem_event" AND protoPayload.methodName="cloudsql.instances.automatedBackup" AND resource.type="cloudsql_database" AND protoPayload.metadata.windowStatus=("STATUS_FAILED" OR "STATUS_ATTEMPT_FAILED")`,
+  'sql-failover': 'resource.type="cloudsql_database" AND ((log_id("cloudaudit.googleapis.com/activity") AND protoPayload.methodName="cloudsql.instances.failover" AND operation.last=true) OR (log_id("cloudaudit.googleapis.com/system_event") AND protoPayload.methodName="cloudsql.instances.autoFailover"))',
+  'sql-restart': 'log_id("cloudaudit.googleapis.com/activity") AND resource.type="cloudsql_database" AND protoPayload.methodName="cloudsql.instances.restart" AND operation.last=true',
+  'cloud-build-failure': 'log_id("cloudaudit.googleapis.com/activity") AND resource.type="build" AND protoPayload.methodName="google.devtools.cloudbuild.v1.CloudBuild.CreateBuild" AND operation.last=true AND protoPayload.response.status=("FAILURE" OR "INTERNAL_ERROR" OR "TIMEOUT" OR "EXPIRED")',
+  'run-deployment-failure': 'log_id("cloudaudit.googleapis.com/activity") AND resource.type="cloud_run_revision" AND protoPayload.methodName=("google.cloud.run.v2.Services.CreateService" OR "google.cloud.run.v2.Services.UpdateService") AND protoPayload.status.code!=0',
+});
+
+function clone(value) {
+  return structuredClone(value);
+}
+
+async function contractFixture() {
+  return JSON.parse(await readFile(CONTRACT_URL, 'utf8'));
+}
+
+test('the executable contract fixes the isolated GCP topology and least-privilege boundary', async () => {
+  const contract = await contractFixture();
+
+  assert.doesNotThrow(() => assertResourceContract(contract));
+  assert.deepEqual(contract.project, {
+    id: PROJECT,
+    displayName: 'Hong Kong Buddy Production V1',
+    organizationId: '797368190621',
+    billingAccountId: '01F9FD-24EA9B-A9232C',
+    labels: { application: 'hong-kong-buddy', environment: 'production-v1' },
+  });
+  assert.deepEqual(contract.locations, {
+    runtime: 'asia-east2', storage: 'asia-east2', database: 'asia-east2',
+    speech: 'asia-southeast1', vertex: 'global',
+  });
+  assert.deepEqual(contract.resources.artifactRegistry, {
+    repository: 'hkbuddy', format: 'DOCKER', mode: 'STANDARD_REPOSITORY',
+    location: 'asia-east2', description: 'Hong Kong Buddy production containers',
+  });
+  assert.deepEqual(contract.apis, [
+    'cloudresourcemanager.googleapis.com', 'serviceusage.googleapis.com',
+    'cloudbilling.googleapis.com', 'billingbudgets.googleapis.com',
+    'iam.googleapis.com', 'artifactregistry.googleapis.com',
+    'cloudbuild.googleapis.com', 'run.googleapis.com', 'compute.googleapis.com',
+    'servicenetworking.googleapis.com', 'sqladmin.googleapis.com',
+    'storage.googleapis.com', 'secretmanager.googleapis.com',
+    'aiplatform.googleapis.com', 'speech.googleapis.com',
+    'texttospeech.googleapis.com', 'monitoring.googleapis.com',
+    'logging.googleapis.com',
+  ]);
+
+  assert.deepEqual(contract.resources.network, {
+    vpc: 'hkbuddy-prod-vpc', subnet: 'hkbuddy-ae2-run', subnetCidr: '10.24.0.0/26',
+    privateGoogleAccess: true, psaRange: 'hkbuddy-google-managed-services',
+    psaCidr: '10.25.0.0/16', egress: 'private-ranges-only',
+  });
+  assert.deepEqual(contract.resources.cloudSql, {
+    instance: 'hkbuddy-pg', database: 'hkbuddy_v1', databaseVersion: 'POSTGRES_16',
+    availabilityType: 'REGIONAL', tier: 'db-custom-1-3840', diskType: 'PD_SSD',
+    diskSizeGb: 20, storageAutoIncrease: true, privateIpOnly: true,
+    sslMode: 'ENCRYPTED_ONLY', backupEnabled: true, backupStartTime: '18:00',
+    pointInTimeRecovery: true, transactionLogRetentionDays: 7,
+    retainedBackups: 7, retainBackupsOnDelete: true, finalBackup: true,
+    finalBackupRetentionDays: 30, deletionProtection: true,
+    users: [
+      { name: 'hkbuddy_app', databaseRoles: ['pg_read_all_data', 'pg_write_all_data'], secret: 'hkbuddy-db-app-url' },
+      { name: 'hkbuddy_migrator', databaseRoles: ['cloudsqlsuperuser'], secret: 'hkbuddy-db-migrator-url' },
+    ],
+  });
+  assert.deepEqual(contract.resources.bucket, {
+    name: 'hkbuddy-prod-v1-20260826-media', location: 'asia-east2',
+    uniformBucketLevelAccess: true, publicAccessPrevention: 'enforced',
+    versioning: false, softDeleteSeconds: 0, lifecycleDeleteAfterDays: 7,
+    retentionPolicy: null,
+  });
+  assert.deepEqual(contract.resources.cloudRun, {
+    service: 'hkbuddy-api', executionEnvironment: 'gen2', cpu: 2, memory: '1Gi',
+    concurrency: 40, minInstances: 1, maxInstances: 1, cpuThrottling: false,
+    startupCpuBoost: true, timeoutSeconds: 60, initialTrafficPercent: 0,
+    directVpc: true, egress: 'private-ranges-only',
+    startupProbe: { path: '/api/health/live', port: 8080, initialDelaySeconds: 0, timeoutSeconds: 5, periodSeconds: 10, failureThreshold: 12 },
+    livenessProbe: { path: '/api/health/live', port: 8080, initialDelaySeconds: 30, timeoutSeconds: 5, periodSeconds: 30, failureThreshold: 3 },
+    readinessProbe: { path: '/api/health/ready', port: 8080, initialDelaySeconds: 0, timeoutSeconds: 5, periodSeconds: 5, failureThreshold: 3 },
+    secretVersionPolicy: 'numeric-only',
+  });
+  assert.deepEqual(contract.resources.budget, {
+    displayName: 'Hong Kong Buddy Production V1 monthly guard', currency: 'HKD',
+    amount: 2300, calendarPeriod: 'MONTH', projectFilter: `projects/${PROJECT}`,
+    thresholds: [
+      { percent: 0.5, basis: 'CURRENT_SPEND' },
+      { percent: 0.8, basis: 'CURRENT_SPEND' },
+      { percent: 1, basis: 'CURRENT_SPEND' },
+      { percent: 1, basis: 'FORECASTED_SPEND' },
+    ],
+  });
+  assert.deepEqual(
+    contract.resources.monitoring.policies.filter(({ kind }) => kind === 'log-match')
+      .map(({ id, filter }) => [id, filter]),
+    Object.entries(OFFICIAL_LOG_FILTERS),
+  );
+  assert.equal(contract.safety.unresolvedProjectIdPolicy, 'single-confirmed-create-probe');
+  assert.equal(contract.safety.noUserManagedServiceAccountKeys, true);
+  assert.equal(contract.iam.forbiddenWorkloadRoles.includes('roles/iam.serviceAccountTokenCreator'), true);
+  assert.deepEqual(contract.iam.automaticProjectBindings, AUTOMATIC_PROJECT_BINDINGS);
+
+  const evidenceSecretIds = [
+    'hkbuddy-legacy-inventory', 'hkbuddy-dependency-acceptance', 'hkbuddy-llm-smoke',
+    'hkbuddy-asr-smoke', 'hkbuddy-tts-smoke', 'hkbuddy-ios-voice-acceptance',
+  ];
+  assert.deepEqual(
+    contract.resources.secrets.filter(({ baseProvisioningVersion }) => baseProvisioningVersion === false)
+      .map(({ id }) => id),
+    evidenceSecretIds,
+  );
+  for (const id of evidenceSecretIds) {
+    assert.equal(EXPECTED_PROVISION_STEPS.includes(`secret-container:${id}`), true);
+    assert.equal(EXPECTED_PROVISION_STEPS.includes(`secret-version:${id}`), false);
+    assert.equal(contract.iam.bindings.some(({ scope, member, role }) => (
+      scope === `secret:${id}` && member === `serviceAccount:hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`
+        && role === 'roles/secretmanager.secretAccessor'
+    )), true);
+  }
+
+  const runtime = `serviceAccount:hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`;
+  const runtimeProjectRoles = contract.iam.bindings
+    .filter(({ scope, member }) => scope === 'project' && member === runtime)
+    .map(({ role }) => role).sort();
+  assert.deepEqual(runtimeProjectRoles, [
+    'roles/aiplatform.user', 'roles/serviceusage.serviceUsageConsumer', 'roles/speech.client',
+  ]);
+  assert.equal(contract.iam.bindings.some(({ scope, member, role }) => (
+    scope === 'bucket:hkbuddy-prod-v1-20260826-media' && member === runtime
+      && role === 'roles/storage.objectUser'
+  )), true);
+  assert.equal(contract.iam.bindings.some(({ scope, member, role }) => (
+    scope === 'secret:hkbuddy-db-migrator-url' && member === runtime
+      && role === 'roles/secretmanager.secretAccessor'
+  )), false);
+  assert.equal(contract.iam.bindings.some(({ scope, member, role }) => (
+    scope === 'service-account:hkbuddy-build'
+      && member === `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`
+      && role === 'roles/iam.serviceAccountUser'
+  )), true);
+  assert.equal(contract.iam.bindings.some(({ scope, role }) => (
+    scope === 'project' && contract.iam.forbiddenWorkloadRoles.includes(role)
+  )), false);
+});
+
+test('contract validation rejects identity drift, public access, broad workload roles, or mutable secret pins', async (t) => {
+  const base = await contractFixture();
+  const cases = [
+    ['legacy project', (value) => { value.project.id = 'hkbuddy-pilot-0630'; }],
+    ['wrong organization', (value) => { value.project.organizationId = '1'; }],
+    ['public bucket', (value) => { value.resources.bucket.publicAccessPrevention = 'inherited'; }],
+    ['broad runtime role', (value) => { value.iam.bindings.push({ scope: 'project', member: `serviceAccount:hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/editor' }); }],
+    ['connector drift', (value) => { value.resources.cloudRun.directVpc = false; }],
+    ['extra public Cloud Run control', (value) => { value.resources.cloudRun.allowUnauthenticated = true; }],
+    ['extra resource surface', (value) => { value.resources.unreviewed = {}; }],
+    ['extra top-level surface', (value) => { value.unreviewed = true; }],
+    ['public SQL', (value) => { value.resources.cloudSql.privateIpOnly = false; }],
+    ['unencrypted SQL', (value) => { value.resources.cloudSql.sslMode = 'ALLOW_UNENCRYPTED_AND_ENCRYPTED'; }],
+    ['latest secret', (value) => { value.resources.cloudRun.secretVersionPolicy = 'latest'; }],
+    ['missing readback', (value) => { value.safety.completePostCreateReadback = false; }],
+    ['budget currency drift', (value) => { value.resources.budget.currency = 'USD'; }],
+    ['alert threshold replacement', (value) => { value.resources.monitoring.policies[0].threshold = 0.5; }],
+    ['alert filter replacement', (value) => { value.resources.monitoring.policies[6].filter = 'severity>=ERROR'; }],
+    ['IAM same-length external replacement', (value) => { value.iam.bindings[0].member = 'user:external@example.test'; }],
+    ['automatic binding replacement', (value) => { value.iam.automaticProjectBindings[1].role = 'roles/editor'; }],
+    ['forbidden-role list replacement', (value) => { value.iam.forbiddenWorkloadRoles[0] = 'roles/viewer'; }],
+  ];
+  for (const [name, mutate] of cases) {
+    await t.test(name, () => {
+      const candidate = clone(base);
+      mutate(candidate);
+      assert.throws(() => assertResourceContract(candidate), /GCP resource contract is invalid/);
+    });
+  }
+});
+
+test('gcloud execution is argv-only and rejects values that could disclose a secret', async () => {
+  const calls = [];
+  const executor = createGcloudExecutor({
+    executable: 'python.exe',
+    prefixArgs: ['C:/gcloud/lib/gcloud.py'],
+    execFile: async (executable, args, options) => {
+      calls.push({ executable, args, options });
+      return { stdout: '{"ok":true}\n', stderr: '' };
+    },
+  });
+
+  const result = await executor(['projects', 'describe', PROJECT, `--project=${PROJECT}`, '--format=json']);
+  assert.deepEqual(result, { ok: true });
+  assert.deepEqual(calls, [{
+    executable: 'python.exe',
+    args: ['C:/gcloud/lib/gcloud.py', 'projects', 'describe', PROJECT, `--project=${PROJECT}`, '--format=json'],
+    options: { encoding: 'utf8', maxBuffer: 1048576, windowsHide: true },
+  }]);
+  await assert.rejects(() => executor(`projects describe ${PROJECT}`), /argv array/);
+  await assert.rejects(() => executor(['sql', 'users', 'create', '--password=hunter2']), /secret-bearing argv/);
+  await assert.rejects(() => executor(['run', 'deploy', 'postgres://user:pass@example.test/db']), /secret-bearing argv/);
+  await assert.rejects(() => executor(['projects', 'describe', `${PROJECT}\nwhoami`]), /unsafe argv/);
+
+  const permissionExecutor = createGcloudExecutor({
+    executable: 'python.exe', prefixArgs: ['C:/gcloud/lib/gcloud.py'],
+    execFile: async () => {
+      const error = new Error('command failed');
+      error.stderr = 'The caller does not have permission.';
+      throw error;
+    },
+  });
+  await assert.rejects(
+    () => permissionExecutor(['projects', 'describe', PROJECT, `--project=${PROJECT}`, '--format=json']),
+    (error) => error.code === 'FORBIDDEN',
+  );
+});
+
+test('authenticated HTTPS control-plane identity is resolved without exposing its token', async () => {
+  const seen = [];
+  const request = createAuthenticatedRequest({
+    auth: {
+      getClient: async () => ({
+        getAccessToken: async () => ({ token: 'sensitive-access-token' }),
+        getTokenInfo: async (token) => {
+          seen.push(['token-info', token]);
+          return { email: 'admin@motionexp.com' };
+        },
+        request: async (input) => { seen.push(['request', input]); return { data: { ok: true } }; },
+      }),
+    },
+  });
+  assert.equal(await request.getPrincipal(), 'admin@motionexp.com');
+  assert.deepEqual(await request({ method: 'GET', url: 'https://example.googleapis.com/v1/read' }), { ok: true });
+  assert.equal(JSON.stringify(seen.filter(([kind]) => kind !== 'token-info')).includes('sensitive-access-token'), false);
+});
+
+test('default-style HTTPS authentication reuses the exact gcloud account without putting bearer data in argv', async () => {
+  const execCalls = [];
+  const fetchCalls = [];
+  const tokenInfoCalls = [];
+  const request = createGcloudAuthenticatedRequest({
+    executable: 'python.exe', prefixArgs: ['C:/gcloud/lib/gcloud.py'],
+    account: 'admin@motionexp.com',
+    execFile: async (executable, args, options) => {
+      execCalls.push({ executable, args, options });
+      if (args.includes('config')) return {
+        stdout: '{"core":{"account":"admin@motionexp.com"},"auth":{}}\n', stderr: '',
+      };
+      return { stdout: 'sensitive-bearer-token\n', stderr: '' };
+    },
+    getTokenInfo: async (token) => {
+      tokenInfoCalls.push(token);
+      return { email: 'admin@motionexp.com' };
+    },
+    environment: {},
+    fetchImpl: async (url, options) => {
+      fetchCalls.push({ url, options });
+      return {
+        ok: true, status: 200,
+        headers: { get: () => null },
+        text: async () => '{"ok":true}',
+      };
+    },
+    now: () => 1_000,
+  });
+  assert.equal(await request.getPrincipal(), 'admin@motionexp.com');
+  assert.deepEqual(await request({
+    method: 'POST', url: 'https://example.googleapis.com/v1/write', body: { secret: 'body-only' },
+  }), { ok: true });
+  assert.equal(execCalls.length, 2);
+  assert.deepEqual(execCalls[0].args, [
+    'C:/gcloud/lib/gcloud.py', 'config', 'list',
+    '--format=json', `--project=${PROJECT}`,
+  ]);
+  assert.deepEqual(execCalls[1].args, [
+    'C:/gcloud/lib/gcloud.py', 'auth', 'print-access-token',
+    '--account=admin@motionexp.com', `--project=${PROJECT}`,
+  ]);
+  assert.deepEqual(tokenInfoCalls, ['sensitive-bearer-token']);
+  assert.equal(JSON.stringify(execCalls).includes('sensitive-bearer-token'), false);
+  assert.equal(JSON.stringify(execCalls).includes('body-only'), false);
+  assert.equal(fetchCalls[0].options.headers.authorization, 'Bearer sensitive-bearer-token');
+  assert.equal(fetchCalls[0].options.body, '{"secret":"body-only"}');
+});
+
+test('gcloud HTTPS authentication rejects every effective credential override before token use', async (t) => {
+  for (const [name, environment] of [
+    ['impersonation env', { CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT: 'foreign@example.test' }],
+    ['access-token env', { CLOUDSDK_AUTH_ACCESS_TOKEN: 'do-not-use' }],
+    ['access-token-file env', { CLOUDSDK_AUTH_ACCESS_TOKEN_FILE: 'C:/foreign-token' }],
+    ['credential-file env', { CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: 'C:/foreign-credential' }],
+  ]) {
+    await t.test(name, async () => {
+      let execCalls = 0;
+      const request = createGcloudAuthenticatedRequest({
+        executable: 'python.exe', prefixArgs: ['C:/gcloud/lib/gcloud.py'],
+        account: 'admin@motionexp.com', environment,
+        execFile: async () => { execCalls += 1; return { stdout: 'must-not-run' }; },
+        getTokenInfo: async () => ({ email: 'admin@motionexp.com' }),
+      });
+      await assert.rejects(() => request.getPrincipal(), (error) => error.code === 'GCLOUD_AUTH_OVERRIDE');
+      assert.equal(execCalls, 0);
+    });
+  }
+
+  for (const [name, auth] of [
+    ['impersonation property', { impersonate_service_account: 'foreign@example.test' }],
+    ['access-token-file property', { access_token_file: 'C:/foreign-token' }],
+    ['credential-file property', { credential_file_override: 'C:/foreign-credential' }],
+  ]) {
+    await t.test(name, async () => {
+      const calls = [];
+      const request = createGcloudAuthenticatedRequest({
+        executable: 'python.exe', prefixArgs: ['C:/gcloud/lib/gcloud.py'],
+        account: 'admin@motionexp.com', environment: {},
+        execFile: async (_executable, args) => {
+          calls.push(args);
+          return { stdout: `${JSON.stringify({ auth })}\n`, stderr: '' };
+        },
+        getTokenInfo: async () => ({ email: 'admin@motionexp.com' }),
+      });
+      await assert.rejects(() => request.getPrincipal(), (error) => error.code === 'GCLOUD_AUTH_OVERRIDE');
+      assert.equal(calls.length, 1);
+      assert.equal(calls.some((args) => args.includes('print-access-token')), false);
+    });
+  }
+});
+
+test('CIDR audit ignores only the target VPC system default route and blocks real overlap', () => {
+  const network = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/hkbuddy-prod-vpc`;
+  assert.doesNotThrow(() => assertCidrAvailable({
+    desired: '10.24.0.0/26', network,
+    subnets: [], addresses: [],
+    routes: [{
+      network, destRange: '0.0.0.0/0',
+      nextHopGateway: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/gateways/default-internet-gateway`,
+    }],
+  }));
+  assert.doesNotThrow(() => assertCidrAvailable({
+    desired: '10.25.0.0/16', network, subnets: [], addresses: [],
+    kind: 'psa',
+    routes: [{ network, destRange: '10.0.0.0/8', nextHopVpnTunnel: 'vpn-1' }],
+  }));
+  assert.throws(() => assertCidrAvailable({
+    desired: '10.25.0.0/16', network, subnets: [], addresses: [],
+    kind: 'psa',
+    routes: [{ network, destRange: '10.25.8.0/24', nextHopVpnTunnel: 'vpn-1' }],
+  }), (error) => error.code === 'CIDR_OVERLAP');
+  assert.throws(() => assertCidrAvailable({
+    desired: '10.25.0.0/16', network, routes: [], addresses: [],
+    subnets: [{ network, ipCidrRange: '10.25.1.0/24' }],
+  }), (error) => error.code === 'CIDR_OVERLAP');
+  assert.doesNotThrow(() => assertCidrAvailable({
+    desired: '10.25.0.0/16', network, routes: [], subnets: [],
+    kind: 'psa',
+    addresses: [{ purpose: 'VPC_PEERING', network: `${network}-other`, address: '10.25.0.0', prefixLength: 16 }],
+  }));
+});
+
+test('monitoring aggregation groups Cloud Run and Cloud SQL metrics by their real resource label', () => {
+  assert.equal(monitoringGroupByField('run.googleapis.com/request_count'), 'resource.label.service_name');
+  assert.equal(monitoringGroupByField('cloudsql.googleapis.com/database/cpu/utilization'), 'resource.label.database_id');
+  assert.throws(() => monitoringGroupByField('unknown.googleapis.com/metric'), /unsupported monitoring metric/);
+});
+
+test('log alert policies use official event contracts and validate each filter read-only before policy creation', async (t) => {
+  const contract = await contractFixture();
+  for (const [policyId, filter] of Object.entries(OFFICIAL_LOG_FILTERS)) {
+    await t.test(policyId, async () => {
+      const requests = [];
+      const plane = new GcpControlPlane({
+        contract, notificationChannel: CHANNEL,
+        gcloud: async () => { throw new Error('gcloud must not run'); },
+        request: async (input) => {
+          requests.push(input);
+          if (input.url === 'https://logging.googleapis.com/v2/entries:list') return {};
+          if (input.url === `https://monitoring.googleapis.com/v3/projects/${PROJECT}/alertPolicies`) {
+            return { name: `projects/${PROJECT}/alertPolicies/1` };
+          }
+          throw new Error('unexpected request');
+        },
+      });
+      await plane.create(`monitoring-policy:${policyId}`, { notificationChannel: CHANNEL });
+      assert.deepEqual(requests, [
+        {
+          method: 'POST', url: 'https://logging.googleapis.com/v2/entries:list',
+          body: {
+            resourceNames: [`projects/${PROJECT}`], filter, pageSize: 1,
+            orderBy: 'timestamp desc',
+          },
+        },
+        {
+          method: 'POST', url: `https://monitoring.googleapis.com/v3/projects/${PROJECT}/alertPolicies`,
+          body: requests[1].body,
+        },
+      ]);
+      assert.equal(requests[1].body.conditions[0].conditionMatchedLog.filter, filter);
+    });
+  }
+
+  await t.test('unverifiable Logging filter stops before Monitoring mutation', async () => {
+    const requests = [];
+    const plane = new GcpControlPlane({
+      contract, notificationChannel: CHANNEL,
+      gcloud: async () => { throw new Error('gcloud must not run'); },
+      request: async (input) => {
+        requests.push(input);
+        const error = new Error('invalid logging filter');
+        error.code = 'BAD_REQUEST';
+        throw error;
+      },
+    });
+    await assert.rejects(
+      () => plane.create('monitoring-policy:sql-backup-failure', { notificationChannel: CHANNEL }),
+      (error) => error.code === 'MONITORING_LOG_FILTER_UNVERIFIED',
+    );
+    assert.deepEqual(requests.map(({ url }) => url), ['https://logging.googleapis.com/v2/entries:list']);
+  });
+
+  await t.test('metric descriptor identity mismatch stops before Monitoring mutation', async () => {
+    const requests = [];
+    const plane = new GcpControlPlane({
+      contract, notificationChannel: CHANNEL,
+      gcloud: async () => { throw new Error('gcloud must not run'); },
+      request: async (input) => {
+        requests.push(input);
+        return { type: 'run.googleapis.com/not-the-requested-metric' };
+      },
+    });
+    await assert.rejects(
+      () => plane.create('monitoring-policy:run-5xx-ratio', { notificationChannel: CHANNEL }),
+      (error) => error.code === 'MONITORING_METRIC_DESCRIPTOR_UNVERIFIED',
+    );
+    assert.equal(requests.some(({ url }) => url.endsWith('/alertPolicies')), false);
+  });
+});
+
+test('monitoring policy identity matches the marker-or-display-name union before create', async (t) => {
+  const contract = await contractFixture();
+  const definition = contract.resources.monitoring.policies.find(({ id }) => id === 'sql-backup-failure');
+
+  await t.test('an unlabelled fixed-name policy is drift, never absence', async () => {
+    const plane = new GcpControlPlane({
+      contract, notificationChannel: CHANNEL,
+      gcloud: async () => { throw new Error('gcloud must not run'); },
+      request: async () => ({ alertPolicies: [{ displayName: definition.displayName }] }),
+    });
+    assert.deepEqual(await plane.read('monitoring-policy:sql-backup-failure'), {
+      status: 'present', value: { exact: false },
+    });
+  });
+
+  await t.test('one exact labelled policy plus an unlabelled fixed-name duplicate is drift', async () => {
+    const exactPolicy = {
+      displayName: definition.displayName,
+      combiner: 'OR', enabled: true, notificationChannels: [CHANNEL],
+      userLabels: {
+        application: 'hong_kong_buddy', environment: 'production_v1',
+        hkbuddy_contract: 'sql_backup_failure',
+      },
+      conditions: [{
+        displayName: definition.displayName,
+        conditionMatchedLog: { filter: definition.filter },
+      }],
+      alertStrategy: {
+        notificationRateLimit: { period: '300s' }, autoClose: '604800s',
+      },
+    };
+    const plane = new GcpControlPlane({
+      contract, notificationChannel: CHANNEL,
+      gcloud: async () => { throw new Error('gcloud must not run'); },
+      request: async () => ({ alertPolicies: [
+        exactPolicy, { displayName: definition.displayName },
+      ] }),
+    });
+    assert.deepEqual(await plane.read('monitoring-policy:sql-backup-failure'), {
+      status: 'present', value: { exact: false },
+    });
+  });
+});
+
+test('ensureExactResource is dry-run safe, reads after create, and fails closed on collision, drift, 403, or ambiguity', async (t) => {
+  await t.test('dry run never creates', async () => {
+    let creates = 0;
+    const result = await ensureExactResource({
+      id: 'vpc', mutate: false,
+      read: async () => ({ status: 'absent' }),
+      create: async () => { creates += 1; },
+      compare: () => true,
+    });
+    assert.deepEqual(result, { id: 'vpc', status: 'planned' });
+    assert.equal(creates, 0);
+  });
+
+  await t.test('confirmed create is followed by exact readback', async () => {
+    let reads = 0;
+    let creates = 0;
+    const result = await ensureExactResource({
+      id: 'vpc', mutate: true,
+      read: async () => (++reads === 1 ? { status: 'absent' } : { status: 'present', value: { name: 'vpc' } }),
+      create: async () => { creates += 1; },
+      compare: (value) => value.name === 'vpc',
+    });
+    assert.deepEqual(result, { id: 'vpc', status: 'created' });
+    assert.equal(reads, 2);
+    assert.equal(creates, 1);
+  });
+
+  const failures = [
+    ['403 is unknown', async () => ({ status: 'unknown', code: 'FORBIDDEN' }), async () => undefined, 'RESOURCE_STATE_UNKNOWN'],
+    ['present drift', async () => ({ status: 'present', value: { name: 'other' } }), async () => undefined, 'RESOURCE_DRIFT'],
+    ['collision', async () => ({ status: 'absent' }), async () => { const error = new Error('collision'); error.code = 'ALREADY_EXISTS'; throw error; }, 'RESOURCE_COLLISION'],
+    ['ambiguous missing', (() => { let reads = 0; return async () => (++reads === 1 ? { status: 'absent' } : { status: 'absent' }); })(), async () => { throw new Error('transport lost'); }, 'CREATE_RESULT_AMBIGUOUS'],
+  ];
+  for (const [name, read, create, code] of failures) {
+    await t.test(name, async () => {
+      await assert.rejects(
+        () => ensureExactResource({ id: 'resource', mutate: true, read, create, compare: () => false }),
+        (error) => error.code === code,
+      );
+    });
+  }
+
+  await t.test('ambiguous transport result is accepted only after exact readback', async () => {
+    let reads = 0;
+    const result = await ensureExactResource({
+      id: 'resource', mutate: true,
+      read: async () => (++reads === 1
+        ? { status: 'absent' }
+        : { status: 'present', value: { exact: true } }),
+      create: async () => { throw new Error('response lost'); },
+      compare: (value) => value.exact === true,
+    });
+    assert.deepEqual(result, { id: 'resource', status: 'created-readback-recovered' });
+  });
+});
+
+test('the unresolved project ID path permits exactly one confirmed create probe and reads back ambiguity', async (t) => {
+  await t.test('403 is not absence but one fixed create probe can succeed', async () => {
+    let reads = 0;
+    let creates = 0;
+    const result = await ensureProjectResource({
+      read: async () => (++reads === 1
+        ? { status: 'unknown', code: 'FORBIDDEN' }
+        : { status: 'present', value: { exact: true } }),
+      create: async () => { creates += 1; },
+      compare: (value) => value.exact === true,
+    });
+    assert.deepEqual(result, { id: 'project', status: 'created-from-unresolved' });
+    assert.equal(reads, 2);
+    assert.equal(creates, 1);
+  });
+
+  await t.test('ALREADY_EXISTS stops as a collision without retry', async () => {
+    let creates = 0;
+    await assert.rejects(() => ensureProjectResource({
+      read: async () => ({ status: 'unknown', code: 'FORBIDDEN' }),
+      create: async () => {
+        creates += 1;
+        const error = new Error('already exists');
+        error.code = 'ALREADY_EXISTS';
+        throw error;
+      },
+      compare: () => false,
+    }), (error) => error.code === 'RESOURCE_COLLISION');
+    assert.equal(creates, 1);
+  });
+
+  await t.test('ambiguous create is accepted only after exact readback', async () => {
+    let reads = 0;
+    let creates = 0;
+    const result = await ensureProjectResource({
+      read: async () => (++reads === 1
+        ? { status: 'unknown', code: 'FORBIDDEN' }
+        : { status: 'present', value: { exact: true } }),
+      create: async () => { creates += 1; throw new Error('response lost'); },
+      compare: (value) => value.exact === true,
+    });
+    assert.deepEqual(result, { id: 'project', status: 'created-readback-recovered' });
+    assert.equal(creates, 1);
+  });
+
+  await t.test('permission and unresolved ambiguity fail closed', async () => {
+    for (const [createCode, expected] of [
+      ['FORBIDDEN', 'PROJECT_CREATE_PROBE_FORBIDDEN'],
+      ['TRANSPORT_AMBIGUOUS', 'PROJECT_CREATE_RESULT_AMBIGUOUS'],
+    ]) {
+      let reads = 0;
+      await assert.rejects(() => ensureProjectResource({
+        read: async () => {
+          reads += 1;
+          return { status: 'unknown', code: 'FORBIDDEN' };
+        },
+        create: async () => {
+          const error = new Error(createCode);
+          error.code = createCode;
+          throw error;
+        },
+        compare: () => false,
+      }), (error) => error.code === expected);
+      assert.equal(reads, createCode === 'FORBIDDEN' ? 1 : 2);
+    }
+  });
+});
+
+test('final key audit uses project-explicit argv and rejects every user-managed service-account key', async () => {
+  const contract = await contractFixture();
+  const calls = [];
+  await assertNoUserManagedServiceAccountKeys({
+    contract,
+    gcloud: async (args) => { calls.push(args); return []; },
+  });
+  assert.equal(calls.length, 4);
+  assert.equal(calls.every((args) => args.includes('--managed-by=user')
+    && args.includes(`--project=${PROJECT}`)), true);
+
+  await assert.rejects(() => assertNoUserManagedServiceAccountKeys({
+    contract,
+    gcloud: async () => [{ name: 'projects/example/serviceAccounts/example/keys/1' }],
+  }), (error) => error.code === 'USER_MANAGED_SERVICE_ACCOUNT_KEY');
+});
+
+function exactManagedIamPolicies(contract) {
+  const scopes = [
+    'project', 'bucket:hkbuddy-prod-v1-20260826-media', 'repository:hkbuddy',
+    ...contract.resources.secrets.map(({ id }) => `secret:${id}`),
+    ...contract.resources.serviceAccounts.map(({ id }) => `service-account:${id}`),
+  ];
+  const policies = Object.fromEntries(scopes.map((scope) => [scope, { bindings: [] }]));
+  for (const binding of contract.iam.bindings) {
+    policies[binding.scope].bindings.push({
+      role: binding.role,
+      members: [binding.member.replace('__PROJECT_NUMBER__', PROJECT_NUMBER)],
+    });
+  }
+  for (const binding of contract.iam.automaticProjectBindings) {
+    policies.project.bindings.push({
+      role: binding.role,
+      members: [binding.member.replace('__PROJECT_NUMBER__', PROJECT_NUMBER)],
+    });
+  }
+  return policies;
+}
+
+test('managed IAM final readback is an exact per-scope allowlist and forbids workload token creation', async (t) => {
+  const contract = await contractFixture();
+  const exactPolicies = exactManagedIamPolicies(contract);
+  assert.doesNotThrow(() => assertExactManagedIamPolicies({
+    contract, projectNumber: PROJECT_NUMBER, policiesByScope: exactPolicies,
+  }));
+  const realEmptyPolicyShape = clone(exactPolicies);
+  delete realEmptyPolicyShape['secret:hkbuddy-db-bootstrap-state'].bindings;
+  assert.doesNotThrow(() => assertExactManagedIamPolicies({
+    contract, projectNumber: PROJECT_NUMBER, policiesByScope: realEmptyPolicyShape,
+  }));
+
+  const runtime = `serviceAccount:hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`;
+  const deployer = `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`;
+  const cases = [
+    ['project TokenCreator', 'project', { role: 'roles/iam.serviceAccountTokenCreator', members: [runtime] }],
+    ['project Cloud SQL client', 'project', { role: 'roles/cloudsql.client', members: [runtime] }],
+    ['bucket storage admin', 'bucket:hkbuddy-prod-v1-20260826-media', { role: 'roles/storage.admin', members: [runtime] }],
+    ['wrong secret access', 'secret:hkbuddy-db-migrator-url', { role: 'roles/secretmanager.secretAccessor', members: [runtime] }],
+    ['repository writer', 'repository:hkbuddy', { role: 'roles/artifactregistry.writer', members: [runtime] }],
+    ['SA TokenCreator', 'service-account:hkbuddy-runtime', { role: 'roles/iam.serviceAccountTokenCreator', members: [deployer] }],
+    ['public secret access', 'secret:hkbuddy-session-secret', { role: 'roles/secretmanager.secretAccessor', members: ['allUsers'] }],
+    ['external secret access', 'secret:hkbuddy-session-secret', { role: 'roles/secretmanager.secretAccessor', members: ['serviceAccount:foreign@example.test'] }],
+    ['external bucket access', 'bucket:hkbuddy-prod-v1-20260826-media', { role: 'roles/storage.objectViewer', members: ['user:foreign@example.test'] }],
+    ['external repository access', 'repository:hkbuddy', { role: 'roles/artifactregistry.reader', members: ['serviceAccount:foreign@example.test'] }],
+    ['external SA impersonation', 'service-account:hkbuddy-runtime', { role: 'roles/iam.serviceAccountUser', members: ['user:foreign@example.test'] }],
+    ['external project access', 'project', { role: 'roles/viewer', members: ['user:foreign@example.test'] }],
+    ['unexpected Google agent role', 'project', { role: 'roles/editor', members: [`serviceAccount:service-${PROJECT_NUMBER}@gcp-sa-cloudbuild.iam.gserviceaccount.com`] }],
+    ['legacy Google APIs agent Editor', 'project', { role: 'roles/editor', members: [`serviceAccount:${PROJECT_NUMBER}@cloudservices.gserviceaccount.com`] }],
+  ];
+  for (const [name, scope, unexpected] of cases) {
+    await t.test(name, () => {
+      const policies = clone(exactPolicies);
+      policies[scope].bindings.push(unexpected);
+      assert.throws(
+        () => assertExactManagedIamPolicies({ contract, projectNumber: PROJECT_NUMBER, policiesByScope: policies }),
+        (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
+      );
+    });
+  }
+
+  await t.test('missing service-agent impersonation binding is rejected', () => {
+    const policies = clone(exactPolicies);
+    policies['service-account:hkbuddy-build'].bindings = [];
+    assert.throws(
+      () => assertExactManagedIamPolicies({ contract, projectNumber: PROJECT_NUMBER, policiesByScope: policies }),
+      (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
+    );
+  });
+
+  await t.test('missing automatic Cloud Build project grant is rejected', () => {
+    const policies = clone(exactPolicies);
+    policies.project.bindings = policies.project.bindings.filter(({ role }) => (
+      role !== 'roles/cloudbuild.serviceAgent'
+    ));
+    assert.throws(
+      () => assertExactManagedIamPolicies({ contract, projectNumber: PROJECT_NUMBER, policiesByScope: policies }),
+      (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
+    );
+  });
+
+  await t.test('required creator owner binding is exact', () => {
+    const policies = clone(exactPolicies);
+    policies.project.bindings = policies.project.bindings.filter(({ role }) => role !== 'roles/owner');
+    assert.throws(
+      () => assertExactManagedIamPolicies({ contract, projectNumber: PROJECT_NUMBER, policiesByScope: policies }),
+      (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
+    );
+  });
+
+  await t.test('conditional managed binding is not exact', () => {
+    const policies = clone(exactPolicies);
+    policies.project.bindings[0].condition = { title: 'temporary', expression: 'request.time < timestamp("2030-01-01T00:00:00Z")' };
+    assert.throws(
+      () => assertExactManagedIamPolicies({ contract, projectNumber: PROJECT_NUMBER, policiesByScope: policies }),
+      (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
+    );
+  });
+});
+
+test('pre-sensitive IAM subset audits reject foreign project owners and secret accessors', async (t) => {
+  const contract = await contractFixture();
+  for (const [name, projectOnly, policyFor] of [
+    ['foreign project owner', true, (scope) => (scope === 'project' ? {
+      bindings: [{ role: 'roles/owner', members: ['user:foreign@example.test'] }],
+    } : { bindings: [] })],
+    ['foreign secret accessor', false, (scope) => (scope === 'secret:hkbuddy-db-app-url' ? {
+      bindings: [{ role: 'roles/secretmanager.secretAccessor', members: ['serviceAccount:foreign@example.test'] }],
+    } : { bindings: [] })],
+  ]) {
+    await t.test(name, async () => {
+      const gcloudCalls = [];
+      const plane = new GcpControlPlane({
+        contract, notificationChannel: CHANNEL,
+        gcloud: async (args) => {
+          gcloudCalls.push(args);
+          let scope;
+          if (args[0] === 'projects') scope = 'project';
+          else if (args[0] === 'storage') scope = 'bucket:hkbuddy-prod-v1-20260826-media';
+          else if (args[0] === 'artifacts') scope = 'repository:hkbuddy';
+          else if (args[0] === 'secrets') scope = `secret:${args[2]}`;
+          else if (args[0] === 'iam') scope = `service-account:${args[3].split('@')[0]}`;
+          else throw new Error('unexpected gcloud operation');
+          return policyFor(scope);
+        },
+        request: async () => { throw new Error('REST must not run'); },
+      });
+      plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
+      await assert.rejects(
+        () => plane.auditManagedIamPolicies({ projectOnly }),
+        (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
+      );
+      assert.equal(gcloudCalls.some((args) => args.some((arg) => /add-iam-policy-binding/.test(arg))), false);
+    });
+  }
+});
+
+function exactBucket({ projectNumber = '123456789012' } = {}) {
+  return {
+    name: 'hkbuddy-prod-v1-20260826-media', projectNumber, location: 'ASIA-EAST2',
+    iamConfiguration: {
+      uniformBucketLevelAccess: { enabled: true }, publicAccessPrevention: 'enforced',
+    },
+    versioning: { enabled: false },
+    softDeletePolicy: { retentionDurationSeconds: '0' },
+    lifecycle: { rule: [{ action: { type: 'Delete' }, condition: { age: 7 } }] },
+  };
+}
+
+test('readback compares project display name and labels, repository description, and unconditional bucket lifecycle exactly', async () => {
+  const contract = await contractFixture();
+  const plane = new GcpControlPlane({
+    contract, notificationChannel: CHANNEL,
+    gcloud: async () => { throw new Error('gcloud must not run'); },
+    request: async () => { throw new Error('REST must not run'); },
+  });
+  const project = {
+    projectId: PROJECT, projectNumber: PROJECT_NUMBER, lifecycleState: 'ACTIVE',
+    parent: { id: '797368190621' }, name: 'Hong Kong Buddy Production V1',
+    labels: { application: 'hong-kong-buddy', environment: 'production-v1' },
+  };
+  assert.equal(plane.compare('project', project), true);
+  assert.equal(plane.compare('project', { ...project, name: 'Wrong name' }), false);
+  assert.equal(plane.compare('project', {
+    ...project, labels: { ...project.labels, unexpected: 'extra' },
+  }), false);
+
+  const repository = {
+    name: `projects/${PROJECT}/locations/asia-east2/repositories/hkbuddy`,
+    location: 'asia-east2', format: 'DOCKER', mode: 'STANDARD_REPOSITORY',
+    description: 'Hong Kong Buddy production containers',
+  };
+  assert.equal(plane.compare('artifact-registry', repository), true);
+  assert.equal(plane.compare('artifact-registry', { ...repository, description: 'drifted' }), false);
+  assert.equal(plane.compare('artifact-registry', { ...repository, mode: 'REMOTE_REPOSITORY' }), false);
+  assert.equal(plane.compare('artifact-registry', { ...repository, mode: 'VIRTUAL_REPOSITORY' }), false);
+
+  plane.cache.set('project', project);
+  const bucket = exactBucket();
+  assert.equal(plane.compare('bucket', bucket), true);
+  const conditionalLifecycle = clone(bucket);
+  conditionalLifecycle.lifecycle.rule[0].condition.matchesPrefix = ['temporary/'];
+  assert.equal(plane.compare('bucket', conditionalLifecycle), false);
+});
+
+test('Artifact Registry creation and readback require an exact writable standard repository', async () => {
+  const calls = [];
+  const plane = new GcpControlPlane({
+    contract: await contractFixture(), notificationChannel: CHANNEL,
+    gcloud: async (args) => { calls.push(args); return {}; },
+    request: async () => { throw new Error('REST must not run'); },
+  });
+  await plane.create('artifact-registry');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].includes('--mode=standard-repository'), true);
+});
+
+test('secret container readback rejects expiry, rotation, topics, CMEK, and label drift', async () => {
+  const plane = new GcpControlPlane({
+    contract: await contractFixture(), notificationChannel: CHANNEL,
+    gcloud: async () => { throw new Error('gcloud must not run'); },
+    request: async () => { throw new Error('REST must not run'); },
+  });
+  const secret = {
+    name: `projects/${PROJECT}/secrets/hkbuddy-session-secret`,
+    replication: { automatic: {} },
+    labels: { application: 'hong-kong-buddy', environment: 'production-v1' },
+  };
+  assert.equal(plane.compare('secret-container:hkbuddy-session-secret', secret), true);
+  for (const drifted of [
+    { ...secret, expireTime: '2026-09-01T00:00:00Z' },
+    { ...secret, ttl: '86400s' },
+    { ...secret, rotation: { nextRotationTime: '2026-09-01T00:00:00Z', rotationPeriod: '86400s' } },
+    { ...secret, topics: [{ name: `projects/${PROJECT}/topics/rotation` }] },
+    { ...secret, replication: { automatic: { customerManagedEncryption: { kmsKeyName: 'projects/foreign/locations/global/keyRings/x/cryptoKeys/y' } } } },
+    { ...secret, labels: { ...secret.labels, unexpected: 'extra' } },
+  ]) {
+    assert.equal(plane.compare('secret-container:hkbuddy-session-secret', drifted), false);
+  }
+});
+
+test('existing generated secret values must be canonical base64url encodings of exactly 32 bytes', async () => {
+  const plane = new GcpControlPlane({
+    contract: await contractFixture(), notificationChannel: CHANNEL,
+    gcloud: async () => { throw new Error('gcloud must not run'); },
+    request: async () => { throw new Error('REST must not run'); },
+  });
+  plane.cache.set('cloud-sql-instance', { privateIp: '10.25.0.3' });
+  const canonical = Buffer.alloc(32, 0x41).toString('base64url');
+  const url = (user, password) => `postgresql://${user}:${encodeURIComponent(password)}@10.25.0.3:5432/hkbuddy_v1?sslmode=require`;
+
+  assert.equal(plane.compare('secret-version:hkbuddy-session-secret', {
+    version: '1', secretValue: canonical,
+  }), true);
+  assert.equal(plane.compare('secret-version:hkbuddy-session-secret', {
+    version: '1', secretValue: 'A'.repeat(32),
+  }), false);
+  assert.equal(plane.compare('secret-version:hkbuddy-db-app-url', {
+    version: '1', secretValue: url('hkbuddy_app', canonical),
+  }), true);
+  assert.equal(plane.compare('secret-version:hkbuddy-db-app-url', {
+    version: '1', secretValue: url('hkbuddy_app', 'x'),
+  }), false);
+  assert.equal(plane.compare('secret-version:hkbuddy-db-migrator-url', {
+    version: '1', secretValue: url('hkbuddy_migrator', `${canonical}=`),
+  }), false);
+});
+
+test('Cloud SQL creation uses the supported v1 REST insert with the named PSA range and exact retention controls', async () => {
+  const requests = [];
+  const plane = new GcpControlPlane({
+    contract: await contractFixture(), notificationChannel: CHANNEL,
+    gcloud: async () => { throw new Error('Cloud SQL create must not use gcloud argv'); },
+    request: async (input) => {
+      requests.push(input);
+      return { name: 'operation-1', status: 'DONE' };
+    },
+  });
+  await plane.create('cloud-sql-instance');
+  assert.deepEqual(requests, [{
+    method: 'POST', url: `https://sqladmin.googleapis.com/v1/projects/${PROJECT}/instances`,
+    body: {
+      name: 'hkbuddy-pg', region: 'asia-east2', databaseVersion: 'POSTGRES_16',
+      settings: {
+        tier: 'db-custom-1-3840', availabilityType: 'REGIONAL',
+        dataDiskType: 'PD_SSD', dataDiskSizeGb: '20', storageAutoResize: true,
+        ipConfiguration: {
+          ipv4Enabled: false,
+          privateNetwork: `projects/${PROJECT}/global/networks/hkbuddy-prod-vpc`,
+          allocatedIpRange: 'hkbuddy-google-managed-services', sslMode: 'ENCRYPTED_ONLY',
+        },
+        backupConfiguration: {
+          enabled: true, startTime: '18:00', pointInTimeRecoveryEnabled: true,
+          transactionLogRetentionDays: 7,
+          backupRetentionSettings: { retentionUnit: 'COUNT', retainedBackups: 7 },
+        },
+        deletionProtectionEnabled: true, retainBackupsOnDelete: true,
+        finalBackupConfig: { enabled: true, retentionDays: 30 },
+      },
+    },
+  }]);
+});
+
+test('global bucket ownership is target-project exact and a foreign collision cannot trigger storage or IAM mutation', async () => {
+  const gcloudCalls = [];
+  const requests = [];
+  const plane = new GcpControlPlane({
+    contract: await contractFixture(), notificationChannel: CHANNEL,
+    gcloud: async (args) => {
+      gcloudCalls.push(args);
+      if (args[0] === 'projects' && args[1] === 'describe') {
+        return {
+          projectId: PROJECT, projectNumber: '123456789012', lifecycleState: 'ACTIVE',
+          parent: { id: '797368190621' },
+          labels: { application: 'hong-kong-buddy', environment: 'production-v1' },
+        };
+      }
+      throw new Error('unexpected gcloud operation');
+    },
+    request: async (input) => {
+      requests.push(input);
+      if (input.method === 'GET') return exactBucket({ projectNumber: '999999999999' });
+      throw new Error('mutation must not run');
+    },
+  });
+  assert.equal((await plane.read('project')).status, 'present');
+  await assert.rejects(() => plane.read('bucket'), (error) => error.code === 'BUCKET_ID_COLLISION');
+  assert.equal(requests.every(({ method }) => method === 'GET'), true);
+  assert.equal(gcloudCalls.some((args) => args.includes('add-iam-policy-binding')), false);
+});
+
+test('bucket insert request contains only writable exact controls and readback includes target projectNumber', async () => {
+  const requests = [];
+  const plane = new GcpControlPlane({
+    contract: await contractFixture(), notificationChannel: CHANNEL,
+    gcloud: async (args) => {
+      if (args[0] === 'projects' && args[1] === 'describe') {
+        return {
+          projectId: PROJECT, projectNumber: '123456789012', lifecycleState: 'ACTIVE',
+          parent: { id: '797368190621' },
+          labels: { application: 'hong-kong-buddy', environment: 'production-v1' },
+        };
+      }
+      throw new Error('unexpected gcloud operation');
+    },
+    request: async (input) => { requests.push(input); return exactBucket(); },
+  });
+  await plane.read('project');
+  assert.equal(plane.compare('bucket', exactBucket()), true);
+  assert.equal(plane.compare('bucket', exactBucket({ projectNumber: '999999999999' })), false);
+  await plane.create('bucket');
+  const insert = requests.find(({ method }) => method === 'POST');
+  assert.equal(insert.body.locationType, undefined);
+  assert.deepEqual(insert.body, {
+    name: 'hkbuddy-prod-v1-20260826-media', location: 'asia-east2',
+    iamConfiguration: {
+      uniformBucketLevelAccess: { enabled: true }, publicAccessPrevention: 'enforced',
+    },
+    versioning: { enabled: false },
+    softDeletePolicy: { retentionDurationSeconds: '0' },
+    lifecycle: { rule: [{ action: { type: 'Delete' }, condition: { age: 7 } }] },
+  });
+});
+
+test('budget readback normalizes an omitted default-false notification field', async () => {
+  const budget = {
+    displayName: 'Hong Kong Buddy Production V1 monthly guard',
+    budgetFilter: { projects: ['projects/123456789012'], calendarPeriod: 'MONTH' },
+    amount: { specifiedAmount: { currencyCode: 'HKD', units: '2300' } },
+    thresholdRules: [
+      { thresholdPercent: 0.5, spendBasis: 'CURRENT_SPEND' },
+      { thresholdPercent: 0.8, spendBasis: 'CURRENT_SPEND' },
+      { thresholdPercent: 1, spendBasis: 'CURRENT_SPEND' },
+      { thresholdPercent: 1, spendBasis: 'FORECASTED_SPEND' },
+    ],
+    notificationsRule: { monitoringNotificationChannels: [CHANNEL] },
+  };
+  const plane = new GcpControlPlane({
+    contract: await contractFixture(), notificationChannel: CHANNEL,
+    gcloud: async (args) => {
+      if (args[0] === 'projects') return {
+        projectId: PROJECT, projectNumber: '123456789012', lifecycleState: 'ACTIVE',
+        parent: { id: '797368190621' },
+        labels: { application: 'hong-kong-buddy', environment: 'production-v1' },
+      };
+      throw new Error('unexpected gcloud operation');
+    },
+    request: async ({ method, url }) => {
+      assert.equal(method, 'GET');
+      assert.match(url, /billingbudgets\.googleapis\.com/);
+      return { budgets: [budget] };
+    },
+  });
+  await plane.read('project');
+  const readback = await plane.read('budget');
+  assert.deepEqual(readback, { status: 'present', value: { exact: true } });
+});
+
+test('budget pagination respects the Billing Budgets API maximum page size', async () => {
+  const requests = [];
+  const plane = new GcpControlPlane({
+    contract: await contractFixture(), notificationChannel: CHANNEL,
+    gcloud: async (args) => {
+      if (args[0] === 'projects') return {
+        projectId: PROJECT, projectNumber: PROJECT_NUMBER, lifecycleState: 'ACTIVE',
+        parent: { id: '797368190621' }, name: 'Hong Kong Buddy Production V1',
+        labels: { application: 'hong-kong-buddy', environment: 'production-v1' },
+      };
+      throw new Error('unexpected gcloud operation');
+    },
+    request: async (input) => {
+      requests.push(input);
+      return { budgets: [] };
+    },
+  });
+  await plane.read('project');
+  await plane.read('budget');
+  assert.match(requests[0].url, /[?&]pageSize=100(?:&|$)/);
+  assert.doesNotMatch(requests[0].url, /pageSize=1000/);
+});
+
+test('paginated secret-version, alert-policy, and budget readbacks cannot hide duplicate matches', async (t) => {
+  const contract = await contractFixture();
+
+  await t.test('enabled secret versions', async () => {
+    const requests = [];
+    const plane = new GcpControlPlane({
+      contract, notificationChannel: CHANNEL,
+      gcloud: async () => { throw new Error('gcloud must not run'); },
+      request: async (input) => {
+        requests.push(input);
+        if (input.url.includes(':access')) throw new Error('ambiguous versions must stop before access');
+        if (input.url.includes('pageToken=second')) return {
+          versions: [{ name: `projects/${PROJECT}/secrets/hkbuddy-session-secret/versions/2`, state: 'ENABLED' }],
+        };
+        return {
+          versions: [{ name: `projects/${PROJECT}/secrets/hkbuddy-session-secret/versions/1`, state: 'ENABLED' }],
+          nextPageToken: 'second',
+        };
+      },
+    });
+    assert.deepEqual(await plane.read('secret-version:hkbuddy-session-secret'), {
+      status: 'present', value: { exact: false },
+    });
+    assert.equal(requests.length, 2);
+  });
+
+  await t.test('alert policies', async () => {
+    const requests = [];
+    const duplicate = { userLabels: { hkbuddy_contract: 'sql_backup_failure' } };
+    const plane = new GcpControlPlane({
+      contract, notificationChannel: CHANNEL,
+      gcloud: async () => { throw new Error('gcloud must not run'); },
+      request: async (input) => {
+        requests.push(input);
+        return input.url.includes('pageToken=second')
+          ? { alertPolicies: [duplicate] }
+          : { alertPolicies: [duplicate], nextPageToken: 'second' };
+      },
+    });
+    assert.deepEqual(await plane.read('monitoring-policy:sql-backup-failure'), {
+      status: 'present', value: { exact: false },
+    });
+    assert.equal(requests.length, 2);
+  });
+
+  await t.test('budgets', async () => {
+    const requests = [];
+    const duplicate = { displayName: 'Hong Kong Buddy Production V1 monthly guard' };
+    const plane = new GcpControlPlane({
+      contract, notificationChannel: CHANNEL,
+      gcloud: async (args) => {
+        if (args[0] === 'projects') return {
+          projectId: PROJECT, projectNumber: PROJECT_NUMBER, lifecycleState: 'ACTIVE',
+          parent: { id: '797368190621' }, name: 'Hong Kong Buddy Production V1',
+          labels: { application: 'hong-kong-buddy', environment: 'production-v1' },
+        };
+        throw new Error('unexpected gcloud operation');
+      },
+      request: async (input) => {
+        requests.push(input);
+        return input.url.includes('pageToken=second')
+          ? { budgets: [duplicate] }
+          : { budgets: [duplicate], nextPageToken: 'second' };
+      },
+    });
+    await plane.read('project');
+    assert.deepEqual(await plane.read('budget'), {
+      status: 'present', value: { exact: false },
+    });
+    assert.equal(requests.length, 2);
+  });
+});
+
+test('malformed successful list responses are ambiguous and can never trigger duplicate creation', async (t) => {
+  for (const body of [null, 'not-an-object', []]) {
+    await t.test(JSON.stringify(body), async () => {
+      const requests = [];
+      const plane = new GcpControlPlane({
+        contract: await contractFixture(), notificationChannel: CHANNEL,
+        gcloud: async () => { throw new Error('gcloud must not run'); },
+        request: async (input) => { requests.push(input); return body; },
+      });
+      await assert.rejects(
+        () => plane.read('secret-version:hkbuddy-session-secret'),
+        (error) => error.code === 'PAGINATION_AMBIGUOUS',
+      );
+      assert.equal(requests.every(({ method }) => method === 'GET'), true);
+    });
+  }
+});
+
+test('every non-paginated list readback rejects malformed shapes before any create', async (t) => {
+  for (const body of [null, 'not-an-array', {}]) {
+    await t.test(`gcloud arrays ${JSON.stringify(body)}`, async () => {
+      for (const id of ['apis', 'psa-connection']) {
+        const calls = [];
+        const plane = new GcpControlPlane({
+          contract: await contractFixture(), notificationChannel: CHANNEL,
+          gcloud: async (args) => { calls.push(args); return body; },
+          request: async () => { throw new Error('REST must not run'); },
+        });
+        await assert.rejects(() => plane.read(id), (error) => error.code === 'LIST_RESPONSE_AMBIGUOUS');
+        assert.equal(calls.some((args) => args.includes('enable') || args.includes('connect')), false);
+      }
+    });
+  }
+
+  for (const body of [null, 'not-an-object', [], { items: null }]) {
+    await t.test(`SQL users ${JSON.stringify(body)}`, async () => {
+      const requests = [];
+      const plane = new GcpControlPlane({
+        contract: await contractFixture(), notificationChannel: CHANNEL,
+        gcloud: async () => { throw new Error('gcloud must not run'); },
+        request: async (input) => { requests.push(input); return body; },
+      });
+      await assert.rejects(
+        () => plane.read('db-user:hkbuddy_app'),
+        (error) => error.code === 'LIST_RESPONSE_AMBIGUOUS',
+      );
+      assert.equal(requests.every(({ method }) => method === 'GET'), true);
+    });
+  }
+
+  await t.test('SQL users may omit items to express an exact empty list', async () => {
+    const plane = new GcpControlPlane({
+      contract: await contractFixture(), notificationChannel: CHANNEL,
+      gcloud: async () => { throw new Error('gcloud must not run'); },
+      request: async () => ({}),
+    });
+    assert.deepEqual(await plane.read('db-user:hkbuddy_app'), { status: 'absent' });
+  });
+
+  for (const body of [null, 'not-an-array', {}]) {
+    await t.test(`CIDR sources ${JSON.stringify(body)}`, async () => {
+      const calls = [];
+      const plane = new GcpControlPlane({
+        contract: await contractFixture(), notificationChannel: CHANNEL,
+        gcloud: async (args) => { calls.push(args); return body; },
+        request: async () => { throw new Error('REST must not run'); },
+      });
+      await assert.rejects(() => plane.create('subnet'), (error) => error.code === 'LIST_RESPONSE_AMBIGUOUS');
+      assert.equal(calls.some((args) => args[0] === 'compute' && args[3] === 'create'), false);
+    });
+  }
+});
+
+function preflightGcloud({
+  projectPresent = false, forbidden = false, billingCurrency = 'HKD',
+  activeAccount = 'admin@motionexp.com',
+} = {}) {
+  const calls = [];
+  const gcloud = async (args) => {
+    calls.push(args);
+    if (forbidden && args[0] === 'projects') {
+      const error = new Error('forbidden');
+      error.code = 'FORBIDDEN';
+      throw error;
+    }
+    if (args[0] === 'auth') return [{ account: activeAccount, status: 'ACTIVE' }];
+    if (args[0] === 'organizations') return { name: 'organizations/797368190621', displayName: 'motionexp.com' };
+    if (args[0] === 'billing' && args[1] === 'accounts') return {
+      name: 'billingAccounts/01F9FD-24EA9B-A9232C', open: true, currencyCode: billingCurrency,
+    };
+    if (args[0] === 'projects') {
+      if (projectPresent) return { projectId: PROJECT, parent: { type: 'organization', id: '797368190621' }, lifecycleState: 'ACTIVE' };
+      const error = new Error('not found');
+      error.code = 'NOT_FOUND';
+      throw error;
+    }
+    throw new Error(`unexpected command ${args.join(' ')}`);
+  };
+  return { calls, gcloud };
+}
+
+test('preflight is read-only, project-explicit, and treats an absent target as a safe create plan', async () => {
+  const fixture = preflightGcloud();
+  const output = [];
+  const result = await runGcpPreflight({
+    contract: await contractFixture(),
+    gcloud: fixture.gcloud,
+    getRestPrincipal: async () => 'admin@motionexp.com',
+    writeOutput: (line) => output.push(line),
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(result.publicReport, {
+    status: 'dry-run', code: 'GCP_PREFLIGHT_COMPLETE', projectId: PROJECT,
+    projectState: 'absent', readyForProjectCreation: true,
+    alertChannel: 'not-supplied', mutationPerformed: false,
+  });
+  assert.equal(fixture.calls.length, 4);
+  assert.equal(fixture.calls.every((args) => args.includes(`--project=${PROJECT}`)), true);
+  assert.equal(fixture.calls.some((args) => args.includes('create') || args.includes('enable') || args.includes('link')), false);
+  assert.deepEqual(output, [`${JSON.stringify(result.publicReport)}\n`]);
+});
+
+test('preflight verifies an enabled target-project Monitoring channel and fails closed on 403 or unverified status', async (t) => {
+  await t.test('billing-account currency must match the exact HKD 2300 budget contract', async () => {
+    const fixture = preflightGcloud({ billingCurrency: 'USD' });
+    const result = await runGcpPreflight({
+      contract: await contractFixture(), gcloud: fixture.gcloud,
+      getRestPrincipal: async () => 'admin@motionexp.com', writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.publicReport.code, 'BUDGET_CURRENCY_MISMATCH');
+    assert.equal(result.publicReport.mutationPerformed, false);
+    assert.equal(fixture.calls.some((args) => args.includes('create')), false);
+  });
+
+  await t.test('verified channel', async () => {
+    const fixture = preflightGcloud({ projectPresent: true });
+    const requests = [];
+    const result = await runGcpPreflight({
+      argv: [`--notification-channel=${CHANNEL}`],
+      contract: await contractFixture(),
+      gcloud: fixture.gcloud,
+      getRestPrincipal: async () => 'admin@motionexp.com',
+      request: async (input) => {
+        requests.push(input);
+        return { name: CHANNEL, type: 'email', enabled: true, verificationStatus: 'VERIFIED' };
+      },
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.publicReport.alertChannel, 'verified');
+    assert.deepEqual(requests, [{ method: 'GET', url: `https://monitoring.googleapis.com/v3/${CHANNEL}` }]);
+  });
+
+  await t.test('unverified channel', async () => {
+    const fixture = preflightGcloud({ projectPresent: true });
+    const result = await runGcpPreflight({
+      argv: [`--notification-channel=${CHANNEL}`],
+      contract: await contractFixture(),
+      gcloud: fixture.gcloud,
+      getRestPrincipal: async () => 'admin@motionexp.com',
+      request: async () => ({ name: CHANNEL, type: 'email', enabled: true, verificationStatus: 'UNVERIFIED' }),
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.publicReport.code, 'ALERT_CHANNEL_UNVERIFIED');
+  });
+
+  await t.test('verified non-email channel is rejected before alert or budget work', async () => {
+    const fixture = preflightGcloud({ projectPresent: true });
+    const result = await runGcpPreflight({
+      argv: [`--notification-channel=${CHANNEL}`], contract: await contractFixture(),
+      gcloud: fixture.gcloud, getRestPrincipal: async () => 'admin@motionexp.com',
+      request: async () => ({ name: CHANNEL, type: 'sms', enabled: true, verificationStatus: 'VERIFIED' }),
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.publicReport.code, 'ALERT_CHANNEL_UNVERIFIED');
+  });
+
+  await t.test('403 project lookup is unresolved, never absent, and needs one confirmed create probe', async () => {
+    const fixture = preflightGcloud({ forbidden: true });
+    const result = await runGcpPreflight({
+      contract: await contractFixture(), gcloud: fixture.gcloud,
+      getRestPrincipal: async () => 'admin@motionexp.com', writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.publicReport.code, 'PROJECT_ID_UNRESOLVED');
+    assert.equal(result.publicReport.projectState, 'create-probe-required');
+    assert.equal(result.publicReport.readyForProjectCreation, false);
+    assert.equal(result.publicReport.requiresConfirmedCreateProbe, true);
+    assert.equal(fixture.calls.some((args) => args.includes('create')), false);
+  });
+
+  await t.test('gcloud and HTTPS identities must be the same approved principal', async () => {
+    const fixture = preflightGcloud();
+    const result = await runGcpPreflight({
+      contract: await contractFixture(), gcloud: fixture.gcloud,
+      getRestPrincipal: async () => 'different@example.test', writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.publicReport.code, 'CONTROL_PLANE_IDENTITY_MISMATCH');
+    assert.equal(result.publicReport.mutationPerformed, false);
+  });
+
+  await t.test('a matching but non-contract operator is rejected before organization checks', async () => {
+    const fixture = preflightGcloud({ activeAccount: 'foreign@example.test' });
+    const result = await runGcpPreflight({
+      contract: await contractFixture(), gcloud: fixture.gcloud,
+      getRestPrincipal: async () => 'foreign@example.test', writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.publicReport.code, 'GCP_AUTH_INVALID');
+    assert.equal(fixture.calls.length, 1);
+    assert.equal(result.publicReport.mutationPerformed, false);
+  });
+});
+
+test('confirmed provisioning uses the single project create-probe path while other 403s remain fatal', async (t) => {
+  await t.test('unresolved project is created once then normal provisioning continues', async () => {
+    const plane = new MemoryControlPlane();
+    let projectReads = 0;
+    const baseRead = plane.read.bind(plane);
+    plane.read = async (id, context) => {
+      if (id === 'project' && projectReads++ === 0) {
+        plane.calls.push(['read', id]);
+        return { status: 'unknown', code: 'FORBIDDEN' };
+      }
+      return baseRead(id, context);
+    };
+    const result = await runGcpProvision({
+      argv: [`--confirm-project=${PROJECT}`, `--notification-channel=${CHANNEL}`],
+      contract: await contractFixture(), controlPlane: plane,
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 0);
+    assert.equal(plane.calls.filter(([kind, id]) => kind === 'create' && id === 'project').length, 1);
+  });
+
+  await t.test('a non-project 403 remains a hard stop', async () => {
+    const plane = new MemoryControlPlane({ existing: ['project'] });
+    const baseRead = plane.read.bind(plane);
+    plane.read = async (id, context) => (
+      id === 'billing' ? { status: 'unknown', code: 'FORBIDDEN' } : baseRead(id, context)
+    );
+    const result = await runGcpProvision({
+      argv: [`--confirm-project=${PROJECT}`, `--notification-channel=${CHANNEL}`],
+      contract: await contractFixture(), controlPlane: plane,
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.publicReport.code, 'RESOURCE_STATE_UNKNOWN');
+    assert.equal(result.publicReport.resumeBoundary, 'billing');
+    assert.equal(plane.calls.some(([kind, id]) => kind === 'create' && id === 'billing'), false);
+  });
+});
+
+class MemoryControlPlane {
+  constructor({
+    existing = [], unverifiedChannel = false, userManagedKey = false,
+    finalReadbackFailure = null, iamSubsetFailure = null,
+  } = {}) {
+    this.resources = new Map(existing.map((id) => {
+      const value = { id, exact: true };
+      if (id === 'project') value.projectNumber = '123456789012';
+      if (id === 'cloud-sql-instance') value.privateIp = '10.25.0.3';
+      if (id.startsWith('secret-version:')) value.version = '1';
+      return [id, value];
+    }));
+    this.calls = [];
+    this.unverifiedChannel = unverifiedChannel;
+    this.userManagedKey = userManagedKey;
+    this.finalReadbackFailure = finalReadbackFailure;
+    this.iamSubsetFailure = iamSubsetFailure;
+    this.secrets = [];
+  }
+
+  async read(id) {
+    this.calls.push(['read', id]);
+    if (id === 'notification-channel') {
+      return { status: 'present', value: { id, exact: !this.unverifiedChannel } };
+    }
+    return this.resources.has(id)
+      ? { status: 'present', value: this.resources.get(id) }
+      : { status: 'absent' };
+  }
+
+  async create(id, context) {
+    this.calls.push(['create', id]);
+    if (context?.sensitive) this.secrets.push(context.sensitive);
+    const value = { id, exact: true };
+    if (id === 'project') value.projectNumber = '123456789012';
+    if (id === 'cloud-sql-instance') value.privateIp = '10.25.0.3';
+    if (id.startsWith('secret-version:')) value.version = '1';
+    this.resources.set(id, value);
+    return value;
+  }
+
+  compare(_id, value) {
+    return value?.exact === true;
+  }
+
+  value(id) {
+    return this.resources.get(id);
+  }
+
+  async auditUserManagedServiceAccountKeys() {
+    this.calls.push(['audit', 'service-account-keys']);
+    if (this.userManagedKey) {
+      const error = new Error('user-managed key');
+      error.code = 'USER_MANAGED_SERVICE_ACCOUNT_KEY';
+      throw error;
+    }
+  }
+
+  async auditManagedIamPolicies({ projectOnly }) {
+    const stage = projectOnly ? 'project' : 'managed';
+    this.calls.push(['iam-subset-audit', stage]);
+    if (this.iamSubsetFailure === stage) {
+      const error = new Error('unexpected IAM entitlement');
+      error.code = 'IAM_ALLOWLIST_MISMATCH';
+      throw error;
+    }
+  }
+
+  async finalReadback() {
+    this.calls.push(['final-readback', 'all']);
+    if (this.finalReadbackFailure) {
+      const error = new Error(this.finalReadbackFailure);
+      error.code = this.finalReadbackFailure;
+      throw error;
+    }
+  }
+}
+
+test('provisioning is inert by default and requires the one exact confirmation flag', async (t) => {
+  for (const argv of [
+    [], ['--confirm-project=other-project'],
+    [`--confirm-project=${PROJECT}`, '--extra'],
+  ]) {
+    await t.test(argv.join(' ') || 'no args', async () => {
+      const plane = new MemoryControlPlane();
+      const result = await runGcpProvision({
+        argv, contract: await contractFixture(), controlPlane: plane,
+        writeOutput: () => undefined,
+      });
+      assert.equal(result.publicReport.mutationPerformed, false);
+      assert.equal(plane.calls.some(([kind]) => kind === 'create'), false);
+      if (argv.length > 0) assert.equal(result.publicReport.code, 'EXACT_PROJECT_CONFIRMATION_REQUIRED');
+    });
+  }
+});
+
+test('live provisioning rejects a gcloud/HTTPS identity mismatch before its first mutation', async () => {
+  const calls = [];
+  const result = await runGcpProvision({
+    argv: [`--confirm-project=${PROJECT}`, `--notification-channel=${CHANNEL}`],
+    contract: await contractFixture(),
+    gcloud: async (args) => {
+      calls.push(args);
+      if (args[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
+      throw new Error('unexpected control-plane call');
+    },
+    request: async () => { throw new Error('request must not run'); },
+    getRestPrincipal: async () => 'different@example.test',
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.publicReport.code, 'CONTROL_PLANE_IDENTITY_MISMATCH');
+  assert.equal(result.publicReport.mutationPerformed, false);
+  assert.equal(calls.some((args) => args.includes('create')), false);
+});
+
+test('live provisioning rejects a non-contract operator even when its CLI and HTTPS identities match', async () => {
+  const calls = [];
+  const result = await runGcpProvision({
+    argv: [`--confirm-project=${PROJECT}`, `--notification-channel=${CHANNEL}`],
+    contract: await contractFixture(),
+    gcloud: async (args) => {
+      calls.push(args);
+      if (args[0] === 'auth') return [{ account: 'foreign@example.test', status: 'ACTIVE' }];
+      throw new Error('unexpected control-plane call');
+    },
+    request: async () => { throw new Error('request must not run'); },
+    getRestPrincipal: async () => 'foreign@example.test',
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.publicReport.code, 'CONTROL_PLANE_IDENTITY_MISMATCH');
+  assert.equal(result.publicReport.mutationPerformed, false);
+  assert.equal(calls.some((args) => args.includes('create')), false);
+});
+
+test('confirmed provisioning creates every fixed step, performs post-create readback, keeps secrets out of logs, and returns numeric versions', async () => {
+  const plane = new MemoryControlPlane();
+  const output = [];
+  const secretValues = [Buffer.alloc(32, 0x41), Buffer.alloc(32, 0x42), Buffer.alloc(32, 0x43)];
+  let randomIndex = 0;
+  const result = await runGcpProvision({
+    argv: [`--confirm-project=${PROJECT}`, `--notification-channel=${CHANNEL}`],
+    contract: await contractFixture(), controlPlane: plane,
+    randomBytes: () => secretValues[randomIndex++],
+    writeOutput: (line) => output.push(line),
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.publicReport.status, 'provisioned');
+  assert.equal(result.publicReport.mutationPerformed, true);
+  assert.deepEqual(result.publicReport.secretVersions, {
+    'hkbuddy-db-app-url': '1', 'hkbuddy-db-migrator-url': '1',
+    'hkbuddy-session-secret': '1', 'hkbuddy-db-bootstrap-state': '1',
+  });
+  assert.equal(Object.values(result.publicReport.secretVersions).every((value) => /^\d+$/.test(value)), true);
+  assert.equal(JSON.stringify(result).includes('latest'), false);
+
+  const created = plane.calls.filter(([kind]) => kind === 'create').map(([, id]) => id);
+  assert.deepEqual(created, EXPECTED_PROVISION_STEPS.filter((id) => id !== 'notification-channel'));
+  for (const id of created) {
+    const sequence = plane.calls.filter(([kind, candidate]) => (
+      ['read', 'create'].includes(kind) && candidate === id
+    )).map(([kind]) => kind);
+    assert.deepEqual(sequence, ['read', 'create', 'read'], id);
+  }
+  assert.equal(plane.calls.some(([kind, id]) => kind === 'create' && id === 'notification-channel'), false);
+
+  const serializedCommands = JSON.stringify(plane.calls);
+  const serializedOutput = output.join('');
+  for (const secret of secretValues.map((value) => value.toString('base64url'))) {
+    assert.equal(serializedCommands.includes(secret), false);
+    assert.equal(serializedOutput.includes(secret), false);
+  }
+  assert.equal(plane.secrets.length >= 4, true);
+  assert.equal(plane.calls.some(([kind]) => kind === 'final-readback'), true);
+});
+
+test('service-account key and mandatory final-readback gates prevent a false provisioning success', async (t) => {
+  await t.test('channel verification and budget precede every costly topology, secret, or IAM mutation', async () => {
+    for (const { argv, plane, expectedCode } of [
+      {
+        argv: [`--confirm-project=${PROJECT}`],
+        plane: new MemoryControlPlane(), expectedCode: 'ALERT_CHANNEL_REQUIRED',
+      },
+      {
+        argv: [`--confirm-project=${PROJECT}`, `--notification-channel=${CHANNEL}`],
+        plane: new MemoryControlPlane({ unverifiedChannel: true }), expectedCode: 'ALERT_CHANNEL_UNVERIFIED',
+      },
+    ]) {
+      const result = await runGcpProvision({
+        argv, contract: await contractFixture(), controlPlane: plane, writeOutput: () => undefined,
+      });
+      assert.equal(result.exitCode, 1);
+      assert.equal(result.publicReport.code, expectedCode);
+      assert.deepEqual(
+        plane.calls.filter(([kind]) => kind === 'create').map(([, id]) => id),
+        ['project', 'billing', 'apis'],
+      );
+      assert.equal(plane.calls.some(([kind, id]) => kind === 'create' && (
+        ['vpc', 'subnet', 'psa-range', 'psa-connection', 'cloud-sql-instance', 'database', 'bucket'].includes(id)
+          || id.startsWith('secret-') || id.startsWith('iam:')
+      )), false);
+    }
+    assert.equal(EXPECTED_PROVISION_STEPS.indexOf('notification-channel') < EXPECTED_PROVISION_STEPS.indexOf('budget'), true);
+    assert.equal(EXPECTED_PROVISION_STEPS.indexOf('budget') < EXPECTED_PROVISION_STEPS.indexOf('vpc'), true);
+  });
+
+  await t.test('foreign project or managed-resource IAM stops before every sensitive write', async () => {
+    for (const iamSubsetFailure of ['project', 'managed']) {
+      const plane = new MemoryControlPlane({ iamSubsetFailure });
+      const result = await runGcpProvision({
+        argv: [`--confirm-project=${PROJECT}`, `--notification-channel=${CHANNEL}`],
+        contract: await contractFixture(), controlPlane: plane, writeOutput: () => undefined,
+      });
+      assert.equal(result.exitCode, 1);
+      assert.equal(result.publicReport.code, 'IAM_ALLOWLIST_MISMATCH');
+      assert.equal(plane.calls.some(([kind, id]) => kind === 'create' && (
+        id.startsWith('secret-version:') || id.startsWith('db-user:')
+      )), false);
+    }
+  });
+
+  await t.test('user-managed key stops immediately after service accounts and before resource or secret grants', async () => {
+    const plane = new MemoryControlPlane({ userManagedKey: true });
+    const result = await runGcpProvision({
+      argv: [`--confirm-project=${PROJECT}`, `--notification-channel=${CHANNEL}`],
+      contract: await contractFixture(), controlPlane: plane, writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.publicReport.code, 'USER_MANAGED_SERVICE_ACCOUNT_KEY');
+    assert.equal(result.publicReport.resumeBoundary, 'service-account-key-audit');
+    const auditIndex = plane.calls.findIndex(([kind]) => kind === 'audit');
+    assert.equal(auditIndex > 0, true);
+    assert.equal(plane.calls.slice(auditIndex + 1).some(([kind]) => kind === 'create'), false);
+    assert.equal(plane.calls.some(([kind, id]) => kind === 'create' && (
+      id.startsWith('secret-') || id.startsWith('iam:') || id === 'vpc'
+    )), false);
+  });
+
+  await t.test('control plane without finalReadback is invalid before mutation', async () => {
+    let creates = 0;
+    const result = await runGcpProvision({
+      argv: [`--confirm-project=${PROJECT}`, `--notification-channel=${CHANNEL}`],
+      contract: await contractFixture(),
+      controlPlane: {
+        read: async () => ({ status: 'absent' }),
+        create: async () => { creates += 1; },
+        compare: () => true,
+        auditUserManagedServiceAccountKeys: async () => undefined,
+      },
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.publicReport.code, 'CONTROL_PLANE_INVALID');
+    assert.equal(result.publicReport.mutationPerformed, false);
+    assert.equal(creates, 0);
+  });
+
+  await t.test('final readback failure prevents GCP_PROVISION_COMPLETE', async () => {
+    const plane = new MemoryControlPlane({ finalReadbackFailure: 'IAM_ALLOWLIST_MISMATCH' });
+    const result = await runGcpProvision({
+      argv: [`--confirm-project=${PROJECT}`, `--notification-channel=${CHANNEL}`],
+      contract: await contractFixture(), controlPlane: plane, writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.publicReport.code, 'IAM_ALLOWLIST_MISMATCH');
+    assert.equal(result.publicReport.resumeBoundary, 'final-readback');
+    assert.equal(result.publicReport.status, 'failed');
+  });
+});
+
+test('safe partial rerun skips exact resources, stops on drift, and preserves a precise resume boundary', async (t) => {
+  await t.test('exact rerun does not recreate resources', async () => {
+    const plane = new MemoryControlPlane({ existing: EXPECTED_PROVISION_STEPS });
+    const result = await runGcpProvision({
+      argv: [`--confirm-project=${PROJECT}`, `--notification-channel=${CHANNEL}`],
+      contract: await contractFixture(), controlPlane: plane,
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 0);
+    assert.equal(plane.calls.some(([kind]) => kind === 'create'), false);
+  });
+
+  await t.test('drift stops before later mutation', async () => {
+    const plane = new MemoryControlPlane();
+    plane.resources.set('vpc', { id: 'vpc', exact: false });
+    const result = await runGcpProvision({
+      argv: [`--confirm-project=${PROJECT}`, `--notification-channel=${CHANNEL}`],
+      contract: await contractFixture(), controlPlane: plane,
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.publicReport.code, 'RESOURCE_DRIFT');
+    assert.equal(result.publicReport.resumeBoundary, 'vpc');
+    assert.equal(plane.calls.some(([kind, id]) => kind === 'create' && id === 'subnet'), false);
+  });
+
+  await t.test('unverified alert channel blocks policies and budget', async () => {
+    const plane = new MemoryControlPlane({ unverifiedChannel: true });
+    const result = await runGcpProvision({
+      argv: [`--confirm-project=${PROJECT}`, `--notification-channel=${CHANNEL}`],
+      contract: await contractFixture(), controlPlane: plane,
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.publicReport.code, 'ALERT_CHANNEL_UNVERIFIED');
+    assert.equal(plane.calls.some(([kind, id]) => kind === 'create' && id.startsWith('monitoring-policy:')), false);
+    assert.equal(plane.calls.some(([kind, id]) => kind === 'create' && id === 'budget'), false);
+  });
+});
+
+test('package scripts expose guarded preflight/provision commands and syntax-check both entrypoints', async () => {
+  const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.equal(packageJson.scripts['gcp:preflight'], 'node scripts/gcp-preflight.js');
+  assert.equal(packageJson.scripts['gcp:provision'], 'node scripts/gcp-provision.js');
+  assert.match(packageJson.scripts.check, /node --check scripts\/gcp-preflight\.js/);
+  assert.match(packageJson.scripts.check, /node --check scripts\/gcp-provision\.js/);
+});

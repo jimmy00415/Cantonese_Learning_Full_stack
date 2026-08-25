@@ -1,0 +1,232 @@
+# Hong Kong Buddy Production V1 — guarded GCP provisioning
+
+This directory is the executable infrastructure contract for the isolated
+Production V1 project. It does not refer to, update, or delete any legacy Hong
+Kong Buddy resource.
+
+## Fixed boundary
+
+- Project: `hkbuddy-prod-v1-20260826`
+- Organization: `797368190621`
+- Billing account: `01F9FD-24EA9B-A9232C`
+- Cloud Run, Cloud SQL, Artifact Registry, and media storage: `asia-east2`
+- Speech-to-Text and Text-to-Speech: `asia-southeast1`
+- Vertex AI: `global`
+- Monthly budget alert: `HKD 2300`, with 50/80/100% actual and 100%
+  forecast thresholds; it is an alert, not a hard spend cap
+- Runtime/database connectivity: Cloud Run Direct VPC with
+  `private-ranges-only` egress and Cloud SQL private IP
+- Cloud SQL transport: `sslmode=require`, with instance-side
+  `ENCRYPTED_ONLY`
+
+The complete identities, APIs, IAM bindings, probes, backup controls, alert
+policies, and budget thresholds live in `resource-contract.json`. The contract
+is deliberately exact. Changing an identity or weakening a control makes the
+scripts fail before mutation.
+
+## Commands
+
+`npm run gcp:preflight` is read-only. It checks the active CLI identity, target
+organization, open billing account, and whether the target project is absent or
+already matches its fixed parent. It never creates, enables, links, patches, or
+deletes anything.
+
+The billing account must report `currencyCode=HKD`. Google requires a fixed
+budget amount to use the billing account's native currency, so the reviewed
+live ruling is `HKD 2300` rather than the earlier `USD 300` draft. Any currency
+mismatch fails before mutation.
+
+An optional existing target-project Monitoring channel can be checked with:
+
+```text
+npm run gcp:preflight -- --notification-channel=projects/hkbuddy-prod-v1-20260826/notificationChannels/NUMERIC_ID
+```
+
+The channel must have `type=email`, be enabled, and have
+`verificationStatus=VERIFIED`. Billing Budgets does not accept an arbitrary
+Monitoring channel type. A missing, disabled, inaccessible, non-email, or
+unverified channel is not treated as usable.
+
+`npm run gcp:provision` is also inert by default: it validates the contract and
+prints the planned fixed operation IDs. The mutating first-stage bootstrap is:
+
+```text
+npm run gcp:provision -- --confirm-project=hkbuddy-prod-v1-20260826
+```
+
+That exact form creates or verifies only the project, billing, and API
+foundation, then stops at the required channel gate. After the operator creates
+and verifies the email channel, the mutating resume form is:
+
+```text
+npm run gcp:provision -- --confirm-project=hkbuddy-prod-v1-20260826 --notification-channel=projects/hkbuddy-prod-v1-20260826/notificationChannels/NUMERIC_ID
+```
+
+No abbreviated confirmation, alternate project, extra flag, or legacy identity
+is accepted. Bootstrap is intentionally two-stage. The first confirmed run may
+create only the fixed project, billing link, and required API/service-identity
+foundation before it stops at `notification-channel`. The operator then creates
+the real email channel in that project and completes its external email
+verification. A rerun with the numeric verified channel creates and reads back
+the budget and alert policies before any VPC, HA Cloud SQL, storage, secret, or
+workload-IAM mutation. The script reports the exact resume boundary and never
+rolls back or deletes partial resources.
+
+## CLI launch on Windows
+
+The script uses `execFile` with an argument array; it never builds a shell
+command string. On the standard Windows Cloud SDK installation it invokes the
+bundled Python runtime and `gcloud.py` directly. A nonstandard installation must
+provide both absolute paths:
+
+- `V1_GCP_PYTHON_EXECUTABLE`
+- `V1_GCLOUD_PY_PATH`
+
+The active Cloud SDK configuration remains operator-controlled. Use the
+dedicated Production V1 configuration directory when running the reviewed live
+command; the scripts never switch configurations implicitly. For example, set
+`CLOUDSDK_CONFIG` to the reviewed `gcloud-hkbuddy-production-v1` directory in
+the operator process before invoking npm.
+
+Authenticated HTTPS calls acquire an access token in memory for the one active
+gcloud account. The reviewed launch authority is fixed to
+`admin@motionexp.com`; both CLI and REST must resolve to that account before
+mutation. The script rejects every effective `CLOUDSDK_AUTH_*` credential
+override and any active gcloud `auth` override, including impersonation,
+access-token-file, and credential-file settings. It introspects the actual
+access token and compares the returned email rather than trusting the requested
+account argument. This also makes the project-creator `roles/owner` baseline explicit
+instead of accepting whichever identity happens to be active. The bearer token
+is never placed in an argument or report. This operator authentication path is
+separate from the runtime: Cloud Run uses its attached service account through
+application default credentials.
+
+## Idempotence and failure behavior
+
+Each durable operation follows this sequence:
+
+1. describe or list;
+2. compare every contract-bearing field;
+3. create only when absent;
+4. read back and compare again.
+
+An inaccessible (`403`) resource is unknown, never absent. The only exception
+in behavior—not classification—is the target project ID after the separately
+recorded accessible-list and create-permission audit: dry-run reports
+`PROJECT_ID_UNRESOLVED` / `create-probe-required`, and the exact confirmation
+may issue one `projects.create` for the fixed ID. It never retries that create,
+chooses a new ID, or treats the 403 as absence. `ALREADY_EXISTS`, permission
+failure, unresolved readback, a global bucket/project collision, immutable
+drift, wrong parent, public bucket
+principal, broad workload IAM, missing metric descriptor, or ambiguous result
+stops the run. If a create response is lost, the script accepts it only when an
+immediate readback proves the exact contract. The safe report identifies the
+last completed step and the next resume boundary without including provider
+error bodies.
+
+List-based readbacks validate every non-paginated response and exhaust every
+paginated endpoint before deciding absence, uniqueness, or exactness. A null,
+primitive, wrong container shape, malformed member, or malformed successful
+page is ambiguous, never empty. A project-policy subset audit runs immediately after
+project resolution. A second subset audit covers every managed bucket,
+repository, secret, and service-account policy after the empty containers exist
+but before any secret value or database user is written. These audits permit
+not-yet-created expected grants but reject every unmodeled entitlement. The
+final readback is mandatory, not advisory: it re-describes every
+resource, re-audits all four service accounts for user-managed keys, rejects a
+public bucket member, and compares the managed project, bucket, repository,
+secret, and service-account IAM policies to exact per-scope allowlists. Any
+extra managed workload binding, conditional replacement, or missing binding
+fails the run. Workload principals may never receive
+`roles/iam.serviceAccountTokenCreator`; the only such binding is the expected
+Google-managed Cloud Build service agent on `hkbuddy-build`. The Cloud Build
+service agent's automatically managed project-level
+`roles/cloudbuild.serviceAgent` grant is separately required and is never
+re-created by this script. Exact official service-agent member/role pairs for
+the enabled or used APIs are permitted if Google materializes them; arbitrary
+Google-managed roles, external users/service accounts, public principals, and
+extra project or resource bindings are rejected. In particular, a new project's
+Google APIs Service Agent may have only the current
+`roles/compute.instanceGroupManagerServiceAgent` entitlement; legacy
+project-level `roles/editor` is not allowed.
+
+Cloud SQL is created through the supported SQL Admin v1 `instances.insert`
+request because the installed GA Cloud SDK cannot bind the named PSA allocation
+on its create command. The request sets
+`settings.ipConfiguration.allocatedIpRange=hkbuddy-google-managed-services`,
+private IP only, `ENCRYPTED_ONLY`, HA, backup/PITR/WAL retention, retained and
+final backups, and deletion protection in one reviewed body. Its long-running
+operation must finish successfully before the complete instance readback is
+accepted.
+
+Artifact Registry is created and read back as an exact writable
+`STANDARD_REPOSITORY`; a remote or virtual Docker repository with the same name
+is a collision, not an acceptable substitute.
+
+## Database identities and secrets
+
+`hkbuddy_app` and `hkbuddy_migrator` are different PostgreSQL identities.
+Cloud SQL's authenticated users API receives passwords only in an HTTPS JSON
+body. The application user is created with only `pg_read_all_data` and
+`pg_write_all_data`, which prevents Cloud SQL from automatically assigning
+`cloudsqlsuperuser`; the migrator is explicitly assigned
+`cloudsqlsuperuser` for DDL.
+
+The application URL, migrator URL, and session value are generated in memory.
+They are sent only in authenticated SQL Admin or Secret Manager request bodies.
+They never appear in gcloud arguments, stdout, logs, reports, or temporary
+files. Every generated credential, including both URL passwords, must remain a
+canonical unpadded base64url encoding of exactly 32 bytes on readback; a weak or
+noncanonical pre-existing value is drift. Secret containers also require exact
+Google-managed automatic replication, exact labels, and no expiry, TTL,
+rotation, topic, or CMEK control. Runtime and migration URLs point at the private IP and contain only
+`sslmode=require`. A non-secret bootstrap receipt binds the user roles to the
+numeric URL-secret versions. Existing users without that receipt stop as an
+ambiguous partial state.
+
+Only numeric Secret Manager versions are returned for the later Cloud Run
+service/job specification. `latest` is not a deployment pin. The runtime gets
+access to the application URL and session secret only; the migrator gets access
+to the migrator URL only.
+
+The base provisioning pass also creates six empty evidence containers:
+`hkbuddy-legacy-inventory`, `hkbuddy-dependency-acceptance`,
+`hkbuddy-llm-smoke`, `hkbuddy-asr-smoke`, `hkbuddy-tts-smoke`, and
+`hkbuddy-ios-voice-acceptance`. It creates no version in those containers.
+The frozen-release task adds exactly one accepted numeric version to each and
+mounts it read-only; startup validation remains fail closed. Runtime receives
+secret-scoped accessor grants for these six containers so no project-wide
+Secret Manager access is needed.
+
+The deployer can act as `hkbuddy-runtime`, `hkbuddy-migrator`, and
+`hkbuddy-build` only through service-account-scoped
+`roles/iam.serviceAccountUser` bindings. There is no project-wide `actAs`
+grant. The build identity writes only to the `hkbuddy` repository and project
+logs; the deployer reads only that repository and has `roles/run.developer`.
+
+Final readback also lists user-managed keys for all four service accounts and
+fails if any exist. Runtime provider access is via Cloud Run application
+default credentials, never an API key or downloaded service-account key.
+
+## Monitoring contract
+
+The contract creates six metric policies and five event policies: Cloud Run
+5xx ratio, P95 latency and the one-instance cap; Cloud SQL CPU, storage and
+connections; Cloud SQL backup failure, failover and restart; Cloud Build
+failure; and Cloud Run deployment failure. Before a metric policy is created,
+the exact Monitoring metric descriptor must resolve. Before an event policy is
+created, the exact Logging filter is submitted to the read-only
+`entries:list` endpoint. An unsupported descriptor or filter stops before the
+Monitoring policy write. The verified email channel is then used by every
+policy and by the exact HKD 2300 budget alert.
+
+## Release boundary
+
+This task creates the isolated project foundation. It does not build an image,
+run migration 001, create a Cloud Run candidate, or route traffic. Those actions
+belong to the frozen-release tasks after this contract and its independent
+review are green. The Cloud Run template in the JSON is the binding input for
+that later deployment: one instance, always-allocated CPU, Direct VPC, zero
+initial traffic, and separate live/ready probes. That later task also supplies
+the six accepted evidence versions; this base task deliberately leaves those
+containers versionless.

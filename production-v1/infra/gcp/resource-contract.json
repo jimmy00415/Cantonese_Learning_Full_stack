@@ -1,0 +1,557 @@
+{
+  "schemaVersion": 1,
+  "project": {
+    "id": "hkbuddy-prod-v1-20260826",
+    "displayName": "Hong Kong Buddy Production V1",
+    "organizationId": "797368190621",
+    "billingAccountId": "01F9FD-24EA9B-A9232C",
+    "labels": {
+      "application": "hong-kong-buddy",
+      "environment": "production-v1"
+    }
+  },
+  "locations": {
+    "runtime": "asia-east2",
+    "storage": "asia-east2",
+    "database": "asia-east2",
+    "speech": "asia-southeast1",
+    "vertex": "global"
+  },
+  "apis": [
+    "cloudresourcemanager.googleapis.com",
+    "serviceusage.googleapis.com",
+    "cloudbilling.googleapis.com",
+    "billingbudgets.googleapis.com",
+    "iam.googleapis.com",
+    "artifactregistry.googleapis.com",
+    "cloudbuild.googleapis.com",
+    "run.googleapis.com",
+    "compute.googleapis.com",
+    "servicenetworking.googleapis.com",
+    "sqladmin.googleapis.com",
+    "storage.googleapis.com",
+    "secretmanager.googleapis.com",
+    "aiplatform.googleapis.com",
+    "speech.googleapis.com",
+    "texttospeech.googleapis.com",
+    "monitoring.googleapis.com",
+    "logging.googleapis.com"
+  ],
+  "resources": {
+    "artifactRegistry": {
+      "repository": "hkbuddy",
+      "format": "DOCKER",
+      "mode": "STANDARD_REPOSITORY",
+      "location": "asia-east2",
+      "description": "Hong Kong Buddy production containers"
+    },
+    "serviceAccounts": [
+      {
+        "id": "hkbuddy-runtime",
+        "email": "hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "displayName": "Hong Kong Buddy Cloud Run runtime"
+      },
+      {
+        "id": "hkbuddy-build",
+        "email": "hkbuddy-build@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "displayName": "Hong Kong Buddy Cloud Build"
+      },
+      {
+        "id": "hkbuddy-migrator",
+        "email": "hkbuddy-migrator@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "displayName": "Hong Kong Buddy database migrator"
+      },
+      {
+        "id": "hkbuddy-deployer",
+        "email": "hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "displayName": "Hong Kong Buddy release deployer"
+      }
+    ],
+    "network": {
+      "vpc": "hkbuddy-prod-vpc",
+      "subnet": "hkbuddy-ae2-run",
+      "subnetCidr": "10.24.0.0/26",
+      "privateGoogleAccess": true,
+      "psaRange": "hkbuddy-google-managed-services",
+      "psaCidr": "10.25.0.0/16",
+      "egress": "private-ranges-only"
+    },
+    "cloudSql": {
+      "instance": "hkbuddy-pg",
+      "database": "hkbuddy_v1",
+      "databaseVersion": "POSTGRES_16",
+      "availabilityType": "REGIONAL",
+      "tier": "db-custom-1-3840",
+      "diskType": "PD_SSD",
+      "diskSizeGb": 20,
+      "storageAutoIncrease": true,
+      "privateIpOnly": true,
+      "sslMode": "ENCRYPTED_ONLY",
+      "backupEnabled": true,
+      "backupStartTime": "18:00",
+      "pointInTimeRecovery": true,
+      "transactionLogRetentionDays": 7,
+      "retainedBackups": 7,
+      "retainBackupsOnDelete": true,
+      "finalBackup": true,
+      "finalBackupRetentionDays": 30,
+      "deletionProtection": true,
+      "users": [
+        {
+          "name": "hkbuddy_app",
+          "databaseRoles": [
+            "pg_read_all_data",
+            "pg_write_all_data"
+          ],
+          "secret": "hkbuddy-db-app-url"
+        },
+        {
+          "name": "hkbuddy_migrator",
+          "databaseRoles": [
+            "cloudsqlsuperuser"
+          ],
+          "secret": "hkbuddy-db-migrator-url"
+        }
+      ]
+    },
+    "bucket": {
+      "name": "hkbuddy-prod-v1-20260826-media",
+      "location": "asia-east2",
+      "uniformBucketLevelAccess": true,
+      "publicAccessPrevention": "enforced",
+      "versioning": false,
+      "softDeleteSeconds": 0,
+      "lifecycleDeleteAfterDays": 7,
+      "retentionPolicy": null
+    },
+    "secrets": [
+      {
+        "id": "hkbuddy-db-app-url",
+        "purpose": "runtime PostgreSQL URL",
+        "versionPolicy": "numeric-only"
+      },
+      {
+        "id": "hkbuddy-db-migrator-url",
+        "purpose": "migration PostgreSQL URL",
+        "versionPolicy": "numeric-only"
+      },
+      {
+        "id": "hkbuddy-session-secret",
+        "purpose": "anonymous session signing",
+        "versionPolicy": "numeric-only"
+      },
+      {
+        "id": "hkbuddy-db-bootstrap-state",
+        "purpose": "non-secret database-user binding receipt",
+        "versionPolicy": "numeric-only"
+      },
+      {
+        "id": "hkbuddy-legacy-inventory",
+        "purpose": "immutable legacy inventory evidence",
+        "versionPolicy": "numeric-only",
+        "baseProvisioningVersion": false
+      },
+      {
+        "id": "hkbuddy-dependency-acceptance",
+        "purpose": "immutable dependency acceptance evidence",
+        "versionPolicy": "numeric-only",
+        "baseProvisioningVersion": false
+      },
+      {
+        "id": "hkbuddy-llm-smoke",
+        "purpose": "immutable LLM smoke evidence",
+        "versionPolicy": "numeric-only",
+        "baseProvisioningVersion": false
+      },
+      {
+        "id": "hkbuddy-asr-smoke",
+        "purpose": "immutable ASR smoke evidence",
+        "versionPolicy": "numeric-only",
+        "baseProvisioningVersion": false
+      },
+      {
+        "id": "hkbuddy-tts-smoke",
+        "purpose": "immutable TTS smoke evidence",
+        "versionPolicy": "numeric-only",
+        "baseProvisioningVersion": false
+      },
+      {
+        "id": "hkbuddy-ios-voice-acceptance",
+        "purpose": "immutable iOS voice acceptance evidence",
+        "versionPolicy": "numeric-only",
+        "baseProvisioningVersion": false
+      }
+    ],
+    "cloudRun": {
+      "service": "hkbuddy-api",
+      "executionEnvironment": "gen2",
+      "cpu": 2,
+      "memory": "1Gi",
+      "concurrency": 40,
+      "minInstances": 1,
+      "maxInstances": 1,
+      "cpuThrottling": false,
+      "startupCpuBoost": true,
+      "timeoutSeconds": 60,
+      "initialTrafficPercent": 0,
+      "directVpc": true,
+      "egress": "private-ranges-only",
+      "startupProbe": {
+        "path": "/api/health/live",
+        "port": 8080,
+        "initialDelaySeconds": 0,
+        "timeoutSeconds": 5,
+        "periodSeconds": 10,
+        "failureThreshold": 12
+      },
+      "livenessProbe": {
+        "path": "/api/health/live",
+        "port": 8080,
+        "initialDelaySeconds": 30,
+        "timeoutSeconds": 5,
+        "periodSeconds": 30,
+        "failureThreshold": 3
+      },
+      "readinessProbe": {
+        "path": "/api/health/ready",
+        "port": 8080,
+        "initialDelaySeconds": 0,
+        "timeoutSeconds": 5,
+        "periodSeconds": 5,
+        "failureThreshold": 3
+      },
+      "secretVersionPolicy": "numeric-only"
+    },
+    "monitoring": {
+      "notificationChannel": {
+        "required": true,
+        "mustBeEnabled": true,
+        "requiredType": "email",
+        "requiredVerificationStatus": "VERIFIED"
+      },
+      "metricTypes": [
+        "run.googleapis.com/request_count",
+        "run.googleapis.com/request_latencies",
+        "run.googleapis.com/container/instance_count",
+        "cloudsql.googleapis.com/database/cpu/utilization",
+        "cloudsql.googleapis.com/database/disk/utilization",
+        "cloudsql.googleapis.com/database/postgresql/num_backends"
+      ],
+      "policies": [
+        {
+          "id": "run-5xx-ratio",
+          "displayName": "HK Buddy V1 Cloud Run 5xx ratio",
+          "kind": "metric-ratio",
+          "metricType": "run.googleapis.com/request_count",
+          "threshold": 0.05,
+          "durationSeconds": 300
+        },
+        {
+          "id": "run-latency-p95",
+          "displayName": "HK Buddy V1 Cloud Run P95 latency",
+          "kind": "metric-percentile",
+          "metricType": "run.googleapis.com/request_latencies",
+          "threshold": 6000,
+          "durationSeconds": 300
+        },
+        {
+          "id": "run-instance-cap",
+          "displayName": "HK Buddy V1 Cloud Run instance cap",
+          "kind": "metric-threshold",
+          "metricType": "run.googleapis.com/container/instance_count",
+          "threshold": 1,
+          "durationSeconds": 300
+        },
+        {
+          "id": "sql-cpu",
+          "displayName": "HK Buddy V1 Cloud SQL CPU",
+          "kind": "metric-threshold",
+          "metricType": "cloudsql.googleapis.com/database/cpu/utilization",
+          "threshold": 0.8,
+          "durationSeconds": 300
+        },
+        {
+          "id": "sql-storage",
+          "displayName": "HK Buddy V1 Cloud SQL storage",
+          "kind": "metric-threshold",
+          "metricType": "cloudsql.googleapis.com/database/disk/utilization",
+          "threshold": 0.8,
+          "durationSeconds": 300
+        },
+        {
+          "id": "sql-connections",
+          "displayName": "HK Buddy V1 Cloud SQL connections",
+          "kind": "metric-threshold",
+          "metricType": "cloudsql.googleapis.com/database/postgresql/num_backends",
+          "threshold": 80,
+          "durationSeconds": 300
+        },
+        {
+          "id": "sql-backup-failure",
+          "displayName": "HK Buddy V1 Cloud SQL backup failure",
+          "kind": "log-match",
+          "filter": "logName=\"projects/hkbuddy-prod-v1-20260826/logs/cloudaudit.googleapis.com%2Fsystem_event\" AND protoPayload.methodName=\"cloudsql.instances.automatedBackup\" AND resource.type=\"cloudsql_database\" AND protoPayload.metadata.windowStatus=(\"STATUS_FAILED\" OR \"STATUS_ATTEMPT_FAILED\")"
+        },
+        {
+          "id": "sql-failover",
+          "displayName": "HK Buddy V1 Cloud SQL failover",
+          "kind": "log-match",
+          "filter": "resource.type=\"cloudsql_database\" AND ((log_id(\"cloudaudit.googleapis.com/activity\") AND protoPayload.methodName=\"cloudsql.instances.failover\" AND operation.last=true) OR (log_id(\"cloudaudit.googleapis.com/system_event\") AND protoPayload.methodName=\"cloudsql.instances.autoFailover\"))"
+        },
+        {
+          "id": "sql-restart",
+          "displayName": "HK Buddy V1 Cloud SQL restart",
+          "kind": "log-match",
+          "filter": "log_id(\"cloudaudit.googleapis.com/activity\") AND resource.type=\"cloudsql_database\" AND protoPayload.methodName=\"cloudsql.instances.restart\" AND operation.last=true"
+        },
+        {
+          "id": "cloud-build-failure",
+          "displayName": "HK Buddy V1 Cloud Build failure",
+          "kind": "log-match",
+          "filter": "log_id(\"cloudaudit.googleapis.com/activity\") AND resource.type=\"build\" AND protoPayload.methodName=\"google.devtools.cloudbuild.v1.CloudBuild.CreateBuild\" AND operation.last=true AND protoPayload.response.status=(\"FAILURE\" OR \"INTERNAL_ERROR\" OR \"TIMEOUT\" OR \"EXPIRED\")"
+        },
+        {
+          "id": "run-deployment-failure",
+          "displayName": "HK Buddy V1 Cloud Run deployment failure",
+          "kind": "log-match",
+          "filter": "log_id(\"cloudaudit.googleapis.com/activity\") AND resource.type=\"cloud_run_revision\" AND protoPayload.methodName=(\"google.cloud.run.v2.Services.CreateService\" OR \"google.cloud.run.v2.Services.UpdateService\") AND protoPayload.status.code!=0"
+        }
+      ]
+    },
+    "budget": {
+      "displayName": "Hong Kong Buddy Production V1 monthly guard",
+      "currency": "HKD",
+      "amount": 2300,
+      "calendarPeriod": "MONTH",
+      "projectFilter": "projects/hkbuddy-prod-v1-20260826",
+      "thresholds": [
+        {
+          "percent": 0.5,
+          "basis": "CURRENT_SPEND"
+        },
+        {
+          "percent": 0.8,
+          "basis": "CURRENT_SPEND"
+        },
+        {
+          "percent": 1,
+          "basis": "CURRENT_SPEND"
+        },
+        {
+          "percent": 1,
+          "basis": "FORECASTED_SPEND"
+        }
+      ]
+    }
+  },
+  "iam": {
+    "forbiddenWorkloadRoles": [
+      "roles/owner",
+      "roles/editor",
+      "roles/run.admin",
+      "roles/cloudsql.admin",
+      "roles/cloudsql.editor",
+      "roles/compute.networkAdmin",
+      "roles/storage.admin",
+      "roles/secretmanager.admin",
+      "roles/secretmanager.secretAccessor",
+      "roles/texttospeech.user",
+      "roles/iam.serviceAccountTokenCreator"
+    ],
+    "automaticProjectBindings": [
+      {
+        "member": "user:admin@motionexp.com",
+        "role": "roles/owner",
+        "required": true
+      },
+      {
+        "member": "serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-cloudbuild.iam.gserviceaccount.com",
+        "role": "roles/cloudbuild.serviceAgent",
+        "required": true
+      },
+      {
+        "member": "serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-artifactregistry.iam.gserviceaccount.com",
+        "role": "roles/artifactregistry.serviceAgent",
+        "required": false
+      },
+      {
+        "member": "serviceAccount:service-__PROJECT_NUMBER__@compute-system.iam.gserviceaccount.com",
+        "role": "roles/compute.serviceAgent",
+        "required": false
+      },
+      {
+        "member": "serviceAccount:service-__PROJECT_NUMBER__@service-networking.iam.gserviceaccount.com",
+        "role": "roles/servicenetworking.serviceAgent",
+        "required": false
+      },
+      {
+        "member": "serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-cloud-sql.iam.gserviceaccount.com",
+        "role": "roles/cloudsql.serviceAgent",
+        "required": false
+      },
+      {
+        "member": "serviceAccount:service-__PROJECT_NUMBER__@serverless-robot-prod.iam.gserviceaccount.com",
+        "role": "roles/run.serviceAgent",
+        "required": false
+      },
+      {
+        "member": "serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-aiplatform.iam.gserviceaccount.com",
+        "role": "roles/aiplatform.serviceAgent",
+        "required": false
+      },
+      {
+        "member": "serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-speech.iam.gserviceaccount.com",
+        "role": "roles/speech.serviceAgent",
+        "required": false
+      },
+      {
+        "member": "serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-monitoring-notification.iam.gserviceaccount.com",
+        "role": "roles/monitoring.notificationServiceAgent",
+        "required": false
+      },
+      {
+        "member": "serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-logging.iam.gserviceaccount.com",
+        "role": "roles/logging.serviceAgent",
+        "required": false
+      },
+      {
+        "member": "serviceAccount:__PROJECT_NUMBER__@cloudbuild.gserviceaccount.com",
+        "role": "roles/cloudbuild.builds.builder",
+        "required": false
+      },
+      {
+        "member": "serviceAccount:__PROJECT_NUMBER__@cloudservices.gserviceaccount.com",
+        "role": "roles/compute.instanceGroupManagerServiceAgent",
+        "required": false
+      }
+    ],
+    "bindings": [
+      {
+        "scope": "project",
+        "member": "serviceAccount:hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/aiplatform.user"
+      },
+      {
+        "scope": "project",
+        "member": "serviceAccount:hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/speech.client"
+      },
+      {
+        "scope": "project",
+        "member": "serviceAccount:hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/serviceusage.serviceUsageConsumer"
+      },
+      {
+        "scope": "bucket:hkbuddy-prod-v1-20260826-media",
+        "member": "serviceAccount:hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/storage.objectUser"
+      },
+      {
+        "scope": "secret:hkbuddy-db-app-url",
+        "member": "serviceAccount:hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/secretmanager.secretAccessor"
+      },
+      {
+        "scope": "secret:hkbuddy-session-secret",
+        "member": "serviceAccount:hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/secretmanager.secretAccessor"
+      },
+      {
+        "scope": "secret:hkbuddy-legacy-inventory",
+        "member": "serviceAccount:hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/secretmanager.secretAccessor"
+      },
+      {
+        "scope": "secret:hkbuddy-dependency-acceptance",
+        "member": "serviceAccount:hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/secretmanager.secretAccessor"
+      },
+      {
+        "scope": "secret:hkbuddy-llm-smoke",
+        "member": "serviceAccount:hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/secretmanager.secretAccessor"
+      },
+      {
+        "scope": "secret:hkbuddy-asr-smoke",
+        "member": "serviceAccount:hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/secretmanager.secretAccessor"
+      },
+      {
+        "scope": "secret:hkbuddy-tts-smoke",
+        "member": "serviceAccount:hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/secretmanager.secretAccessor"
+      },
+      {
+        "scope": "secret:hkbuddy-ios-voice-acceptance",
+        "member": "serviceAccount:hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/secretmanager.secretAccessor"
+      },
+      {
+        "scope": "secret:hkbuddy-db-migrator-url",
+        "member": "serviceAccount:hkbuddy-migrator@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/secretmanager.secretAccessor"
+      },
+      {
+        "scope": "repository:hkbuddy",
+        "member": "serviceAccount:hkbuddy-build@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/artifactregistry.writer"
+      },
+      {
+        "scope": "project",
+        "member": "serviceAccount:hkbuddy-build@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/logging.logWriter"
+      },
+      {
+        "scope": "repository:hkbuddy",
+        "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/artifactregistry.reader"
+      },
+      {
+        "scope": "project",
+        "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/run.developer"
+      },
+      {
+        "scope": "service-account:hkbuddy-runtime",
+        "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/iam.serviceAccountUser"
+      },
+      {
+        "scope": "service-account:hkbuddy-migrator",
+        "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/iam.serviceAccountUser"
+      },
+      {
+        "scope": "service-account:hkbuddy-build",
+        "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "role": "roles/iam.serviceAccountUser"
+      },
+      {
+        "scope": "service-account:hkbuddy-build",
+        "member": "serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-cloudbuild.iam.gserviceaccount.com",
+        "role": "roles/iam.serviceAccountTokenCreator"
+      }
+    ]
+  },
+  "safety": {
+    "dryRunDefault": true,
+    "exactConfirmation": "--confirm-project=hkbuddy-prod-v1-20260826",
+    "commandTransport": "execFile-argv",
+    "secretTransport": "authenticated-https-body",
+    "completePostCreateReadback": true,
+    "unresolvedProjectIdPolicy": "single-confirmed-create-probe",
+    "noUserManagedServiceAccountKeys": true,
+    "stopOnForbidden": true,
+    "stopOnAlreadyExists": true,
+    "stopOnDrift": true,
+    "preservePartialResources": true,
+    "publicPrincipalsForbidden": [
+      "allUsers",
+      "allAuthenticatedUsers"
+    ],
+    "legacyIdentitiesForbidden": [
+      "hkbuddy-pilot-0630",
+      "hkbuddy-pilot-0630.azurewebsites.net"
+    ]
+  }
+}
