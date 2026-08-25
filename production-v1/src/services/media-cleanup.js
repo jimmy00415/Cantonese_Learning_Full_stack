@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 export const mediaCleanupLimits = Object.freeze({
   sweepLimit: 100,
@@ -7,6 +7,21 @@ export const mediaCleanupLimits = Object.freeze({
 
 function addMilliseconds(value, milliseconds) {
   return new Date(new Date(value).getTime() + milliseconds);
+}
+
+function sweepObservation(entry) {
+  const lastModified = new Date(entry?.lastModified);
+  const byteLength = Number(entry?.byteLength);
+  const version = entry?.version ?? entry?.etag ?? null;
+  if (!Number.isFinite(lastModified.getTime()) || !Number.isSafeInteger(byteLength) || byteLength < 0
+    || (version !== null && (typeof version !== 'string' || version.length > 1_024))) {
+    throw new Error('Media listing returned invalid write evidence');
+  }
+  return createHash('sha256').update(JSON.stringify({
+    lastModified: lastModified.toISOString(),
+    byteLength,
+    version,
+  })).digest('hex');
 }
 
 export function createMediaCleanupService({
@@ -72,8 +87,9 @@ export function createMediaCleanupService({
     let enqueued = 0;
     for (const entry of listed.keys) {
       if (await store.isStorageKeyLive({ storageKey: entry.storageKey, now: current })) continue;
-      await store.enqueueMediaDeletion({
+      await store.rearmMediaDeletionFromSweep({
         storageKey: entry.storageKey,
+        sweepObservation: sweepObservation(entry),
         reason: 'orphan-attempt-sweep',
         notBefore: current,
         now: current,

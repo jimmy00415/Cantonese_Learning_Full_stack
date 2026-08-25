@@ -163,7 +163,7 @@ function consumeRateLimits(snapshot, requests = []) {
 }
 
 function enqueueDeletion(snapshot, {
-  storageKey, reason, notBefore, now, rearm = false,
+  storageKey, reason, notBefore, now, rearm = false, sweepObservation = null,
 }) {
   if (typeof storageKey !== 'string' || !storageKey) throw new Error('storageKey is required');
   const timestamp = nowIso(now);
@@ -174,6 +174,7 @@ function enqueueDeletion(snapshot, {
       id: randomUUID(), storageKey, reason, notBefore: safeNotBefore,
       state: 'pending', attempt: 0, generation: 1,
       leaseToken: null, leaseExpiresAt: null, workerId: null, lastErrorCode: null,
+      sweepObservation,
       createdAt: timestamp, updatedAt: timestamp, completedAt: null,
     };
     snapshot.mediaDeletionJobs.push(job);
@@ -189,6 +190,7 @@ function enqueueDeletion(snapshot, {
     job.leaseExpiresAt = null;
     job.workerId = null;
     job.lastErrorCode = null;
+    job.sweepObservation = sweepObservation;
     job.completedAt = null;
     job.updatedAt = timestamp;
     return job;
@@ -1021,6 +1023,19 @@ export class AtomicFileStore {
     return this.#mutate((snapshot) => enqueueDeletion(snapshot, {
       storageKey, reason, notBefore, now, rearm: true,
     }));
+  }
+
+  async rearmMediaDeletionFromSweep({ storageKey, sweepObservation, reason, notBefore, now }) {
+    if (typeof sweepObservation !== 'string' || !/^[0-9a-f]{64}$/.test(sweepObservation)) {
+      throw new Error('sweepObservation must be a SHA-256 fingerprint');
+    }
+    return this.#mutate((snapshot) => {
+      const existing = snapshot.mediaDeletionJobs.find((item) => item.storageKey === storageKey);
+      if (existing?.sweepObservation === sweepObservation) return noChange(existing);
+      return enqueueDeletion(snapshot, {
+        storageKey, reason, notBefore, now, rearm: Boolean(existing), sweepObservation,
+      });
+    });
   }
 
   async claimNextMediaDeletion({ workerId, leaseToken, leaseExpiresAt, now }) {

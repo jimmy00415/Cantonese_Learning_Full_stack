@@ -131,8 +131,16 @@ export class LocalMediaStore {
       if (signalError) throw signalError;
       const storageKey = `${prefix}${entry.name}`;
       if (!entry.isFile() || (cursor && storageKey <= cursor) || !STORAGE_KEY.test(storageKey)) continue;
-      const details = await stat(this.#path(storageKey));
-      if (details.mtimeMs < beforeMs) keys.push({ storageKey, lastModified: details.mtime.toISOString(), byteLength: details.size });
+      const details = await stat(this.#path(storageKey), { bigint: true });
+      const modifiedMs = Number(details.mtimeNs) / 1_000_000;
+      if (modifiedMs < beforeMs) {
+        keys.push({
+          storageKey,
+          lastModified: new Date(modifiedMs).toISOString(),
+          byteLength: Number(details.size),
+          version: `local:${details.dev}:${details.ino}:${details.birthtimeNs}:${details.ctimeNs}:${details.mtimeNs}`,
+        });
+      }
       if (keys.length >= maximum) break;
     }
     return { keys, cursor: keys.length === maximum ? keys.at(-1).storageKey : null };

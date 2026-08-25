@@ -38,6 +38,8 @@ async function startVoiceApp(t, {
   configTransform = (value) => value,
   asrProvider = { provider: 'azure', transcribe: async () => ({ transcript: '可編輯廣東話', provider: 'azure', latencyMs: 1, confidence: null }) },
   ttsProvider = { provider: 'azure', synthesize: async () => ({ buffer: Buffer.from([0x49, 0x44, 0x33, 0x04]), mimeType: 'audio/mpeg', provider: 'azure', latencyMs: 1 }) },
+  providedMediaStore = null,
+  mediaDeadlineMs = null,
   now = () => new Date(),
 } = {}) {
   const { LocalMediaStore } = await import('../src/stores/local-media-store.js');
@@ -46,8 +48,8 @@ async function startVoiceApp(t, {
   const filePath = join(directory, 'store.json');
   const store = new AtomicFileStore({ filePath });
   await store.init();
-  const mediaStore = new LocalMediaStore({ rootDirectory: join(directory, 'media') });
-  await mediaStore.init();
+  const mediaStore = providedMediaStore ?? new LocalMediaStore({ rootDirectory: join(directory, 'media') });
+  await mediaStore.init?.();
   const origin = 'https://voice.example.test';
   const baseConfig = loadConfig({
     NODE_ENV: 'test', V1_PUBLIC_ORIGIN: origin, V1_SESSION_SECRET: 'v'.repeat(32),
@@ -56,12 +58,21 @@ async function startVoiceApp(t, {
   });
   const config = configTransform(baseConfig);
   const cleanupService = createMediaCleanupService({ store, mediaStore, now });
-  const app = createApp({ config, store, mediaStore, asrProvider, ttsProvider, cleanupService, now });
+  let voiceService;
+  if (mediaDeadlineMs !== null) {
+    const { createVoiceService } = await import('../src/services/voice.js');
+    voiceService = createVoiceService({
+      config, store, mediaStore, asrProvider, ttsProvider, cleanupService, now,
+      mediaDeadlineMs,
+      spoolParentDirectory: join(directory, 'voice-spool'),
+    });
+  }
+  const app = createApp({ config, store, mediaStore, asrProvider, ttsProvider, cleanupService, voiceService, now });
   const server = app.listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
   t.after(async () => {
     await cleanupService.stop();
-    await mediaStore.close();
+    await mediaStore.close?.();
     await store.close();
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
@@ -288,12 +299,23 @@ test('media local adapter keeps opaque attempts private, bounded, range-readable
     contentType: 'audio/wav',
   });
   assert.equal(stored.byteLength, bytes.length);
+  const storagePath = join(rootDirectory, ...storageKey.split('/'));
+  const fixedModifiedAt = new Date('2026-08-24T00:00:00.000Z');
+  await utimes(storagePath, fixedModifiedAt, fixedModifiedAt);
   const opened = await mediaStore.open({ storageKey, start: 2, end: 7 });
   assert.equal(opened.size, bytes.length);
   assert.deepEqual(await readableBuffer(opened.readable), bytes.subarray(2, 8));
 
   const listed = await mediaStore.listAttemptKeys({ prefix: 'attempts/voice/', before: new Date(Date.now() + 60_000), limit: 10 });
   assert.deepEqual(listed.keys.map((entry) => entry.storageKey), [storageKey]);
+  assert.match(listed.keys[0].version, /^local:/, 'local sweeps receive a replacement-sensitive file identity');
+  assert.deepEqual(await mediaStore.delete({ storageKey }), { deleted: true, notFound: false });
+  await mediaStore.putAttempt({ storageKey, readable: Readable.from([bytes]), maxBytes: bytes.length, contentType: 'audio/wav' });
+  await utimes(storagePath, fixedModifiedAt, fixedModifiedAt);
+  const replaced = await mediaStore.listAttemptKeys({ prefix: 'attempts/voice/', before: new Date(Date.now() + 60_000), limit: 10 });
+  assert.equal(replaced.keys[0].lastModified, listed.keys[0].lastModified);
+  assert.equal(replaced.keys[0].byteLength, listed.keys[0].byteLength);
+  assert.notEqual(replaced.keys[0].version, listed.keys[0].version, 'same-size same-time replacement has a new identity');
   assert.deepEqual(await mediaStore.delete({ storageKey }), { deleted: true, notFound: false });
   assert.deepEqual(await mediaStore.delete({ storageKey }), { deleted: false, notFound: true });
   await assert.rejects(mediaStore.open({ storageKey }), { code: 'MEDIA_NOT_FOUND' });
@@ -956,7 +978,16 @@ test('media Azure Blob adapter requires a private container and mediates bounded
     },
     async *listBlobsFlat({ prefix }) {
       for (const [name, value] of [...blobs.entries()].sort()) {
-        if (name.startsWith(prefix)) yield { name, properties: { contentLength: value.length, lastModified: new Date('2026-08-24T00:00:00.000Z') } };
+        if (name.startsWith(prefix)) {
+          yield {
+            name,
+            properties: {
+              contentLength: value.length,
+              lastModified: new Date('2026-08-24T00:00:00.000Z'),
+              etag: '"fake-etag-1"',
+            },
+          };
+        }
       }
     },
   };
@@ -971,7 +1002,9 @@ test('media Azure Blob adapter requires a private container and mediates bounded
   const opened = await mediaStore.open({ storageKey, start: 1, end: 2 });
   assert.deepEqual(await readableBuffer(opened.readable), bytes.subarray(1, 3));
   assert.equal(Object.hasOwn(opened, 'url'), false);
-  assert.deepEqual((await mediaStore.listAttemptKeys({ prefix: 'attempts/tts/', before: new Date('2026-08-25T00:00:00.000Z'), limit: 10 })).keys.map((entry) => entry.storageKey), [storageKey]);
+  const listed = await mediaStore.listAttemptKeys({ prefix: 'attempts/tts/', before: new Date('2026-08-25T00:00:00.000Z'), limit: 10 });
+  assert.deepEqual(listed.keys.map((entry) => entry.storageKey), [storageKey]);
+  assert.equal(listed.keys[0].version, '"fake-etag-1"');
   assert.deepEqual(await mediaStore.delete({ storageKey }), { deleted: true, notFound: false });
   assert.deepEqual(await mediaStore.delete({ storageKey }), { deleted: false, notFound: true });
 
@@ -1125,6 +1158,73 @@ test('scheduled media cleanup bounds and paginates both attempt-prefix sweeps un
   assert.ok(listCalls.every((call) => call.before === '2026-08-25T03:58:00.000Z'));
   assert.ok(listCalls.some((call) => call.prefix === 'attempts/voice/'
     && call.cursor === 'attempts/voice/11111111-1111-4111-8111-111111111111'));
+});
+
+test('orphan sweep evidence reopens a completed deletion exactly once across cleanup workers', async (t) => {
+  const { createMediaCleanupService } = await import('../src/services/media-cleanup.js');
+  const { filePath, store } = await createStore(t, 'hb-v1-sweep-rearm-evidence-');
+  const storageKey = 'attempts/voice/44444444-4444-4444-8444-444444444444';
+  const current = new Date('2026-08-25T04:00:00.000Z');
+  const objects = new Map();
+  const mediaStore = {
+    listAttemptKeys: async ({ prefix, before, limit }) => ({
+      keys: [...objects.entries()]
+        .filter(([key, value]) => key.startsWith(prefix) && new Date(value.lastModified) < new Date(before))
+        .slice(0, limit)
+        .map(([key, value]) => ({ storageKey: key, ...value })),
+      cursor: null,
+    }),
+    delete: async ({ storageKey: key }) => {
+      const deleted = objects.delete(key);
+      return { deleted, notFound: !deleted };
+    },
+  };
+  const cleanupOne = createMediaCleanupService({ store, mediaStore, now: () => current, workerId: 'sweep-worker-one' });
+  const cleanupTwo = createMediaCleanupService({ store, mediaStore, now: () => current, workerId: 'sweep-worker-two' });
+  t.after(async () => { await cleanupOne.stop(); await cleanupTwo.stop(); });
+
+  await store.enqueueMediaDeletion({ storageKey, reason: 'pre-write-cleanup', notBefore: current, now: current });
+  assert.equal((await cleanupOne.drainOnce()).completed, true, 'generation one completes against not-found');
+  objects.set(storageKey, { lastModified: '2026-08-25T03:00:00.000Z', byteLength: 91, version: 'fake-etag-a' });
+
+  const before = new Date('2026-08-25T03:30:00.000Z');
+  const [firstSweep, secondSweep] = await Promise.all([
+    cleanupOne.sweepAttemptPrefix({ prefix: 'attempts/voice/', before, limit: 10 }),
+    cleanupTwo.sweepAttemptPrefix({ prefix: 'attempts/voice/', before, limit: 10 }),
+  ]);
+  assert.equal(firstSweep.enqueued, 1);
+  assert.equal(secondSweep.enqueued, 1);
+  const afterSweeps = JSON.parse(await readFile(filePath, 'utf8'));
+  const rearmed = afterSweeps.mediaDeletionJobs.find((entry) => entry.storageKey === storageKey);
+  assert.equal(rearmed.generation, 2, 'the same observed object must not continuously rearm and fence workers');
+  assert.equal(rearmed.state, 'pending');
+
+  objects.set(storageKey, { lastModified: '2026-08-25T03:00:00.000Z', byteLength: 91, version: 'fake-etag-b' });
+  await cleanupOne.sweepAttemptPrefix({ prefix: 'attempts/voice/', before, limit: 10 });
+  const afterPendingEvidence = JSON.parse(await readFile(filePath, 'utf8'));
+  assert.equal(afterPendingEvidence.mediaDeletionJobs.find((entry) => entry.storageKey === storageKey).generation, 3);
+  const claimed = await store.claimNextMediaDeletion({
+    workerId: 'stale-sweep-worker',
+    leaseToken: 'stale-sweep-lease',
+    leaseExpiresAt: new Date(current.getTime() + 15_000),
+    now: current,
+  });
+  assert.equal(claimed.generation, 3);
+
+  objects.set(storageKey, { lastModified: '2026-08-25T03:00:00.000Z', byteLength: 91, version: 'fake-etag-c' });
+  await cleanupTwo.sweepAttemptPrefix({ prefix: 'attempts/voice/', before, limit: 10 });
+  await assert.rejects(store.completeMediaDeletion({
+    jobId: claimed.id,
+    generation: claimed.generation,
+    leaseToken: 'stale-sweep-lease',
+    now: current,
+  }), { code: 'LEASE_LOST' });
+  await cleanupOne.sweepAttemptPrefix({ prefix: 'attempts/voice/', before, limit: 10 });
+  const afterDeletingEvidence = JSON.parse(await readFile(filePath, 'utf8'));
+  assert.equal(afterDeletingEvidence.mediaDeletionJobs.find((entry) => entry.storageKey === storageKey).generation, 4);
+
+  assert.equal((await cleanupOne.drainOnce()).completed, true);
+  assert.equal(objects.size, 0, 'positive sweep evidence eventually deletes the post-completion object');
 });
 
 test('server restart recovers only bounded stale private ingress spools and preserves recent and nonmatching paths', async (t) => {
@@ -1456,6 +1556,93 @@ test('abort-ignoring ASR and TTS media writes rearm completed cleanup after time
   }
   assert.equal(objects.size, 0, 'late successful writes are durably rearmed and deleted');
   await new Promise((resolve) => setTimeout(resolve, 25));
+  const persisted = JSON.parse(await readFile(filePath, 'utf8'));
+  for (const storageKey of Object.values(keys)) {
+    const job = persisted.mediaDeletionJobs.find((entry) => entry.storageKey === storageKey);
+    assert.equal(job?.state, 'completed', storageKey);
+    assert.ok(job?.generation >= 2, storageKey);
+  }
+});
+
+test('late-rejecting ASR and TTS writes return bounded HTTP 503 and rearm cleanup after post-write failure', async (t) => {
+  const keys = {
+    voice: 'attempts/voice/dededede-dede-4ded-8ded-dededededede',
+    tts: 'attempts/tts/efefefef-efef-4fef-8fef-efefefefefef',
+  };
+  const objects = new Map();
+  const pendingWrites = [];
+  const mediaStore = {
+    init: async () => undefined,
+    close: async () => undefined,
+    createAttemptKey: ({ kind }) => keys[kind],
+    putAttempt: ({ storageKey, readable }) => new Promise((resolve, reject) => {
+      void resolve;
+      pendingWrites.push({
+        storageKey,
+        finishAndReject: async () => {
+          const bytes = await readableBuffer(Readable.from(readable));
+          objects.set(storageKey, bytes);
+          reject(Object.assign(new Error('fake post-write metadata failure'), { code: 'MEDIA_UNAVAILABLE' }));
+        },
+      });
+    }),
+    delete: async ({ storageKey }) => {
+      const deleted = objects.delete(storageKey);
+      return { deleted, notFound: !deleted };
+    },
+  };
+  let asrCalls = 0;
+  const now = () => new Date('2026-08-25T02:50:00.000Z');
+  const { baseUrl, origin, store, filePath } = await startVoiceApp(t, {
+    providedMediaStore: mediaStore,
+    mediaDeadlineMs: 10,
+    now,
+    asrProvider: { provider: 'azure', transcribe: async () => { asrCalls += 1; return { transcript: 'must not run' }; } },
+    ttsProvider: { provider: 'azure', synthesize: async () => ({ buffer: Buffer.from([0x49, 0x44, 0x33, 0x04]), mimeType: 'audio/mpeg' }) },
+  });
+  const session = await fetchJson(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin } });
+  const cookie = session.response.headers.getSetCookie()[0].split(';')[0];
+  const assistant = await createDeliveredAssistant(store, session.body.data.session, session.body.data.conversation);
+  const audio = canonicalWav(10);
+  const operations = [
+    fetchJson(`${baseUrl}/api/v1/voice/transcriptions`, {
+      method: 'POST',
+      headers: {
+        Origin: origin,
+        Cookie: cookie,
+        'Content-Type': 'audio/wav',
+        'Content-Length': String(audio.length),
+        'X-Client-Upload-Id': 'dededede-0000-4000-8000-000000000000',
+        'X-Content-SHA256': createHash('sha256').update(audio).digest('hex'),
+      },
+      body: audio,
+    }),
+    fetchJson(`${baseUrl}/api/v1/messages/${assistant.id}/audio`, {
+      method: 'POST', headers: { Origin: origin, Cookie: cookie },
+    }),
+  ];
+  const responses = await Promise.race([
+    Promise.all(operations),
+    new Promise((resolve, reject) => {
+      void resolve;
+      setTimeout(() => reject(new Error('HTTP response waited for the abort-ignoring media write')), 250).unref?.();
+    }),
+  ]);
+  for (const result of responses) {
+    assert.equal(result.response.status, 503);
+    assert.equal(result.body.error.code, 'VOICE_MEDIA_UNAVAILABLE');
+  }
+  assert.equal(asrCalls, 0);
+  assert.deepEqual(pendingWrites.map((entry) => entry.storageKey).sort(), Object.values(keys).sort());
+
+  await Promise.all(pendingWrites.map((entry) => entry.finishAndReject()));
+  const cleanupDeadline = Date.now() + 500;
+  while (objects.size > 0 && Date.now() < cleanupDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(objects.size, 0, 'late rejected writes are durably rearmed and deleted');
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  await store.close();
   const persisted = JSON.parse(await readFile(filePath, 'utf8'));
   for (const storageKey of Object.values(keys)) {
     const job = persisted.mediaDeletionJobs.find((entry) => entry.storageKey === storageKey);

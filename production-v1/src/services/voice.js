@@ -148,7 +148,7 @@ function normalizeWorkError(error, capability) {
 }
 
 async function withOperationDeadline({
-  signal, deadlineMs, timeoutError, operation, onLateSuccess,
+  signal, deadlineMs, timeoutError, operation, onLateSettlement,
 }) {
   const controller = new AbortController();
   const abortFromParent = () => controller.abort(
@@ -180,10 +180,7 @@ async function withOperationDeadline({
       ),
     ]);
     if (outcome.source === 'abort') {
-      void operationPromise.then(
-        (value) => onLateSuccess?.(value),
-        () => undefined,
-      ).catch(() => undefined);
+      void operationPromise.finally(() => onLateSettlement?.()).catch(() => undefined);
       throw outcome.error;
     }
     if (outcome.error) throw outcome.error;
@@ -442,7 +439,7 @@ export function createVoiceService({
           signal: mediaSignal,
           contentType: 'audio/wav',
         }),
-        onLateSuccess: async () => {
+        onLateSettlement: async () => {
           const current = currentDate(now);
           await store.rearmMediaDeletionAfterWrite({
             storageKey: attemptStorageKey,
@@ -549,7 +546,7 @@ export function createVoiceService({
           signal: mediaSignal,
           contentType: 'audio/mpeg',
         }),
-        onLateSuccess: async () => {
+        onLateSettlement: async () => {
           const lateAt = currentDate(now);
           await store.rearmMediaDeletionAfterWrite({
             storageKey: attemptStorageKey,

@@ -156,6 +156,7 @@ export class AzureBlobMediaStore {
             storageKey: blob.name,
             lastModified: new Date(lastModified).toISOString(),
             byteLength: Number(blob.properties?.contentLength) || 0,
+            version: blob.properties?.etag ?? blob.versionId ?? null,
           });
         }
         if (keys.length >= maximum) break;
