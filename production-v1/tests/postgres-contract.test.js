@@ -762,7 +762,7 @@ test('live ASR and TTS claims are observed under row locks instead of double-cla
   pool.assertDrained();
 });
 
-test('assistant audio recovery query is bounded to delivered voice-mode messages missing media', async () => {
+test('assistant audio recovery query is bounded to eligible nonterminal voice generations', async () => {
   const candidate = {
     id: 'abababab-abab-4bab-8bab-abababababab',
     session_id: sessionRow().id,
@@ -775,7 +775,7 @@ test('assistant audio recovery query is bounded to delivered voice-mode messages
   ]);
   const store = new PostgresStore({ pool });
 
-  const candidates = await store.listAssistantAudioRecoveryCandidates({ limit: 2 });
+  const candidates = await store.listAssistantAudioRecoveryCandidates({ limit: 2, now: NOW });
   assert.deepEqual(candidates, [{
     id: candidate.id,
     sessionId: candidate.session_id,
@@ -788,8 +788,12 @@ test('assistant audio recovery query is bounded to delivered voice-mode messages
   assert.match(query.text, /status\s*=\s*'delivered'/i);
   assert.match(query.text, /reply_mode\s*=\s*'voice'/i);
   assert.match(query.text, /media_id\s+IS\s+NULL/i);
+  assert.match(query.text, /LEFT JOIN\s+media_generations/i);
+  assert.match(query.text, /retryable\s*=\s*TRUE/i);
+  assert.match(query.text, /lease_expires_at[\s\S]*<=\s*\$2/i);
+  assert.match(query.text, /attempt_deadline_at[\s\S]*<=\s*\$2/i);
   assert.match(query.text, /LIMIT\s+\$1/i);
-  assert.deepEqual(query.values, [2]);
+  assert.deepEqual(query.values, [2, NOW]);
   pool.assertDrained();
 });
 

@@ -1519,16 +1519,30 @@ export class PostgresStore {
     return mapRow(selected.rows[0]);
   }
 
-  async listAssistantAudioRecoveryCandidates({ limit = 25 } = {}) {
+  async listAssistantAudioRecoveryCandidates({ limit = 25, now } = {}) {
     const maximum = Math.max(1, Math.min(Number(limit) || 25, 25));
+    const current = asIso(now);
     const selected = await this.pool.query(`
-      SELECT id, session_id, reply_language, reply_mode, created_at
-      FROM messages
-      WHERE role = 'assistant' AND status = 'delivered'
-        AND reply_mode = 'voice' AND media_id IS NULL
-      ORDER BY created_at ASC, id ASC
+      SELECT m.id, m.session_id, m.reply_language, m.reply_mode, m.created_at
+      FROM messages m
+      LEFT JOIN media_generations g
+        ON g.owner_message_id = m.id AND g.kind = 'assistant_voice'
+      WHERE m.role = 'assistant' AND m.status = 'delivered'
+        AND m.reply_mode = 'voice' AND m.media_id IS NULL
+        AND (
+          g.id IS NULL
+          OR (g.state = 'failed' AND g.retryable = TRUE)
+          OR (
+            g.state = 'generating'
+            AND (
+              g.lease_expires_at IS NULL OR g.lease_expires_at <= $2
+              OR g.attempt_deadline_at IS NULL OR g.attempt_deadline_at <= $2
+            )
+          )
+        )
+      ORDER BY m.created_at ASC, m.id ASC
       LIMIT $1
-    `, [maximum]);
+    `, [maximum, current]);
     return mapRows(selected.rows);
   }
 

@@ -30,6 +30,7 @@ export const voiceIngressSpoolLimits = Object.freeze({
 });
 
 export const assistantAudioRecoveryLimit = 25;
+export const assistantAudioRecoveryIntervalMs = voiceLimits.leaseMs;
 
 export const defaultVoiceIngressSpoolRoot = join(tmpdir(), 'hong-kong-buddy-v1-voice-ingress');
 
@@ -654,7 +655,7 @@ export function createVoiceService({
     return { messageId, state: 'pending' };
   };
 
-  const recoverAssistantAudio = async ({ limit = assistantAudioRecoveryLimit } = {}) => {
+  const recoverAssistantAudio = async ({ limit = assistantAudioRecoveryLimit, signal } = {}) => {
     assertVoiceOutputCapability(config, currentDate(now));
     if (!config.tts?.available || typeof ttsProvider?.synthesize !== 'function') {
       throw workError('VOICE_PROVIDER_MISCONFIGURED', 503, false);
@@ -663,15 +664,20 @@ export function createVoiceService({
       throw workError('VOICE_PROVIDER_MISCONFIGURED', 503, false);
     }
     const maximum = Math.max(1, Math.min(Number(limit) || assistantAudioRecoveryLimit, assistantAudioRecoveryLimit));
-    const candidates = await store.listAssistantAudioRecoveryCandidates({ limit: maximum });
+    const candidates = await store.listAssistantAudioRecoveryCandidates({
+      limit: maximum,
+      now: currentDate(now),
+    });
     let attempted = 0;
     let attached = 0;
     for (const candidate of candidates) {
+      if (signal?.aborted) break;
       attempted += 1;
       try {
         const result = await generateAssistantAudio({
           sessionId: candidate.sessionId,
           messageId: candidate.id,
+          signal,
         });
         if (result?.data?.state === 'attached') attached += 1;
       } catch { /* durable generation state remains authoritative for later recovery */ }

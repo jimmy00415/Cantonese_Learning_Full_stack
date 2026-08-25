@@ -216,12 +216,14 @@ async function createStore(t, prefix = 'hb-v1-voice-store-') {
 
 async function createDeliveredAssistant(store, session, conversation, {
   replyLanguage = 'yue-Hant-HK', replyMode = 'voice',
+  clientMessageId = '12345678-1234-4234-8234-1234567890ab',
+  requestHash = 'assistant-fixture-request',
 } = {}) {
   const accepted = await store.acceptMessage({
     sessionId: session.id,
     conversationId: conversation.id,
-    clientMessageId: '12345678-1234-4234-8234-1234567890ab',
-    requestHash: 'assistant-fixture-request',
+    clientMessageId,
+    requestHash,
     text: 'Tell me something useful',
     replyLanguage,
     replyMode,
@@ -3646,6 +3648,74 @@ test('durable voice recovery after store restart is bounded and does not duplica
     { scanned: 0, attempted: 0, attached: 0, limit: 1 },
   );
   assert.equal(ttsCalls, 1);
+});
+
+test('assistant audio recovery candidates defer a live generation until its lease expires', async (t) => {
+  const { store } = await createStore(t, 'hb-v1-live-voice-recovery-');
+  const owner = await store.createOrResumeSession({
+    tokenHash: 'e'.repeat(64), now: '2026-08-25T00:00:00.000Z',
+  });
+  const assistant = await createDeliveredAssistant(store, owner.session, owner.conversation);
+  const claimed = await store.claimAssistantAudioWithRateLimits({
+    sessionId: owner.session.id,
+    messageId: assistant.id,
+    kind: 'assistant_voice',
+    rateLimits: [],
+    leaseToken: 'dead-worker-lease',
+    attemptStorageKey: 'attempts/tts/dead-worker.mp3',
+    configVersion: 'test',
+    leaseExpiresAt: '2026-08-25T00:00:20.000Z',
+    attemptDeadlineAt: '2026-08-25T00:00:35.000Z',
+    now: '2026-08-25T00:00:06.000Z',
+  });
+  assert.equal(claimed.status, 'claimed');
+
+  assert.deepEqual(await store.listAssistantAudioRecoveryCandidates({
+    limit: 1, now: '2026-08-25T00:00:10.000Z',
+  }), []);
+  assert.deepEqual(
+    (await store.listAssistantAudioRecoveryCandidates({
+      limit: 1, now: '2026-08-25T00:00:21.000Z',
+    })).map((candidate) => candidate.id),
+    [assistant.id],
+  );
+});
+
+test('assistant audio recovery excludes permanent failures so newer voice messages remain eligible', async (t) => {
+  const { store } = await createStore(t, 'hb-v1-terminal-voice-recovery-');
+  const owner = await store.createOrResumeSession({
+    tokenHash: 'f'.repeat(64), now: '2026-08-25T00:00:00.000Z',
+  });
+  const terminal = await createDeliveredAssistant(store, owner.session, owner.conversation);
+  const claim = await store.claimAssistantAudioWithRateLimits({
+    sessionId: owner.session.id,
+    messageId: terminal.id,
+    kind: 'assistant_voice',
+    rateLimits: [],
+    leaseToken: 'permanent-failure-lease',
+    attemptStorageKey: 'attempts/tts/permanent-failure.mp3',
+    configVersion: 'test',
+    leaseExpiresAt: '2026-08-25T00:00:20.000Z',
+    attemptDeadlineAt: '2026-08-25T00:00:35.000Z',
+    now: '2026-08-25T00:00:06.000Z',
+  });
+  await store.failMediaGeneration({
+    generationId: claim.generation.id,
+    leaseToken: 'permanent-failure-lease',
+    failureCode: 'VOICE_SYNTHESIS_REJECTED',
+    failureHttpStatus: 502,
+    retryable: false,
+    now: '2026-08-25T00:00:07.000Z',
+  });
+  const newer = await createDeliveredAssistant(store, owner.session, owner.conversation, {
+    clientMessageId: '87654321-4321-4321-8321-ba0987654321',
+    requestHash: 'newer-assistant-fixture-request',
+  });
+
+  const candidates = await store.listAssistantAudioRecoveryCandidates({
+    limit: 25, now: '2026-08-25T00:00:08.000Z',
+  });
+  assert.deepEqual(candidates.map((candidate) => candidate.id), [newer.id]);
 });
 
 test('durable voice recovery checks release evidence before scanning storage or provider readiness', async () => {

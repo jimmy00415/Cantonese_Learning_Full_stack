@@ -1018,12 +1018,21 @@ export class AtomicFileStore {
     });
   }
 
-  async listAssistantAudioRecoveryCandidates({ limit = 25 } = {}) {
+  async listAssistantAudioRecoveryCandidates({ limit = 25, now } = {}) {
     const maximum = Math.max(1, Math.min(Number(limit) || 25, 25));
+    const current = instant(now);
     return this.#read((snapshot) => clone(snapshot.messages
       .filter((message) => (
         message.role === 'assistant' && message.status === 'delivered'
         && message.replyMode === 'voice' && !message.mediaId
+        && (() => {
+          const generation = snapshot.mediaGenerations.find((item) => (
+            item.ownerMessageId === message.id && item.kind === 'assistant_voice'
+          ));
+          return !generation
+            || (generation.state === 'failed' && generation.retryable === true)
+            || (generation.state === 'generating' && !liveAttempt(generation, current));
+        })()
       ))
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
       .slice(0, maximum)

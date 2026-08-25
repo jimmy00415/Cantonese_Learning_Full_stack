@@ -715,6 +715,180 @@ test('server triggers bounded assistant audio recovery without waiting for TTS c
   await server.runtime.voiceRecovery;
 });
 
+test('server assistant audio recovery recurs without overlapping provider work', async (t) => {
+  const config = productionConfig();
+  const order = [];
+  const { store, mediaStore, cleanupService } = runtimeFixture(order);
+  const retentionWorker = {
+    firstRun: Promise.resolve({ ok: true }),
+    readiness: async () => ({ status: 'ready', healthy: true, policyVersion: 'retention-v1' }),
+    stop: async () => undefined,
+  };
+  const first = deferred();
+  const second = deferred();
+  const scheduled = [];
+  let recoveryCalls = 0;
+  const voiceService = {
+    recoverAssistantAudio() {
+      recoveryCalls += 1;
+      return recoveryCalls === 1 ? first.promise : second.promise;
+    },
+  };
+  const server = await startServer({
+    config,
+    host: '127.0.0.1',
+    port: 0,
+    store,
+    mediaStore,
+    cleanupService,
+    retentionWorker,
+    voiceService,
+    corpus: {
+      schemaVersion: 'hkbu-campus-v1', snapshotAt: '2026-08-25T12:00:00+08:00', sources: [{ id: 'official-source' }],
+    },
+    llmProvider: { provider: 'fake-real', generate: async () => ({ text: 'unused' }) },
+    evaluateReadiness: async () => safeReadiness(true),
+    dispatcherOptions: { pollIntervalMs: 60_000 },
+    voiceRecoveryOptions: {
+      intervalMs: 25,
+      setTimeoutFn(callback, intervalMs) {
+        const handle = { callback, intervalMs, unrefCalled: false, unref() { this.unrefCalled = true; } };
+        scheduled.push(handle);
+        return handle;
+      },
+      clearTimeoutFn: () => undefined,
+    },
+  });
+  t.after(() => server.shutdown());
+
+  assert.equal(recoveryCalls, 1);
+  first.resolve({ scanned: 1, attempted: 1, attached: 0, limit: 25 });
+  await server.runtime.voiceRecovery;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(scheduled.length, 1);
+  assert.equal(scheduled[0].intervalMs, 25);
+  assert.equal(scheduled[0].unrefCalled, true);
+  scheduled[0].callback();
+  scheduled[0].callback();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(recoveryCalls, 2, 'duplicate timer delivery must coalesce while recovery is live');
+  second.resolve({ scanned: 1, attempted: 1, attached: 1, limit: 25 });
+});
+
+test('server shutdown clears recovery timers and never waits for or rearms an in-flight sweep', async (t) => {
+  const config = productionConfig();
+  const order = [];
+  const { store, mediaStore, cleanupService } = runtimeFixture(order);
+  const retentionWorker = {
+    firstRun: Promise.resolve({ ok: true }),
+    readiness: async () => ({ status: 'ready', healthy: true, policyVersion: 'retention-v1' }),
+    stop: async () => undefined,
+  };
+  const first = deferred();
+  const second = deferred();
+  const scheduled = [];
+  const cleared = [];
+  let recoveryCalls = 0;
+  const voiceService = {
+    recoverAssistantAudio({ signal } = {}) {
+      recoveryCalls += 1;
+      if (recoveryCalls === 2) {
+        signal?.addEventListener('abort', () => order.push('recovery:aborted'), { once: true });
+        return second.promise;
+      }
+      return first.promise;
+    },
+  };
+  const server = await startServer({
+    config,
+    host: '127.0.0.1',
+    port: 0,
+    store,
+    mediaStore,
+    cleanupService,
+    retentionWorker,
+    voiceService,
+    corpus: {
+      schemaVersion: 'hkbu-campus-v1', snapshotAt: '2026-08-25T12:00:00+08:00', sources: [{ id: 'official-source' }],
+    },
+    llmProvider: { provider: 'fake-real', generate: async () => ({ text: 'unused' }) },
+    evaluateReadiness: async () => safeReadiness(true),
+    dispatcherOptions: { pollIntervalMs: 60_000 },
+    voiceRecoveryOptions: {
+      intervalMs: 25,
+      setTimeoutFn(callback) {
+        const handle = { callback, unref() {} };
+        scheduled.push(handle);
+        return handle;
+      },
+      clearTimeoutFn: (handle) => cleared.push(handle),
+    },
+  });
+  t.after(() => server.shutdown());
+
+  first.resolve({ scanned: 0, attempted: 0, attached: 0, limit: 25 });
+  await server.runtime.voiceRecovery;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(scheduled.length, 1);
+  scheduled[0].callback();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(recoveryCalls, 2);
+
+  await settleWithin(server.shutdown(), 250, 'shutdown waited for an in-flight recovery provider');
+  assert.equal(order.includes('recovery:aborted'), true);
+  second.resolve({ scanned: 1, attempted: 1, attached: 0, limit: 25 });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(scheduled.length, 1, 'shutdown must not rearm recovery');
+  assert.equal(cleared.length, 0, 'the in-flight callback owns no pending timer');
+});
+
+test('server shutdown clears a pending assistant audio recovery timer', async (t) => {
+  const config = productionConfig();
+  const order = [];
+  const { store, mediaStore, cleanupService } = runtimeFixture(order);
+  const retentionWorker = {
+    firstRun: Promise.resolve({ ok: true }),
+    readiness: async () => ({ status: 'ready', healthy: true, policyVersion: 'retention-v1' }),
+    stop: async () => undefined,
+  };
+  const scheduled = [];
+  const cleared = [];
+  const server = await startServer({
+    config,
+    host: '127.0.0.1',
+    port: 0,
+    store,
+    mediaStore,
+    cleanupService,
+    retentionWorker,
+    voiceService: { recoverAssistantAudio: async () => ({ scanned: 0, attempted: 0, attached: 0, limit: 25 }) },
+    corpus: {
+      schemaVersion: 'hkbu-campus-v1', snapshotAt: '2026-08-25T12:00:00+08:00', sources: [{ id: 'official-source' }],
+    },
+    llmProvider: { provider: 'fake-real', generate: async () => ({ text: 'unused' }) },
+    evaluateReadiness: async () => safeReadiness(true),
+    dispatcherOptions: { pollIntervalMs: 60_000 },
+    voiceRecoveryOptions: {
+      intervalMs: 25,
+      setTimeoutFn(callback) {
+        const handle = { callback, unref() {} };
+        scheduled.push(handle);
+        return handle;
+      },
+      clearTimeoutFn: (handle) => cleared.push(handle),
+    },
+  });
+  t.after(() => server.shutdown());
+  await server.runtime.voiceRecovery;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(scheduled.length, 1);
+  await server.shutdown();
+  assert.deepEqual(cleared, [scheduled[0]]);
+  scheduled[0].callback();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(scheduled.length, 1, 'a late cleared callback must not rearm recovery');
+});
+
 test('the single-flight readiness supervisor revokes, gates, and recovers while public ready stays cached', async (t) => {
   const config = productionConfig();
   const order = [];

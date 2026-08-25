@@ -16,6 +16,7 @@ import { createRuntimeReadinessChecks } from './services/runtime-readiness.js';
 import { createStorageRuntime } from './services/storage-runtime.js';
 import { createTurnProcessor } from './services/turn-processor.js';
 import {
+  assistantAudioRecoveryIntervalMs,
   assertVoiceOutputCapability,
   defaultVoiceIngressSpoolRoot,
   createVoiceService,
@@ -173,6 +174,7 @@ export async function startServer({
   dispatcherOptions = {},
   retentionOptions = {},
   readinessWatchdogOptions = {},
+  voiceRecoveryOptions = {},
   now = () => new Date(),
   spoolParentDirectory = defaultVoiceIngressSpoolRoot,
   spoolRecoveryLimit,
@@ -193,6 +195,10 @@ export async function startServer({
   let retentionWorker = null;
   let eventHub = null;
   let voiceRecovery = null;
+  let voiceRecoveryTimer = null;
+  let voiceRecoveryController = null;
+  let voiceRecoveryStopped = true;
+  let voiceService = null;
   let server = null;
   let shutdownPromise = null;
   let cachedReadiness = config.nodeEnv === 'production'
@@ -222,6 +228,12 @@ export async function startServer({
     : configuredWatchdogIntervalMs;
   const watchdogSetTimeout = readinessWatchdogOptions.setTimeoutFn ?? setTimeout;
   const watchdogClearTimeout = readinessWatchdogOptions.clearTimeoutFn ?? clearTimeout;
+  const voiceRecoveryIntervalMs = Number.isInteger(voiceRecoveryOptions.intervalMs)
+    && voiceRecoveryOptions.intervalMs >= 1
+    ? voiceRecoveryOptions.intervalMs
+    : assistantAudioRecoveryIntervalMs;
+  const voiceRecoverySetTimeout = voiceRecoveryOptions.setTimeoutFn ?? setTimeout;
+  const voiceRecoveryClearTimeout = voiceRecoveryOptions.clearTimeoutFn ?? clearTimeout;
 
   const applyReadinessState = (evaluated) => {
     cachedReadiness = evaluated ?? unavailableReadiness();
@@ -315,6 +327,51 @@ export async function startServer({
     void liveReadinessPromise?.catch(() => undefined);
   };
 
+  const scheduleVoiceRecovery = () => {
+    if (voiceRecoveryStopped || voiceRecoveryTimer || voiceRecoveryController) return;
+    const handle = voiceRecoverySetTimeout(() => {
+      if (voiceRecoveryTimer !== handle) return;
+      voiceRecoveryTimer = null;
+      if (voiceRecoveryStopped) return;
+      voiceRecovery = runVoiceRecovery();
+    }, voiceRecoveryIntervalMs);
+    voiceRecoveryTimer = handle;
+    handle?.unref?.();
+  };
+
+  const runVoiceRecovery = () => {
+    if (voiceRecoveryStopped) {
+      return Promise.resolve({ scanned: 0, attempted: 0, attached: 0, limit: 0 });
+    }
+    if (voiceRecoveryController) return voiceRecovery;
+    const controller = new AbortController();
+    voiceRecoveryController = controller;
+    const work = Promise.resolve()
+      .then(() => voiceService?.recoverAssistantAudio?.({ signal: controller.signal }))
+      .catch(() => ({ scanned: 0, attempted: 0, attached: 0, limit: 0 }));
+    const wrapped = work.finally(() => {
+      if (voiceRecoveryController === controller) voiceRecoveryController = null;
+      scheduleVoiceRecovery();
+    });
+    voiceRecovery = wrapped;
+    return wrapped;
+  };
+
+  const startVoiceRecovery = () => {
+    voiceRecoveryStopped = false;
+    return runVoiceRecovery();
+  };
+
+  const stopVoiceRecovery = () => {
+    voiceRecoveryStopped = true;
+    if (voiceRecoveryTimer) {
+      voiceRecoveryClearTimeout(voiceRecoveryTimer);
+      voiceRecoveryTimer = null;
+    }
+    voiceRecoveryController?.abort();
+    void voiceRecovery?.catch(() => undefined);
+  };
+
   const stopRuntime = ({ cleanupTimeoutMs } = {}) => {
     if (shutdownPromise) return shutdownPromise;
     shutdownPromise = (async () => {
@@ -356,6 +413,7 @@ export async function startServer({
       config.productionReady = false;
       cachedReadiness = unavailableReadiness();
       const watchdogStoppedPromise = attempt(() => stopWatchdog());
+      stopVoiceRecovery();
       const dispatcherStopped = attempt(() => dispatcher?.stop?.());
       await attempt(() => updatePublicStatus(config, now));
       const httpClosed = server?.listening
@@ -438,7 +496,7 @@ export async function startServer({
     const answerService = createAnswerService({ corpus, retriever, llmProvider, now });
     eventHub = suppliedEventHub ?? new EventHub();
     cleanupService = suppliedCleanupService ?? createMediaCleanupService({ store, mediaStore, now });
-    const voiceService = suppliedVoiceService ?? createVoiceService({
+    voiceService = suppliedVoiceService ?? createVoiceService({
       config, store, mediaStore, asrProvider, ttsProvider, cleanupService,
       eventHub, now, spoolParentDirectory,
     });
@@ -551,9 +609,7 @@ export async function startServer({
       applyReadinessState(cachedReadiness);
       startWatchdog();
     }
-    voiceRecovery = Promise.resolve()
-      .then(() => voiceService.recoverAssistantAudio?.())
-      .catch(() => ({ scanned: 0, attempted: 0, attached: 0, limit: 0 }));
+    voiceRecovery = startVoiceRecovery();
 
     server.shutdown = stopRuntime;
     server.runtime = {
@@ -566,7 +622,7 @@ export async function startServer({
       ttsProvider,
       cleanupService,
       voiceService,
-      voiceRecovery,
+      get voiceRecovery() { return voiceRecovery; },
       retentionWorker,
       readiness,
       runtimeState,
