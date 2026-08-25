@@ -53,13 +53,17 @@ export class AzureBlobMediaStore {
     this.containerClient = serviceClient.getContainerClient(containerName);
   }
 
-  async init() {
+  async init({ signal } = {}) {
     try {
-      await this.containerClient.getProperties();
-      const access = await this.containerClient.getAccessPolicy();
+      if (signal?.aborted) throw mediaError('MEDIA_OPERATION_ABORTED', signal.reason);
+      await this.containerClient.getProperties({ abortSignal: signal });
+      if (signal?.aborted) throw mediaError('MEDIA_OPERATION_ABORTED', signal.reason);
+      const access = await this.containerClient.getAccessPolicy({ abortSignal: signal });
+      if (signal?.aborted) throw mediaError('MEDIA_OPERATION_ABORTED', signal.reason);
       if (access?.blobPublicAccess || access?.publicAccess) throw mediaError('MEDIA_CONTAINER_NOT_PRIVATE');
     } catch (error) {
-      if (error?.code === 'MEDIA_CONTAINER_NOT_PRIVATE') throw error;
+      if (error?.code === 'MEDIA_CONTAINER_NOT_PRIVATE' || error?.code === 'MEDIA_OPERATION_ABORTED') throw error;
+      if (signal?.aborted) throw mediaError('MEDIA_OPERATION_ABORTED', signal.reason ?? error);
       throw mediaError('MEDIA_UNAVAILABLE', error);
     }
   }
@@ -170,8 +174,8 @@ export class AzureBlobMediaStore {
     }
   }
 
-  async healthCheck() {
-    await this.init();
+  async healthCheck({ signal } = {}) {
+    await this.init({ signal });
     return { ok: true, driver: 'azure-blob', private: true };
   }
 }

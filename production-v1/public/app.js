@@ -381,7 +381,7 @@ function renderVoiceControls() {
     cancelVoiceButton.disabled = !(canCancelCapture || canRemoveOperation);
     cancelVoiceButton.textContent = canRemoveOperation ? 'Remove voice' : 'Cancel';
   } else {
-    voiceHint.textContent = 'Hold while speaking. Release to create an editable transcript.';
+    voiceHint.textContent = 'Hold while speaking, or press once to start and again to stop. Your recording becomes an editable transcript.';
     retryVoiceTranscriptionButton.hidden = true;
     retryVoiceTranscriptionButton.disabled = true;
     cancelVoiceButton.hidden = true;
@@ -402,7 +402,9 @@ function renderVoiceControls() {
     voiceButton.disabled = !voiceSetupFailed;
   } else if (phase === 'recording' || phase === 'starting') {
     voiceButton.textContent = 'Release to transcribe';
-    voiceButton.setAttribute('aria-label', 'Release to finish this voice message');
+    voiceButton.setAttribute('aria-label', keyboardRecording
+      ? 'Press to stop and transcribe this voice message'
+      : 'Release to finish this voice message');
     voiceButton.disabled = false;
   } else if (snapshot.consent !== 'granted' || snapshot.permission !== 'ready') {
     voiceButton.textContent = 'Enable voice';
@@ -424,7 +426,7 @@ function renderVoiceControls() {
     voiceButton.disabled = true;
   } else {
     voiceButton.textContent = 'Hold to talk';
-    voiceButton.setAttribute('aria-label', 'Hold to record a voice message');
+    voiceButton.setAttribute('aria-label', 'Press or hold to record a voice message');
     voiceButton.disabled = false;
   }
 
@@ -721,10 +723,12 @@ async function toggleVoiceRecording() {
   if (keyboardRecording) {
     keyboardRecording = false;
     finishVoiceHold();
+    renderVoiceControls();
     return;
   }
   if (!(await enableVoiceFromGesture())) return;
   keyboardRecording = beginVoiceHold();
+  renderVoiceControls();
 }
 
 composer.addEventListener('submit', (event) => {

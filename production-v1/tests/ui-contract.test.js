@@ -81,6 +81,7 @@ test('ui contract exposes one consented asynchronous voice-message flow inside t
   assert.match(html, /id="remove-voice-draft"[^>]+type="button"/i);
   assert.match(html, /id="retry-voice-cleanup"[^>]+type="button"[^>]+hidden/i);
   assert.match(html, /id="voice-button"[^>]+aria-pressed="false"[^>]+aria-describedby="voice-hint"/i);
+  assert.match(html, /id="voice-button"[^>]+aria-label="Press or hold to record a voice message"/i);
   assert.match(html, /id="voice-hint"/i);
   assert.match(html, /id="cancel-voice"[^>]+type="button"/i);
   assert.match(html, /id="retry-voice-transcription"[^>]+type="button"[^>]+hidden/i);
@@ -103,6 +104,8 @@ test('ui contract exposes one consented asynchronous voice-message flow inside t
   assert.match(app, /pointercancel/i);
   assert.match(app, /lostpointercapture/i);
   assert.match(app, /voiceButton\.addEventListener\(['"]click['"]/i);
+  assert.match(app, /keyboardRecording\s*\?\s*['"]Press to stop and transcribe this voice message['"]/i);
+  assert.match(app, /Press or hold to record a voice message/i);
   assert.match(app, /voiceButton\.addEventListener\(['"]keyup['"][\s\S]{0,180}markDirectActivation\(\)/i);
   assert.match(app, /addEventListener\(['"]pointerup['"][\s\S]{0,180}markDirectActivation\(\)[\s\S]{0,180}activePointerId\s*!==/i);
   assert.match(app, /voicePhaseCanCancelInteraction\(phase\)/i);
@@ -130,6 +133,8 @@ test('ui contract exposes one consented asynchronous voice-message flow inside t
   assert.match(css, /#voice-button\s*\{[^}]*touch-action:\s*none/is);
   assert.match(css, /\.voice-draft\s*\{[^}]*background:\s*var\(--surface\)/is);
   assert.match(css, /\.voice-consent\s*\{[^}]*max-height:\s*min\(/is);
+  assert.match(css, /\.composer-attribution img\s*\{[^}]*width:\s*(?:6[4-9]|7[0-2])px/is);
+  assert.match(css, /\.composer-attribution img\s*\{[^}]*opacity:\s*\.(?:7[5-9]|8\d)/is);
 });
 
 test('ui contract preserves the exact source assets and serves an optimized avatar derivative', async () => {

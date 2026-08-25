@@ -1,10 +1,100 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
-import { loadConfig } from '../src/config.js';
+import { loadConfig, loadLlmSmokeConfiguration } from '../src/config.js';
 import { createApp } from '../src/app.js';
+import {
+  blobIdentitySha256,
+  finalizeReleaseEvidenceRecord,
+  llmProviderConfigDigest,
+  postgresIdentitySha256,
+} from '../src/services/release-evidence.js';
 import { createLogger } from '../src/telemetry/logger.js';
+
+const TEST_RELEASE_COMMIT = 'a'.repeat(40);
+const TEST_DATABASE_URL = 'postgres://localhost/v1';
+const TEST_BLOB_ACCOUNT_URL = 'https://v1fixture.blob.core.windows.net/';
+const TEST_BLOB_CONTAINER = 'v1-media';
+const TEST_POSTGRES_RESOURCE_ID = 'test-v1-postgres';
+const TEST_BLOB_RESOURCE_ID = 'test-v1-blob';
+const TEST_LLM_CREDENTIAL_VERSION = 'llm-credential-v1';
+const TEST_LLM_CONFIG = {
+  provider: 'hkbu',
+  credentialVersion: TEST_LLM_CREDENTIAL_VERSION,
+  timeoutMs: 12_000,
+  settings: {
+    apiKey: 'test-key',
+    baseUrl: 'https://hkbu.example.test',
+    model: 'hkbu-model',
+    apiVersion: 'v1',
+  },
+};
+const evidenceDirectory = mkdtempSync(join(tmpdir(), 'hk-buddy-config-shell-'));
+test.after(() => rmSync(evidenceDirectory, { recursive: true, force: true }));
+
+const inventory = finalizeReleaseEvidenceRecord({
+  schemaVersion: 1,
+  commitSha: TEST_RELEASE_COMMIT,
+  legacyApplicationIds: ['hkbuddy-pilot-0630'],
+  legacyOrigins: ['https://hkbuddy-pilot-0630.azurewebsites.net'],
+  postgresResources: [],
+  blobResources: [],
+  declaresNoLegacyPostgres: true,
+  declaresNoLegacyBlob: true,
+  reviewedAt: new Date().toISOString(),
+  result: true,
+});
+const dependency = finalizeReleaseEvidenceRecord({
+  schemaVersion: 1,
+  commitSha: TEST_RELEASE_COMMIT,
+  legacyInventoryDigest: inventory.artifactSha256,
+  postgresResourceId: TEST_POSTGRES_RESOURCE_ID,
+  postgresIdentitySha256: postgresIdentitySha256(TEST_DATABASE_URL),
+  blobResourceId: TEST_BLOB_RESOURCE_ID,
+  blobIdentitySha256: blobIdentitySha256({
+    accountUrl: TEST_BLOB_ACCOUNT_URL,
+    container: TEST_BLOB_CONTAINER,
+  }),
+  schema: 'v1_accept_12345678123441238123123456789abc',
+  blobPrefix: 'v1-accept/12345678-1234-4123-8123-123456789abc/',
+  checks: [
+    { name: 'postgres-migration-health', status: 'pass', latencyMs: 1 },
+    { name: 'postgres-concurrency-recovery', status: 'pass', latencyMs: 2 },
+    { name: 'postgres-integrity-events', status: 'pass', latencyMs: 3 },
+    { name: 'postgres-rate-window-fencing', status: 'pass', latencyMs: 4 },
+    { name: 'blob-private-full-range-head', status: 'pass', latencyMs: 5 },
+    { name: 'postgres-media-fencing', status: 'pass', latencyMs: 6 },
+  ],
+  schemaAbsent: true,
+  blobPrefixObjectCount: 0,
+  result: true,
+  occurredAt: new Date().toISOString(),
+});
+const llmSmoke = finalizeReleaseEvidenceRecord({
+  schemaVersion: 1,
+  commitSha: TEST_RELEASE_COMMIT,
+  capability: 'llm',
+  provider: TEST_LLM_CONFIG.provider,
+  contractVersion: 'llm-connectivity-json-v1',
+  providerConfigDigest: llmProviderConfigDigest(TEST_LLM_CONFIG),
+  occurredAt: new Date().toISOString(),
+  result: 'pass',
+  httpClass: '2xx',
+  normalizedSuccess: true,
+  requestCount: 1,
+  latencyMs: 1,
+  usage: { inputTokens: null, outputTokens: null, totalTokens: null },
+});
+const inventoryFile = join(evidenceDirectory, 'inventory.json');
+const dependencyFile = join(evidenceDirectory, 'dependency.json');
+const llmSmokeFile = join(evidenceDirectory, 'llm-smoke.json');
+writeFileSync(inventoryFile, JSON.stringify(inventory));
+writeFileSync(dependencyFile, JSON.stringify(dependency));
+writeFileSync(llmSmokeFile, JSON.stringify(llmSmoke));
 
 function productionEnvironment(overrides = {}) {
   return {
@@ -13,19 +103,30 @@ function productionEnvironment(overrides = {}) {
     V1_SESSION_SECRET: '12345678901234567890123456789012',
     V1_TRUST_PROXY_HOPS: '1',
     V1_STORE_DRIVER: 'postgres',
-    DATABASE_URL: 'postgres://localhost/v1',
+    V1_DATABASE_URL: TEST_DATABASE_URL,
+    V1_POSTGRES_RESOURCE_ID: TEST_POSTGRES_RESOURCE_ID,
     V1_MEDIA_DRIVER: 'azure-blob',
-    V1_AZURE_BLOB_CONTAINER: 'v1-media',
-    V1_AZURE_STORAGE_CONNECTION_STRING: 'UseDevelopmentStorage=true',
+    V1_AZURE_BLOB_CONTAINER: TEST_BLOB_CONTAINER,
+    V1_AZURE_BLOB_ACCOUNT_URL: TEST_BLOB_ACCOUNT_URL,
+    V1_BLOB_RESOURCE_ID: TEST_BLOB_RESOURCE_ID,
     V1_LLM_PROVIDER: 'hkbu',
-    HKBU_API_KEY: 'test-key',
-    HKBU_BASE_URL: 'https://hkbu.example.test',
-    HKBU_MODEL: 'hkbu-model',
-    HKBU_API_VERSION: 'v1',
+    V1_LLM_CREDENTIAL_VERSION: TEST_LLM_CREDENTIAL_VERSION,
+    V1_HKBU_API_KEY: 'test-key',
+    V1_HKBU_BASE_URL: 'https://hkbu.example.test',
+    V1_HKBU_MODEL: 'hkbu-model',
+    V1_HKBU_API_VERSION: 'v1',
+    V1_LLM_SMOKE_EVIDENCE_FILE: llmSmokeFile,
+    V1_LLM_SMOKE_EVIDENCE_VERSION: llmSmoke.artifactSha256,
     V1_INSTANCE_POLICY: 'single',
     V1_PRIVACY_NOTICE_VERSION: '2026-08-25',
     V1_PRIVACY_NOTICE_APPROVED: 'true',
     V1_RETENTION_WORKER_ENABLED: 'true',
+    V1_RELEASE_COMMIT_SHA: TEST_RELEASE_COMMIT,
+    V1_LEGACY_RESOURCE_INVENTORY_FILE: inventoryFile,
+    V1_LEGACY_RESOURCE_INVENTORY_VERSION: inventory.artifactSha256,
+    V1_LEGACY_RESOURCE_INVENTORY_APPROVED: 'true',
+    V1_DEPENDENCY_ACCEPTANCE_EVIDENCE_FILE: dependencyFile,
+    V1_DEPENDENCY_ACCEPTANCE_EVIDENCE_VERSION: dependency.artifactSha256,
     ...overrides,
   };
 }
@@ -34,6 +135,7 @@ test('config defaults to a local atomic-file runtime outside production', () => 
   const config = loadConfig({ NODE_ENV: 'test' });
 
   assert.equal(config.storeDriver, 'atomic-file');
+  assert.equal(config.publicOrigin, 'http://localhost:3000');
   assert.equal(config.productionReady, false);
   assert.deepEqual(config.rateLimits, {
     bootstrap: 20,
@@ -46,8 +148,130 @@ test('config defaults to a local atomic-file runtime outside production', () => 
   });
 });
 
+test('NODE_ENV accepts only the exact development, test, or production values', () => {
+  assert.equal(loadConfig({}).nodeEnv, 'development');
+  assert.equal(loadConfig({ NODE_ENV: 'development' }).nodeEnv, 'development');
+  assert.equal(loadConfig({ NODE_ENV: 'test' }).nodeEnv, 'test');
+  for (const nodeEnv of ['', 'Production', ' staging ', 'staging', 'prod']) {
+    assert.throws(() => loadConfig({ NODE_ENV: nodeEnv }), /NODE_ENV/i, nodeEnv);
+  }
+});
+
+test('config exposes bounded runtime and PostgreSQL deadlines from explicit V1 settings', () => {
+  const config = loadConfig({
+    NODE_ENV: 'test',
+    V1_DEPENDENCY_INIT_TIMEOUT_MS: '2400',
+    V1_READINESS_CHECK_TIMEOUT_MS: '1800',
+    V1_READINESS_WATCHDOG_INTERVAL_MS: '24000',
+    V1_STARTUP_STEP_TIMEOUT_MS: '7200',
+    V1_POSTGRES_CONNECTION_TIMEOUT_MS: '1600',
+    V1_POSTGRES_QUERY_TIMEOUT_MS: '2600',
+    V1_POSTGRES_STATEMENT_TIMEOUT_MS: '2200',
+  });
+
+  assert.deepEqual({
+    dependencyInitTimeoutMs: config.dependencyInitTimeoutMs,
+    readinessCheckTimeoutMs: config.readinessCheckTimeoutMs,
+    readinessWatchdogIntervalMs: config.readinessWatchdogIntervalMs,
+    startupStepTimeoutMs: config.startupStepTimeoutMs,
+    postgresConnectionTimeoutMs: config.postgresConnectionTimeoutMs,
+    postgresQueryTimeoutMs: config.postgresQueryTimeoutMs,
+    postgresStatementTimeoutMs: config.postgresStatementTimeoutMs,
+  }, {
+    dependencyInitTimeoutMs: 2400,
+    readinessCheckTimeoutMs: 1800,
+    readinessWatchdogIntervalMs: 24000,
+    startupStepTimeoutMs: 7200,
+    postgresConnectionTimeoutMs: 1600,
+    postgresQueryTimeoutMs: 2600,
+    postgresStatementTimeoutMs: 2200,
+  });
+
+  for (const [name, value] of [
+    ['V1_DEPENDENCY_INIT_TIMEOUT_MS', '99'],
+    ['V1_READINESS_CHECK_TIMEOUT_MS', '10001'],
+    ['V1_READINESS_WATCHDOG_INTERVAL_MS', '999'],
+    ['V1_STARTUP_STEP_TIMEOUT_MS', '60001'],
+    ['V1_POSTGRES_CONNECTION_TIMEOUT_MS', '0'],
+    ['V1_POSTGRES_QUERY_TIMEOUT_MS', '30001'],
+    ['V1_POSTGRES_STATEMENT_TIMEOUT_MS', 'private'],
+  ]) {
+    assert.throws(() => loadConfig({ NODE_ENV: 'test', [name]: value }), /Numeric configuration/i, name);
+  }
+});
+
+test('LLM smoke bootstrap uses strict production V1 semantics without requiring its future evidence file', () => {
+  const environment = {
+    NODE_ENV: 'test',
+    V1_RELEASE_COMMIT_SHA: TEST_RELEASE_COMMIT,
+    V1_LLM_PROVIDER: 'hkbu',
+    V1_LLM_CREDENTIAL_VERSION: TEST_LLM_CREDENTIAL_VERSION,
+    V1_HKBU_API_KEY: 'private-key',
+    V1_HKBU_BASE_URL: 'https://hkbu.example.test',
+    V1_HKBU_MODEL: 'hkbu-model',
+    V1_HKBU_API_VERSION: 'v1',
+  };
+  const smokeConfig = loadLlmSmokeConfiguration(environment, { now: () => new Date() });
+  assert.equal(smokeConfig.releaseCommitSha, TEST_RELEASE_COMMIT);
+  assert.equal(smokeConfig.llm.available, true);
+  assert.equal(smokeConfig.llm.credentialVersion, TEST_LLM_CREDENTIAL_VERSION);
+  assert.equal(Object.hasOwn(smokeConfig, 'llmEvidence'), false);
+
+  for (const [name, invalid] of [
+    ['uppercase SHA', { ...environment, V1_RELEASE_COMMIT_SHA: TEST_RELEASE_COMMIT.toUpperCase() }],
+    ['HTTP transport', { ...environment, V1_HKBU_BASE_URL: 'http://hkbu.example.test' }],
+    ['missing credential version', { ...environment, V1_LLM_CREDENTIAL_VERSION: undefined }],
+    ['legacy-only provider settings', {
+      V1_RELEASE_COMMIT_SHA: TEST_RELEASE_COMMIT,
+      V1_LLM_CREDENTIAL_VERSION: TEST_LLM_CREDENTIAL_VERSION,
+      LLM_PROVIDER: 'hkbu', HKBU_API_KEY: 'private-key',
+      HKBU_BASE_URL: 'https://hkbu.example.test', HKBU_MODEL: 'hkbu-model', HKBU_API_VERSION: 'v1',
+    }],
+  ]) {
+    assert.throws(() => loadLlmSmokeConfiguration(invalid), /LLM|release|provider|configuration/i, name);
+  }
+});
+
+test('normal production config requires current file-bound LLM smoke evidence before startup', () => {
+  for (const [name, overrides] of [
+    ['missing evidence file', { V1_LLM_SMOKE_EVIDENCE_FILE: undefined }],
+    ['missing evidence version', { V1_LLM_SMOKE_EVIDENCE_VERSION: undefined }],
+    ['missing credential version', { V1_LLM_CREDENTIAL_VERSION: undefined }],
+    ['provider config drift', { V1_HKBU_MODEL: 'drifted-model' }],
+    ['version mismatch', { V1_LLM_SMOKE_EVIDENCE_VERSION: 'f'.repeat(64) }],
+  ]) {
+    assert.throws(
+      () => loadConfig(productionEnvironment(overrides)),
+      /LLM|smoke evidence|credential/i,
+      name,
+    );
+  }
+});
+
 test('config rejects production without a public origin', () => {
   assert.throws(() => loadConfig({ NODE_ENV: 'production' }), /V1_PUBLIC_ORIGIN/);
+});
+
+test('config requires a canonical HTTPS production origin and derives only a local preview default', () => {
+  assert.equal(loadConfig({ NODE_ENV: 'test', PORT: '4173' }).publicOrigin, 'http://localhost:4173');
+  for (const publicOrigin of [
+    'http://v1.example.test',
+    'https://v1.example.test/path',
+    'https://user:password@v1.example.test',
+    'https://v1.example.test?private=true',
+  ]) {
+    assert.throws(
+      () => loadConfig(productionEnvironment({ V1_PUBLIC_ORIGIN: publicOrigin })),
+      /V1_PUBLIC_ORIGIN|HTTPS origin/i,
+    );
+  }
+  const legacyOriginOnly = productionEnvironment({ PUBLIC_ORIGIN: 'https://legacy.example.test' });
+  delete legacyOriginOnly.V1_PUBLIC_ORIGIN;
+  assert.throws(() => loadConfig(legacyOriginOnly), /V1_PUBLIC_ORIGIN/);
+
+  const legacySecretOnly = productionEnvironment({ SESSION_SECRET: 'l'.repeat(64) });
+  delete legacySecretOnly.V1_SESSION_SECRET;
+  assert.throws(() => loadConfig(legacySecretOnly), /V1_SESSION_SECRET/);
 });
 
 test('config gives V1 provider selectors precedence over legacy selectors', () => {
@@ -102,8 +326,14 @@ test('config requires every explicit selected LLM provider member', () => {
       const incompleteValues = { ...provider.values };
       delete incompleteValues[missingMember];
       const incomplete = { NODE_ENV: 'test', V1_LLM_PROVIDER: provider.selector, ...incompleteValues };
-      const incompleteProduction = productionEnvironment({ V1_LLM_PROVIDER: provider.selector, ...provider.values });
-      delete incompleteProduction[missingMember];
+      const productionValues = Object.fromEntries(
+        Object.entries(provider.values).map(([name, value]) => [`V1_${name}`, value]),
+      );
+      const incompleteProduction = productionEnvironment({
+        V1_LLM_PROVIDER: provider.selector,
+        ...productionValues,
+      });
+      delete incompleteProduction[`V1_${missingMember}`];
       assert.equal(loadConfig(incomplete).llm.available, false, `${provider.name} requires ${missingMember} locally`);
       assert.throws(
         () => loadConfig(incompleteProduction),
@@ -204,7 +434,7 @@ test('config disables incomplete voice providers without disabling text', () => 
 
 test('config rejects an incomplete selected production LLM after earlier gates pass', () => {
   assert.throws(
-    () => loadConfig(productionEnvironment({ HKBU_API_KEY: undefined })),
+    () => loadConfig(productionEnvironment({ V1_HKBU_API_KEY: undefined })),
     /configured real LLM provider/,
   );
 });
@@ -216,11 +446,12 @@ test('config rejects legacy-only trusted proxy hops in production', () => {
   );
 });
 
-test('config marks a fully configured production environment ready', () => {
+test('config marks a fully configured production environment configuration-ready but runtime-gated', () => {
   const config = loadConfig(productionEnvironment());
 
-  assert.equal(config.productionReady, true);
-  assert.equal(config.publicStatus.productionReady, true);
+  assert.equal(config.productionConfigurationReady, true);
+  assert.equal(config.productionReady, false);
+  assert.equal(config.publicStatus.productionReady, false);
 });
 
 test('config public status contains capability booleans rather than secret values', () => {
@@ -309,6 +540,78 @@ test('shell app serves a safe liveness envelope with a request ID', async (t) =>
   assert.equal(body.data.status, 'ok');
   assert.equal(typeof body.data.version, 'string');
   assert.equal(body.requestId, response.headers.get('x-request-id'));
+});
+
+test('liveness never calls dependencies while readiness publishes only the injected public boundary', async (t) => {
+  let readinessCalls = 0;
+  const app = createApp({
+    config: loadConfig({ NODE_ENV: 'test' }),
+    readiness: async () => {
+      readinessCalls += 1;
+      return {
+        exitCode: 2,
+        publicReport: {
+          status: 'preview',
+          productionReady: false,
+          boundary: 'local-preview-only',
+          privateUrl: 'https://private.example.test',
+          checks: [{
+            name: 'configuration', status: 'preview', version: 'local-preview-v1', privateDigest: 'f'.repeat(64),
+          }],
+        },
+      };
+    },
+  });
+  const server = app.listen(0, '127.0.0.1');
+  t.after(() => server.close());
+  await new Promise((resolve) => server.once('listening', resolve));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+
+  assert.equal((await fetch(`${baseUrl}/api/health/live`)).status, 200);
+  assert.equal(readinessCalls, 0);
+  const response = await fetch(`${baseUrl}/api/health/ready`);
+  const body = await response.json();
+  assert.equal(response.status, 503);
+  assert.equal(readinessCalls, 1);
+  assert.deepEqual(body.data, {
+    status: 'preview',
+    productionReady: false,
+    boundary: 'local-preview-only',
+    checks: [{ name: 'configuration', status: 'preview', version: 'local-preview-v1' }],
+  });
+  assert.deepEqual(body.error, null);
+});
+
+test('readiness failures remain redacted and fail closed', async (t) => {
+  const app = createApp({
+    config: loadConfig({ NODE_ENV: 'test' }),
+    readiness: async () => { throw new Error('private database endpoint and credentials'); },
+  });
+  const server = app.listen(0, '127.0.0.1');
+  t.after(() => server.close());
+  await new Promise((resolve) => server.once('listening', resolve));
+
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/api/health/ready`);
+  const body = await response.json();
+  assert.equal(response.status, 503);
+  assert.equal(body.data.productionReady, false);
+  assert.equal(body.data.status, 'not-ready');
+  assert.equal(JSON.stringify(body).includes('private database'), false);
+});
+
+test('a production-configured app without server runtime state fails closed for writes', async (t) => {
+  const config = loadConfig({ NODE_ENV: 'test' });
+  config.nodeEnv = 'production';
+  config.productionConfigurationReady = true;
+  const app = createApp({ config });
+  const server = app.listen(0, '127.0.0.1');
+  t.after(() => server.close());
+  await new Promise((resolve) => server.once('listening', resolve));
+
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/session`, { method: 'POST' });
+  const body = await response.json();
+  assert.equal(response.status, 503);
+  assert.equal(body.error?.code, 'PRODUCTION_NOT_READY');
 });
 
 test('shell app rejects cross-origin state-changing requests with a safe error', async (t) => {

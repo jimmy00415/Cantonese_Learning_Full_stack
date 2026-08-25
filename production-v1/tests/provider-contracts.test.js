@@ -3,7 +3,18 @@ import test from 'node:test';
 
 import { loadConfig } from '../src/config.js';
 import { createLlmProvider, ProviderError, providerLimits } from '../src/providers/llm.js';
-import { runProviderSmoke } from '../scripts/provider-smoke.js';
+import {
+  runProviderSmoke,
+  writeLlmSmokeEvidence,
+} from '../scripts/provider-smoke.js';
+import {
+  finalizeReleaseEvidenceRecord,
+  llmProviderConfigDigest,
+  validateLlmSmokeEvidence,
+} from '../src/services/release-evidence.js';
+
+const SMOKE_COMMIT = 'a'.repeat(40);
+const SMOKE_NOW = new Date('2026-08-25T12:00:00.000Z');
 
 const TURN_INPUT = Object.freeze({
   turnId: 'turn-123',
@@ -30,6 +41,24 @@ function miniMaxSuccess(rawText = '{"replyText":"ok"}', stopReason = 'end_turn')
     stop_reason: stopReason,
     usage: { input_tokens: 11, output_tokens: 5 },
   }), { status: 200, headers: { 'content-type': 'application/json' } });
+}
+
+function smokeEnvironment(overrides = {}) {
+  return {
+    NODE_ENV: 'production',
+    V1_RELEASE_COMMIT_SHA: SMOKE_COMMIT,
+    V1_LLM_PROVIDER: 'hkbu',
+    V1_LLM_CREDENTIAL_VERSION: 'credential-v7',
+    V1_HKBU_API_KEY: 'never-print-this-key',
+    V1_HKBU_BASE_URL: 'https://hkbu.test',
+    V1_HKBU_MODEL: 'model',
+    V1_HKBU_API_VERSION: 'v1',
+    ...overrides,
+  };
+}
+
+function cleanFrozenGit() {
+  return async () => ({ commitSha: SMOKE_COMMIT, clean: true });
 }
 
 test('provider contract builds HKBU compatibility and Azure OpenAI deployment requests without key leakage', async () => {
@@ -155,13 +184,14 @@ test('provider contract requires HTTPS before fetch and refuses redirects withou
     env: {
       NODE_ENV: 'test', V1_LLM_PROVIDER: 'hkbu', V1_HKBU_API_KEY: 'never-forward',
       V1_HKBU_BASE_URL: 'http://hkbu.test', V1_HKBU_MODEL: 'model', V1_HKBU_API_VERSION: 'v1',
+      V1_LLM_CREDENTIAL_VERSION: 'credential-v1', V1_RELEASE_COMMIT_SHA: SMOKE_COMMIT,
     },
     fetchImpl: async () => { smokeCalls += 1; return openAiSuccess(); },
     stdout: () => {}, stderr: (line) => smokeErrors.push(line),
   });
-  assert.equal(smokeStatus, 1);
+  assert.equal(smokeStatus, 2);
   assert.equal(smokeCalls, 0);
-  assert.match(smokeErrors.join('\n'), /PROVIDER_NOT_CONFIGURED/);
+  assert.match(smokeErrors.join('\n'), /CONFIG_INVALID/);
 });
 
 test('Azure uses an explicit request profile rather than inferring capability from deployment aliases', async () => {
@@ -324,40 +354,295 @@ test('provider config exposes selected private settings only and keeps publicSta
   assert.equal(JSON.stringify(config.llm.settings).includes('unselected-hkbu-secret'), false);
 });
 
-test('provider smoke is inert without confirmation and makes one secret-safe selected-provider request when confirmed', async () => {
+test('provider smoke requires the exact sole confirmation argument before config, Git, or network access', async () => {
+  for (const argv of [
+    [],
+    ['--confirm-real-provider', '--extra'],
+    ['--extra', '--confirm-real-provider'],
+    ['--confirm-real-provider', '--confirm-real-provider'],
+  ]) {
+    const errors = [];
+    let networkCalls = 0;
+    let gitCalls = 0;
+    let writes = 0;
+    const exitCode = await runProviderSmoke({
+      argv,
+      env: smokeEnvironment(),
+      fetchImpl: async () => { networkCalls += 1; return openAiSuccess('{"ok":true}'); },
+      inspectGit: async () => { gitCalls += 1; return { commitSha: SMOKE_COMMIT, clean: true }; },
+      writeEvidence: async () => { writes += 1; },
+      stdout: () => {},
+      stderr: (line) => errors.push(line),
+    });
+    assert.equal(exitCode, 2);
+    assert.equal(networkCalls, 0);
+    assert.equal(gitCalls, 0);
+    assert.equal(writes, 0);
+    assert.deepEqual(JSON.parse(errors.at(-1)), {
+      provider: null,
+      httpClass: null,
+      normalizedSuccess: false,
+      latencyMs: 0,
+      artifactSha256: null,
+      code: 'CONFIRMATION_REQUIRED',
+    });
+  }
+});
+
+test('default smoke bootstrap rejects legacy-only or non-lowercase production identity before Git or provider construction', async (t) => {
+  const cases = [
+    ['legacy-only provider variables', {
+      NODE_ENV: 'test',
+      V1_RELEASE_COMMIT_SHA: SMOKE_COMMIT,
+      V1_LLM_CREDENTIAL_VERSION: 'credential-v7',
+      LLM_PROVIDER: 'hkbu', HKBU_API_KEY: 'legacy-private-key',
+      HKBU_BASE_URL: 'https://hkbu.test', HKBU_MODEL: 'model', HKBU_API_VERSION: 'v1',
+    }],
+    ['uppercase release SHA', smokeEnvironment({ V1_RELEASE_COMMIT_SHA: SMOKE_COMMIT.toUpperCase() })],
+  ];
+  for (const [name, env] of cases) {
+    await t.test(name, async () => {
+      let gitCalls = 0;
+      let providerConstructions = 0;
+      let networkCalls = 0;
+      const errors = [];
+      const exitCode = await runProviderSmoke({
+        argv: ['--confirm-real-provider'],
+        env,
+        inspectGit: async () => { gitCalls += 1; return { commitSha: SMOKE_COMMIT, clean: true }; },
+        createProvider: () => {
+          providerConstructions += 1;
+          return { generate: async () => ({ provider: 'hkbu', rawText: '{"ok":true}' }) };
+        },
+        fetchImpl: async () => { networkCalls += 1; return openAiSuccess('{"ok":true}'); },
+        stdout: () => {},
+        stderr: (line) => errors.push(line),
+      });
+      assert.equal(exitCode, 2);
+      assert.equal(gitCalls, 0);
+      assert.equal(providerConstructions, 0);
+      assert.equal(networkCalls, 0);
+      assert.equal(JSON.parse(errors.at(-1)).code, 'CONFIG_INVALID');
+    });
+  }
+});
+
+test('confirmed provider smoke emits one strict commit/config-bound immutable evidence record', async () => {
   const output = [];
   const errors = [];
+  const records = [];
   let calls = 0;
-  const env = {
-    NODE_ENV: 'test', V1_LLM_PROVIDER: 'hkbu', V1_HKBU_API_KEY: 'never-print-this-key',
-    V1_HKBU_BASE_URL: 'https://hkbu.test', V1_HKBU_MODEL: 'model', V1_HKBU_API_VERSION: 'v1',
-  };
-  const inert = await runProviderSmoke({ argv: [], env, fetchImpl: async () => { calls += 1; return openAiSuccess('{}'); }, stdout: (line) => output.push(line), stderr: (line) => errors.push(line) });
-  assert.notEqual(inert, 0);
-  assert.equal(calls, 0);
-
-  const confirmed = await runProviderSmoke({ argv: ['--confirm-real-provider'], env, fetchImpl: async () => { calls += 1; return openAiSuccess('{}'); }, stdout: (line) => output.push(line), stderr: (line) => errors.push(line) });
-  assert.equal(confirmed, 0);
-  assert.equal(calls, 1);
-  const rendered = [...output, ...errors].join('\n');
-  assert.equal(rendered.includes('never-print-this-key'), false);
-  assert.equal(rendered.includes('https://hkbu.test'), false);
-  assert.equal(rendered.includes('smoke'), false);
-  assert.match(rendered, /"provider":"hkbu"/);
-  assert.match(rendered, /"normalizedSuccess":true/);
-
-  const failedOutput = [];
-  const failedErrors = [];
-  const failed = await runProviderSmoke({
-    argv: ['--confirm-real-provider'], env,
-    fetchImpl: async () => new Response('never-print-this-key and private provider body', { status: 401 }),
-    stdout: (line) => failedOutput.push(line), stderr: (line) => failedErrors.push(line),
+  let gitCalls = 0;
+  let requestedBody;
+  const clock = [1_000, 1_123];
+  const exitCode = await runProviderSmoke({
+    argv: ['--confirm-real-provider'],
+    env: smokeEnvironment(),
+    fetchImpl: async (url, init) => {
+      calls += 1;
+      requestedBody = init.body;
+      return openAiSuccess('{"ok":true}');
+    },
+    inspectGit: async () => {
+      gitCalls += 1;
+      return { commitSha: SMOKE_COMMIT, clean: true };
+    },
+    writeEvidence: async (record) => {
+      records.push(record);
+      return 'C:\\private\\path\\must-not-print.json';
+    },
+    now: () => SMOKE_NOW,
+    clockMs: () => clock.shift(),
+    stdout: (line) => output.push(line),
+    stderr: (line) => errors.push(line),
   });
-  assert.equal(failed, 1);
-  const failureRendered = [...failedOutput, ...failedErrors].join('\n');
-  assert.equal(failureRendered.includes('never-print-this-key'), false);
-  assert.equal(failureRendered.includes('private provider body'), false);
-  assert.equal(failureRendered.includes('https://hkbu.test'), false);
-  assert.match(failureRendered, /"httpClass":"4xx"/);
-  assert.match(failureRendered, /"code":"PROVIDER_AUTH_FAILED"/);
+
+  assert.equal(exitCode, 0);
+  assert.equal(calls, 1);
+  assert.equal(gitCalls, 2);
+  assert.equal(records.length, 1);
+  assert.match(requestedBody, /\{\\"ok\\":true\}/);
+  const record = records[0];
+  assert.deepEqual(Object.keys(record).sort(), [
+    'artifactSha256', 'capability', 'commitSha', 'contractVersion', 'httpClass',
+    'latencyMs', 'normalizedSuccess', 'occurredAt', 'provider', 'providerConfigDigest',
+    'requestCount', 'result', 'schemaVersion', 'usage',
+  ].sort());
+  assert.deepEqual(record.usage, { inputTokens: 10, outputTokens: 4, totalTokens: 14 });
+  assert.equal(record.latencyMs, 123);
+  const selected = loadConfig({ ...smokeEnvironment(), NODE_ENV: 'test' }).llm;
+  selected.credentialVersion = 'credential-v7';
+  assert.equal(record.providerConfigDigest, llmProviderConfigDigest(selected));
+  assert.equal(validateLlmSmokeEvidence(record, {
+    expectedVersion: record.artifactSha256,
+    commitSha: SMOKE_COMMIT,
+    provider: 'hkbu',
+    configDigest: record.providerConfigDigest,
+    now: SMOKE_NOW,
+  }).valid, true);
+
+  assert.equal(errors.length, 0);
+  assert.equal(output.length, 1);
+  const rendered = output[0];
+  assert.deepEqual(JSON.parse(rendered), {
+    provider: 'hkbu',
+    httpClass: '2xx',
+    normalizedSuccess: true,
+    latencyMs: 123,
+    artifactSha256: record.artifactSha256,
+    code: 'LLM_SMOKE_RECORDED',
+  });
+  for (const forbidden of [
+    'never-print-this-key', 'https://hkbu.test', 'private', 'path',
+    record.providerConfigDigest, '{"ok":true}', 'request-1',
+  ]) assert.equal(rendered.includes(forbidden), false);
+});
+
+test('provider smoke rejects dirty or moving Git state before publishing evidence', async (t) => {
+  const cases = [
+    ['dirty before request', [{ commitSha: SMOKE_COMMIT, clean: false }], 0, 2],
+    ['wrong commit before request', [{ commitSha: 'b'.repeat(40), clean: true }], 0, 2],
+    ['dirty after request', [
+      { commitSha: SMOKE_COMMIT, clean: true },
+      { commitSha: SMOKE_COMMIT, clean: false },
+    ], 1, 1],
+    ['commit moved after request', [
+      { commitSha: SMOKE_COMMIT, clean: true },
+      { commitSha: 'b'.repeat(40), clean: true },
+    ], 1, 1],
+  ];
+  for (const [name, states, expectedNetworkCalls, expectedExitCode] of cases) {
+    await t.test(name, async () => {
+      let calls = 0;
+      let writes = 0;
+      const errors = [];
+      const exitCode = await runProviderSmoke({
+        argv: ['--confirm-real-provider'],
+        env: smokeEnvironment(),
+        fetchImpl: async () => { calls += 1; return openAiSuccess('{"ok":true}'); },
+        inspectGit: async () => states.shift(),
+        writeEvidence: async () => { writes += 1; },
+        clockMs: (() => { let value = 1_000; return () => { value += 1; return value; }; })(),
+        stdout: () => {},
+        stderr: (line) => errors.push(line),
+      });
+      assert.equal(exitCode, expectedExitCode);
+      assert.equal(calls, expectedNetworkCalls);
+      assert.equal(writes, 0);
+      assert.equal(JSON.parse(errors.at(-1)).code, 'RELEASE_GIT_STATE_INVALID');
+    });
+  }
+});
+
+test('provider smoke hard-caps network use at one request and rechecks Git after provider failure', async () => {
+  let networkCalls = 0;
+  let gitCalls = 0;
+  let writes = 0;
+  const errors = [];
+  const exitCode = await runProviderSmoke({
+    argv: ['--confirm-real-provider'],
+    env: smokeEnvironment(),
+    fetchImpl: async () => { networkCalls += 1; return openAiSuccess('{"ok":true}'); },
+    createProvider: ({ fetchImpl }) => ({
+      provider: 'hkbu',
+      async generate() {
+        await fetchImpl('https://hkbu.test/first', {});
+        await fetchImpl('https://hkbu.test/second', {});
+        return { provider: 'hkbu', rawText: '{"ok":true}', usage: null };
+      },
+    }),
+    inspectGit: async () => { gitCalls += 1; return { commitSha: SMOKE_COMMIT, clean: true }; },
+    writeEvidence: async () => { writes += 1; },
+    stdout: () => {},
+    stderr: (line) => errors.push(line),
+  });
+
+  assert.equal(exitCode, 1);
+  assert.equal(networkCalls, 1);
+  assert.equal(gitCalls, 2);
+  assert.equal(writes, 0);
+  assert.equal(JSON.parse(errors.at(-1)).code, 'PROVIDER_SMOKE_REQUEST_LIMIT');
+});
+
+test('provider smoke requires exact normalized JSON and redacts provider and artifact failures', async (t) => {
+  for (const rawText of ['{}', '{"ok":1}', '{"ok":true,"extra":1}', '```json\n{"ok":true}\n```']) {
+    await t.test(`invalid normalized payload ${rawText}`, async () => {
+      let writes = 0;
+      const errors = [];
+      const exitCode = await runProviderSmoke({
+        argv: ['--confirm-real-provider'],
+        env: smokeEnvironment(),
+        fetchImpl: async () => openAiSuccess(rawText),
+        inspectGit: cleanFrozenGit(),
+        writeEvidence: async () => { writes += 1; },
+        clockMs: (() => { let value = 1_000; return () => ++value; })(),
+        stdout: () => {}, stderr: (line) => errors.push(line),
+      });
+      assert.equal(exitCode, 1);
+      assert.equal(writes, 0);
+      assert.equal(JSON.parse(errors.at(-1)).code, 'PROVIDER_INVALID_RESPONSE');
+    });
+  }
+
+  const providerErrors = [];
+  const providerExit = await runProviderSmoke({
+    argv: ['--confirm-real-provider'],
+    env: smokeEnvironment(),
+    fetchImpl: async () => new Response('never-print-this-key private provider body', { status: 401 }),
+    inspectGit: cleanFrozenGit(),
+    stdout: () => {}, stderr: (line) => providerErrors.push(line),
+  });
+  assert.equal(providerExit, 1);
+  assert.deepEqual(JSON.parse(providerErrors.at(-1)), {
+    provider: 'hkbu', httpClass: '4xx', normalizedSuccess: false,
+    latencyMs: JSON.parse(providerErrors.at(-1)).latencyMs,
+    artifactSha256: null, code: 'PROVIDER_AUTH_FAILED',
+  });
+  assert.equal(providerErrors.join('\n').includes('never-print-this-key'), false);
+  assert.equal(providerErrors.join('\n').includes('private provider body'), false);
+
+  const writeErrors = [];
+  const writeExit = await runProviderSmoke({
+    argv: ['--confirm-real-provider'],
+    env: smokeEnvironment(),
+    fetchImpl: async () => openAiSuccess('{"ok":true}'),
+    inspectGit: cleanFrozenGit(),
+    writeEvidence: async () => { const error = new Error('C:\\private\\evidence.json'); error.code = 'EEXIST'; throw error; },
+    clockMs: (() => { let value = 1_000; return () => ++value; })(),
+    stdout: () => {}, stderr: (line) => writeErrors.push(line),
+  });
+  assert.equal(writeExit, 1);
+  assert.equal(JSON.parse(writeErrors.at(-1)).code, 'LLM_SMOKE_ARTIFACT_EXISTS');
+  assert.equal(writeErrors.join('\n').includes('private'), false);
+});
+
+test('default LLM evidence writer creates a digest-named file exclusively with private permissions', async () => {
+  const record = finalizeReleaseEvidenceRecord({
+    schemaVersion: 1,
+    commitSha: SMOKE_COMMIT,
+    capability: 'llm',
+    provider: 'hkbu',
+    contractVersion: 'llm-connectivity-json-v1',
+    providerConfigDigest: 'b'.repeat(64),
+    occurredAt: SMOKE_NOW.toISOString(),
+    result: 'pass',
+    httpClass: '2xx',
+    normalizedSuccess: true,
+    requestCount: 1,
+    latencyMs: 1,
+    usage: { inputTokens: null, outputTokens: null, totalTokens: null },
+  });
+  let madeDirectory;
+  let invocation;
+  const filePath = await writeLlmSmokeEvidence(record, {
+    rootDirectory: 'C:\\candidate',
+    makeDirectory: async (directory, options) => { madeDirectory = { directory, options }; },
+    writeArtifact: async (path, contents, options) => { invocation = { path, contents, options }; },
+  });
+
+  assert.equal(madeDirectory.options.recursive, true);
+  assert.equal(filePath, invocation.path);
+  assert.equal(filePath.endsWith(`${SMOKE_COMMIT}-llm-${record.artifactSha256}.json`), true);
+  assert.deepEqual(invocation.options, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+  assert.deepEqual(JSON.parse(invocation.contents), record);
 });

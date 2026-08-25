@@ -1052,24 +1052,117 @@ test('voice config is Azure-only for ASR, validates regions, and keeps all provi
 
 test('voice release evidence is artifact/config/commit bound and expires dynamically after startup', async (t) => {
   const { finalizeEvidenceRecord, providerConfigDigest } = await import('../src/services/voice-evidence.js');
+  const {
+    blobIdentitySha256,
+    finalizeReleaseEvidenceRecord,
+    LLM_SMOKE_CONTRACT_VERSION,
+    llmProviderConfigDigest,
+    postgresIdentitySha256,
+  } = await import('../src/services/release-evidence.js');
   const directory = await mkdtemp(join(tmpdir(), 'hb-v1-speech-evidence-'));
   const asrPath = join(directory, 'asr.json');
   const ttsPath = join(directory, 'tts.json');
   const iosPath = join(directory, 'ios.json');
+  const inventoryPath = join(directory, 'legacy-inventory.json');
+  const dependencyPath = join(directory, 'dependency-acceptance.json');
+  const llmPath = join(directory, 'llm-smoke.json');
   const commitSha = 'd'.repeat(40);
   const occurredAt = '2026-08-25T00:00:00.000Z';
+  const databaseUrl = 'postgres://v1.example.test/v1';
+  const blobConnectionString = 'DefaultEndpointsProtocol=https;AccountName=v1media;AccountKey=fake-only;EndpointSuffix=core.windows.net';
+  const postgresResourceId = '/subscriptions/new/resourceGroups/v1/providers/Microsoft.DBforPostgreSQL/flexibleServers/v1';
+  const blobResourceId = '/subscriptions/new/resourceGroups/v1/providers/Microsoft.Storage/storageAccounts/v1media';
+  const postgresIdentity = postgresIdentitySha256(databaseUrl);
+  const blobIdentity = blobIdentitySha256({
+    connectionString: blobConnectionString,
+    container: 'v1-private-media',
+  });
+  const inventoryRecord = finalizeReleaseEvidenceRecord({
+    schemaVersion: 1,
+    commitSha,
+    legacyApplicationIds: ['hkbuddy-pilot-0630'],
+    legacyOrigins: ['https://hkbuddy-pilot-0630.azurewebsites.net'],
+    postgresResources: [],
+    blobResources: [],
+    declaresNoLegacyPostgres: true,
+    declaresNoLegacyBlob: true,
+    reviewedAt: occurredAt,
+    result: true,
+  });
+  const dependencyRecord = finalizeReleaseEvidenceRecord({
+    schemaVersion: 1,
+    commitSha,
+    legacyInventoryDigest: inventoryRecord.artifactSha256,
+    postgresResourceId,
+    postgresIdentitySha256: postgresIdentity,
+    blobResourceId,
+    blobIdentitySha256: blobIdentity,
+    schema: 'v1_accept_11111111111141118111111111111111',
+    blobPrefix: 'v1-accept/11111111-1111-4111-8111-111111111111/',
+    checks: [
+      { name: 'postgres-migration-health', status: 'pass', latencyMs: 1 },
+      { name: 'postgres-concurrency-recovery', status: 'pass', latencyMs: 2 },
+      { name: 'postgres-integrity-events', status: 'pass', latencyMs: 3 },
+      { name: 'postgres-rate-window-fencing', status: 'pass', latencyMs: 4 },
+      { name: 'blob-private-full-range-head', status: 'pass', latencyMs: 5 },
+      { name: 'postgres-media-fencing', status: 'pass', latencyMs: 6 },
+    ],
+    schemaAbsent: true,
+    blobPrefixObjectCount: 0,
+    result: true,
+    occurredAt,
+  });
+  const llmConfig = {
+    provider: 'hkbu',
+    credentialVersion: 'llm-rotation-2026-08',
+    timeoutMs: 12_000,
+    settings: {
+      apiKey: 'llm-secret',
+      baseUrl: 'https://llm.example.test',
+      model: 'model',
+      apiVersion: 'v1',
+    },
+  };
+  const llmRecord = finalizeReleaseEvidenceRecord({
+    schemaVersion: 1,
+    commitSha,
+    capability: 'llm',
+    provider: llmConfig.provider,
+    contractVersion: LLM_SMOKE_CONTRACT_VERSION,
+    providerConfigDigest: llmProviderConfigDigest(llmConfig),
+    occurredAt,
+    result: 'pass',
+    httpClass: '2xx',
+    normalizedSuccess: true,
+    requestCount: 1,
+    latencyMs: 100,
+    usage: { inputTokens: null, outputTokens: null, totalTokens: null },
+  });
+  await writeFile(inventoryPath, JSON.stringify(inventoryRecord));
+  await writeFile(dependencyPath, JSON.stringify(dependencyRecord));
+  await writeFile(llmPath, JSON.stringify(llmRecord));
   const baseEnvironment = {
     NODE_ENV: 'production', V1_PUBLIC_ORIGIN: 'https://v1.example.test', V1_SESSION_SECRET: 's'.repeat(32),
-    V1_TRUST_PROXY_HOPS: '1', V1_STORE_DRIVER: 'postgres', DATABASE_URL: 'postgres://v1.example.test/v1',
+    V1_TRUST_PROXY_HOPS: '1', V1_STORE_DRIVER: 'postgres', V1_DATABASE_URL: databaseUrl,
+    V1_POSTGRES_RESOURCE_ID: postgresResourceId,
     V1_MEDIA_DRIVER: 'azure-blob', V1_AZURE_BLOB_CONTAINER: 'v1-private-media',
-    V1_AZURE_STORAGE_CONNECTION_STRING: 'private-connection-string',
-    V1_LLM_PROVIDER: 'hkbu', HKBU_API_KEY: 'llm-secret', HKBU_BASE_URL: 'https://llm.example.test', HKBU_MODEL: 'model', HKBU_API_VERSION: 'v1',
+    V1_AZURE_STORAGE_CONNECTION_STRING: blobConnectionString,
+    V1_BLOB_RESOURCE_ID: blobResourceId,
+    V1_LLM_PROVIDER: 'hkbu', V1_LLM_CREDENTIAL_VERSION: llmConfig.credentialVersion,
+    V1_HKBU_API_KEY: llmConfig.settings.apiKey, V1_HKBU_BASE_URL: llmConfig.settings.baseUrl,
+    V1_HKBU_MODEL: llmConfig.settings.model, V1_HKBU_API_VERSION: llmConfig.settings.apiVersion,
+    V1_LLM_SMOKE_EVIDENCE_FILE: llmPath, V1_LLM_SMOKE_EVIDENCE_VERSION: llmRecord.artifactSha256,
     V1_INSTANCE_POLICY: 'single', V1_PRIVACY_NOTICE_VERSION: 'notice-v1', V1_PRIVACY_NOTICE_APPROVED: 'true', V1_RETENTION_WORKER_ENABLED: 'true',
     V1_RELEASE_COMMIT_SHA: commitSha,
+    V1_LEGACY_RESOURCE_INVENTORY_FILE: inventoryPath,
+    V1_LEGACY_RESOURCE_INVENTORY_VERSION: inventoryRecord.artifactSha256,
+    V1_LEGACY_RESOURCE_INVENTORY_APPROVED: 'true',
+    V1_DEPENDENCY_ACCEPTANCE_EVIDENCE_FILE: dependencyPath,
+    V1_DEPENDENCY_ACCEPTANCE_EVIDENCE_VERSION: dependencyRecord.artifactSha256,
     V1_ASR_PROVIDER: 'azure', V1_TTS_PROVIDER: 'azure', AZURE_SPEECH_KEY: 'speech-secret', AZURE_SPEECH_REGION: 'eastasia',
     V1_AZURE_SPEECH_CREDENTIAL_VERSION: 'speech-rotation-2026-08',
   };
-  const unverified = loadConfig(baseEnvironment, { now: () => new Date(occurredAt) });
+  const unverified = loadConfig({ ...baseEnvironment, NODE_ENV: 'test' }, { now: () => new Date(occurredAt) });
   const asrRecord = finalizeEvidenceRecord({
     schemaVersion: 1, commitSha, capability: 'asr', provider: 'azure', contractVersion: 'azure-asr-v1',
     providerConfigDigest: providerConfigDigest(unverified.asr, 'asr'), occurredAt, result: 'pass', latencyMs: 120,
@@ -1173,6 +1266,81 @@ test('speech evidence requires exact ASR fixture facts and keeps TTS free of ASR
     fixtureSha256: '7'.repeat(64),
     fixtureDurationMs: 1_000,
   }), 'tts', 'azure-tts-v1'), false);
+});
+
+test('voice evidence rejects unknown top-level and assertion fields', async () => {
+  const {
+    finalizeEvidenceRecord,
+    validateIosVoiceEvidence,
+    validateSpeechEvidence,
+  } = await import('../src/services/voice-evidence.js');
+  const commitSha = '9'.repeat(40);
+  const configDigest = '8'.repeat(64);
+  const now = new Date('2026-08-25T00:00:00.000Z');
+  const speechPayload = {
+    schemaVersion: 1,
+    commitSha,
+    capability: 'tts',
+    provider: 'azure',
+    contractVersion: 'azure-tts-v1',
+    providerConfigDigest: configDigest,
+    occurredAt: now.toISOString(),
+    result: 'pass',
+    latencyMs: 10,
+  };
+  const validateSpeech = (payload) => {
+    const record = finalizeEvidenceRecord(payload);
+    return validateSpeechEvidence(record, {
+      expectedVersion: record.artifactSha256,
+      commitSha,
+      capability: 'tts',
+      provider: 'azure',
+      contractVersion: 'azure-tts-v1',
+      configDigest,
+      now,
+    });
+  };
+  assert.equal(validateSpeech(speechPayload), true);
+  assert.equal(validateSpeech({ ...speechPayload, privateUrl: 'https://private.example.test/object' }), false);
+  assert.equal(validateSpeech({ ...speechPayload, transcript: 'must-not-be-accepted' }), false);
+
+  const assertions = {
+    normalizedCanonicalWav: true,
+    autoStop55Seconds: true,
+    permissionCleanup: true,
+    cancelCleanup: true,
+    oneIdempotentUpload: true,
+    editableTranscript: true,
+    textFallback: true,
+    noRawContainerUpload: true,
+  };
+  const iosPayload = {
+    schemaVersion: 1,
+    commitSha,
+    capability: 'ios-voice',
+    normalizerContractVersion: 'canonical-wav-v1',
+    deviceModelClass: 'real-iphone',
+    iosVersion: '19.0',
+    safariVersion: '19.0',
+    captureMimeType: 'audio/mp4',
+    fixtureSha256: '7'.repeat(64),
+    fixtureDurationMs: 1_000,
+    assertions,
+    occurredAt: now.toISOString(),
+    result: 'pass',
+  };
+  const validateIos = (payload) => {
+    const record = finalizeEvidenceRecord(payload);
+    return validateIosVoiceEvidence(record, {
+      expectedVersion: record.artifactSha256,
+      commitSha,
+      normalizerContractVersion: 'canonical-wav-v1',
+      now,
+    });
+  };
+  assert.equal(validateIos(iosPayload), true);
+  assert.equal(validateIos({ ...iosPayload, secret: 'must-not-be-accepted' }), false);
+  assert.equal(validateIos({ ...iosPayload, assertions: { ...assertions, privateUrl: true } }), false);
 });
 
 test('voice provider smoke is inert without exact confirmations and invokes only the selected fake capability once', async () => {

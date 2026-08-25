@@ -17,18 +17,33 @@ export function createDispatcher({
   leaseDurationMs = 15_000,
   renewalIntervalMs = 5_000,
   concurrency = dispatcherLimits.concurrency,
+  pollStaleAfterMs = Math.max(pollIntervalMs * 4, 5_000),
 } = {}) {
   if (!store || typeof processTurn !== 'function') throw new Error('dispatcher dependencies are required');
   if (renewalIntervalMs >= leaseDurationMs) throw new Error('renewal interval must be shorter than lease duration');
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 16) throw new Error('dispatcher concurrency must be between 1 and 16');
+  if (!Number.isInteger(pollStaleAfterMs) || pollStaleAfterMs <= 0) {
+    throw new Error('dispatcher poll staleness must be a positive integer');
+  }
   let started = false;
   let stopped = false;
+  let paused = false;
   let timer = null;
   let pumpPromise = null;
   let stopPromise = null;
   const activeJobs = new Set();
   const activeControllers = new Set();
   const activeRenewals = new Set();
+  let lastPollSucceededAt = null;
+  let lastPollOutcome = null;
+
+  function observePoll(outcome) {
+    lastPollOutcome = outcome;
+    try { lastPollSucceededAt = outcome === 'success' ? asDate(now()) : lastPollSucceededAt; } catch {
+      if (outcome === 'success') lastPollSucceededAt = null;
+      lastPollOutcome = 'failure';
+    }
+  }
 
   async function executeClaim(turn, leaseToken, controller) {
     let renewalPromise = null;
@@ -73,17 +88,45 @@ export function createDispatcher({
   }
 
   async function claimAndLaunch() {
-    if (stopped) return null;
+    if (stopped || paused) return null;
     const claimedAt = asDate(now());
     const leaseToken = randomUUID();
-    const turn = await store.claimNextTurn({
-      workerId,
-      leaseToken,
-      now: claimedAt,
-      leaseUntil: new Date(claimedAt.getTime() + leaseDurationMs),
-    });
+    let turn;
+    try {
+      turn = await store.claimNextTurn({
+        workerId,
+        leaseToken,
+        now: claimedAt,
+        leaseUntil: new Date(claimedAt.getTime() + leaseDurationMs),
+      });
+      observePoll('success');
+    } catch (error) {
+      observePoll('failure');
+      throw error;
+    }
+    if (stopped || paused) return null;
     if (!turn) return null;
     return { job: launch(turn, leaseToken) };
+  }
+
+  async function probe({ signal } = {}) {
+    if (stopped || typeof store.dispatcherHealthCheck !== 'function') {
+      observePoll('failure');
+      throw Object.assign(new Error('Dispatcher health check is unavailable'), { code: 'DISPATCHER_NOT_READY' });
+    }
+    try {
+      if (signal?.aborted) throw Object.assign(new Error('Dispatcher health check was aborted'), { code: 'DISPATCHER_NOT_READY' });
+      const health = await store.dispatcherHealthCheck({ signal });
+      if (signal?.aborted) throw Object.assign(new Error('Dispatcher health check was aborted'), { code: 'DISPATCHER_NOT_READY' });
+      if (health?.ok !== true || health?.driver !== 'postgres' || health?.capability !== 'turn-claim') {
+        throw Object.assign(new Error('Dispatcher health check failed'), { code: 'DISPATCHER_NOT_READY' });
+      }
+      observePoll('success');
+      return true;
+    } catch (error) {
+      observePoll('failure');
+      throw error;
+    }
   }
 
   async function runOnce() {
@@ -94,7 +137,7 @@ export function createDispatcher({
   }
 
   function schedule(delay = pollIntervalMs) {
-    if (!started || stopped || timer) return;
+    if (!started || stopped || paused || timer) return;
     timer = setTimeout(() => {
       timer = null;
       void pump();
@@ -106,7 +149,7 @@ export function createDispatcher({
     if (pumpPromise) return pumpPromise;
     pumpPromise = (async () => {
       try {
-        while (started && !stopped && activeJobs.size < concurrency) {
+        while (started && !stopped && !paused && activeJobs.size < concurrency) {
           const claimed = await claimAndLaunch();
           if (!claimed) break;
         }
@@ -114,20 +157,34 @@ export function createDispatcher({
         // Durable polling retries on the next interval; request/provider data is never logged here.
       } finally {
         pumpPromise = null;
-        if (started && !stopped && activeJobs.size < concurrency) schedule();
+        if (started && !stopped && !paused && activeJobs.size < concurrency) schedule();
       }
     })();
     return pumpPromise;
   }
 
-  function start() {
+  function start({ paused: initiallyPaused = false } = {}) {
     if (started || stopped) return;
     started = true;
+    paused = initiallyPaused;
+    if (!paused) schedule(0);
+  }
+
+  function resume() {
+    if (!started || stopped || !paused) return;
+    paused = false;
     schedule(0);
   }
 
+  function pause() {
+    if (!started || stopped || paused) return;
+    paused = true;
+    if (timer) clearTimeout(timer);
+    timer = null;
+  }
+
   function wake() {
-    if (!started || stopped) return;
+    if (!started || stopped || paused) return;
     if (timer) clearTimeout(timer);
     timer = null;
     schedule(0);
@@ -137,6 +194,7 @@ export function createDispatcher({
     if (stopPromise) return stopPromise;
     stopped = true;
     started = false;
+    paused = false;
     if (timer) clearTimeout(timer);
     timer = null;
     for (const controller of activeControllers) controller.abort();
@@ -150,5 +208,21 @@ export function createDispatcher({
     return stopPromise;
   }
 
-  return { workerId, runOnce, start, wake, stop };
+  function readiness(options = {}) {
+    let fresh = false;
+    try {
+      const current = asDate(options.now ?? now());
+      const age = lastPollSucceededAt ? current.getTime() - lastPollSucceededAt.getTime() : Infinity;
+      fresh = age >= 0 && (age <= pollStaleAfterMs || activeJobs.size >= concurrency);
+    } catch { /* fail closed */ }
+    const healthy = started && !stopped && lastPollOutcome === 'success' && fresh;
+    return {
+      name: 'dispatcher',
+      status: healthy ? 'ready' : 'not-ready',
+      healthy,
+      version: 'dispatcher-v1',
+    };
+  }
+
+  return { workerId, runOnce, probe, start, pause, resume, wake, stop, readiness };
 }

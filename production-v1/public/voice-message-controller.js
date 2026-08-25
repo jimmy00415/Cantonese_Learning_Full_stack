@@ -14,7 +14,7 @@ const SAFE_ERRORS = Object.freeze({
   VOICE_CONSENT_REQUIRED: 'Review and allow microphone access before recording.',
   VOICE_CONTROLLER_DISPOSED: 'Voice input is no longer active. You can continue by typing.',
   VOICE_CONTROLLER_SUSPENDED: 'Voice input paused when this page became inactive. Reopen it to continue.',
-  VOICE_PERMISSION_FAILED: 'Microphone access could not be confirmed. You can continue by typing.',
+  VOICE_PERMISSION_FAILED: 'Microphone access is blocked. Allow it in your browser or device settings, then retry—or continue by typing.',
   VOICE_CAPTURE_FAILED: 'The recording could not be completed. You can continue by typing.',
   VOICE_RECORDING_INVALID: 'The recording could not be prepared safely. Please try again or type your message.',
   VOICE_RECORDING_SAVE_FAILED: 'The recording could not be saved safely. Please try again or type your message.',

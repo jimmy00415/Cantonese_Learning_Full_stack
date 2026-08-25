@@ -730,7 +730,7 @@ test('snapshot and notifications are immutable copies and unsafe dependency erro
     controller.preflightPermission(),
     (error) => error.code === 'VOICE_PERMISSION_FAILED'
       && error.textSafe === true
-      && error.message === 'Microphone access could not be confirmed. You can continue by typing.',
+      && error.message === 'Microphone access is blocked. Allow it in your browser or device settings, then retry—or continue by typing.',
   );
 
   const snapshot = controller.snapshot();

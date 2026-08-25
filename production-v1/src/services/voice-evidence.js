@@ -1,11 +1,36 @@
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+
+import { readBoundedJsonObjectFile } from './release-evidence.js';
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
 const FUTURE_SKEW_MS = 5 * 60 * 1_000;
 const RELEASE_SHA = /^[0-9a-f]{40}$/i;
 const DIGEST = /^[0-9a-f]{64}$/;
 const AZURE_REGION = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const VOICE_EVIDENCE_MAX_BYTES = 64 * 1_024;
+const SPEECH_EVIDENCE_KEYS = Object.freeze([
+  'schemaVersion', 'commitSha', 'capability', 'provider', 'contractVersion',
+  'providerConfigDigest', 'occurredAt', 'result', 'latencyMs', 'artifactSha256',
+]);
+const ASR_FIXTURE_KEYS = Object.freeze(['fixtureSha256', 'fixtureDurationMs']);
+const IOS_ASSERTION_KEYS = Object.freeze([
+  'normalizedCanonicalWav', 'autoStop55Seconds', 'permissionCleanup', 'cancelCleanup',
+  'oneIdempotentUpload', 'editableTranscript', 'textFallback', 'noRawContainerUpload',
+]);
+const IOS_EVIDENCE_KEYS = Object.freeze([
+  'schemaVersion', 'commitSha', 'capability', 'normalizerContractVersion',
+  'deviceModelClass', 'iosVersion', 'safariVersion', 'captureMimeType',
+  'fixtureSha256', 'fixtureDurationMs', 'assertions', 'occurredAt', 'result',
+  'artifactSha256',
+]);
+
+function hasExactOwnKeys(value, expectedKeys) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const actualKeys = Object.keys(value);
+  if (actualKeys.length !== expectedKeys.length) return false;
+  const expected = new Set(expectedKeys);
+  return actualKeys.every((key) => expected.has(key));
+}
 
 function canonicalValue(value) {
   if (Array.isArray(value)) return value.map(canonicalValue);
@@ -77,14 +102,11 @@ export function providerConfigDigest(config, capability) {
   return createHash('sha256').update(canonicalJson(providerConfigDescriptor(config, capability))).digest('hex');
 }
 
-export function readEvidenceRecord(filePath) {
-  if (!filePath) return null;
-  try {
-    const record = JSON.parse(readFileSync(filePath, 'utf8'));
-    return record && typeof record === 'object' && !Array.isArray(record) ? record : null;
-  } catch {
-    return null;
-  }
+export function readEvidenceRecord(filePath, dependencies = {}) {
+  return readBoundedJsonObjectFile(filePath, {
+    ...dependencies,
+    maximumBytes: VOICE_EVIDENCE_MAX_BYTES,
+  });
 }
 
 function artifactValid(record, expectedVersion) {
@@ -116,8 +138,12 @@ export function validateSpeechEvidence(record, {
   expectedVersion, commitSha, capability, provider, contractVersion,
   configDigest, now,
 }) {
+  const expectedKeys = capability === 'asr'
+    ? [...SPEECH_EVIDENCE_KEYS, ...ASR_FIXTURE_KEYS]
+    : SPEECH_EVIDENCE_KEYS;
   return Boolean(
-    RELEASE_SHA.test(String(commitSha ?? ''))
+    hasExactOwnKeys(record, expectedKeys)
+    && RELEASE_SHA.test(String(commitSha ?? ''))
     && artifactValid(record, expectedVersion)
     && record.schemaVersion === 1
     && record.commitSha === commitSha
@@ -136,12 +162,10 @@ export function validateIosVoiceEvidence(record, {
   expectedVersion, commitSha, normalizerContractVersion, now,
 }) {
   const assertions = record?.assertions ?? {};
-  const requiredAssertions = [
-    'normalizedCanonicalWav', 'autoStop55Seconds', 'permissionCleanup', 'cancelCleanup',
-    'oneIdempotentUpload', 'editableTranscript', 'textFallback', 'noRawContainerUpload',
-  ];
   return Boolean(
-    RELEASE_SHA.test(String(commitSha ?? ''))
+    hasExactOwnKeys(record, IOS_EVIDENCE_KEYS)
+    && hasExactOwnKeys(assertions, IOS_ASSERTION_KEYS)
+    && RELEASE_SHA.test(String(commitSha ?? ''))
     && artifactValid(record, expectedVersion)
     && record.schemaVersion === 1
     && record.commitSha === commitSha
@@ -154,7 +178,7 @@ export function validateIosVoiceEvidence(record, {
     && typeof record.captureMimeType === 'string' && record.captureMimeType
     && DIGEST.test(String(record.fixtureSha256 ?? ''))
     && Number.isFinite(record.fixtureDurationMs) && record.fixtureDurationMs > 0
-    && requiredAssertions.every((name) => assertions[name] === true)
+    && IOS_ASSERTION_KEYS.every((name) => assertions[name] === true)
     && timeValid(record, now, 90 * DAY_MS),
   );
 }

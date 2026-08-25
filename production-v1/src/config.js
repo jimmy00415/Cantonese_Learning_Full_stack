@@ -9,11 +9,19 @@ import {
   validateSpeechEvidence,
   voiceEvidenceContracts,
 } from './services/voice-evidence.js';
+import {
+  blobIdentitySha256,
+  llmProviderConfigDigest,
+  postgresIdentitySha256,
+  validateLlmSmokeEvidenceFile,
+  validateReleaseEvidenceBundle,
+} from './services/release-evidence.js';
 
 const TRUE = 'true';
 const AZURE_REQUEST_PROFILES = new Set(['standard', 'reasoning']);
+const NODE_ENVIRONMENTS = new Set(['development', 'test', 'production']);
 export const NORMALIZER_CONTRACT_VERSION = 'canonical-wav-v1';
-const RELEASE_SHA = /^[0-9a-f]{40}$/i;
+const RELEASE_SHA = /^[0-9a-f]{40}$/;
 const AZURE_SPEECH_REGION = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 function firstDefined(env, ...names) {
@@ -43,31 +51,32 @@ function normalizeMiniMaxKey(value) {
   return String(value ?? '').trim().replace(/^Minimax-/, '');
 }
 
-function selectedLlmSettings(env, provider) {
+function selectedLlmSettings(env, provider, { v1Only = false } = {}) {
+  const selected = (...names) => firstDefined(env, ...(v1Only ? names.slice(0, 1) : names));
   if (provider === 'hkbu') {
     return {
-      apiKey: firstDefined(env, 'V1_HKBU_API_KEY', 'HKBU_API_KEY'),
-      baseUrl: firstDefined(env, 'V1_HKBU_BASE_URL', 'HKBU_BASE_URL'),
-      model: firstDefined(env, 'V1_HKBU_MODEL', 'HKBU_MODEL'),
-      apiVersion: firstDefined(env, 'V1_HKBU_API_VERSION', 'HKBU_API_VERSION'),
+      apiKey: selected('V1_HKBU_API_KEY', 'HKBU_API_KEY'),
+      baseUrl: selected('V1_HKBU_BASE_URL', 'HKBU_BASE_URL'),
+      model: selected('V1_HKBU_MODEL', 'HKBU_MODEL'),
+      apiVersion: selected('V1_HKBU_API_VERSION', 'HKBU_API_VERSION'),
     };
   }
   if (provider === 'azure-openai') {
     return {
-      apiKey: firstDefined(env, 'V1_AZURE_OPENAI_KEY', 'AZURE_OPENAI_KEY'),
-      endpoint: firstDefined(env, 'V1_AZURE_OPENAI_ENDPOINT', 'AZURE_OPENAI_ENDPOINT'),
-      deployment: firstDefined(env, 'V1_AZURE_OPENAI_DEPLOYMENT', 'AZURE_OPENAI_DEPLOYMENT'),
-      apiVersion: firstDefined(env, 'V1_AZURE_OPENAI_API_VERSION', 'AZURE_OPENAI_API_VERSION'),
-      requestProfile: firstDefined(env, 'V1_AZURE_OPENAI_REQUEST_PROFILE', 'AZURE_OPENAI_REQUEST_PROFILE')?.trim().toLowerCase(),
-      minCompletionTokens: boundedInteger(firstDefined(env, 'V1_AZURE_OPENAI_MIN_COMPLETION_TOKENS', 'AZURE_OPENAI_MIN_COMPLETION_TOKENS'), 1600, 800, 6000),
+      apiKey: selected('V1_AZURE_OPENAI_KEY', 'AZURE_OPENAI_KEY'),
+      endpoint: selected('V1_AZURE_OPENAI_ENDPOINT', 'AZURE_OPENAI_ENDPOINT'),
+      deployment: selected('V1_AZURE_OPENAI_DEPLOYMENT', 'AZURE_OPENAI_DEPLOYMENT'),
+      apiVersion: selected('V1_AZURE_OPENAI_API_VERSION', 'AZURE_OPENAI_API_VERSION'),
+      requestProfile: selected('V1_AZURE_OPENAI_REQUEST_PROFILE', 'AZURE_OPENAI_REQUEST_PROFILE')?.trim().toLowerCase(),
+      minCompletionTokens: boundedInteger(selected('V1_AZURE_OPENAI_MIN_COMPLETION_TOKENS', 'AZURE_OPENAI_MIN_COMPLETION_TOKENS'), 1600, 800, 6000),
     };
   }
   if (provider === 'minimax') {
     return {
-      apiKey: normalizeMiniMaxKey(firstDefined(env, 'V1_MINIMAX_API_KEY', 'MINIMAX_API_KEY')),
-      baseUrl: firstDefined(env, 'V1_MINIMAX_BASE_URL', 'MINIMAX_BASE_URL'),
-      anthropicBaseUrl: firstDefined(env, 'V1_MINIMAX_ANTHROPIC_BASE_URL', 'MINIMAX_ANTHROPIC_BASE_URL'),
-      model: firstDefined(env, 'V1_MINIMAX_LLM_MODEL', 'MINIMAX_LLM_MODEL'),
+      apiKey: normalizeMiniMaxKey(selected('V1_MINIMAX_API_KEY', 'MINIMAX_API_KEY')),
+      baseUrl: selected('V1_MINIMAX_BASE_URL', 'MINIMAX_BASE_URL'),
+      anthropicBaseUrl: selected('V1_MINIMAX_ANTHROPIC_BASE_URL', 'MINIMAX_ANTHROPIC_BASE_URL'),
+      model: selected('V1_MINIMAX_LLM_MODEL', 'MINIMAX_LLM_MODEL'),
     };
   }
   return {};
@@ -81,6 +90,32 @@ function configuredLlm(provider, settings) {
   }
   if (provider === 'minimax') return Boolean(settings.apiKey && settings.baseUrl && settings.anthropicBaseUrl && settings.model);
   return provider === 'deterministic';
+}
+
+function buildLlmConfiguration(env, { v1Only = false } = {}) {
+  const provider = asProvider(
+    v1Only ? env.V1_LLM_PROVIDER : firstDefined(env, 'V1_LLM_PROVIDER', 'LLM_PROVIDER'),
+    v1Only ? 'none' : 'deterministic',
+  );
+  const settings = selectedLlmSettings(env, provider, { v1Only });
+  if (provider === 'azure-openai' && settings.requestProfile
+    && !AZURE_REQUEST_PROFILES.has(settings.requestProfile)) {
+    throw new Error('V1_AZURE_OPENAI_REQUEST_PROFILE must be standard or reasoning');
+  }
+  return {
+    provider,
+    available: configuredLlm(provider, settings),
+    credentialVersion: env.V1_LLM_CREDENTIAL_VERSION?.trim(),
+    settings,
+    timeoutMs: boundedInteger(
+      v1Only
+        ? env.V1_LLM_PROVIDER_TIMEOUT_MS
+        : firstDefined(env, 'V1_LLM_PROVIDER_TIMEOUT_MS', 'LLM_PROVIDER_TIMEOUT_MS'),
+      12_000,
+      1_000,
+      12_000,
+    ),
+  };
 }
 
 function selectedAsrSettings(env, provider) {
@@ -142,22 +177,49 @@ function boundedInteger(value, fallback, minimum, maximum) {
   return parsed;
 }
 
+function validResourceId(value) {
+  return typeof value === 'string'
+    && value === value.trim()
+    && value.length > 0 && value.length <= 1_024
+    && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+function canonicalPublicOrigin(value, { production = false } = {}) {
+  if (typeof value !== 'string' || !value) return null;
+  try {
+    const url = new URL(value);
+    if ((production ? url.protocol !== 'https:' : !['http:', 'https:'].includes(url.protocol))
+      || url.username || url.password || value !== url.origin) return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
 function assertProductionReady(config) {
-  if (!config.publicOrigin) throw new Error('V1_PUBLIC_ORIGIN is required in production');
+  if (!canonicalPublicOrigin(config.publicOrigin, { production: true })) {
+    throw new Error('V1_PUBLIC_ORIGIN must be a canonical HTTPS origin in production');
+  }
   if (Buffer.byteLength(config.sessionSecret ?? '') < 32) {
     throw new Error('V1_SESSION_SECRET must be at least 32 bytes in production');
   }
   if (!config.trustedProxyHopsExplicit || config.trustedProxyHops === null) {
     throw new Error('V1_TRUST_PROXY_HOPS must be explicitly set in production');
   }
-  if (config.storeDriver !== 'postgres' || !config.databaseUrl) {
-    throw new Error('Production requires V1_STORE_DRIVER=postgres and DATABASE_URL');
+  if (config.storeDriver !== 'postgres') throw new Error('V1_STORE_DRIVER=postgres is required in production');
+  if (!config.databaseUrl) throw new Error('V1_DATABASE_URL is required in production');
+  if (!validResourceId(config.postgresResourceId)) throw new Error('V1_POSTGRES_RESOURCE_ID is required in production');
+  if (config.mediaDriver !== 'azure-blob') throw new Error('V1_MEDIA_DRIVER=azure-blob is required in production');
+  if (!config.mediaContainer) throw new Error('V1_AZURE_BLOB_CONTAINER is required in production');
+  if (!config.mediaCredential) {
+    throw new Error('V1_AZURE_STORAGE_CONNECTION_STRING or V1_AZURE_BLOB_ACCOUNT_URL is required in production');
   }
-  if (config.mediaDriver !== 'azure-blob' || !config.mediaContainer || !config.mediaCredential) {
-    throw new Error('Production requires Azure Blob media configuration');
-  }
+  if (!validResourceId(config.blobResourceId)) throw new Error('V1_BLOB_RESOURCE_ID is required in production');
   if (!config.llm.available || config.llm.provider === 'deterministic') {
     throw new Error('Production requires a configured real LLM provider');
+  }
+  if (!validResourceId(config.llm.credentialVersion)) {
+    throw new Error('V1_LLM_CREDENTIAL_VERSION is required in production');
   }
   const providerUrls = config.llm.provider === 'hkbu'
     ? [config.llm.settings.baseUrl]
@@ -176,6 +238,22 @@ function assertProductionReady(config) {
     throw new Error('An approved V1_PRIVACY_NOTICE_VERSION is required in production');
   }
   if (!config.retentionWorkerEnabled) throw new Error('V1_RETENTION_WORKER_ENABLED=true is required in production');
+  if (!config.releaseCommitSha) throw new Error('V1_RELEASE_COMMIT_SHA is required in production');
+}
+
+export function loadLlmSmokeConfiguration(environment = process.env, { now = () => new Date() } = {}) {
+  const env = loadEnvironmentFile(environment);
+  const releaseCommitSha = env.V1_RELEASE_COMMIT_SHA?.trim() || null;
+  if (!releaseCommitSha || !RELEASE_SHA.test(releaseCommitSha)) {
+    throw new Error('V1_RELEASE_COMMIT_SHA must be a lowercase 40-hex commit SHA');
+  }
+  const llm = buildLlmConfiguration(env, { v1Only: true });
+  if (!llm.available || llm.provider === 'deterministic' || !validResourceId(llm.credentialVersion)) {
+    throw new Error('Strict V1 LLM provider configuration is required');
+  }
+  llmProviderConfigDigest(llm);
+  void now;
+  return { releaseCommitSha, llm };
 }
 
 function publicStatusFor(config, speechEvidence, at) {
@@ -237,13 +315,11 @@ function publicStatusFor(config, speechEvidence, at) {
 export function loadConfig(environment = process.env, { now = () => new Date() } = {}) {
   const env = loadEnvironmentFile(environment);
   const nodeEnv = env.NODE_ENV ?? 'development';
-  const isProduction = nodeEnv === 'production';
-  const llmProvider = asProvider(firstDefined(env, 'V1_LLM_PROVIDER', 'LLM_PROVIDER'), 'deterministic');
-  const llmSettings = selectedLlmSettings(env, llmProvider);
-  if (llmProvider === 'azure-openai' && llmSettings.requestProfile
-    && !AZURE_REQUEST_PROFILES.has(llmSettings.requestProfile)) {
-    throw new Error('V1_AZURE_OPENAI_REQUEST_PROFILE must be standard or reasoning');
+  if (!NODE_ENVIRONMENTS.has(nodeEnv)) {
+    throw new Error('NODE_ENV must be exactly development, test, or production');
   }
+  const isProduction = nodeEnv === 'production';
+  const llm = buildLlmConfiguration(env, { v1Only: isProduction });
   const asrProvider = asProvider(firstDefined(env, 'V1_ASR_PROVIDER', 'ASR_PROVIDER'));
   const ttsProvider = asProvider(firstDefined(env, 'V1_TTS_PROVIDER', 'TTS_PROVIDER'));
   const asrSettings = selectedAsrSettings(env, asrProvider);
@@ -259,6 +335,18 @@ export function loadConfig(environment = process.env, { now = () => new Date() }
   const mediaAccountUrl = isProduction
     ? env.V1_AZURE_BLOB_ACCOUNT_URL
     : firstDefined(env, 'V1_AZURE_BLOB_ACCOUNT_URL', 'AZURE_BLOB_ACCOUNT_URL');
+  const databaseUrl = isProduction
+    ? env.V1_DATABASE_URL
+    : firstDefined(env, 'V1_DATABASE_URL', 'DATABASE_URL');
+  const mediaContainer = isProduction
+    ? env.V1_AZURE_BLOB_CONTAINER
+    : firstDefined(env, 'V1_AZURE_BLOB_CONTAINER', 'AZURE_BLOB_CONTAINER', 'AZURE_STORAGE_CONTAINER');
+  const postgresResourceId = isProduction
+    ? env.V1_POSTGRES_RESOURCE_ID
+    : firstDefined(env, 'V1_POSTGRES_RESOURCE_ID', 'POSTGRES_RESOURCE_ID');
+  const blobResourceId = isProduction
+    ? env.V1_BLOB_RESOURCE_ID
+    : firstDefined(env, 'V1_BLOB_RESOURCE_ID', 'BLOB_RESOURCE_ID');
   if (mediaConnectionString && mediaAccountUrl) {
     throw new Error('Configure exactly one Azure Blob authentication mode');
   }
@@ -268,18 +356,33 @@ export function loadConfig(environment = process.env, { now = () => new Date() }
     throw new Error('V1_RELEASE_COMMIT_SHA must be a 40-hex commit SHA');
   }
 
+  const configuredPublicOrigin = isProduction
+    ? env.V1_PUBLIC_ORIGIN
+    : firstDefined(env, 'V1_PUBLIC_ORIGIN', 'PUBLIC_ORIGIN');
+  const publicOrigin = configuredPublicOrigin
+    ?? `http://localhost:${boundedInteger(env.PORT, 3000, 0, 65_535)}`;
+  if (!canonicalPublicOrigin(publicOrigin, { production: isProduction })) {
+    throw new Error(isProduction
+      ? 'V1_PUBLIC_ORIGIN must be a canonical HTTPS origin in production'
+      : 'Public origin must be a canonical HTTP or HTTPS origin');
+  }
+
   const config = {
     nodeEnv,
-    publicOrigin: firstDefined(env, 'V1_PUBLIC_ORIGIN', 'PUBLIC_ORIGIN'),
-    sessionSecret: firstDefined(env, 'V1_SESSION_SECRET', 'SESSION_SECRET'),
+    publicOrigin,
+    sessionSecret: isProduction
+      ? env.V1_SESSION_SECRET
+      : firstDefined(env, 'V1_SESSION_SECRET', 'SESSION_SECRET'),
     trustedProxyHops: parseTrustedProxyHops(trustedProxyValue),
     trustedProxyHopsExplicit: env.V1_TRUST_PROXY_HOPS !== undefined,
-    storeDriver: firstDefined(env, 'V1_STORE_DRIVER', 'STORE_DRIVER') ?? 'atomic-file',
+    storeDriver: (isProduction ? env.V1_STORE_DRIVER : firstDefined(env, 'V1_STORE_DRIVER', 'STORE_DRIVER')) ?? 'atomic-file',
     atomicFilePath: resolve(firstDefined(env, 'V1_ATOMIC_FILE_PATH', 'ATOMIC_FILE_PATH') ?? 'data/store.json'),
-    databaseUrl: env.DATABASE_URL,
-    mediaDriver: firstDefined(env, 'V1_MEDIA_DRIVER', 'MEDIA_DRIVER') ?? 'local',
+    databaseUrl,
+    postgresResourceId,
+    mediaDriver: (isProduction ? env.V1_MEDIA_DRIVER : firstDefined(env, 'V1_MEDIA_DRIVER', 'MEDIA_DRIVER')) ?? 'local',
     localMediaPath: resolve(firstDefined(env, 'V1_LOCAL_MEDIA_PATH', 'LOCAL_MEDIA_PATH') ?? 'media'),
-    mediaContainer: firstDefined(env, 'V1_AZURE_BLOB_CONTAINER', 'AZURE_BLOB_CONTAINER', 'AZURE_STORAGE_CONTAINER'),
+    mediaContainer,
+    blobResourceId,
     mediaConnectionString,
     mediaAccountUrl,
     mediaAuthMode: mediaConnectionString ? 'connection-string' : mediaAccountUrl ? 'managed-identity' : null,
@@ -290,6 +393,13 @@ export function loadConfig(environment = process.env, { now = () => new Date() }
     retentionWorkerEnabled: asBoolean(env.V1_RETENTION_WORKER_ENABLED),
     releaseCommitSha,
     normalizerContractVersion: NORMALIZER_CONTRACT_VERSION,
+    dependencyInitTimeoutMs: boundedInteger(env.V1_DEPENDENCY_INIT_TIMEOUT_MS, 10_000, 100, 30_000),
+    readinessCheckTimeoutMs: boundedInteger(env.V1_READINESS_CHECK_TIMEOUT_MS, 3_000, 100, 10_000),
+    readinessWatchdogIntervalMs: boundedInteger(env.V1_READINESS_WATCHDOG_INTERVAL_MS, 30_000, 1_000, 300_000),
+    startupStepTimeoutMs: boundedInteger(env.V1_STARTUP_STEP_TIMEOUT_MS, 15_000, 100, 60_000),
+    postgresConnectionTimeoutMs: boundedInteger(env.V1_POSTGRES_CONNECTION_TIMEOUT_MS, 5_000, 100, 30_000),
+    postgresQueryTimeoutMs: boundedInteger(env.V1_POSTGRES_QUERY_TIMEOUT_MS, 10_000, 100, 30_000),
+    postgresStatementTimeoutMs: boundedInteger(env.V1_POSTGRES_STATEMENT_TIMEOUT_MS, 10_000, 100, 30_000),
     rateLimits: {
       bootstrap: rateLimit(env.V1_SESSION_BOOTSTRAP_LIMIT_10M, 20),
       message5m: rateLimit(env.V1_MESSAGE_LIMIT_5M, 30),
@@ -299,12 +409,7 @@ export function loadConfig(environment = process.env, { now = () => new Date() }
       tts10m: rateLimit(env.V1_TTS_LIMIT_10M, 5),
       ttsDaily: rateLimit(env.V1_TTS_LIMIT_DAY, 20),
     },
-    llm: {
-      provider: llmProvider,
-      available: configuredLlm(llmProvider, llmSettings),
-      settings: llmSettings,
-      timeoutMs: boundedInteger(firstDefined(env, 'V1_LLM_PROVIDER_TIMEOUT_MS', 'LLM_PROVIDER_TIMEOUT_MS'), 12_000, 1_000, 12_000),
-    },
+    llm,
     asr: { provider: asrProvider, available: configuredAsr(asrProvider, asrSettings), settings: asrSettings },
     tts: { provider: ttsProvider, available: configuredTts(ttsProvider, ttsSettings), settings: ttsSettings },
     sse: {
@@ -317,12 +422,53 @@ export function loadConfig(environment = process.env, { now = () => new Date() }
   if (!isProduction && config.trustedProxyHops === null) {
     throw new Error('V1_TRUST_PROXY_HOPS must be a non-negative integer');
   }
-  if (isProduction) assertProductionReady(config);
+  let releaseEvidence = null;
+  let llmEvidence = null;
+  let productionConfigurationReady = false;
+  if (isProduction) {
+    assertProductionReady(config);
+    const postgresIdentity = postgresIdentitySha256(config.databaseUrl);
+    const blobIdentity = blobIdentitySha256({
+      accountUrl: config.mediaAccountUrl,
+      connectionString: config.mediaConnectionString,
+      container: config.mediaContainer,
+    });
+    const binding = {
+      inventoryFile: env.V1_LEGACY_RESOURCE_INVENTORY_FILE,
+      inventoryVersion: env.V1_LEGACY_RESOURCE_INVENTORY_VERSION,
+      inventoryApproved: asBoolean(env.V1_LEGACY_RESOURCE_INVENTORY_APPROVED),
+      dependencyFile: env.V1_DEPENDENCY_ACCEPTANCE_EVIDENCE_FILE,
+      dependencyVersion: env.V1_DEPENDENCY_ACCEPTANCE_EVIDENCE_VERSION,
+      commitSha: config.releaseCommitSha,
+      postgresResourceId: config.postgresResourceId,
+      postgresIdentitySha256: postgresIdentity,
+      blobResourceId: config.blobResourceId,
+      blobIdentitySha256: blobIdentity,
+    };
+    const evidence = validateReleaseEvidenceBundle({ ...binding, now: now() });
+    if (!evidence.valid) throw new Error(`Production release evidence is invalid (${evidence.code})`);
+    releaseEvidence = Object.freeze(binding);
+    const llmBinding = {
+      evidenceFile: env.V1_LLM_SMOKE_EVIDENCE_FILE,
+      evidenceVersion: env.V1_LLM_SMOKE_EVIDENCE_VERSION,
+      commitSha: config.releaseCommitSha,
+      provider: config.llm.provider,
+      configDigest: llmProviderConfigDigest(config.llm),
+    };
+    const llmSmokeEvidence = validateLlmSmokeEvidenceFile({ ...llmBinding, now: now() });
+    if (!llmSmokeEvidence.valid) {
+      throw new Error(`Production LLM smoke evidence is invalid (${llmSmokeEvidence.code})`);
+    }
+    llmEvidence = Object.freeze(llmBinding);
+    productionConfigurationReady = true;
+  }
 
   const runtime = {
     ...config,
-    productionReady: isProduction && config.storeDriver === 'postgres' && config.mediaDriver === 'azure-blob'
-      && config.llm.available && config.llm.provider !== 'deterministic',
+    productionConfigurationReady,
+    productionReady: false,
+    releaseEvidence,
+    llmEvidence,
   };
   const speechEvidence = {
     asr: { record: readEvidenceRecord(env.V1_ASR_SMOKE_EVIDENCE_FILE), version: env.V1_ASR_SMOKE_EVIDENCE_VERSION ?? null },
