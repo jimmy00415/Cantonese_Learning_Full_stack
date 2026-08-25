@@ -2841,15 +2841,18 @@ test('voice HTTP transcription is owned, idempotent, editable, status-recoverabl
   assert.equal(created.body.data.transcript, '可編輯廣東話');
   assert.equal(created.body.data.requestSha256, requestSha256);
   assert.match(created.body.data.voiceDraftId, /^[0-9a-f-]{36}$/i);
+  assert.equal(Object.hasOwn(created.body.data, 'mediaId'), false, 'ASR drafts expose only voiceDraftId');
   const retry = await fetchJson(`${baseUrl}/api/v1/voice/transcriptions`, { method: 'POST', headers, body: audio });
   assert.equal(retry.response.status, 200);
   assert.equal(retry.body.data.voiceDraftId, created.body.data.voiceDraftId);
   assert.equal(retry.body.data.requestSha256, requestSha256);
+  assert.equal(Object.hasOwn(retry.body.data, 'mediaId'), false, 'idempotent replay keeps the same narrow draft contract');
   assert.equal(asrCalls, 1);
   const status = await fetchJson(`${baseUrl}/api/v1/voice/uploads/${uploadId}`, { headers: { Cookie: cookie } });
   assert.equal(status.response.status, 200);
   assert.equal(status.body.data.state, 'ready');
   assert.equal(status.body.data.requestSha256, requestSha256);
+  assert.equal(Object.hasOwn(status.body.data, 'mediaId'), false, 'status recovery keeps the same narrow draft contract');
 
   const invalid = Buffer.from('not-a-wave');
   const invalidId = 'cccccccc-0000-4000-8000-000000000000';
@@ -2871,6 +2874,154 @@ test('voice HTTP transcription is owned, idempotent, editable, status-recoverabl
   assert.equal(asrCalls, 1);
   const mediaFiles = await import('node:fs/promises').then(({ readdir }) => readdir(join(directory, 'media', 'attempts', 'voice')).catch(() => []));
   assert.equal(mediaFiles.length, 1, 'only the ready draft object remains');
+});
+
+test('missing ASR provider durably records one permanent upload failure for POST replay and GET recovery', async (t) => {
+  const { baseUrl, origin, store } = await startVoiceApp(t, { asrProvider: null });
+  const session = await fetchJson(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin } });
+  const cookie = session.response.headers.getSetCookie()[0].split(';')[0];
+  const audio = canonicalWav(25);
+  const clientUploadId = 'c1c1c1c1-0000-4000-8000-000000000000';
+  const requestSha256 = createHash('sha256').update(audio).digest('hex');
+  const headers = {
+    Origin: origin,
+    Cookie: cookie,
+    'Content-Type': 'audio/wav',
+    'Content-Length': String(audio.length),
+    'X-Client-Upload-Id': clientUploadId,
+    'X-Content-SHA256': requestSha256,
+  };
+
+  const first = await fetchJson(`${baseUrl}/api/v1/voice/transcriptions`, {
+    method: 'POST', headers, body: audio,
+  });
+  assert.equal(first.response.status, 503);
+  assert.equal(first.body.error.code, 'VOICE_PROVIDER_MISCONFIGURED');
+
+  const durable = await store.getVoiceUploadStatus({
+    sessionId: session.body.data.session.id,
+    clientUploadId,
+  });
+  assert.equal(durable.state, 'failed');
+  assert.equal(durable.failureCode, 'VOICE_PROVIDER_MISCONFIGURED');
+  assert.equal(durable.failureHttpStatus, 503);
+  assert.equal(durable.retryable, false);
+  assert.equal(durable.requestSha256, requestSha256);
+  assert.equal(durable.mediaAssetId, null);
+  assert.equal(durable.transcript, null);
+
+  const recovered = await fetchJson(`${baseUrl}/api/v1/voice/uploads/${clientUploadId}`, {
+    headers: { Cookie: cookie },
+  });
+  assert.equal(recovered.response.status, 200);
+  assert.deepEqual(recovered.body.data, {
+    clientUploadId,
+    requestSha256,
+    state: 'failed',
+    failureCode: 'VOICE_PROVIDER_MISCONFIGURED',
+    retryable: false,
+  });
+
+  const replay = await fetchJson(`${baseUrl}/api/v1/voice/transcriptions`, {
+    method: 'POST', headers, body: audio,
+  });
+  assert.equal(replay.response.status, 503);
+  assert.equal(replay.body.error.code, 'VOICE_PROVIDER_MISCONFIGURED');
+});
+
+test('voice transcription rejects missing or malformed upload identity headers before claim, body, and ASR work', async (t) => {
+  let asrCalls = 0;
+  const { baseUrl, origin, filePath } = await startVoiceApp(t, {
+    asrProvider: {
+      provider: 'azure',
+      transcribe: async () => {
+        asrCalls += 1;
+        return { transcript: 'must not run', provider: 'azure', latencyMs: 1, confidence: null };
+      },
+    },
+  });
+  const session = await fetchJson(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin } });
+  const cookie = session.response.headers.getSetCookie()[0].split(';')[0];
+  const audio = canonicalWav(10);
+  const requestSha256 = createHash('sha256').update(audio).digest('hex');
+  const baseHeaders = {
+    Origin: origin,
+    Cookie: cookie,
+    'Content-Type': 'audio/wav',
+    'Content-Length': String(audio.length),
+  };
+  const cases = [
+    ['missing X-Client-Upload-Id', { ...baseHeaders, 'X-Content-SHA256': requestSha256 }],
+    ['malformed X-Client-Upload-Id', { ...baseHeaders, 'X-Client-Upload-Id': 'not-a-uuid', 'X-Content-SHA256': requestSha256 }],
+    ['missing X-Content-SHA256', { ...baseHeaders, 'X-Client-Upload-Id': 'c2c2c2c2-0000-4000-8000-000000000000' }],
+    ['non-lowercase X-Content-SHA256', { ...baseHeaders, 'X-Client-Upload-Id': 'c3c3c3c3-0000-4000-8000-000000000000', 'X-Content-SHA256': requestSha256.toUpperCase() }],
+  ];
+  const before = await readFile(filePath, 'utf8');
+
+  for (const [name, headers] of cases) {
+    const result = await fetchJson(`${baseUrl}/api/v1/voice/transcriptions`, {
+      method: 'POST', headers, body: audio,
+    });
+    assert.equal(result.response.status, 400, name);
+    assert.equal(result.body.error.code, 'INVALID_REQUEST', name);
+  }
+
+  assert.equal(asrCalls, 0);
+  assert.equal(await readFile(filePath, 'utf8'), before, 'invalid upload identity never creates a claim');
+});
+
+test('oversized chunked voice upload exposes one public 413 code and keeps its durable terminal reason', async (t) => {
+  let asrCalls = 0;
+  const { baseUrl, origin, store } = await startVoiceApp(t, {
+    asrProvider: {
+      provider: 'azure',
+      transcribe: async () => {
+        asrCalls += 1;
+        return { transcript: 'must not run', provider: 'azure', latencyMs: 1, confidence: null };
+      },
+    },
+  });
+  const session = await fetchJson(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin } });
+  const cookie = session.response.headers.getSetCookie()[0].split(';')[0];
+  const bytes = Buffer.alloc((8 * 1024 * 1024) + 1, 0x61);
+  const clientUploadId = 'c4c4c4c4-0000-4000-8000-000000000000';
+  const requestSha256 = createHash('sha256').update(bytes).digest('hex');
+  const headers = {
+    Origin: origin,
+    Cookie: cookie,
+    'Content-Type': 'audio/wav',
+    'X-Client-Upload-Id': clientUploadId,
+    'X-Content-SHA256': requestSha256,
+  };
+  const upload = () => fetchJson(`${baseUrl}/api/v1/voice/transcriptions`, {
+    method: 'POST', headers, body: Readable.from([bytes]), duplex: 'half',
+  });
+
+  const first = await upload();
+  assert.equal(first.response.status, 413);
+  assert.equal(first.body.error.code, 'PAYLOAD_TOO_LARGE');
+  assert.equal(asrCalls, 0);
+
+  const durable = await store.getVoiceUploadStatus({
+    sessionId: session.body.data.session.id,
+    clientUploadId,
+  });
+  assert.equal(durable.state, 'failed');
+  assert.equal(durable.failureCode, 'VOICE_UPLOAD_TOO_LARGE');
+  assert.equal(durable.failureHttpStatus, 413);
+  assert.equal(durable.retryable, false);
+
+  const recovered = await fetchJson(`${baseUrl}/api/v1/voice/uploads/${clientUploadId}`, {
+    headers: { Cookie: cookie },
+  });
+  assert.equal(recovered.response.status, 200);
+  assert.equal(recovered.body.data.failureCode, 'VOICE_UPLOAD_TOO_LARGE');
+  assert.equal(recovered.body.data.retryable, false);
+
+  const replay = await upload();
+  assert.equal(replay.response.status, 413);
+  assert.equal(replay.body.error.code, 'PAYLOAD_TOO_LARGE');
+  assert.equal(asrCalls, 0);
 });
 
 test('voice upload DELETE is owned, capability-independent, idempotent, and permanently fences live work', async (t) => {
@@ -3129,6 +3280,70 @@ test('voice capability failure precedes malformed headers, MIME, declared size, 
   assert.equal(response.body.error.code, 'VOICE_NOT_RELEASE_VERIFIED');
   assert.equal(asrCalls, 0);
   assert.equal(await readFile(filePath, 'utf8'), before);
+});
+
+test('missing TTS provider durably records one permanent generation for POST replay and GET recovery', async (t) => {
+  const { baseUrl, origin, store, filePath } = await startVoiceApp(t, { ttsProvider: null });
+  const session = await fetchJson(`${baseUrl}/api/v1/session`, { method: 'POST', headers: { Origin: origin } });
+  const cookie = session.response.headers.getSetCookie()[0].split(';')[0];
+  const assistant = await createDeliveredAssistant(store, session.body.data.session, session.body.data.conversation);
+  const audioPath = `/api/v1/messages/${assistant.id}/audio`;
+
+  const first = await fetchJson(`${baseUrl}${audioPath}`, {
+    method: 'POST', headers: { Origin: origin, Cookie: cookie },
+  });
+  assert.equal(first.response.status, 503);
+  assert.equal(first.body.error.code, 'VOICE_PROVIDER_MISCONFIGURED');
+
+  const durable = await store.getAssistantAudioStatus({
+    sessionId: session.body.data.session.id,
+    messageId: assistant.id,
+    kind: 'assistant_voice',
+  });
+  assert.equal(durable.state, 'failed');
+  assert.equal(durable.failureCode, 'VOICE_PROVIDER_MISCONFIGURED');
+  assert.equal(durable.failureHttpStatus, 503);
+  assert.equal(durable.retryable, false);
+  assert.equal(durable.mediaAssetId, null);
+
+  const recovered = await fetchJson(`${baseUrl}${audioPath}/status`, {
+    headers: { Cookie: cookie },
+  });
+  assert.equal(recovered.response.status, 200);
+  assert.deepEqual(recovered.body.data, {
+    messageId: assistant.id,
+    state: 'failed',
+    mediaId: null,
+    failureCode: 'VOICE_PROVIDER_MISCONFIGURED',
+    retryable: false,
+  });
+
+  const afterFirst = JSON.parse(await readFile(filePath, 'utf8'));
+  const generations = afterFirst.mediaGenerations.filter((entry) => (
+    entry.ownerMessageId === assistant.id && entry.kind === 'assistant_voice'
+  ));
+  assert.equal(generations.length, 1);
+  assert.equal(generations[0].attempt, 1);
+  assert.equal(afterFirst.mediaAssets.some((asset) => asset.kind === 'assistant_voice'), false);
+  assert.equal(afterFirst.events.some((event) => event.type === 'audio.ready' && event.messageId === assistant.id), false);
+  const ttsBuckets = afterFirst.rateLimitBuckets
+    .filter((bucket) => bucket.quota === 'tts-10m' || bucket.quota === 'tts-day')
+    .map((bucket) => [bucket.quota, bucket.count])
+    .sort(([left], [right]) => left.localeCompare(right));
+  assert.deepEqual(ttsBuckets, [['tts-10m', 1], ['tts-day', 1]]);
+  const ownedMessage = await store.getOwnedAssistantMessage({
+    sessionId: session.body.data.session.id,
+    messageId: assistant.id,
+  });
+  assert.equal(ownedMessage.mediaId ?? null, null);
+
+  const beforeReplay = await readFile(filePath, 'utf8');
+  const replay = await fetchJson(`${baseUrl}${audioPath}`, {
+    method: 'POST', headers: { Origin: origin, Cookie: cookie },
+  });
+  assert.equal(replay.response.status, 503);
+  assert.equal(replay.body.error.code, 'VOICE_PROVIDER_MISCONFIGURED');
+  assert.equal(await readFile(filePath, 'utf8'), beforeReplay, 'permanent replay never reclaims quota or creates another generation');
 });
 
 test('voice HTTP opt-in TTS keeps text, generates once, and media GET Range HEAD 416 and ownership stay private', async (t) => {

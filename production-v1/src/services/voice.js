@@ -308,7 +308,6 @@ function uploadPublic(upload) {
       state: 'ready',
       transcript: upload.transcript,
       voiceDraftId: upload.mediaAssetId,
-      mediaId: upload.mediaAssetId,
       durationMs: asset?.durationMs ?? null,
       retryable: false,
     };
@@ -413,8 +412,6 @@ export function createVoiceService({
       error.retryAfter = retryAfter(claim.blockingExpiresAt, startedAt);
       throw error;
     }
-    if (!asrProvider?.transcribe) throw workError('VOICE_PROVIDER_MISCONFIGURED', 503, false);
-
     const heartbeat = createHeartbeat({
       hardDeadline,
       now,
@@ -425,6 +422,7 @@ export function createVoiceService({
     });
     let objectWritten = false;
     try {
+      if (!asrProvider?.transcribe) throw workError('VOICE_PROVIDER_MISCONFIGURED', 503, false);
       const spooled = await spoolIngress({
         readable,
         maxBytes: voiceLimits.uploadBytes,
@@ -541,13 +539,13 @@ export function createVoiceService({
       error.retryAfter = retryAfter(claim.blockingExpiresAt, current);
       throw error;
     }
-    if (!ttsProvider?.synthesize) throw workError('VOICE_PROVIDER_MISCONFIGURED', 503, false);
     const heartbeat = createHeartbeat({
       hardDeadline, now, externalSignal: signal,
       renew: (leaseExpiresAt, at) => store.renewMediaGenerationLease({ generationId: claim.generation.id, leaseToken, leaseExpiresAt, now: at }),
     });
     let objectWritten = false;
     try {
+      if (!ttsProvider?.synthesize) throw workError('VOICE_PROVIDER_MISCONFIGURED', 503, false);
       const synthesized = await ttsProvider.synthesize(claim.message.text, { signal: heartbeat.signal });
       const stored = await withOperationDeadline({
         signal: heartbeat.signal,
