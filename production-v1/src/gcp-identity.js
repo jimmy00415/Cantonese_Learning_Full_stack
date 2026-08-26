@@ -2,6 +2,18 @@ const projectId = 'motion-expert-hk-ltd-webpage';
 const projectNumber = '582852715831';
 const serviceAccount = (id) => `${id}@${projectId}.iam.gserviceaccount.com`;
 
+export const GCP_OBSOLETE_EXECUTABLE_IDENTITIES = Object.freeze([
+  'hkbuddy-prod-v1-20260826', '93662314720', 'hkbuddy', 'hkbuddy-api',
+  'hkbuddy-pg', 'hkbuddy-prod-vpc', 'hkbuddy-ae2-run',
+  'hkbuddy-google-managed-services', 'hkbuddy-runtime', 'hkbuddy-build',
+  'hkbuddy-migrator', 'hkbuddy-deployer', 'hkbuddy-acceptance',
+  'hkbuddy-migrate', 'hkbuddy-db-app-url', 'hkbuddy-db-migrator-url',
+  'hkbuddy-session-secret', 'hkbuddy-db-bootstrap-state',
+  'hkbuddy-legacy-inventory', 'hkbuddy-dependency-acceptance',
+  'hkbuddy-llm-smoke', 'hkbuddy-asr-smoke', 'hkbuddy-tts-smoke',
+  'hkbuddy-ios-voice-acceptance', 'hkbuddy-prod-v1-20260826-media',
+]);
+
 export const GCP_IDENTITY = Object.freeze({
   projectId,
   projectNumber,
@@ -13,6 +25,7 @@ export const GCP_IDENTITY = Object.freeze({
   service: 'hkbuddy-v1-api',
   repository: 'hkbuddy-v1',
   bucket: 'hkbuddy-v1-582852715831-media',
+  buildSourceBucket: 'hkbuddy-v1-582852715831-build-source',
   cloudSqlInstance: 'hkbuddy-v1-pg',
   database: 'hkbuddy_v1',
   network: 'hkbuddy-v1-vpc',

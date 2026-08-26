@@ -58,7 +58,9 @@ project `motion-expert-hk-ltd-webpage` (`582852715831`): Artifact Registry
 repository `hkbuddy-v1`, Cloud Run service `hkbuddy-v1-api`, Cloud SQL instance
 `hkbuddy-v1-pg` with database `hkbuddy_v1`, VPC `hkbuddy-v1-vpc`, subnet
 `hkbuddy-v1-ae2-run`, PSA range `hkbuddy-v1-google-services`, and the exact
-`hkbuddy-v1-*` service accounts, secrets, and Jobs in
+regional private lifecycle-bounded Cloud Build source bucket
+`hkbuddy-v1-582852715831-build-source`, plus the exact `hkbuddy-v1-*` service
+accounts, secrets, and Jobs in
 `infra/gcp/resource-contract.json`. The application resource island is
 dedicated, but project API enablement, quota, billing, audit logs, and the
 project IAM boundary are shared.

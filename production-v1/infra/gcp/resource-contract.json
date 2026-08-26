@@ -162,6 +162,16 @@
       "lifecycleDeleteAfterDays": 7,
       "retentionPolicy": null
     },
+    "buildSourceBucket": {
+      "name": "hkbuddy-v1-582852715831-build-source",
+      "location": "asia-east2",
+      "uniformBucketLevelAccess": true,
+      "publicAccessPrevention": "enforced",
+      "versioning": false,
+      "softDeleteSeconds": 0,
+      "lifecycleDeleteAfterDays": 1,
+      "retentionPolicy": null
+    },
     "secrets": [
       {
         "id": "hkbuddy-v1-db-app-url",
@@ -564,6 +574,11 @@
         "scope": "repository:hkbuddy-v1",
         "member": "serviceAccount:hkbuddy-v1-build@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/artifactregistry.writer"
+      },
+      {
+        "scope": "bucket:hkbuddy-v1-582852715831-build-source",
+        "member": "serviceAccount:hkbuddy-v1-build@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
+        "role": "roles/storage.objectViewer"
       },
       {
         "scope": "project",

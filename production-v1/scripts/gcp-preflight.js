@@ -6,6 +6,10 @@ import {
   createDefaultGcloudAuthenticatedRequest,
   createDefaultGcloudExecutor,
   GcpControlPlane,
+  isExactBillingAccountResource,
+  isExactOrganizationResource,
+  isExactProjectBillingLink,
+  isExactProjectParent,
   loadResourceContract,
   REQUIRED_OPERATOR_ACCOUNT,
 } from './gcp-provision.js';
@@ -31,8 +35,7 @@ function parseArguments(argv) {
 }
 
 function projectMatches(project) {
-  const parent = project?.parent?.id ?? String(project?.parent ?? '').split('/').at(-1);
-  return project?.projectId === PROJECT && String(parent) === ORGANIZATION
+  return project?.projectId === PROJECT && isExactProjectParent(project?.parent)
     && String(project?.projectNumber ?? '') === PROJECT_NUMBER
     && project?.name === 'Motion Expert HK LTD Webpage'
     && project?.lifecycleState === 'ACTIVE'
@@ -109,7 +112,7 @@ export async function runGcpPreflight({
   } catch {
     return publish(writeOutput, 1, safeFailure('ORGANIZATION_STATE_UNKNOWN'));
   }
-  if (String(organization?.name ?? '').split('/').at(-1) !== ORGANIZATION) {
+  if (!isExactOrganizationResource(organization)) {
     return publish(writeOutput, 1, safeFailure('ORGANIZATION_DRIFT'));
   }
 
@@ -122,7 +125,7 @@ export async function runGcpPreflight({
   } catch {
     return publish(writeOutput, 1, safeFailure('BILLING_STATE_UNKNOWN'));
   }
-  if (String(billing?.name ?? '').split('/').at(-1) !== BILLING_ACCOUNT || billing?.open !== true) {
+  if (!isExactBillingAccountResource(billing) || billing?.open !== true) {
     return publish(writeOutput, 1, safeFailure('BILLING_ACCOUNT_INACTIVE'));
   }
   if (billing.currencyCode !== selectedContract.resources.budget.currency) {
@@ -152,8 +155,7 @@ export async function runGcpPreflight({
   } catch {
     return publish(writeOutput, 1, safeFailure('SHARED_PROJECT_BASELINE_INVALID', { projectState }));
   }
-  if (billingLink?.billingEnabled !== true
-    || !String(billingLink.billingAccountName ?? billingLink.billingAccount ?? '').endsWith(BILLING_ACCOUNT)) {
+  if (!isExactProjectBillingLink(billingLink)) {
     return publish(writeOutput, 1, safeFailure('SHARED_PROJECT_BASELINE_INVALID', { projectState }));
   }
 

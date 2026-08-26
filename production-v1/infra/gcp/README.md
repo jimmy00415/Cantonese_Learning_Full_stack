@@ -36,6 +36,9 @@ The Tasks 1–2 operator boundary uses only these executable V1 identities:
 - Cloud Run service: `hkbuddy-v1-api`
 - Artifact Registry Docker repository: `hkbuddy-v1`
 - media bucket: `hkbuddy-v1-582852715831-media`
+- regional Cloud Build source bucket: `hkbuddy-v1-582852715831-build-source`
+  with uniform bucket-level access, enforced public-access prevention, disabled
+  versioning and soft delete, and a one-day delete lifecycle
 - Cloud SQL instance/database: `hkbuddy-v1-pg` / `hkbuddy_v1`
 - VPC/subnet/PSA range: `hkbuddy-v1-vpc` /
   `hkbuddy-v1-ae2-run` / `hkbuddy-v1-google-services`
@@ -72,6 +75,13 @@ enablement, resource, billing, IAM, or REST mutation. Malformed, unavailable,
 truncated/overflowed, wrong-project, or foreign managed-namespace inventory fails closed before a
 host mutation.
 
+The Cloud Asset collision audit applies the centralized obsolete executable
+identity set to canonical name, display name, description, parent name, parent
+type, and every label key/value. This includes the bare legacy Artifact
+Registry repository identity and all prior resource aliases. The separate
+legacy-inventory workflow remains explicitly read-only evidence and does not
+authorize adopting any discovered legacy resource.
+
 The complete identities, APIs, IAM bindings, probes, backup controls, alert
 policies, and budget thresholds live in `resource-contract.json`. The contract
 is deliberately exact. Changing an identity or weakening a control makes the
@@ -84,6 +94,13 @@ project, its exact project number and display name, no project labels, its open
 billing link, and the three protected baseline IAM bindings. It never creates,
 links, patches, or deletes the project, billing link, default network, or any
 unrelated IAM policy.
+
+Organization, billing account, project parent, and project billing link are
+accepted only in the explicitly enumerated canonical API shapes with exact
+case, delimiter, segment count, and required fields. The project-wide CIDR
+audit validates all supported `INTERNAL` + `RESERVED` Compute address purposes,
+normalizes canonical ranges (using `/32` only for unambiguous single-address
+families), and rejects unsupported or incomplete address shapes before a write.
 
 The billing account must report `currencyCode=HKD`. Google requires a fixed
 budget amount to use the billing account's native currency, so the reviewed
@@ -267,7 +284,7 @@ but before any secret value or database user is written. These audits permit
 not-yet-created expected grants but reject every unmodeled entitlement. The
 final readback is mandatory, not advisory: it re-describes every
 resource, re-audits all five service accounts for user-managed keys, rejects a
-public bucket member, and compares the managed project, bucket, repository,
+public bucket member, and compares the managed project, both buckets, repository,
 secret, and service-account IAM policies to exact per-scope allowlists. It also
 lists project custom roles and requires the one fixed GA
 `hkbuddyV1AcceptanceBucketMetadataReader` definition with exactly
@@ -278,15 +295,23 @@ fails the run. Workload principals may never receive
 `roles/iam.serviceAccountTokenCreator`; the only such binding is the expected
 Google-managed Cloud Build service agent on
 `hkbuddy-v1-build@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com`.
+The observed protected baseline binding
+`serviceAccount:582852715831@cloudservices.gserviceaccount.com` plus
+`roles/editor` is protected and immutable. Additional Editor grants are
+forbidden. This observed binding is distinct from optional newer service-agent bindings
+that Google may materialize only as the exact member/role pairs
+enumerated by the contract.
+
 The Cloud Build service agent's automatically managed project-level
 `roles/cloudbuild.serviceAgent` grant is separately required and is never
 re-created by this script. Exact official service-agent member/role pairs for
 the enabled or used APIs are permitted if Google materializes them; arbitrary
 Google-managed roles, external users/service accounts, public principals, and
-extra project or resource bindings are rejected. In particular, the shared
-project's Google APIs Service Agent may have only the current
-`roles/compute.instanceGroupManagerServiceAgent` entitlement; legacy
-project-level `roles/editor` is not allowed.
+extra project or resource bindings are rejected. In particular, an optional
+newer Google APIs Service Agent entitlement may be only the exact
+`roles/compute.instanceGroupManagerServiceAgent` pair enumerated by the
+contract; it does not replace or weaken the immutable observed Editor baseline
+above.
 
 Cloud SQL is created through the supported SQL Admin v1 `instances.insert`
 request because the installed GA Cloud SDK cannot bind the named PSA allocation

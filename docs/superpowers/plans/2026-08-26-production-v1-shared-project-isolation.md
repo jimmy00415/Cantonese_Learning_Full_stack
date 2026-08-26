@@ -34,7 +34,7 @@
 - Modify: `production-v1/package.json`
 
 **Interfaces:**
-- Produces: frozen `GCP_IDENTITY` with `projectId`, `projectNumber`, `organizationId`, `billingAccountId`, `region`, `speechRegion`, `service`, `repository`, `bucket`, `cloudSqlInstance`, `network`, `subnet`, `psaRange`, `serviceAccounts`, `secrets`, and `jobs`.
+- Produces: frozen `GCP_IDENTITY` with `projectId`, `projectNumber`, `organizationId`, `billingAccountId`, `region`, `speechRegion`, `service`, `repository`, `bucket`, `buildSourceBucket`, `cloudSqlInstance`, `network`, `subnet`, `psaRange`, `serviceAccounts`, `secrets`, and `jobs`.
 - Produces: resource contract with `project.mode === 'existing-billed-shared'`, exact protected baseline, and exact namespaced resources.
 - Consumes: no prior task interface.
 

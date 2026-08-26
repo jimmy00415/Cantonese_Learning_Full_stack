@@ -7,7 +7,10 @@ import { promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { GoogleAuth, OAuth2Client } from 'google-auth-library';
-import { GCP_IDENTITY } from '../src/gcp-identity.js';
+import {
+  GCP_IDENTITY,
+  GCP_OBSOLETE_EXECUTABLE_IDENTITIES,
+} from '../src/gcp-identity.js';
 
 const execFileAsync = promisify(execFileCallback);
 const PROJECT = GCP_IDENTITY.projectId;
@@ -117,6 +120,7 @@ const REQUIRED_IAM_BINDINGS = Object.freeze([
   { scope: 'project', member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.acceptance}`, role: 'roles/logging.logWriter' },
   { scope: `secret:${GCP_IDENTITY.secrets.dbMigratorUrl}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.migrator}`, role: 'roles/secretmanager.secretAccessor' },
   { scope: `repository:${GCP_IDENTITY.repository}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.build}`, role: 'roles/artifactregistry.writer' },
+  { scope: `bucket:${GCP_IDENTITY.buildSourceBucket}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.build}`, role: 'roles/storage.objectViewer' },
   { scope: 'project', member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.build}`, role: 'roles/logging.logWriter' },
   { scope: `repository:${GCP_IDENTITY.repository}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.deployer}`, role: 'roles/artifactregistry.reader' },
   { scope: 'project', member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.deployer}`, role: 'roles/cloudbuild.builds.editor' },
@@ -160,6 +164,31 @@ function contractError() {
 
 function requireExact(value, expected) {
   if (!exact(value, expected)) throw contractError();
+}
+
+export function isExactOrganizationResource(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value)
+    && value.name === `organizations/${ORGANIZATION}`);
+}
+
+export function isExactBillingAccountResource(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value)
+    && value.name === `billingAccounts/${BILLING_ACCOUNT}`);
+}
+
+export function isExactProjectParent(parent) {
+  return parent === `organizations/${ORGANIZATION}`
+    || exact(parent, { type: 'organization', id: ORGANIZATION });
+}
+
+export function isExactProjectBillingLink(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || value.billingEnabled !== true) return false;
+  const hasName = Object.hasOwn(value, 'billingAccountName');
+  const hasAlias = Object.hasOwn(value, 'billingAccount');
+  if (hasName === hasAlias) return false;
+  const account = hasName ? value.billingAccountName : value.billingAccount;
+  return account === `billingAccounts/${BILLING_ACCOUNT}`;
 }
 
 function assertNoForbiddenText(value) {
@@ -210,7 +239,7 @@ export function assertResourceContract(contract) {
 
   const resources = contract.resources;
   requireExact(Object.keys(resources ?? {}).sort(), [
-    'artifactRegistry', 'bucket', 'budget', 'cloudRun', 'cloudSql', 'customRoles', 'monitoring',
+    'artifactRegistry', 'bucket', 'budget', 'buildSourceBucket', 'cloudRun', 'cloudSql', 'customRoles', 'monitoring',
     'network', 'secrets', 'serviceAccounts',
   ]);
   requireExact(resources?.artifactRegistry, {
@@ -247,6 +276,12 @@ export function assertResourceContract(contract) {
     name: GCP_IDENTITY.bucket, location: 'asia-east2',
     uniformBucketLevelAccess: true, publicAccessPrevention: 'enforced',
     versioning: false, softDeleteSeconds: 0, lifecycleDeleteAfterDays: 7,
+    retentionPolicy: null,
+  });
+  requireExact(resources?.buildSourceBucket, {
+    name: GCP_IDENTITY.buildSourceBucket, location: 'asia-east2',
+    uniformBucketLevelAccess: true, publicAccessPrevention: 'enforced',
+    versioning: false, softDeleteSeconds: 0, lifecycleDeleteAfterDays: 1,
     retentionPolicy: null,
   });
   requireExact(resources?.secrets, [
@@ -760,6 +795,7 @@ export function assertExactCustomRoleDefinitions({ contract, roles }) {
 function managedIamScopes(contract) {
   return [
     'project', `bucket:${contract.resources.bucket.name}`,
+    `bucket:${contract.resources.buildSourceBucket.name}`,
     `repository:${contract.resources.artifactRegistry.repository}`,
     ...contract.resources.secrets.map(({ id }) => `secret:${id}`),
     ...contract.resources.serviceAccounts.map(({ id }) => `service-account:${id}`),
@@ -890,6 +926,12 @@ const COMPUTE_NAME = /^[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?$/;
 const COMPUTE_NETWORK_PREFIX = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/`;
 const COMPUTE_REGION = new RegExp(`^https://www\\.googleapis\\.com/compute/v1/projects/${PROJECT}/regions/[a-z]+(?:-[a-z]+)+[1-9]\\d*$`);
 const COMPUTE_DEFAULT_GATEWAY = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/gateways/default-internet-gateway`;
+const INTERNAL_RESERVED_SINGLE_ADDRESS_PURPOSES = new Set([
+  'DNS_RESOLVER', 'GCE_ENDPOINT', 'PRIVATE_SERVICE_CONNECT', 'SHARED_LOADBALANCER_VIP',
+]);
+const INTERNAL_RESERVED_RANGE_PURPOSES = new Set([
+  'CROSS_SITE_NETWORK', 'IPSEC_INTERCONNECT', 'NAT_AUTO', 'PRIVATE_NAT', 'VPC_PEERING',
+]);
 
 function canonicalIpv4(value) {
   const parts = String(value).split('.');
@@ -905,6 +947,42 @@ function canonicalCidr(value) {
     || !/^(?:[0-9]|[12]\d|3[0-2])$/.test(parts[1])) return false;
   const bounds = cidrBounds(value);
   return bounds !== null && bounds[0] === ipv4Number(parts[0]);
+}
+
+function internalReservedCidr(item, networkLinks) {
+  if (item.addressType !== 'INTERNAL' || item.status !== 'RESERVED') return null;
+  if (!INTERNAL_RESERVED_SINGLE_ADDRESS_PURPOSES.has(item.purpose)
+    && !INTERNAL_RESERVED_RANGE_PURPOSES.has(item.purpose)) {
+    throw commandError('CIDR_AUDIT_INVALID');
+  }
+  if (!canonicalIpv4(item.address)) throw commandError('CIDR_AUDIT_INVALID');
+  let prefixLength = item.prefixLength;
+  if (prefixLength === undefined) {
+    if (!INTERNAL_RESERVED_SINGLE_ADDRESS_PURPOSES.has(item.purpose)) {
+      throw commandError('CIDR_AUDIT_INVALID');
+    }
+    prefixLength = 32;
+  }
+  if (!Number.isInteger(prefixLength) || prefixLength < 0 || prefixLength > 32
+    || !canonicalCidr(`${item.address}/${prefixLength}`)) {
+    throw commandError('CIDR_AUDIT_INVALID');
+  }
+  if (item.purpose === 'VPC_PEERING') {
+    if (!networkLinks.has(item.network) || Object.hasOwn(item, 'region')
+      || Object.hasOwn(item, 'subnetwork')) throw commandError('CIDR_AUDIT_INVALID');
+  } else {
+    if (typeof item.region !== 'string' || !COMPUTE_REGION.test(item.region)) {
+      throw commandError('CIDR_AUDIT_INVALID');
+    }
+    const hasNetwork = Object.hasOwn(item, 'network');
+    const hasSubnetwork = Object.hasOwn(item, 'subnetwork');
+    if (hasNetwork === hasSubnetwork) throw commandError('CIDR_AUDIT_INVALID');
+    if (hasNetwork && !networkLinks.has(item.network)) throw commandError('CIDR_AUDIT_INVALID');
+    if (hasSubnetwork && !new RegExp(
+      `^https://www\\.googleapis\\.com/compute/v1/projects/${PROJECT}/regions/[a-z]+(?:-[a-z]+)+[1-9]\\d*/subnetworks/[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?$`,
+    ).test(item.subnetwork)) throw commandError('CIDR_AUDIT_INVALID');
+  }
+  return `${item.address}/${prefixLength}`;
 }
 
 function canonicalNextHop(item, networkLinks) {
@@ -957,11 +1035,9 @@ function validateComputeInventory({ networks, subnets, routes, addresses }) {
     if (!item || typeof item !== 'object' || Array.isArray(item)
       || typeof item.name !== 'string' || !COMPUTE_NAME.test(item.name)
       || typeof item.addressType !== 'string' || typeof item.status !== 'string') return true;
-    if (item.purpose === 'VPC_PEERING') {
-      return !networkLinks.has(item.network) || item.addressType !== 'INTERNAL'
-        || !canonicalIpv4(item.address) || !Number.isInteger(item.prefixLength)
-        || item.prefixLength < 0 || item.prefixLength > 32
-        || !canonicalCidr(`${item.address}/${item.prefixLength}`) || Object.hasOwn(item, 'region');
+    if (item.addressType === 'INTERNAL' && item.status === 'RESERVED') {
+      internalReservedCidr(item, networkLinks);
+      return false;
     }
     return Object.hasOwn(item, 'region') && (
       typeof item.region !== 'string' || !COMPUTE_REGION.test(item.region)
@@ -981,10 +1057,8 @@ function assertCidrNoOverlap({ desired, network, subnets, routes, addresses }) {
     ))
     .map(({ destRange }) => destRange);
   const targetAddresses = addresses
-    .filter(({ purpose, network: memberNetwork }) => (
-      purpose === 'VPC_PEERING' && sameNetwork(memberNetwork, network)
-    ))
-    .map(({ address, prefixLength }) => `${address}/${prefixLength}`);
+    .filter(({ addressType, status }) => addressType === 'INTERNAL' && status === 'RESERVED')
+    .map(({ address, prefixLength }) => `${address}/${prefixLength ?? 32}`);
   if ([...targetSubnets, ...targetAddresses].some((candidate) => cidrOverlap(desired, candidate))
     || targetRoutes.some((candidate) => cidrOverlap(desired, candidate))) {
     throw commandError('CIDR_OVERLAP');
@@ -1025,7 +1099,7 @@ function apiForProvisionStep(id) {
   if (['vpc', 'subnet', 'psa-range'].includes(id)) return 'compute.googleapis.com';
   if (id === 'psa-connection') return 'servicenetworking.googleapis.com';
   if (['cloud-sql-instance', 'database'].includes(id) || id.startsWith('db-user:')) return 'sqladmin.googleapis.com';
-  if (id === 'bucket') return 'storage.googleapis.com';
+  if (id === 'bucket' || id === 'build-source-bucket') return 'storage.googleapis.com';
   if (id.startsWith('secret-')) return 'secretmanager.googleapis.com';
   if (id === 'notification-channel' || id.startsWith('monitoring-policy:')) return 'monitoring.googleapis.com';
   if (id === 'budget') return 'billingbudgets.googleapis.com';
@@ -1040,8 +1114,20 @@ function assertManagedIdentityInventory(items, expected, extractor, marker = /hk
     const name = raw.replace(/^gs:\/\//, '').split('/').at(-1).split('@')[0];
     const text = [raw, item.displayName, item.description, item.metadata?.name]
       .filter((value) => typeof value === 'string').join(' ');
+    if (hasObsoleteExecutableIdentity(text)) throw commandError('RESOURCE_COLLISION');
     if (marker.test(text) && !permitted.has(name)) throw commandError('RESOURCE_COLLISION');
   }
+}
+
+const OBSOLETE_EXECUTABLE_IDENTITY = new RegExp(
+  `(?<![a-z0-9_-])(?:${GCP_OBSOLETE_EXECUTABLE_IDENTITIES
+    .map((value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|')})(?![a-z0-9_-])`,
+  'i',
+);
+
+function hasObsoleteExecutableIdentity(value) {
+  return OBSOLETE_EXECUTABLE_IDENTITY.test(String(value));
 }
 
 function hasManagedName(value) {
@@ -1148,6 +1234,7 @@ function exactTopLevelManagedAsset(asset) {
   if (exactAsset({ asset, assetType: 'run.googleapis.com/Service', name: `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/services/${GCP_IDENTITY.service}`, location: 'asia-east2' })) return asset.displayName === undefined || asset.displayName === GCP_IDENTITY.service;
   if (exactAsset({ asset, assetType: 'artifactregistry.googleapis.com/Repository', name: `//artifactregistry.googleapis.com/projects/${PROJECT}/locations/asia-east2/repositories/${GCP_IDENTITY.repository}`, location: 'asia-east2' })) return asset.displayName === undefined || asset.displayName === GCP_IDENTITY.repository;
   if (exactAsset({ asset, assetType: 'storage.googleapis.com/Bucket', name: `//storage.googleapis.com/${GCP_IDENTITY.bucket}`, location: 'asia-east2' })) return true;
+  if (exactAsset({ asset, assetType: 'storage.googleapis.com/Bucket', name: `//storage.googleapis.com/${GCP_IDENTITY.buildSourceBucket}`, location: 'asia-east2' })) return true;
   if (exactAsset({ asset, assetType: 'sqladmin.googleapis.com/Instance', name: `//sqladmin.googleapis.com/projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}`, location: 'asia-east2' })) return true;
   if (exactAsset({ asset, assetType: 'compute.googleapis.com/Network', name: `//compute.googleapis.com/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`, location: 'global' })) return true;
   if (exactAsset({ asset, assetType: 'compute.googleapis.com/Subnetwork', name: `//compute.googleapis.com/projects/${PROJECT}/regions/asia-east2/subnetworks/${GCP_IDENTITY.subnet}`, location: 'asia-east2' })) return true;
@@ -1197,6 +1284,7 @@ function exactManagedGeneratedAsset(asset) {
 
 function assetHasManagedMarker(asset) {
   const text = [asset.name, asset.displayName, asset.description, asset.parentFullResourceName,
+    asset.parentAssetType,
     ...Object.entries(asset.labels ?? {}).flat()]
     .filter((value) => typeof value === 'string').join(' ');
   return hasManagedName(text) || /hkbuddyv1/i.test(text);
@@ -1210,8 +1298,10 @@ function assertCloudAssetInventory(assets) {
     throw commandError('CLOUD_ASSET_INVENTORY_WRONG_PROJECT');
   }
   for (const asset of assets) {
-    const text = [asset.name, asset.displayName, asset.description].filter((value) => typeof value === 'string').join(' ');
-    if (/hkbuddy-(?:prod|pilot|api|pg|runtime|build|migrator|deployer|acceptance)(?:[-_a-z0-9]*)?/i.test(text)) {
+    const text = [asset.name, asset.displayName, asset.description, asset.parentFullResourceName,
+      asset.parentAssetType, ...Object.entries(asset.labels ?? {}).flat()]
+      .filter((value) => typeof value === 'string').join(' ');
+    if (hasObsoleteExecutableIdentity(text)) {
       throw commandError('RESOURCE_COLLISION');
     }
     const managedDescendantParent = asset.parentFullResourceName
@@ -1241,7 +1331,8 @@ function provisionSteps(contract) {
     'artifact-registry',
     ...contract.resources.serviceAccounts.map(({ id }) => `service-account:${id}`),
     ...contract.resources.customRoles.map(({ id }) => `custom-role:${id}`),
-    'vpc', 'subnet', 'psa-range', 'psa-connection', 'cloud-sql-instance', 'database', 'bucket',
+    'vpc', 'subnet', 'psa-range', 'psa-connection', 'cloud-sql-instance', 'database',
+    'bucket', 'build-source-bucket',
     ...contract.resources.secrets.map(({ id }) => `secret-container:${id}`),
     `secret-version:${GCP_IDENTITY.secrets.dbAppUrl}`,
     `secret-version:${GCP_IDENTITY.secrets.dbMigratorUrl}`,
@@ -1265,12 +1356,13 @@ const STATIC_EXPECTED_STEPS = [
   'service-account:hkbuddy-v1-migrator', 'service-account:hkbuddy-v1-deployer',
   'service-account:hkbuddy-v1-acceptance',
   'custom-role:hkbuddyV1AcceptanceBucketMetadataReader',
-  'vpc', 'subnet', 'psa-range', 'psa-connection', 'cloud-sql-instance', 'database', 'bucket',
+  'vpc', 'subnet', 'psa-range', 'psa-connection', 'cloud-sql-instance', 'database',
+  'bucket', 'build-source-bucket',
   ...SECRET_CONTAINER_IDS.map((id) => `secret-container:${id}`),
   `secret-version:${GCP_IDENTITY.secrets.dbAppUrl}`, `secret-version:${GCP_IDENTITY.secrets.dbMigratorUrl}`,
   `secret-version:${GCP_IDENTITY.secrets.session}`, 'db-user:hkbuddy_app',
   'db-user:hkbuddy_migrator', `secret-version:${GCP_IDENTITY.secrets.bootstrap}`,
-  ...Array.from({ length: 34 }, (_, index) => `iam:${String(index + 1).padStart(2, '0')}`),
+  ...Array.from({ length: 35 }, (_, index) => `iam:${String(index + 1).padStart(2, '0')}`),
 ];
 
 export const EXPECTED_PROVISION_STEPS = Object.freeze(STATIC_EXPECTED_STEPS);
@@ -1814,7 +1906,9 @@ export class GcpControlPlane {
     }
     if (enabledApis.has('storage.googleapis.com')) {
       const buckets = await this.#gcloud(['storage', 'buckets', 'list', `--project=${PROJECT}`, '--format=json']);
-      assertManagedIdentityInventory(buckets, [GCP_IDENTITY.bucket], ({ name }) => name);
+      assertManagedIdentityInventory(
+        buckets, [GCP_IDENTITY.bucket, GCP_IDENTITY.buildSourceBucket], ({ name }) => name,
+      );
     }
     if (enabledApis.has('compute.googleapis.com')) {
       const [networks, subnets, addresses] = await Promise.all([
@@ -1954,10 +2048,11 @@ export class GcpControlPlane {
         `--project=${PROJECT}`, '--format=json',
       ]) };
     }
-    if (id === 'bucket') {
+    if (id === 'bucket' || id === 'build-source-bucket') {
+      const bucket = id === 'bucket' ? GCP_IDENTITY.bucket : GCP_IDENTITY.buildSourceBucket;
       const value = await this.#rest({
         method: 'GET',
-        url: `https://storage.googleapis.com/storage/v1/b/${GCP_IDENTITY.bucket}?projection=full`,
+        url: `https://storage.googleapis.com/storage/v1/b/${bucket}?projection=full`,
       });
       if (String(value?.projectNumber ?? '') !== this.#projectNumber()) {
         throw commandError('BUCKET_ID_COLLISION');
@@ -2067,19 +2162,25 @@ export class GcpControlPlane {
       'sql', 'databases', 'create', GCP_IDENTITY.database, `--instance=${GCP_IDENTITY.cloudSqlInstance}`,
       `--project=${PROJECT}`, '--format=json',
     ]);
-    if (id === 'bucket') return this.#rest({
+    if (id === 'bucket' || id === 'build-source-bucket') {
+      const definition = id === 'bucket'
+        ? this.contract.resources.bucket : this.contract.resources.buildSourceBucket;
+      return this.#rest({
       method: 'POST',
       url: `https://storage.googleapis.com/storage/v1/b?project=${PROJECT}&projection=full`,
       body: {
-        name: GCP_IDENTITY.bucket, location: 'asia-east2',
+        name: definition.name, location: definition.location,
         iamConfiguration: {
           uniformBucketLevelAccess: { enabled: true }, publicAccessPrevention: 'enforced',
         },
         versioning: { enabled: false },
         softDeletePolicy: { retentionDurationSeconds: '0' },
-        lifecycle: { rule: [{ action: { type: 'Delete' }, condition: { age: 7 } }] },
+        lifecycle: { rule: [{
+          action: { type: 'Delete' }, condition: { age: definition.lifecycleDeleteAfterDays },
+        }] },
       },
-    });
+      });
+    }
     if (id.startsWith('secret-container:')) {
       const secretId = id.slice('secret-container:'.length);
       return this.#rest({
@@ -2109,16 +2210,14 @@ export class GcpControlPlane {
   #compare(id, value, context) {
     if (!value || typeof value !== 'object') return false;
     if (id === 'project') {
-      const parent = value.parent?.id ?? String(value.parent ?? '').split('/').at(-1);
-      return value.projectId === PROJECT && String(parent) === ORGANIZATION
+      return value.projectId === PROJECT && isExactProjectParent(value.parent)
         && String(value.projectNumber ?? '') === PROJECT_NUMBER
         && value.lifecycleState === 'ACTIVE'
         && (value.displayName ?? value.name) === this.contract.project.displayName
         && exact(value.labels ?? {}, this.contract.project.labels);
     }
     if (id === 'billing') {
-      return value.billingEnabled === true
-        && String(value.billingAccountName ?? value.billingAccount ?? '').endsWith(BILLING_ACCOUNT);
+      return isExactProjectBillingLink(value);
     }
     if (id === 'apis') {
       const enabled = new Set((value ?? []).map(({ config, name }) => config?.name ?? name));
@@ -2172,7 +2271,7 @@ export class GcpControlPlane {
     if (id === 'cloud-sql-instance') return this.#compareCloudSql(value);
     if (id === 'database') return value.name === GCP_IDENTITY.database && value.instance === GCP_IDENTITY.cloudSqlInstance
       && value.project === PROJECT;
-    if (id === 'bucket') return this.#compareBucket(value);
+    if (id === 'bucket' || id === 'build-source-bucket') return this.#compareBucket(id, value);
     if (id.startsWith('secret-container:')) {
       const secretId = id.slice('secret-container:'.length);
       return value.name === `projects/${PROJECT}/secrets/${secretId}`
@@ -2221,10 +2320,12 @@ export class GcpControlPlane {
       && Number(settings.finalBackupConfig?.retentionDays) === 30;
   }
 
-  #compareBucket(value) {
+  #compareBucket(id, value) {
+    const definition = id === 'bucket'
+      ? this.contract.resources.bucket : this.contract.resources.buildSourceBucket;
     const rules = value.lifecycle?.rule ?? [];
     const policy = value.iamConfiguration ?? {};
-    return value.name === GCP_IDENTITY.bucket
+    return value.name === definition.name
       && String(value.projectNumber ?? '') === this.#projectNumber()
       && value.location === 'ASIA-EAST2'
       && policy.uniformBucketLevelAccess?.enabled === true
@@ -2232,7 +2333,9 @@ export class GcpControlPlane {
       && value.versioning?.enabled !== true
       && Number(value.softDeletePolicy?.retentionDurationSeconds ?? 0) === 0
       && (value.retentionPolicy === undefined || value.retentionPolicy === null)
-      && exact(rules, [{ action: { type: 'Delete' }, condition: { age: 7 } }]);
+      && exact(rules, [{
+        action: { type: 'Delete' }, condition: { age: definition.lifecycleDeleteAfterDays },
+      }]);
   }
 
   async #readSecretVersion(secretId) {

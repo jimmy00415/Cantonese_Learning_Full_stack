@@ -71,6 +71,9 @@ The migrated fail-closed resource contract uses:
 - Cloud Run service: `hkbuddy-v1-api` in `asia-east2`;
 - Cloud SQL: `hkbuddy-v1-pg`, PostgreSQL 16, database `hkbuddy_v1`;
 - media bucket: `hkbuddy-v1-582852715831-media` in `asia-east2`;
+- Cloud Build source bucket: `hkbuddy-v1-582852715831-build-source` in
+  `asia-east2`, private with UBLA and PAP enforced, no versioning or soft
+  delete, and a one-day delete lifecycle;
 - custom VPC: `hkbuddy-v1-vpc`;
 - direct-VPC subnet: `hkbuddy-v1-ae2-run`, `10.24.0.0/26`;
 - private-services range: `hkbuddy-v1-google-services`, `10.25.0.0/16`;
@@ -118,7 +121,8 @@ fresh preflight:
    namespace, except the fixed database/user names whose scope is the dedicated
    Cloud SQL instance.
 3. The proposed subnet and private-service CIDRs do not overlap any project
-   subnet, route, reserved address, or peering range.
+   subnet, route, supported internal `RESERVED` address family, or peering
+   range; unsupported or incomplete internal-address shapes fail closed.
 4. No existing project-level IAM binding, default-network object, DNS resource,
    domain, BigQuery dataset, or unrelated resource is a mutation target.
 5. Existing resources with a managed identity must match the complete expected
