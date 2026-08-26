@@ -16,6 +16,7 @@ import {
 } from '../scripts/release-state-store.js';
 import {
   classifyReconciliation,
+  classifyRestartDisposition,
   createFinalMutationGuard,
   recoverTerminalFromReceipt,
   reconcileMutation,
@@ -112,6 +113,20 @@ test('journal records are canonical, exact, secret-free, and hash chained', () =
     mutate(changed);
     assert.throws(() => validateJournalRecords(changed), /journal/i);
   }
+});
+
+test('journal operation identity preserves a colon-qualified release operation id', () => {
+  const operationId = 'inventory-publish:legacyInventory';
+  const record = finalizeJournalRecord(common({
+    phase: 'inventory',
+    operationId,
+  }));
+  assert.equal(record.operationId, operationId);
+  assert.equal(validateReconciliationPrefix({ operationIds: [operationId], records: [] }), true);
+  assert.equal(createFinalMutationGuard({
+    finalOperationId: operationId,
+    mutationOperationIds: [operationId],
+  }).beforeOperation(operationId), true);
 });
 
 test('atomic create-only writer publishes exact bytes privately and refuses replacement', async (t) => {
@@ -224,6 +239,61 @@ test('state store appends one exact intent-checkpoint-terminal attempt', async (
   await store.close();
 });
 
+test('state store reopens one matching in-flight attempt and rejects plan drift', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hkbuddy-state-restart-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const receiptDirectory = join(root, 'receipts');
+  await mkdir(receiptDirectory);
+  const first = await openReleaseStateStore({
+    receiptDirectory,
+    releaseSha: RELEASE_SHA,
+    releaseIdentitySha256: RELEASE_IDENTITY,
+    phase: 'candidate',
+    phasePlanSha256: PLAN_SHA,
+    attemptId: ATTEMPT_ID,
+    receiptHeadSha256: RECEIPT_HEAD,
+    now: () => new Date(CREATED_AT),
+    allowTemporaryState: true,
+  });
+  const intent = await first.appendIntent(common().payload, { operationId: 'candidate-deploy' });
+  await first.close();
+
+  const restartAttemptId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  await assert.rejects(() => openReleaseStateStore({
+    receiptDirectory,
+    releaseSha: RELEASE_SHA,
+    releaseIdentitySha256: RELEASE_IDENTITY,
+    phase: 'candidate',
+    phasePlanSha256: '9'.repeat(64),
+    attemptId: restartAttemptId,
+    receiptHeadSha256: RECEIPT_HEAD,
+    now: () => new Date(CREATED_AT),
+    allowTemporaryState: true,
+  }), /journal|plan/i);
+
+  const restarted = await openReleaseStateStore({
+    receiptDirectory,
+    releaseSha: RELEASE_SHA,
+    releaseIdentitySha256: RELEASE_IDENTITY,
+    phase: 'candidate',
+    phasePlanSha256: PLAN_SHA,
+    attemptId: restartAttemptId,
+    receiptHeadSha256: RECEIPT_HEAD,
+    now: () => new Date(CREATED_AT),
+    allowTemporaryState: true,
+  });
+  assert.equal(restarted.attemptId, ATTEMPT_ID);
+  assert.equal(restarted.records.at(-1).recordSha256, intent.recordSha256);
+  await restarted.appendCheckpoint({
+    intentRecordSha256: intent.recordSha256,
+    classification: 'after',
+    outcome: 'adopted-restart',
+    observationSha256: '2'.repeat(64),
+    safeResult: { kind: 'none' },
+  });
+  await restarted.close();
+});
+
 test('reconciliation adopts only exact after and blocks before, in-flight, and mixed truth', async () => {
   const before = { state: 'before', revision: 'old' };
   const inFlight = { state: 'in-flight', revision: 'new' };
@@ -259,6 +329,42 @@ test('reconciliation adopts only exact after and blocks before, in-flight, and m
       safeResult: { kind: 'none' },
     }), /reconciliation/i);
   }
+});
+
+test('every mutation family has an explicit restart classification policy', () => {
+  const boundedRetryKinds = [
+    'cloud-run-job-replace',
+    'cloud-run-service-replace',
+    'cloud-run-service-iam',
+    'cloud-run-traffic',
+    'cloud-run-service-delete',
+    'gcs-object-write',
+    'gcs-object-delete',
+  ];
+  const noRetryKinds = [
+    'cloud-build-submit',
+    'cloud-run-job-execute',
+    'secret-version-add',
+  ];
+  for (const reconcileKind of [...boundedRetryKinds, ...noRetryKinds]) {
+    assert.equal(classifyRestartDisposition({ reconcileKind, classification: 'after' }),
+      'adopt-after', reconcileKind);
+    assert.equal(classifyRestartDisposition({ reconcileKind, classification: 'in-flight' }),
+      'poll-only', reconcileKind);
+    assert.equal(classifyRestartDisposition({ reconcileKind, classification: 'mixed' }),
+      'block-mixed', reconcileKind);
+  }
+  for (const reconcileKind of boundedRetryKinds) {
+    assert.equal(classifyRestartDisposition({ reconcileKind, classification: 'before' }),
+      'retry-exact-before', reconcileKind);
+  }
+  for (const reconcileKind of noRetryKinds) {
+    assert.equal(classifyRestartDisposition({ reconcileKind, classification: 'before' }),
+      'block-ambiguous', reconcileKind);
+  }
+  assert.throws(() => classifyRestartDisposition({
+    reconcileKind: 'unknown', classification: 'after',
+  }), /restart/i);
 });
 
 test('intent durability failure prevents mutation and restart-after adopts without repeating it', async () => {
@@ -303,6 +409,56 @@ test('receipt-before-terminal recovery performs one local terminal append and no
   assert.equal(terminal.receiptSha256, receipt.receiptSha256);
   assert.deepEqual(events[0].responseLossOperationIds, []);
   assert.equal(events[0].checkpointRecordSha256, records[1].recordSha256);
+});
+
+test('terminal recovery counts only the current attempt in a multi-phase journal', async () => {
+  const records = threeRecordJournal();
+  const secondAttemptId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const intent = finalizeJournalRecord(common({
+    recordType: 'intent',
+    generation: 4,
+    attemptId: secondAttemptId,
+    phase: 'candidate-cleanup',
+    phasePlanSha256: '8'.repeat(64),
+    operationId: 'candidate-cleanup-delete',
+    receiptHeadSha256: records.at(-1).payload.receiptSha256,
+    previousRecordSha256: records.at(-1).recordSha256,
+    payload: {
+      mutationOrdinal: 1,
+      operationAttemptId: '9'.repeat(32),
+      commandSha256: 'a'.repeat(64),
+      reconcileKind: 'cloud-run-service-delete',
+      beforeSha256: 'b'.repeat(64),
+      afterSha256: 'c'.repeat(64),
+    },
+  }));
+  const checkpoint = finalizeJournalRecord(common({
+    recordType: 'checkpoint',
+    generation: 5,
+    attemptId: secondAttemptId,
+    phase: 'candidate-cleanup',
+    phasePlanSha256: '8'.repeat(64),
+    operationId: 'candidate-cleanup-delete',
+    receiptHeadSha256: records.at(-1).payload.receiptSha256,
+    previousRecordSha256: intent.recordSha256,
+    payload: {
+      intentRecordSha256: intent.recordSha256,
+      classification: 'after',
+      outcome: 'adopted-restart',
+      observationSha256: 'c'.repeat(64),
+      safeResult: { kind: 'none' },
+    },
+  }));
+  records.push(intent, checkpoint);
+  let terminalPayload;
+  await recoverTerminalFromReceipt({
+    records,
+    receipt: { receiptSha256: 'd'.repeat(64), phase: 'candidate-cleanup' },
+    terminalState: { cleanup: 'absent', mutationCount: 1 },
+    appendTerminal: async (payload) => { terminalPayload = payload; return payload; },
+  });
+  assert.equal(terminalPayload.mutationCount, 1);
+  assert.deepEqual(terminalPayload.responseLossOperationIds, ['candidate-cleanup-delete']);
 });
 
 test('final mutation guard permits only reads and durable local writes afterwards', () => {

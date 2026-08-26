@@ -2,6 +2,21 @@ import { createHash } from 'node:crypto';
 
 import { canonicalJson, validateJournalRecords } from './release-state-store.js';
 
+const BOUNDED_RETRY_KINDS = new Set([
+  'cloud-run-job-replace',
+  'cloud-run-service-replace',
+  'cloud-run-service-iam',
+  'cloud-run-traffic',
+  'cloud-run-service-delete',
+  'gcs-object-write',
+  'gcs-object-delete',
+]);
+const NO_RETRY_KINDS = new Set([
+  'cloud-build-submit',
+  'cloud-run-job-execute',
+  'secret-version-add',
+]);
+
 function digest(value) {
   return createHash('sha256').update(canonicalJson(value)).digest('hex');
 }
@@ -12,6 +27,18 @@ export function classifyReconciliation({ before, inFlight, after, observed } = {
   if (observedHash === digest(before)) return 'before';
   if (inFlight !== null && inFlight !== undefined && observedHash === digest(inFlight)) return 'in-flight';
   return 'mixed';
+}
+
+export function classifyRestartDisposition({ reconcileKind, classification } = {}) {
+  if (![...BOUNDED_RETRY_KINDS, ...NO_RETRY_KINDS].includes(reconcileKind)
+    || !['after', 'before', 'in-flight', 'mixed'].includes(classification)) {
+    throw new Error('Release restart classification is invalid');
+  }
+  if (classification === 'after') return 'adopt-after';
+  if (classification === 'in-flight') return 'poll-only';
+  if (classification === 'mixed') return 'block-mixed';
+  return BOUNDED_RETRY_KINDS.has(reconcileKind)
+    ? 'retry-exact-before' : 'block-ambiguous';
 }
 
 export async function reconcileMutation({
@@ -76,7 +103,9 @@ export async function recoverTerminalFromReceipt({
     throw new Error('Release terminal recovery is invalid');
   }
   validateJournalRecords(records);
-  const responseLossOperationIds = records
+  const currentAttemptId = records.at(-1).attemptId;
+  const currentAttemptRecords = records.filter((record) => record.attemptId === currentAttemptId);
+  const responseLossOperationIds = currentAttemptRecords
     .filter((record) => record.recordType === 'checkpoint'
       && ['adopted-response-loss', 'adopted-restart'].includes(record.payload.outcome))
     .map((record) => record.operationId);
@@ -85,13 +114,15 @@ export async function recoverTerminalFromReceipt({
     checkpointRecordSha256: records.at(-1).recordSha256,
     receiptSha256: receipt.receiptSha256,
     terminalState,
-    mutationCount: records.filter((record) => record.recordType === 'checkpoint').length,
+    mutationCount: currentAttemptRecords.filter(
+      (record) => record.recordType === 'checkpoint',
+    ).length,
     responseLossOperationIds,
   });
 }
 
 export function createFinalMutationGuard({ finalOperationId, mutationOperationIds } = {}) {
-  if (!/^[a-z][a-z0-9-]{0,95}$/.test(String(finalOperationId ?? ''))
+  if (!/^[a-z][A-Za-z0-9:-]{0,127}$/.test(String(finalOperationId ?? ''))
     || !Array.isArray(mutationOperationIds) || !mutationOperationIds.includes(finalOperationId)
     || new Set(mutationOperationIds).size !== mutationOperationIds.length) {
     throw new Error('Final mutation contract is invalid');
@@ -116,7 +147,7 @@ export function createFinalMutationGuard({ finalOperationId, mutationOperationId
 export function validateReconciliationPrefix({ operationIds, records } = {}) {
   if (!Array.isArray(operationIds) || operationIds.length < 1
     || new Set(operationIds).size !== operationIds.length
-    || operationIds.some((value) => !/^[a-z][a-z0-9-]{0,95}$/.test(String(value ?? '')))
+    || operationIds.some((value) => !/^[a-z][A-Za-z0-9:-]{0,127}$/.test(String(value ?? '')))
     || !Array.isArray(records)) throw new Error('Release reconciliation prefix is invalid');
   let operationIndex = 0;
   let currentIntent = null;

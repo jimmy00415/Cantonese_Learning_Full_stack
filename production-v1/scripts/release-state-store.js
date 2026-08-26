@@ -11,7 +11,7 @@ const RELEASE_SHA = /^[0-9a-f]{40}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const OPERATION_ATTEMPT_ID = /^[0-9a-f]{32}$/;
-const OPERATION_ID = /^[a-z][a-z0-9-]{0,95}$/;
+const OPERATION_ID = /^[a-z][A-Za-z0-9:-]{0,127}$/;
 const HOST = /^[^\u0000-\u001f\u007f/\\]{1,255}$/u;
 const PHASES = new Set([
   'build', 'migration', 'inventory', 'acceptance', 'collect', 'evidence',
@@ -566,11 +566,16 @@ export async function openReleaseStateStore({
   try {
     await recoverJournalTemp(stateDirectory);
     const { records } = await readJournalFiles(stateDirectory);
+    let effectiveAttemptId = attemptId;
     if (records.length > 0) {
       const last = records.at(-1);
       if (last.releaseSha !== releaseSha || last.releaseIdentitySha256 !== releaseIdentitySha256) fail();
-      if (last.recordType !== 'terminal' && last.attemptId !== attemptId) {
-        throw new Error('Release journal has another open attempt');
+      if (last.recordType !== 'terminal') {
+        if (last.phase !== phase || last.phasePlanSha256 !== phasePlanSha256
+          || last.receiptHeadSha256 !== receiptHeadSha256) {
+          throw new Error('Release journal open-attempt plan drift');
+        }
+        effectiveAttemptId = last.attemptId;
       }
     }
 
@@ -594,7 +599,7 @@ export async function openReleaseStateStore({
         releaseIdentitySha256,
         phase,
         phasePlanSha256,
-        attemptId,
+        attemptId: effectiveAttemptId,
         operationId,
         receiptHeadSha256,
         previousRecordSha256: previous?.recordSha256 ?? null,
@@ -604,6 +609,7 @@ export async function openReleaseStateStore({
     }
 
     return {
+      attemptId: effectiveAttemptId,
       stateDirectory,
       records,
       async appendIntent(payload, { operationId } = {}) {

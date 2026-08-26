@@ -10,7 +10,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { createDefaultGcloudExecutor } from './gcp-provision.js';
 import { containsForbiddenPersistedSecret } from './persisted-secret-contract.js';
-import { writeAtomicCreateOnly } from './release-state-store.js';
+import {
+  recoverTerminalFromReceipt,
+  validateReconciliationPrefix,
+} from './release-reconciliation.js';
+import { openReleaseStateStore, writeAtomicCreateOnly } from './release-state-store.js';
 import { GCP_IDENTITY } from '../src/gcp-identity.js';
 import { finalizeReleaseEvidenceRecord } from '../src/services/release-evidence.js';
 import { finalizeEvidenceRecord } from '../src/services/voice-evidence.js';
@@ -3306,6 +3310,19 @@ async function loadReleaseReceiptFiles(plan, { through }) {
   return receipts;
 }
 
+async function loadExistingReleasePhaseReceipt(plan, phase) {
+  const filePath = plan?.releaseReceiptPaths?.[phase];
+  if (!filePath) return null;
+  try {
+    await lstat(filePath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+  const receipts = await loadReleaseReceiptFiles(plan, { through: phase });
+  return receipts.at(-1);
+}
+
 async function persistReleaseReceipt(plan, receipt) {
   const filePath = plan.releaseReceiptPaths[receipt.phase];
   if (!filePath) throw new Error('Release receipt path is invalid');
@@ -3441,6 +3458,141 @@ function operationMayMutate(id) {
     || id === 'candidate-cleanup-delete' || id === 'promote-stable-deploy'
     || id === 'promote-public-service'
     || id === 'promote-traffic' || id === 'rollback-traffic';
+}
+
+function journalReconcileKind(id) {
+  if (id === 'build-submit') return 'cloud-build-submit';
+  if (id === 'candidate-deploy' || id === 'promote-stable-deploy') {
+    return 'cloud-run-service-replace';
+  }
+  if (id === 'candidate-private-iam-grant' || id === 'promote-public-service') {
+    return 'cloud-run-service-iam';
+  }
+  if (id === 'promote-traffic' || id === 'rollback-traffic') return 'cloud-run-traffic';
+  if (id === 'candidate-cleanup-delete') return 'cloud-run-service-delete';
+  if (id.endsWith('-deploy')) return 'cloud-run-job-replace';
+  if (id.endsWith('-execute')) return 'cloud-run-job-execute';
+  if (id.startsWith('inventory-publish:') || id.startsWith('evidence-publish:')) {
+    return 'secret-version-add';
+  }
+  if (id.startsWith('evidence-collect-copy:')) return 'gcs-object-write';
+  if (id.startsWith('evidence-output-delete:')) return 'gcs-object-delete';
+  throw new Error('Release mutation has no reconciliation contract');
+}
+
+function journalOperationState(plan, member, state) {
+  return Object.freeze({
+    operationId: member.id,
+    phase: member.phase,
+    releaseIdentitySha256: plan.releaseIdentitySha256,
+    state,
+  });
+}
+
+function journalCheckpointBoundary(operationId) {
+  if (operationId === 'build-submit') return 'build-readback';
+  if (operationId === 'candidate-deploy') return 'candidate-private-iam-baseline-readback';
+  if (operationId === 'candidate-private-iam-grant') return 'candidate-private-iam-readback';
+  if (operationId === 'candidate-cleanup-delete') return 'candidate-cleanup-absence-readback';
+  if (operationId === 'promote-stable-deploy') return 'promote-stable-artifact-readback';
+  if (operationId === 'promote-public-service') return 'promote-public-iam-readback';
+  if (operationId === 'promote-traffic') return 'promote-readback';
+  if (operationId === 'rollback-traffic') return 'rollback-readback';
+  if (operationId.startsWith('inventory-publish:')) {
+    return operationId.replace('inventory-publish:', 'inventory-readback:');
+  }
+  if (operationId.startsWith('evidence-publish:')) {
+    return operationId.replace('evidence-publish:', 'evidence-readback:');
+  }
+  if (operationId.endsWith('-deploy')) return operationId.replace(/-deploy$/u, '-readback');
+  return operationId;
+}
+
+function journalRestartObservation(member, plan) {
+  const { id } = member;
+  if (id === 'build-submit' || id.endsWith('-execute')) return { mode: 'blocked' };
+  if (id === 'migration-deploy') return {
+    mode: 'read',
+    argv: [
+      'run', 'jobs', 'describe', MIGRATION_JOB,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ],
+  };
+  if (id.endsWith('-deploy') && !['candidate-deploy', 'promote-stable-deploy'].includes(id)) {
+    const key = id.slice(0, -'-deploy'.length);
+    const job = plan.expectedJobs[key]?.job;
+    if (!job) return { mode: 'blocked' };
+    return {
+      mode: 'read',
+      argv: [
+        'run', 'jobs', 'describe', job,
+        `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+      ],
+    };
+  }
+  if (id.startsWith('inventory-publish:') || id.startsWith('evidence-publish:')) {
+    const key = id.slice(id.indexOf(':') + 1);
+    const expected = plan.evidence[key];
+    const definition = EVIDENCE_DEFINITIONS[key];
+    if (!expected || !definition) return { mode: 'blocked' };
+    return {
+      mode: 'read',
+      argv: [
+        'secrets', 'versions', 'describe', expected.secretVersion,
+        `--secret=${definition.secret}`, `--project=${PROJECT}`, '--format=json',
+      ],
+    };
+  }
+  if (id.startsWith('evidence-collect-copy:')) return { mode: 'collected-local' };
+  if (id.startsWith('evidence-output-delete:')) {
+    const key = id.slice(id.indexOf(':') + 1);
+    const output = plan.acceptanceOutputs[key];
+    if (!output) return { mode: 'blocked' };
+    return {
+      mode: 'gcs-absence-list',
+      argv: [
+        'storage', 'objects', 'list', `gs://${output.bucket}/${output.object}`,
+        `--project=${PROJECT}`, '--format=json',
+      ],
+    };
+  }
+  if (id === 'candidate-deploy') return {
+    mode: 'read',
+    argv: [
+      'run', 'services', 'describe', CANDIDATE_SERVICE,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ],
+  };
+  if (id === 'candidate-private-iam-grant') return {
+    mode: 'read',
+    argv: [
+      'run', 'services', 'get-iam-policy', CANDIDATE_SERVICE,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ],
+  };
+  if (id === 'candidate-cleanup-delete') return { mode: 'deferred-absence' };
+  if (id === 'promote-stable-deploy') return {
+    mode: 'read',
+    argv: [
+      'run', 'services', 'describe', STABLE_SERVICE,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ],
+  };
+  if (id === 'promote-public-service') return {
+    mode: 'read',
+    argv: [
+      'run', 'services', 'get-iam-policy', STABLE_SERVICE,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ],
+  };
+  if (id === 'promote-traffic' || id === 'rollback-traffic') return {
+    mode: 'read',
+    argv: [
+      'run', 'services', 'describe', STABLE_SERVICE,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ],
+  };
+  return { mode: 'blocked' };
 }
 
 function parseArguments(argv, releaseSha) {
@@ -3724,7 +3876,11 @@ export async function runGcpRelease({
   workloadFetch = globalThis.fetch,
   randomUUID = systemRandomUUID,
   loadReceipts = loadReleaseReceiptFiles,
+  loadPhaseReceipt = loadExistingReleasePhaseReceipt,
   persistReceipt = persistReleaseReceipt,
+  openStateStore = openReleaseStateStore,
+  recoverTerminal = recoverTerminalFromReceipt,
+  journalAttemptId = systemRandomUUID,
   now = () => new Date(),
   environment = process.env,
   writeOutput = (line) => process.stdout.write(line),
@@ -3833,6 +3989,114 @@ export async function runGcpRelease({
       });
     }
   }
+  const mutationMembers = selected.filter(({ id }) => operationMayMutate(id));
+  let stateStore = null;
+  let journalMutationCount = 0;
+  let releaseJournalAttemptId = null;
+  let existingJournalIntent = null;
+  let resumeOperationId = null;
+  let hasOpenJournalAttempt = false;
+  let openJournalRecords = [];
+  if (mutationMembers.length > 0) {
+    try {
+      if (typeof openStateStore !== 'function' || typeof journalAttemptId !== 'function') {
+        throw new Error('Release journal is unavailable');
+      }
+      releaseJournalAttemptId = journalAttemptId();
+      stateStore = await openStateStore({
+        receiptDirectory: plan.releaseReceiptDirectory,
+        releaseSha: plan.releaseSha,
+        releaseIdentitySha256: plan.releaseIdentitySha256,
+        phase: selection.phase,
+        phasePlanSha256: canonicalSha256({
+          phase: selection.phase,
+          operations: selected.map(({ id, argv: operationArgv }) => ({ id, argv: operationArgv })),
+        }),
+        attemptId: releaseJournalAttemptId,
+        receiptHeadSha256: priorReceipts.at(-1)?.receiptSha256 ?? null,
+        now,
+        workspaceRoot: APP_ROOT,
+      });
+      if (!stateStore || !Array.isArray(stateStore.records)
+        || !['appendIntent', 'appendCheckpoint', 'appendTerminal', 'close']
+          .every((key) => typeof stateStore[key] === 'function')) {
+        throw new Error('Release journal is invalid');
+      }
+      releaseJournalAttemptId = stateStore.attemptId ?? releaseJournalAttemptId;
+      const lastTerminalIndex = stateStore.records.findLastIndex(
+        (record) => record.recordType === 'terminal',
+      );
+      openJournalRecords = stateStore.records.slice(lastTerminalIndex + 1);
+      if (openJournalRecords.length > 0) {
+        validateReconciliationPrefix({
+          operationIds: mutationMembers.map(({ id }) => id),
+          records: openJournalRecords,
+        });
+        hasOpenJournalAttempt = true;
+        journalMutationCount = openJournalRecords.filter(
+          (record) => record.recordType === 'checkpoint',
+        ).length;
+        existingJournalIntent = openJournalRecords.at(-1)?.recordType === 'intent'
+          ? openJournalRecords.at(-1) : null;
+        resumeOperationId = existingJournalIntent?.operationId
+          ?? mutationMembers[journalMutationCount]?.id
+          ?? null;
+      }
+    } catch {
+      await stateStore?.close().catch(() => undefined);
+      return publish(writeOutput, 1, {
+        status: 'failed', code: 'RELEASE_STATE_INVALID', mutationPerformed: false,
+        releaseSha: plan.releaseSha, phase: selection.phase, completed: [],
+      });
+    }
+  }
+  if (hasOpenJournalAttempt && resumeOperationId === null && receiptPhaseIndex >= 0) {
+    let phaseReceipt;
+    try {
+      phaseReceipt = typeof loadPhaseReceipt === 'function'
+        ? await loadPhaseReceipt(plan, selection.phase, priorReceipts) : null;
+      if (phaseReceipt !== null) {
+        validateReleaseReceiptChain([...priorReceipts, phaseReceipt], plan, {
+          through: selection.phase,
+        });
+      }
+    } catch {
+      await stateStore?.close().catch(() => undefined);
+      return publish(writeOutput, 1, {
+        status: 'failed', code: 'RELEASE_RECEIPT_CHAIN_INVALID', mutationPerformed: false,
+        releaseSha: plan.releaseSha, phase: selection.phase, completed: [],
+      });
+    }
+    if (phaseReceipt !== null) {
+      try {
+        if (typeof recoverTerminal !== 'function') throw new Error('Terminal recovery unavailable');
+        await recoverTerminal({
+          records: stateStore.records,
+          receipt: phaseReceipt,
+          terminalState: {
+            completed: [...phaseReceipt.completed],
+            mutationCount: journalMutationCount,
+            phase: selection.phase,
+          },
+          appendTerminal: (payload) => stateStore.appendTerminal(payload),
+        });
+        await stateStore.close();
+        return publish(writeOutput, 0, {
+          status: 'phase-complete', code: 'GCP_RELEASE_PHASE_COMPLETE',
+          mutationPerformed: false, recoveredTerminal: true,
+          releaseSha: plan.releaseSha, phase: selection.phase,
+          completed: [...phaseReceipt.completed], phaseReceipt,
+        });
+      } catch {
+        await stateStore?.close().catch(() => undefined);
+        return publish(writeOutput, 1, {
+          status: 'failed', code: 'RELEASE_JOURNAL_WRITE_FAILED', mutationPerformed: false,
+          releaseSha: plan.releaseSha, phase: selection.phase,
+          completed: [...phaseReceipt.completed],
+        });
+      }
+    }
+  }
   try {
     const task8Phases = ['promote', 'rollback'].includes(selection.phase)
       ? ['readiness', 'workload', 'mobile']
@@ -3880,6 +4144,7 @@ export async function runGcpRelease({
   let buildReceipt = null;
   let migrationExecutionReceipt = null;
   let mutationAttempted = false;
+  let pendingJournal = null;
   let promotionIamBaseline = null;
   let stablePublicIamBaseline = null;
   let stablePriorRevisionBaseline = null;
@@ -3892,7 +4157,9 @@ export async function runGcpRelease({
   let workloadArtifactPublished = false;
   let candidateCleanupState = null;
   let activeOperationId = null;
+  let resumeBoundaryReached = !hasOpenJournalAttempt;
   const responseLossRecoveries = [];
+  const restartAdoptions = new Set();
   if (task8Attestations.workload && task8Attestations.workload !== true) {
     try {
       const attestation = task8Attestations.workload;
@@ -3954,18 +4221,74 @@ export async function runGcpRelease({
       await verifyEvidence(plan.evidence, { releaseSha: plan.releaseSha });
     }
     for (const member of selected) {
+      if (hasOpenJournalAttempt && !resumeBoundaryReached) {
+        if (resumeOperationId !== null && member.id === resumeOperationId) {
+          resumeBoundaryReached = true;
+        } else {
+          completed.push(member.id);
+          continue;
+        }
+      }
+      if (hasOpenJournalAttempt && resumeOperationId === null) {
+        completed.push(member.id);
+        continue;
+      }
       if (candidateCleanupState === 'already-absent'
         && member.id !== 'candidate-cleanup-absence-readback') continue;
       activeOperationId = member.id;
-      if (operationMayMutate(member.id)) mutationAttempted = true;
-      if (member.id === 'candidate-deploy') candidateDeployMutationAttempted = true;
-      if (member.id === 'candidate-private-iam-grant') candidateIamMutationAttempted = true;
-      if (member.id === 'promote-stable-deploy') promotionStableMutationAttempted = true;
-      if (member.id === 'promote-public-service') promotionIamMutationAttempted = true;
-      if (member.id === 'promote-traffic') promotionTrafficMutationAttempted = true;
+      let journalIntent = null;
+      let journalAfterSha256 = null;
+      const restartingMutation = existingJournalIntent?.operationId === member.id;
+      if (operationMayMutate(member.id)) {
+        if (pendingJournal !== null) {
+          throw new Error('Prior release mutation lacks an authoritative checkpoint');
+        }
+        const mutationOrdinal = restartingMutation
+          ? existingJournalIntent.payload.mutationOrdinal : journalMutationCount + 1;
+        const beforeState = journalOperationState(plan, member, 'before');
+        const afterState = journalOperationState(plan, member, 'after');
+        journalAfterSha256 = restartingMutation
+          ? existingJournalIntent.payload.afterSha256 : canonicalSha256(afterState);
+        if (restartingMutation) {
+          journalIntent = existingJournalIntent;
+          existingJournalIntent = null;
+          restartAdoptions.add(member.id);
+        } else {
+          try {
+            journalIntent = await stateStore.appendIntent({
+              mutationOrdinal,
+              operationAttemptId: createHash('sha256').update([
+                releaseJournalAttemptId, member.id, String(mutationOrdinal),
+              ].join('\0')).digest('hex').slice(0, 32),
+              commandSha256: canonicalSha256(member.argv),
+              reconcileKind: journalReconcileKind(member.id),
+              beforeSha256: canonicalSha256(beforeState),
+              afterSha256: journalAfterSha256,
+            }, { operationId: member.id });
+          } catch (error) {
+            error.code = 'RELEASE_JOURNAL_WRITE_FAILED';
+            throw error;
+          }
+        }
+        journalMutationCount = mutationOrdinal;
+        pendingJournal = Object.freeze({
+          afterSha256: journalAfterSha256,
+          intent: journalIntent,
+          operationId: member.id,
+          restarting: restartingMutation,
+        });
+        if (!restartingMutation) mutationAttempted = true;
+      }
+      if (!restartingMutation && member.id === 'candidate-deploy') candidateDeployMutationAttempted = true;
+      if (!restartingMutation && member.id === 'candidate-private-iam-grant') candidateIamMutationAttempted = true;
+      if (!restartingMutation && member.id === 'promote-stable-deploy') promotionStableMutationAttempted = true;
+      if (!restartingMutation && member.id === 'promote-public-service') promotionIamMutationAttempted = true;
+      if (!restartingMutation && member.id === 'promote-traffic') promotionTrafficMutationAttempted = true;
       let receipt;
       let canonicalServiceAbsence = false;
       try {
+        const restartObservation = restartingMutation
+          ? journalRestartObservation(member, plan) : null;
         const operationArgv = member.id === 'build-readback'
           ? [
             'builds', 'describe', buildReceipt?.buildId,
@@ -3973,7 +4296,33 @@ export async function runGcpRelease({
           ]
           : member.argv;
         try {
-          receipt = await executor(operationArgv);
+          if (!restartingMutation) {
+            receipt = await executor(operationArgv);
+          } else if (restartObservation.mode === 'blocked') {
+            throw new Error('Release restart lacks an authoritative correlation identity');
+          } else if (restartObservation.mode === 'deferred-absence') {
+            receipt = null;
+          } else if (restartObservation.mode === 'gcs-absence-list') {
+            const rows = await executor(restartObservation.argv);
+            if (!Array.isArray(rows) || rows.length !== 0) {
+              throw new Error('Release restart observed the GCS object before-state');
+            }
+            receipt = null;
+          } else if (restartObservation.mode === 'collected-local') {
+            const key = member.id.slice(member.id.indexOf(':') + 1);
+            const describe = plan.operations.find(
+              ({ id }) => id === `evidence-collect-describe:${key}`,
+            );
+            if (!describe) throw new Error('Release restart collection source is unavailable');
+            const source = await executor(describe.argv);
+            collectedObjectReceipts.set(
+              key,
+              validateAcceptanceObjectReceipt(source, plan.acceptanceOutputs[key]),
+            );
+            receipt = null;
+          } else {
+            receipt = await executor(restartObservation.argv);
+          }
         } finally {
           if (member.id === 'build-submit'
             && (typeof verifyBuildConfig !== 'function'
@@ -4137,24 +4486,31 @@ export async function runGcpRelease({
         validateServiceIamReceipt(receipt, { policy: 'stable-private', requireEtag: true });
         promotionIamBaseline = normalizeServiceIamPolicy(receipt, { requireEtag: true });
       } else if (member.id === 'promote-public-service') {
-        if (!promotionIamBaseline) throw new Error('Promotion IAM baseline is unavailable');
-        const normalized = validateIamPolicyState(
-          receipt, publicIamPolicyState(promotionIamBaseline), { requireEtag: true },
-        );
-        if (normalized.etag === promotionIamBaseline.etag) {
-          throw new Error('Promotion IAM mutation has no new etag');
+        if (restartingMutation) {
+          validateServiceIamReceipt(receipt, { policy: 'stable-public', requireEtag: true });
+        } else {
+          if (!promotionIamBaseline) throw new Error('Promotion IAM baseline is unavailable');
+          const normalized = validateIamPolicyState(
+            receipt, publicIamPolicyState(promotionIamBaseline), { requireEtag: true },
+          );
+          if (normalized.etag === promotionIamBaseline.etag) {
+            throw new Error('Promotion IAM mutation has no new etag');
+          }
+          validateServiceIamReceipt(receipt, { policy: 'stable-public', requireEtag: true });
         }
-        validateServiceIamReceipt(receipt, { policy: 'stable-public', requireEtag: true });
       } else if (member.id === 'promote-public-iam-readback') {
         validateServiceIamReceipt(receipt, { policy: 'stable-public', requireEtag: true });
         if (plan.previousRevision === null) {
-          if (!promotionIamBaseline) throw new Error('Promotion IAM baseline is unavailable');
-          validateIamPolicyState(
-            receipt, publicIamPolicyState(promotionIamBaseline), { requireEtag: true },
-          );
-        } else if (!stablePublicIamBaseline
-          || !exact(iamPolicyState(normalizeServiceIamPolicy(receipt, { requireEtag: true })),
-            iamPolicyState(stablePublicIamBaseline))) {
+          if (!restartAdoptions.has('promote-public-service')) {
+            if (!promotionIamBaseline) throw new Error('Promotion IAM baseline is unavailable');
+            validateIamPolicyState(
+              receipt, publicIamPolicyState(promotionIamBaseline), { requireEtag: true },
+            );
+          }
+        } else if (!restartAdoptions.has('promote-traffic')
+          && (!stablePublicIamBaseline
+            || !exact(iamPolicyState(normalizeServiceIamPolicy(receipt, { requireEtag: true })),
+              iamPolicyState(stablePublicIamBaseline)))) {
           throw new Error('Stable public IAM changed during promotion');
         }
       } else if (member.id === 'candidate-service-precheck') {
@@ -4203,7 +4559,9 @@ export async function runGcpRelease({
         }
         if (candidateCleanupState === null) candidateCleanupState = 'deleted';
       } else if (member.id === 'promote-traffic') {
-        if (responseLossRecoveries.includes(member.id)) validatePromotedService(receipt, plan);
+        if (restartingMutation || responseLossRecoveries.includes(member.id)) {
+          validatePromotedService(receipt, plan);
+        }
         else validateTrafficTargetAcknowledgement(receipt, {
           revision: plan.stableRevision, serviceUrl: plan.serviceOrigin,
         });
@@ -4223,7 +4581,9 @@ export async function runGcpRelease({
         || member.id === 'rollback-public-iam-readback') {
         validateServiceIamReceipt(receipt, { policy: 'stable-public', requireEtag: true });
       } else if (member.id === 'rollback-traffic') {
-        if (responseLossRecoveries.includes(member.id)) validateCandidateCleanupService(receipt, plan);
+        if (restartingMutation || responseLossRecoveries.includes(member.id)) {
+          validateCandidateCleanupService(receipt, plan);
+        }
         else validateTrafficTargetAcknowledgement(receipt, {
           revision: plan.previousRevision, serviceUrl: plan.serviceOrigin,
         });
@@ -4270,378 +4630,54 @@ export async function runGcpRelease({
           throw new Error('Evidence version readback is not publication-bound');
         }
       }
+      if (pendingJournal !== null
+        && journalCheckpointBoundary(pendingJournal.operationId) === member.id) {
+        try {
+          await stateStore.appendCheckpoint({
+            intentRecordSha256: pendingJournal.intent.recordSha256,
+            classification: 'after',
+            outcome: pendingJournal.restarting ? 'adopted-restart'
+              : (responseLossRecoveries.includes(pendingJournal.operationId)
+                ? 'adopted-response-loss' : 'applied'),
+            observationSha256: pendingJournal.afterSha256,
+            safeResult: { kind: 'none' },
+          });
+          pendingJournal = null;
+        } catch (error) {
+          error.code = 'RELEASE_JOURNAL_WRITE_FAILED';
+          throw error;
+        }
+      }
       completed.push(member.id);
       activeOperationId = null;
+    }
+    if (pendingJournal !== null) {
+      throw new Error('Release mutation lacks an authoritative checkpoint');
     }
     if (selection.phase === 'candidate') {
       validateCandidateControlPlaneReadbacks(candidateReadbacks, plan);
     }
-  } catch {
-    let compensationFailed = false;
-    let candidateServiceRestored = null;
-    let promotionServiceRestored = null;
-    let promotionIamRestored = null;
-
-    const readCandidateState = async () => {
-      const service = await executor([
-        'run', 'services', 'describe', CANDIDATE_SERVICE,
-        `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-      ]);
-      validateCandidateService(service, plan.expectedCandidate);
-      const revision = await executor([
-        'run', 'revisions', 'describe', plan.candidateRevision,
-        `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-      ]);
-      validateCandidateRevisionReadback(revision, plan);
-      const artifact = await executor([
-        'artifacts', 'docker', 'images', 'describe', plan.image,
-        `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
-      ]);
-      validateCandidateArtifact(artifact, plan.image);
-      const iam = await executor([
-        'run', 'services', 'get-iam-policy', CANDIDATE_SERVICE,
-        `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-      ]);
-      validateServiceIamReceipt(iam, { policy: 'candidate-private', requireEtag: true });
-      return { artifact, iam, revision, service };
-    };
-
-    if (selection.phase === 'candidate'
-      && (candidateDeployMutationAttempted || candidateIamMutationAttempted)) {
-      try {
-        let candidate = null;
-        try {
-          candidate = await executor([
-            'run', 'services', 'describe', CANDIDATE_SERVICE,
-            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-          ]);
-        } catch (error) {
-          if (error?.code !== 'CLOUD_RUN_SERVICE_NOT_FOUND') throw error;
-        }
-        if (candidate !== null) {
-          validateCandidateService(candidate, plan.expectedCandidate);
-          const revision = await executor([
-            'run', 'revisions', 'describe', plan.candidateRevision,
-            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-          ]);
-          validateCandidateRevisionReadback(revision, plan);
-          const artifact = await executor([
-            'artifacts', 'docker', 'images', 'describe', plan.image,
-            `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
-          ]);
-          validateCandidateArtifact(artifact, plan.image);
-          const iam = await executor([
-            'run', 'services', 'get-iam-policy', CANDIDATE_SERVICE,
-            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-          ]);
-          try {
-            validateServiceIamReceipt(iam, { policy: 'stable-private', requireEtag: true });
-          } catch {
-            validateServiceIamReceipt(iam, { policy: 'candidate-private', requireEtag: true });
-          }
-          try {
-            await executor([
-              'run', 'services', 'delete', CANDIDATE_SERVICE, '--quiet',
-              `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-            ]);
-          } catch (deleteError) {
-            try {
-              await executor([
-                'run', 'services', 'describe', CANDIDATE_SERVICE,
-                `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-              ]);
-              throw deleteError;
-            } catch (readbackError) {
-              if (readbackError?.code !== 'CLOUD_RUN_SERVICE_NOT_FOUND') throw deleteError;
-            }
-          }
-        }
-        try {
-          await executor([
-            'run', 'services', 'describe', CANDIDATE_SERVICE,
-            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-          ]);
-          throw new Error('Candidate compensation did not remove the candidate service');
-        } catch (error) {
-          if (error?.code !== 'CLOUD_RUN_SERVICE_NOT_FOUND') throw error;
-        }
-        candidateServiceRestored = true;
-      } catch {
-        compensationFailed = true;
-        candidateServiceRestored = false;
-      }
+  } catch (phaseError) {
+    if (phaseError?.code === 'RELEASE_JOURNAL_WRITE_FAILED') {
+      await stateStore?.close().catch(() => undefined);
+      return publish(writeOutput, 1, {
+        status: 'failed', code: 'RELEASE_JOURNAL_WRITE_FAILED',
+        mutationPerformed: mutationAttempted,
+        releaseSha: plan.releaseSha, phase: selection.phase, completed,
+        resumeBoundary: activeOperationId,
+      });
     }
-
-    const promotionMutationAttempted = selection.phase === 'promote'
-      && (promotionStableMutationAttempted
-        || promotionTrafficMutationAttempted || promotionIamMutationAttempted);
-    if (promotionMutationAttempted) {
-      let restorePath = null;
-      try {
-        if (typeof verifyEvidence !== 'function'
-          || await verifyEvidence(plan.evidence, { releaseSha: plan.releaseSha }) !== true) {
-          throw new Error('Promotion compensation evidence is invalid');
-        }
-        await readCandidateState();
-        if (plan.previousRevision === null) {
-          let stable = null;
-          try {
-            stable = await executor([
-              'run', 'services', 'describe', STABLE_SERVICE,
-              `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-            ]);
-          } catch (error) {
-            if (error?.code !== 'CLOUD_RUN_SERVICE_NOT_FOUND') throw error;
-          }
-          if (stable === null) {
-            if (typeof writeStableSpec !== 'function' || await writeStableSpec(plan) !== true) {
-              throw new Error('Stable Service YAML is unavailable');
-            }
-            const dryRun = await executor([
-              'run', 'services', 'replace', plan.stableServiceSpecPath,
-              `--project=${PROJECT}`, `--region=${REGION}`, '--dry-run', '--format=json',
-            ]);
-            validateStableServiceSpecDryRun(dryRun, plan);
-            try {
-              stable = await executor([
-                'run', 'services', 'replace', plan.stableServiceSpecPath,
-                `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-              ]);
-              validateStableStagedService(stable, plan);
-            } catch {
-              stable = await executor([
-                'run', 'services', 'describe', STABLE_SERVICE,
-                `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-              ]);
-              validateStableStagedService(stable, plan);
-              responseLossRecoveries.push('first-promotion-stable-compensation');
-            }
-          } else {
-            validatePromotionCompensationSource(stable, plan);
-          }
-          const stableRevision = await executor([
-            'run', 'revisions', 'describe', plan.stableRevision,
-            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-          ]);
-          validateStableRevisionReadback(stableRevision, plan);
-          const stableArtifact = await executor([
-            'artifacts', 'docker', 'images', 'describe', plan.image,
-            `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
-          ]);
-          validateCandidateArtifact(stableArtifact, plan.image);
-          const currentIamReceipt = await executor([
-            'run', 'services', 'get-iam-policy', STABLE_SERVICE,
-            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-          ]);
-          const currentIam = normalizeServiceIamPolicy(currentIamReceipt, { requireEtag: true });
-          let stableIsPrivate = true;
-          try {
-            validateServiceIamReceipt(currentIamReceipt, {
-              policy: 'stable-private', requireEtag: true,
-            });
-          } catch {
-            stableIsPrivate = false;
-            validateServiceIamReceipt(currentIamReceipt, {
-              policy: 'stable-public', requireEtag: true,
-            });
-          }
-          if (!stableIsPrivate) {
-            const privateState = promotionIamBaseline
-              ? iamPolicyState(promotionIamBaseline)
-              : { bindings: [], version: currentIam.version };
-            if (!exact(privateState.bindings, [])) {
-              throw new Error('First promotion private IAM baseline is invalid');
-            }
-            const restorePolicy = {
-              bindings: [],
-              etag: currentIam.etag,
-              ...(privateState.version === null ? {} : { version: privateState.version }),
-            };
-            const attemptId = typeof randomUUID === 'function' ? randomUUID() : null;
-            const expectedRestorePath = promotionIamRestorePolicyPath(plan, attemptId);
-            restorePath = typeof writeIamRestorePolicy === 'function'
-              ? await writeIamRestorePolicy(plan, restorePolicy, { attemptId }) : null;
-            if (restorePath !== expectedRestorePath) {
-              throw new Error('Promotion IAM restore policy is unavailable');
-            }
-            try {
-              const restored = await executor([
-                'run', 'services', 'set-iam-policy', STABLE_SERVICE, restorePath,
-                `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-              ]);
-              validateServiceIamReceipt(restored, {
-                policy: 'stable-private', requireEtag: true,
-              });
-            } catch {
-              const restored = await executor([
-                'run', 'services', 'get-iam-policy', STABLE_SERVICE,
-                `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-              ]);
-              validateServiceIamReceipt(restored, {
-                policy: 'stable-private', requireEtag: true,
-              });
-              responseLossRecoveries.push('first-promotion-iam-compensation');
-            }
-          }
-          const freshStable = await executor([
-            'run', 'services', 'describe', STABLE_SERVICE,
-            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-          ]);
-          validatePromotionCompensationSource(freshStable, plan);
-          const freshRevision = await executor([
-            'run', 'revisions', 'describe', plan.stableRevision,
-            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-          ]);
-          validateStableRevisionReadback(freshRevision, plan);
-          const freshArtifact = await executor([
-            'artifacts', 'docker', 'images', 'describe', plan.image,
-            `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
-          ]);
-          validateCandidateArtifact(freshArtifact, plan.image);
-          const freshIam = await executor([
-            'run', 'services', 'get-iam-policy', STABLE_SERVICE,
-            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-          ]);
-          validateServiceIamReceipt(freshIam, { policy: 'stable-private', requireEtag: true });
-        } else {
-          if (!stablePublicIamBaseline || !stablePriorRevisionBaseline
-            || !stablePriorArtifactBaseline) {
-            throw new Error('Prior stable compensation baseline is unavailable');
-          }
-          const currentStable = await executor([
-            'run', 'services', 'describe', STABLE_SERVICE,
-            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-          ]);
-          validatePromotionCompensationSource(currentStable, plan);
-          const currentIam = await executor([
-            'run', 'services', 'get-iam-policy', STABLE_SERVICE,
-            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-          ]);
-          validateServiceIamReceipt(currentIam, { policy: 'stable-public', requireEtag: true });
-          if (!exact(iamPolicyState(normalizeServiceIamPolicy(currentIam, { requireEtag: true })),
-            iamPolicyState(stablePublicIamBaseline))) {
-            throw new Error('Stable public IAM changed during promotion');
-          }
-          const currentPriorRevision = await executor([
-            'run', 'revisions', 'describe', plan.previousRevision,
-            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-          ]);
-          validatePriorRevisionReadback(currentPriorRevision, plan);
-          if (!exact(currentPriorRevision, stablePriorRevisionBaseline)) {
-            throw new Error('Prior stable revision configuration changed during promotion');
-          }
-          const currentPriorArtifact = await executor([
-            'artifacts', 'docker', 'images', 'describe', plan.previousImage,
-            `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
-          ]);
-          validateCandidateArtifact(currentPriorArtifact, plan.previousImage);
-          if (!exact(currentPriorArtifact, stablePriorArtifactBaseline)) {
-            throw new Error('Prior stable artifact changed during promotion');
-          }
-          let alreadyRestored = true;
-          try {
-            validateStableService(currentStable, plan);
-          } catch {
-            alreadyRestored = false;
-          }
-          if (!alreadyRestored) {
-            let responseLost = null;
-            let acknowledgementError = null;
-            let acknowledgement;
-            try {
-              acknowledgement = await executor([
-                'run', 'services', 'update-traffic', STABLE_SERVICE,
-                `--to-revisions=${plan.previousRevision}=100`,
-                `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-              ]);
-            } catch (error) {
-              responseLost = error;
-            }
-            if (responseLost === null) {
-              try {
-                validateTrafficTargetAcknowledgement(acknowledgement, {
-                  revision: plan.previousRevision, serviceUrl: plan.serviceOrigin,
-                });
-              } catch (error) {
-                acknowledgementError = error;
-              }
-            }
-            const restored = await executor([
-              'run', 'services', 'describe', STABLE_SERVICE,
-              `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-            ]);
-            validateStableService(restored, plan);
-            if (responseLost !== null) {
-              responseLossRecoveries.push('later-promotion-stable-compensation');
-            }
-            if (acknowledgementError !== null) {
-              throw acknowledgementError;
-            }
-          }
-          const freshStable = await executor([
-            'run', 'services', 'describe', STABLE_SERVICE,
-            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-          ]);
-          validateStableService(freshStable, plan);
-          const freshPriorRevision = await executor([
-            'run', 'revisions', 'describe', plan.previousRevision,
-            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-          ]);
-          validatePriorRevisionReadback(freshPriorRevision, plan);
-          if (!exact(freshPriorRevision, stablePriorRevisionBaseline)) {
-            throw new Error('Prior stable revision compensation is not exact');
-          }
-          const freshPriorArtifact = await executor([
-            'artifacts', 'docker', 'images', 'describe', plan.previousImage,
-            `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
-          ]);
-          validateCandidateArtifact(freshPriorArtifact, plan.previousImage);
-          if (!exact(freshPriorArtifact, stablePriorArtifactBaseline)) {
-            throw new Error('Prior stable artifact compensation is not exact');
-          }
-          const freshIam = await executor([
-            'run', 'services', 'get-iam-policy', STABLE_SERVICE,
-            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-          ]);
-          validateServiceIamReceipt(freshIam, { policy: 'stable-public', requireEtag: true });
-          if (!exact(iamPolicyState(normalizeServiceIamPolicy(freshIam, { requireEtag: true })),
-            iamPolicyState(stablePublicIamBaseline))) {
-            throw new Error('Stable public IAM compensation is not exact');
-          }
-        }
-        await readCandidateState();
-        promotionServiceRestored = true;
-        promotionIamRestored = true;
-      } catch {
-        compensationFailed = true;
-        promotionServiceRestored = false;
-        promotionIamRestored = false;
-      } finally {
-        if (restorePath !== null) {
-          try {
-            if (typeof removeIamRestorePolicy !== 'function'
-              || await removeIamRestorePolicy(plan, restorePath) !== true) {
-              throw new Error('Promotion IAM restore policy cleanup failed');
-            }
-          } catch {
-            compensationFailed = true;
-            promotionIamRestored = false;
-          }
-        }
-      }
-    }
-    const compensationCode = selection.phase === 'candidate'
-      ? 'CANDIDATE_COMPENSATION_FAILED' : 'PROMOTION_COMPENSATION_FAILED';
+    await stateStore?.close().catch(() => undefined);
     return publish(writeOutput, 1, {
-      status: 'failed', code: compensationFailed ? compensationCode : 'RELEASE_PHASE_FAILED',
+      status: 'failed', code: 'RELEASE_PHASE_FAILED',
       mutationPerformed: mutationAttempted,
       releaseSha: plan.releaseSha, phase: selection.phase, completed,
-      resumeBoundary: activeOperationId ?? selected.find(({ id }) => !completed.includes(id))?.id ?? null,
-      ...(candidateServiceRestored === null ? {} : { candidateServiceRestored }),
-      ...(promotionServiceRestored === null ? {} : { promotionServiceRestored }),
-      ...(promotionIamRestored === null ? {} : { promotionIamRestored }),
+      resumeBoundary: activeOperationId
+        ?? selected.find(({ id }) => !completed.includes(id))?.id
+        ?? null,
       ...(responseLossRecoveries.length === 0 ? {} : { responseLossRecoveries }),
     });
+
   }
   const publicReport = {
     status: 'phase-complete', code: 'GCP_RELEASE_PHASE_COMPLETE', mutationPerformed: true,
@@ -4671,8 +4707,36 @@ export async function runGcpRelease({
       if (typeof persistReceipt !== 'function' || await persistReceipt(plan, phaseReceipt) !== true) {
         throw new Error('Release receipt persistence failed');
       }
+      if (stateStore !== null) {
+        const lastCheckpoint = stateStore.records.at(-1);
+        if (lastCheckpoint?.recordType !== 'checkpoint') {
+          const error = new Error('Release journal checkpoint is unavailable');
+          error.code = 'RELEASE_JOURNAL_WRITE_FAILED';
+          throw error;
+        }
+        try {
+          await stateStore.appendTerminal({
+            status: 'phase-complete',
+            checkpointRecordSha256: lastCheckpoint.recordSha256,
+            receiptSha256: phaseReceipt.receiptSha256,
+            terminalState: {
+              completed: [...completed],
+              mutationCount: journalMutationCount,
+              phase: selection.phase,
+            },
+            mutationCount: journalMutationCount,
+            responseLossOperationIds: stateStore.records
+              .filter((record) => record.recordType === 'checkpoint'
+                && ['adopted-response-loss', 'adopted-restart'].includes(record.payload.outcome))
+              .map((record) => record.operationId),
+          });
+        } catch (error) {
+          error.code = 'RELEASE_JOURNAL_WRITE_FAILED';
+          throw error;
+        }
+      }
       publicReport.phaseReceipt = phaseReceipt;
-    } catch {
+    } catch (error) {
       let cleanupFailed = false;
       if (selection.phase === 'workload' && workloadArtifactPublished) {
         try {
@@ -4680,15 +4744,18 @@ export async function runGcpRelease({
           await assertControlledWorkloadTargetAbsent(workloadExecution.evidence);
         } catch { cleanupFailed = true; }
       }
+      await stateStore?.close().catch(() => undefined);
       return publish(writeOutput, 1, {
-        status: 'failed', code: cleanupFailed
-          ? 'WORKLOAD_EVIDENCE_CLEANUP_FAILED' : 'RELEASE_RECEIPT_WRITE_FAILED',
+        status: 'failed', code: cleanupFailed ? 'WORKLOAD_EVIDENCE_CLEANUP_FAILED'
+          : (error?.code === 'RELEASE_JOURNAL_WRITE_FAILED'
+            ? 'RELEASE_JOURNAL_WRITE_FAILED' : 'RELEASE_RECEIPT_WRITE_FAILED'),
         mutationPerformed: mutationAttempted,
         releaseSha: plan.releaseSha, phase: selection.phase, completed,
       });
     }
   }
   publicReport.mutationPerformed = mutationAttempted;
+  await stateStore?.close().catch(() => undefined);
   return publish(writeOutput, 0, publicReport);
 }
 
