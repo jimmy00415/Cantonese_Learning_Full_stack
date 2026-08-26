@@ -20,6 +20,7 @@ import {
 const NOW = new Date('2026-08-26T12:00:00.000Z');
 const COMMIT = '1'.repeat(40);
 const SOURCE_ARCHIVE_SHA256 = '2'.repeat(64);
+const BUILD_CONFIG_SHA256 = '3'.repeat(64);
 const RUN_ID = '123e4567-e89b-42d3-a456-426614174000';
 const SCHEMA = `v1_accept_${RUN_ID.replaceAll('-', '')}`;
 const GCS_PREFIX = `v1-accept/${RUN_ID}/`;
@@ -71,6 +72,7 @@ function legacyInventory(overrides = {}) {
 function releaseManifest(overrides = {}) {
   return {
     schemaVersion: 1,
+    buildConfigSha256: BUILD_CONFIG_SHA256,
     releaseSha: COMMIT,
     sourceArchiveSha256: SOURCE_ARCHIVE_SHA256,
     sourcePath: 'git-archive:production-v1',
@@ -589,6 +591,8 @@ test('immutable image manifest and release-scoped GCS evidence output are mandat
   for (const manifest of [
     releaseManifest({ releaseSha: '2'.repeat(40) }),
     releaseManifest({ sourceArchiveSha256: 'A'.repeat(64) }),
+    releaseManifest({ buildConfigSha256: 'A'.repeat(64) }),
+    (() => { const missing = releaseManifest(); delete missing.buildConfigSha256; return missing; })(),
     releaseManifest({ sourcePath: 'working-tree' }),
     { ...releaseManifest(), extra: true },
   ]) {

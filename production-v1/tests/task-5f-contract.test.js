@@ -20,6 +20,7 @@ const STABLE_SERVICE = GCP_IDENTITY.service;
 const CANDIDATE_SERVICE = GCP_IDENTITY.candidateService;
 const RELEASE_SHA = 'a'.repeat(40);
 const SOURCE_SHA = 'b'.repeat(64);
+const BUILD_CONFIG_SHA = 'e'.repeat(64);
 const IMAGE_DIGEST = `sha256:${'c'.repeat(64)}`;
 const PREVIOUS_IMAGE_DIGEST = `sha256:${'d'.repeat(64)}`;
 const PREVIOUS_REVISION = `${STABLE_SERVICE}-111111111111`;
@@ -99,6 +100,8 @@ function releaseInput({ first = false } = {}) {
     releaseSha: RELEASE_SHA,
     sourceArchive: 'C:\\release\\source.tar.gz',
     sourceArchiveSha256: SOURCE_SHA,
+    buildConfig: `C:\\release\\${RELEASE_SHA}.${BUILD_CONFIG_SHA}.cloudbuild.yaml`,
+    buildConfigSha256: BUILD_CONFIG_SHA,
     imageDigest: IMAGE_DIGEST,
     projectNumber: PROJECT_NUMBER,
     databaseSecretVersions: { app: '7', migrator: '8', session: '9' },
@@ -124,7 +127,9 @@ function canonicalFixture(value) {
 
 function receiptOutputs(plan, phase) {
   if (phase === 'build') return {
+    buildConfigSha256: plan.buildConfigSha256,
     buildId: '12345678-1234-4234-8234-123456789abc',
+    buildReceiptSha256: 'f'.repeat(64),
     imageDigest: plan.imageDigest,
     sourceArchiveSha256: plan.sourceArchiveSha256,
     sourceProvenance: {
@@ -132,6 +137,7 @@ function receiptOutputs(plan, phase) {
       sha256: plan.sourceArchiveSha256,
     },
     ociLabels: {
+      'com.simplify.build-config-sha256': plan.buildConfigSha256,
       'com.simplify.source-archive-sha256': plan.sourceArchiveSha256,
       'org.opencontainers.image.revision': plan.releaseSha,
       'org.opencontainers.image.source': 'https://github.com/jimmy00415/Cantonese_Learning_Full_stack',
@@ -600,7 +606,8 @@ function addressAudit(addresses, desired = '10.250.0.0/24') {
       externalIpv6Prefix: '2001:db8:2::/64',
       ipv6AccessType: 'EXTERNAL',
       stackType: 'IPV4_IPV6',
-      purpose: 'VM_AND_FR',
+      purpose: 'PRIVATE',
+      ipv6GceEndpoint: 'VM_AND_FR',
     }],
     routes: [], addresses,
   });

@@ -25,6 +25,7 @@ COPY --chown=node:node scripts/create-image-release-manifest.js ./scripts/create
 
 ARG V1_RELEASE_COMMIT_SHA
 ARG V1_SOURCE_ARCHIVE_SHA256
+ARG V1_BUILD_CONFIG_SHA256
 RUN node scripts/create-image-release-manifest.js \
   && rm scripts/create-image-release-manifest.js
 

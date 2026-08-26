@@ -1,4 +1,9 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
 import test from 'node:test';
 
 import { createGcloudExecutor } from '../scripts/gcp-provision.js';
@@ -16,6 +21,8 @@ const CANDIDATE_TAG = `candidate-${'c'.repeat(12)}`;
 const CANDIDATE_TAG_URL = `https://${CANDIDATE_TAG}---${GCP_IDENTITY.candidateService}-${PROJECT_NUMBER}.${REGION}.run.app`;
 const STABLE_URL = `https://${GCP_IDENTITY.service}-${PROJECT_NUMBER}.${REGION}.run.app`;
 
+const sha256 = (value) => createHash('sha256').update(value).digest('hex');
+
 function rejectingGcloud(stderr) {
   return createGcloudExecutor({
     executable: 'python.exe',
@@ -23,6 +30,19 @@ function rejectingGcloud(stderr) {
     execFile: async () => {
       const error = new Error('gcloud failed');
       error.stderr = stderr;
+      throw error;
+    },
+  });
+}
+
+function rejectingGcloudWithCode(stderr, code) {
+  return createGcloudExecutor({
+    executable: 'python.exe',
+    prefixArgs: ['C:/gcloud/lib/gcloud.py'],
+    execFile: async () => {
+      const error = new Error('gcloud failed');
+      error.stderr = stderr;
+      error.code = code;
       throw error;
     },
   });
@@ -81,6 +101,13 @@ test('SDK 553 canonical Cloud Run service and job absence is exact', async (t) =
       );
     });
   }
+
+  await assert.rejects(
+    () => rejectingGcloudWithCode('generic NOT_FOUND from an unrelated transport', 'NOT_FOUND')(
+      stableArgv,
+    ),
+    (error) => error.code === 'TRANSPORT_AMBIGUOUS',
+  );
 });
 
 test('traffic row representations validate before exact phase comparison', async (t) => {
@@ -260,14 +287,16 @@ test('Compute Address inventory accepts only the complete project-bound matrix',
       ipCidrRange: '10.7.0.0/24',
       ipv6AccessType: 'EXTERNAL',
       stackType: 'IPV4_IPV6',
-      purpose: 'VM_ONLY',
+      purpose: 'PRIVATE',
+      ipv6GceEndpoint: 'VM_ONLY',
       externalIpv6Prefix: '2001:db8:1::/64',
     }),
     subnet('external-netlb', {
       ipCidrRange: '10.8.0.0/24',
       ipv6AccessType: 'EXTERNAL',
       stackType: 'IPV4_IPV6',
-      purpose: 'VM_AND_FR',
+      purpose: 'PRIVATE',
+      ipv6GceEndpoint: 'VM_AND_FR',
       externalIpv6Prefix: '2001:db8:2::/64',
     }),
   ];
@@ -345,6 +374,14 @@ test('Compute Address inventory accepts only the complete project-bound matrix',
   await reject('regional IPv6 non-base address', (rows) => { rows[12].address = '2001:db8:1:0:1::1'; });
   await reject('regional IPv6 outside subnet prefix', (rows) => { rows[12].address = '2001:db8:9:0:1::'; });
   await reject('NETLB on VM_ONLY subnet', (rows) => { rows[13].subnetwork = subnets[1].selfLink; });
+  await t.test('legacy impossible purpose is not an IPv6 endpoint mode', () => {
+    const legacySubnets = structuredClone(subnets);
+    legacySubnets[1].purpose = 'VM_ONLY';
+    delete legacySubnets[1].ipv6GceEndpoint;
+    assert.throws(() => validateComputeAddressInventory({
+      addresses, networks: [{ name: 'default', selfLink: network }], subnets: legacySubnets,
+    }), (error) => error.code === 'CIDR_AUDIT_INVALID');
+  });
 });
 
 test('managed PSA Address describe requires the same explicit matrix fields', () => {
@@ -428,4 +465,69 @@ test('Service Account list and describe identities bind email, resource name, an
       );
     });
   }
+});
+
+test('managed Service Account inventory binds each managed id to its exact expected email', () => {
+  const { validateManagedServiceAccountInventory } = provisionContract;
+  assert.equal(typeof validateManagedServiceAccountInventory, 'function');
+  const expected = Object.values(GCP_IDENTITY.serviceAccounts).map((email) => ({
+    id: email.split('@')[0], email,
+  }));
+  const rows = expected.map(({ email }) => ({
+    email,
+    name: `projects/${PROJECT}/serviceAccounts/${email}`,
+    projectId: PROJECT,
+  }));
+  assert.equal(validateManagedServiceAccountInventory(rows, expected), true);
+  const drift = structuredClone(rows);
+  drift[0].email = `${expected[0].id}@foreign-project.iam.gserviceaccount.com`;
+  drift[0].name = `projects/${PROJECT}/serviceAccounts/${drift[0].email}`;
+  assert.throws(
+    () => validateManagedServiceAccountInventory(drift, expected),
+    (error) => ['LIST_RESPONSE_AMBIGUOUS', 'SERVICE_ACCOUNT_IDENTITY_INVALID'].includes(error.code),
+  );
+});
+
+test('release archive freezes the exact raw Cloud Build Git blob beside the archive', async (t) => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), 'hkbuddy-task-5g-frozen-config-'));
+  t.after(() => rm(fixtureRoot, { recursive: true, force: true }));
+  const repositoryRoot = join(fixtureRoot, 'repository');
+  await mkdir(join(repositoryRoot, 'production-v1', 'data', 'knowledge'), { recursive: true });
+  const rawBuildConfig = Buffer.from('steps:\r\n  - id: exact-git-blob\r\n\r\n');
+  await writeFile(join(repositoryRoot, 'production-v1', 'Dockerfile'), 'FROM scratch\n');
+  await writeFile(join(repositoryRoot, 'production-v1', 'cloudbuild.yaml'), rawBuildConfig);
+  await writeFile(
+    join(repositoryRoot, 'production-v1', 'data', 'knowledge', 'hkbu-v1.json'),
+    '{"sources":[],"claims":[]}\n',
+  );
+  const git = (...argv) => execFileSync('git', argv, {
+    cwd: repositoryRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+  git('init', '--quiet');
+  git('config', 'user.name', 'Task 5G Contract');
+  git('config', 'user.email', 'task-5g@example.invalid');
+  git('config', 'core.autocrlf', 'false');
+  git('add', 'production-v1');
+  git('commit', '--quiet', '-m', 'fixture');
+  const releaseSha = git('rev-parse', 'HEAD');
+
+  await writeFile(
+    join(repositoryRoot, 'production-v1', 'cloudbuild.yaml'),
+    'steps:\n  - id: mutable-worktree-drift\n',
+  );
+  git('update-index', '--assume-unchanged', 'production-v1/cloudbuild.yaml');
+
+  const result = await releaseContract.prepareReleaseArchive({
+    repositoryRoot,
+    releaseSha,
+    destination: join(fixtureRoot, 'source.tar.gz'),
+  });
+  const expectedHash = sha256(rawBuildConfig);
+  assert.equal(result.buildConfigSha256, expectedHash);
+  assert.equal(
+    basename(result.buildConfig),
+    `${releaseSha}.${expectedHash}.cloudbuild.yaml`,
+  );
+  assert.deepEqual(await readFile(result.buildConfig), rawBuildConfig);
+  assert.equal(result.buildConfig.startsWith(repositoryRoot), false);
 });

@@ -467,7 +467,8 @@ function canonicalDescribeAbsence(argv, stderr) {
 }
 
 function classifyTransportError(error, argv = null) {
-  if (['NOT_FOUND', 'FORBIDDEN', 'ALREADY_EXISTS'].includes(error?.code)) return error.code;
+  if (['FORBIDDEN', 'ALREADY_EXISTS'].includes(error?.code)) return error.code;
+  if (error?.code === 'NOT_FOUND' && argv === null) return 'NOT_FOUND';
   const status = Number(error?.response?.status ?? error?.status ?? error?.statusCode);
   if (status === 403) return 'FORBIDDEN';
   const canonicalStderr = normalizeTransportStderr(error?.stderr ?? error?.message ?? '');
@@ -1190,11 +1191,11 @@ function validateExternalAddress(item, subnetsByLink) {
         throw commandError('CIDR_AUDIT_INVALID');
       }
       const subnet = subnetsByLink.get(item.subnetwork);
-      const acceptedPurpose = item.ipv6EndpointType === 'NETLB'
-        ? subnet?.purpose === 'VM_AND_FR'
-        : ['VM_ONLY', 'VM_AND_FR'].includes(subnet?.purpose);
+      const acceptedEndpointMode = item.ipv6EndpointType === 'NETLB'
+        ? subnet?.ipv6GceEndpoint === 'VM_AND_FR'
+        : ['VM_ONLY', 'VM_AND_FR'].includes(subnet?.ipv6GceEndpoint);
       if (!subnet || subnet.region !== item.region || subnet.ipv6AccessType !== 'EXTERNAL'
-        || subnet.stackType !== 'IPV4_IPV6' || !acceptedPurpose
+        || subnet.stackType !== 'IPV4_IPV6' || !acceptedEndpointMode
         || !canonicalIpv6Cidr(subnet.externalIpv6Prefix)
         || !ipv6CidrContains(subnet.externalIpv6Prefix, `${item.address}/96`)) {
         throw commandError('CIDR_AUDIT_INVALID');
@@ -1385,6 +1386,31 @@ function assertManagedIdentityInventory(items, expected, extractor, marker = /hk
     if (hasObsoleteExecutableIdentity(text)) throw commandError('RESOURCE_COLLISION');
     if (marker.test(text) && !permitted.has(name)) throw commandError('RESOURCE_COLLISION');
   }
+}
+
+export function validateManagedServiceAccountInventory(items, expectedAccounts) {
+  if (!Array.isArray(expectedAccounts) || expectedAccounts.length === 0
+    || expectedAccounts.some((account) => !account || typeof account !== 'object'
+      || typeof account.id !== 'string' || typeof account.email !== 'string'
+      || account.email.split('@')[0] !== account.id)) {
+    throw commandError('LIST_RESPONSE_AMBIGUOUS');
+  }
+  const expectedById = new Map(expectedAccounts.map((account) => [account.id, account]));
+  if (expectedById.size !== expectedAccounts.length) throw commandError('LIST_RESPONSE_AMBIGUOUS');
+  assertManagedIdentityInventory(items, [...expectedById.keys()], (item) => {
+    if (typeof item?.email !== 'string') throw commandError('LIST_RESPONSE_AMBIGUOUS');
+    const expected = expectedById.get(item.email.split('@')[0]);
+    try {
+      validateServiceAccountIdentity(item, {
+        email: expected?.email ?? item.email,
+        ...(expected?.displayName === undefined ? {} : { displayName: expected.displayName }),
+      });
+    } catch {
+      throw commandError('LIST_RESPONSE_AMBIGUOUS');
+    }
+    return item.email;
+  });
+  return true;
 }
 
 const OBSOLETE_EXECUTABLE_IDENTITY = new RegExp(
@@ -2152,12 +2178,10 @@ export class GcpControlPlane {
         this.#gcloud(['iam', 'service-accounts', 'list', `--project=${PROJECT}`, '--format=json']),
         this.#gcloud(['iam', 'roles', 'list', `--project=${PROJECT}`, '--format=json']),
       ]);
-      assertManagedIdentityInventory(serviceAccounts, this.contract.resources.serviceAccounts.map(({ id }) => id), (item) => {
-        try { validateServiceAccountIdentity(item, { email: item?.email }); } catch {
-          throw commandError('LIST_RESPONSE_AMBIGUOUS');
-        }
-        return item.email;
-      });
+      validateManagedServiceAccountInventory(
+        serviceAccounts,
+        this.contract.resources.serviceAccounts,
+      );
       assertManagedIdentityInventory(roles, this.contract.resources.customRoles.map(({ id }) => id), (item) => {
         if (typeof item.name !== 'string'
           || (item.name.includes('hkbuddyV1') && !item.name.startsWith(`projects/${PROJECT}/roles/`))) {

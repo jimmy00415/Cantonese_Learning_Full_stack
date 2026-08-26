@@ -468,11 +468,14 @@ function postgresPassword(databaseUrl) {
 }
 
 function validateReleaseManifest(value, releaseSha) {
-  const expectedKeys = ['releaseSha', 'schemaVersion', 'sourceArchiveSha256', 'sourcePath'];
+  const expectedKeys = [
+    'buildConfigSha256', 'releaseSha', 'schemaVersion', 'sourceArchiveSha256', 'sourcePath',
+  ];
   return Boolean(value && typeof value === 'object' && !Array.isArray(value)
     && Object.keys(value).sort().join('\0') === expectedKeys.sort().join('\0')
     && value.schemaVersion === 1
     && value.releaseSha === releaseSha
+    && DIGEST.test(String(value.buildConfigSha256 ?? ''))
     && DIGEST.test(String(value.sourceArchiveSha256 ?? ''))
     && value.sourcePath === 'git-archive:production-v1');
 }

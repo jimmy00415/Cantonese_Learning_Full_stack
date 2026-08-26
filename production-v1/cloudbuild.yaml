@@ -1,16 +1,20 @@
 steps:
   - id: validate-release-sha
     name: node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
+    waitFor:
+      - '-'
     entrypoint: node
     args:
       - -e
       - >-
         if (!/^[0-9a-f]{40}$/.test(process.env.RELEASE_SHA || '') ||
-        !/^[0-9a-f]{64}$/.test(process.env.SOURCE_SHA256 || ''))
+        !/^[0-9a-f]{64}$/.test(process.env.SOURCE_SHA256 || '') ||
+        !/^[0-9a-f]{64}$/.test(process.env.BUILD_CONFIG_SHA256 || ''))
         { process.stderr.write('invalid release SHA\n'); process.exit(2); }
     env:
       - RELEASE_SHA=$_RELEASE_SHA
       - SOURCE_SHA256=$_SOURCE_SHA256
+      - BUILD_CONFIG_SHA256=$_BUILD_CONFIG_SHA256
   - id: dependency-security-gate
     name: node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
     waitFor:
@@ -18,33 +22,14 @@ steps:
     entrypoint: sh
     args:
       - -ceu
-      - |-
-        npm ci --omit=dev --ignore-scripts --no-audit
-        dependency_security_receipt="$$(npm run --silent security:dependencies)"
-        DEPENDENCY_SECURITY_RECEIPT="$$dependency_security_receipt" node -e '
-          const { isDeepStrictEqual } = require("node:util");
-          const expected = {
-            status: "passed",
-            code: "DEPENDENCY_SECURITY_EXCEPTION_REVIEWED",
-            advisoryId: "GHSA-w5hq-g745-h8pq",
-            expiresAt: "2026-09-26T00:00:00.000Z",
-            vulnerabilityCount: 2,
-            gaxiosCopies: 2,
-            uuidMethod: "v4",
-            uuidVersion: "9.0.1",
-          };
-          try {
-            const actual = JSON.parse(process.env.DEPENDENCY_SECURITY_RECEIPT || "");
-            if (!isDeepStrictEqual(actual, expected)) throw new Error("receipt drift");
-          } catch {
-            process.stderr.write("dependency security receipt invalid\n");
-            process.exit(2);
-          }
-        '
+      - >-
+        npm ci --omit=dev --ignore-scripts --no-audit &&
+        npm run --silent security:dependencies
   - id: build
     name: gcr.io/cloud-builders/docker@sha256:2e8d40d8e48dc14fab4213d5e532d74f63fd403d9e8d7f6463096a75820286c3
     waitFor:
       - dependency-security-gate
+    entrypoint: docker
     args:
       - build
       - --file=Dockerfile
@@ -52,19 +37,23 @@ steps:
       - --label=org.opencontainers.image.revision=$_RELEASE_SHA
       - --label=org.opencontainers.image.source=https://github.com/jimmy00415/Cantonese_Learning_Full_stack
       - --label=com.simplify.source-archive-sha256=$_SOURCE_SHA256
+      - --label=com.simplify.build-config-sha256=$_BUILD_CONFIG_SHA256
       - --build-arg=V1_RELEASE_COMMIT_SHA=$_RELEASE_SHA
       - --build-arg=V1_SOURCE_ARCHIVE_SHA256=$_SOURCE_SHA256
+      - --build-arg=V1_BUILD_CONFIG_SHA256=$_BUILD_CONFIG_SHA256
       - .
   - id: verify-image-contract
     name: gcr.io/cloud-builders/docker@sha256:2e8d40d8e48dc14fab4213d5e532d74f63fd403d9e8d7f6463096a75820286c3
     waitFor:
       - build
+    entrypoint: docker
     args:
       - run
       - --rm
       - --entrypoint=node
       - --env=V1_RELEASE_COMMIT_SHA=$_RELEASE_SHA
       - --env=V1_SOURCE_ARCHIVE_SHA256=$_SOURCE_SHA256
+      - --env=V1_BUILD_CONFIG_SHA256=$_BUILD_CONFIG_SHA256
       - asia-east2-docker.pkg.dev/$PROJECT_ID/hkbuddy-v1/hkbuddy-v1-api:$_RELEASE_SHA
       - scripts/image-release-contract.js
   - id: verify-oci-labels
@@ -79,6 +68,8 @@ steps:
         asia-east2-docker.pkg.dev/$PROJECT_ID/hkbuddy-v1/hkbuddy-v1-api:$_RELEASE_SHA)" = "$_RELEASE_SHA" &&
         test "$(docker inspect --format='{{ index .Config.Labels "com.simplify.source-archive-sha256" }}'
         asia-east2-docker.pkg.dev/$PROJECT_ID/hkbuddy-v1/hkbuddy-v1-api:$_RELEASE_SHA)" = "$_SOURCE_SHA256" &&
+        test "$(docker inspect --format='{{ index .Config.Labels "com.simplify.build-config-sha256" }}'
+        asia-east2-docker.pkg.dev/$PROJECT_ID/hkbuddy-v1/hkbuddy-v1-api:$_RELEASE_SHA)" = "$_BUILD_CONFIG_SHA256" &&
         test "$(docker inspect --format='{{ index .Config.Labels "org.opencontainers.image.source" }}'
         asia-east2-docker.pkg.dev/$PROJECT_ID/hkbuddy-v1/hkbuddy-v1-api:$_RELEASE_SHA)" =
         "https://github.com/jimmy00415/Cantonese_Learning_Full_stack"

@@ -26,6 +26,7 @@ const STABLE_SERVICE = 'hkbuddy-v1-api';
 const CANDIDATE_SERVICE = 'hkbuddy-v1-api-candidate';
 const RELEASE_SHA = 'a'.repeat(40);
 const SOURCE_SHA = 'b'.repeat(64);
+const BUILD_CONFIG_SHA = 'e'.repeat(64);
 const IMAGE_DIGEST = `sha256:${'c'.repeat(64)}`;
 const PREVIOUS_IMAGE_DIGEST = `sha256:${'d'.repeat(64)}`;
 const CANDIDATE_TAG = `candidate-${RELEASE_SHA.slice(0, 12)}`;
@@ -113,6 +114,8 @@ function releaseInput({ first = false, task8Evidence = null } = {}) {
     releaseSha: RELEASE_SHA,
     sourceArchive: 'C:\\release\\source.tar.gz',
     sourceArchiveSha256: SOURCE_SHA,
+    buildConfig: `C:\\release\\${RELEASE_SHA}.${BUILD_CONFIG_SHA}.cloudbuild.yaml`,
+    buildConfigSha256: BUILD_CONFIG_SHA,
     imageDigest: IMAGE_DIGEST,
     projectNumber: PROJECT_NUMBER,
     databaseSecretVersions: { app: '7', migrator: '8', session: '9' },

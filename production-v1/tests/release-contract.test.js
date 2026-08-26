@@ -45,11 +45,16 @@ const PROJECT = 'motion-expert-hk-ltd-webpage';
 const REGION = 'asia-east2';
 const RELEASE_SHA = 'a'.repeat(40);
 const SOURCE_SHA = 'b'.repeat(64);
+const BUILD_CONFIG_SHA = 'e'.repeat(64);
+const BUILD_CONFIG = `C:\\release\\${RELEASE_SHA}.${BUILD_CONFIG_SHA}.cloudbuild.yaml`;
 const IMAGE_DIGEST = `sha256:${'c'.repeat(64)}`;
 const PREVIOUS_IMAGE_DIGEST = `sha256:${'d'.repeat(64)}`;
 const PROJECT_NUMBER = '582852715831';
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const BUILD_SA = `projects/${PROJECT}/serviceAccounts/hkbuddy-v1-build@${PROJECT}.iam.gserviceaccount.com`;
+const BUILD_ID = '12345678-1234-4234-8234-123456789abc';
+const NODE_BUILDER = 'node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5';
+const DOCKER_BUILDER = 'gcr.io/cloud-builders/docker@sha256:2e8d40d8e48dc14fab4213d5e532d74f63fd403d9e8d7f6463096a75820286c3';
 const RUNTIME_SA = `hkbuddy-v1-runtime@${PROJECT}.iam.gserviceaccount.com`;
 const ACCEPTANCE_SA = `hkbuddy-v1-acceptance@${PROJECT}.iam.gserviceaccount.com`;
 const ACCEPTANCE_RUN_ID = '123e4567-e89b-42d3-a456-426614174000';
@@ -132,6 +137,8 @@ function releaseInput(overrides = {}) {
     releaseSha: RELEASE_SHA,
     sourceArchive: 'C:\\release\\source.tar.gz',
     sourceArchiveSha256: SOURCE_SHA,
+    buildConfig: BUILD_CONFIG,
+    buildConfigSha256: BUILD_CONFIG_SHA,
     imageDigest: IMAGE_DIGEST,
     projectNumber: PROJECT_NUMBER,
     databaseSecretVersions: { app: '7', migrator: '8', session: '9' },
@@ -162,6 +169,109 @@ function releaseInput(overrides = {}) {
     previousRevision,
     previousImageDigest: PREVIOUS_IMAGE_DIGEST,
     ...overrides,
+  };
+}
+
+function exactCloudBuildReceipt() {
+  const imageName = `asia-east2-docker.pkg.dev/${PROJECT}/hkbuddy-v1/hkbuddy-v1-api:${RELEASE_SHA}`;
+  const validateInputs = "if (!/^[0-9a-f]{40}$/.test(process.env.RELEASE_SHA || '') || !/^[0-9a-f]{64}$/.test(process.env.SOURCE_SHA256 || '') || !/^[0-9a-f]{64}$/.test(process.env.BUILD_CONFIG_SHA256 || '')) { process.stderr.write('invalid release SHA\\n'); process.exit(2); }";
+  const verifyLabels = [
+    `test "$(docker inspect --format='{{ index .Config.Labels "org.opencontainers.image.revision" }}' ${imageName})" = "${RELEASE_SHA}"`,
+    `test "$(docker inspect --format='{{ index .Config.Labels "com.simplify.source-archive-sha256" }}' ${imageName})" = "${SOURCE_SHA}"`,
+    `test "$(docker inspect --format='{{ index .Config.Labels "com.simplify.build-config-sha256" }}' ${imageName})" = "${BUILD_CONFIG_SHA}"`,
+    `test "$(docker inspect --format='{{ index .Config.Labels "org.opencontainers.image.source" }}' ${imageName})" = "https://github.com/jimmy00415/Cantonese_Learning_Full_stack"`,
+  ].join(' && ');
+  const storageSource = {
+    bucket: 'hkbuddy-v1-582852715831-build-source',
+    object: 'source/source.tgz',
+    generation: '123',
+  };
+  const sourceUri = `gs://${storageSource.bucket}/${storageSource.object}#${storageSource.generation}`;
+  return {
+    id: BUILD_ID,
+    name: `projects/${PROJECT}/locations/${REGION}/builds/${BUILD_ID}`,
+    projectId: PROJECT,
+    status: 'SUCCESS',
+    serviceAccount: BUILD_SA,
+    timeout: '1200s',
+    images: [imageName],
+    substitutions: {
+      _BUILD_CONFIG_SHA256: BUILD_CONFIG_SHA,
+      _RELEASE_SHA: RELEASE_SHA,
+      _SOURCE_SHA256: SOURCE_SHA,
+    },
+    options: {
+      logging: 'CLOUD_LOGGING_ONLY',
+      requestedVerifyOption: 'VERIFIED',
+      sourceProvenanceHash: ['SHA256'],
+    },
+    steps: [
+      {
+        id: 'validate-release-sha', name: NODE_BUILDER, entrypoint: 'node',
+        args: ['-e', validateInputs],
+        env: [
+          `RELEASE_SHA=${RELEASE_SHA}`,
+          `SOURCE_SHA256=${SOURCE_SHA}`,
+          `BUILD_CONFIG_SHA256=${BUILD_CONFIG_SHA}`,
+        ],
+        waitFor: ['-'], status: 'SUCCESS',
+      },
+      {
+        id: 'dependency-security-gate', name: NODE_BUILDER, entrypoint: 'sh',
+        args: ['-ceu', 'npm ci --omit=dev --ignore-scripts --no-audit && npm run --silent security:dependencies'],
+        env: [], waitFor: ['validate-release-sha'], status: 'SUCCESS', exitCode: 0,
+      },
+      {
+        id: 'build', name: DOCKER_BUILDER, entrypoint: 'docker',
+        args: [
+          'build', '--file=Dockerfile', `--tag=${imageName}`,
+          `--label=org.opencontainers.image.revision=${RELEASE_SHA}`,
+          '--label=org.opencontainers.image.source=https://github.com/jimmy00415/Cantonese_Learning_Full_stack',
+          `--label=com.simplify.source-archive-sha256=${SOURCE_SHA}`,
+          `--label=com.simplify.build-config-sha256=${BUILD_CONFIG_SHA}`,
+          `--build-arg=V1_RELEASE_COMMIT_SHA=${RELEASE_SHA}`,
+          `--build-arg=V1_SOURCE_ARCHIVE_SHA256=${SOURCE_SHA}`,
+          `--build-arg=V1_BUILD_CONFIG_SHA256=${BUILD_CONFIG_SHA}`,
+          '.',
+        ],
+        env: [], waitFor: ['dependency-security-gate'], status: 'SUCCESS',
+      },
+      {
+        id: 'verify-image-contract', name: DOCKER_BUILDER, entrypoint: 'docker',
+        args: [
+          'run', '--rm', '--entrypoint=node',
+          `--env=V1_RELEASE_COMMIT_SHA=${RELEASE_SHA}`,
+          `--env=V1_SOURCE_ARCHIVE_SHA256=${SOURCE_SHA}`,
+          `--env=V1_BUILD_CONFIG_SHA256=${BUILD_CONFIG_SHA}`,
+          imageName, 'scripts/image-release-contract.js',
+        ],
+        env: [], waitFor: ['build'], status: 'SUCCESS',
+      },
+      {
+        id: 'verify-oci-labels', name: DOCKER_BUILDER, entrypoint: 'sh',
+        args: ['-ceu', verifyLabels],
+        env: [], waitFor: ['verify-image-contract'], status: 'SUCCESS',
+      },
+    ],
+    source: { storageSource },
+    sourceProvenance: {
+      resolvedStorageSource: storageSource,
+      fileHashes: {
+        [sourceUri]: {
+          fileHash: [{ type: 'SHA256', value: Buffer.from(SOURCE_SHA, 'hex').toString('base64') }],
+        },
+      },
+    },
+    results: {
+      buildStepImages: [
+        `sha256:${NODE_BUILDER.split('@sha256:')[1]}`,
+        `sha256:${NODE_BUILDER.split('@sha256:')[1]}`,
+        `sha256:${DOCKER_BUILDER.split('@sha256:')[1]}`,
+        `sha256:${DOCKER_BUILDER.split('@sha256:')[1]}`,
+        `sha256:${DOCKER_BUILDER.split('@sha256:')[1]}`,
+      ],
+      images: [{ name: imageName, digest: IMAGE_DIGEST }],
+    },
   };
 }
 
@@ -215,30 +325,10 @@ test('Cloud Build is pinned to the governed source staging bucket and receipt pr
     '--gcs-source-staging-dir=gs://hkbuddy-v1-582852715831-build-source/source',
   ), true);
 
-  const sourceHash = Buffer.from(SOURCE_SHA, 'hex').toString('base64');
-  const receipt = {
-    id: '12345678-1234-4234-8234-123456789abc', status: 'SUCCESS', serviceAccount: BUILD_SA,
-    substitutions: { _RELEASE_SHA: RELEASE_SHA, _SOURCE_SHA256: SOURCE_SHA },
-    options: { requestedVerifyOption: 'VERIFIED', sourceProvenanceHash: ['SHA256'] },
-    steps: ['validate-release-sha', 'dependency-security-gate', 'build', 'verify-image-contract',
-      'verify-oci-labels'].map((id) => ({ id, status: 'SUCCESS' })),
-    sourceProvenance: {
-      resolvedStorageSource: {
-        bucket: 'hkbuddy-v1-582852715831-build-source', object: 'source/source.tgz', generation: '123',
-      },
-      fileHashes: {
-        'gs://hkbuddy-v1-582852715831-build-source/source/source.tgz#123': {
-          fileHash: [{ type: 'SHA256', value: sourceHash }],
-        },
-      },
-    },
-    results: { images: [{
-      name: `asia-east2-docker.pkg.dev/${PROJECT}/hkbuddy-v1/hkbuddy-v1-api:${RELEASE_SHA}`,
-      digest: IMAGE_DIGEST,
-    }] },
-  };
+  const receipt = exactCloudBuildReceipt();
   assert.doesNotThrow(() => validateBuildReceipt(receipt, {
     releaseSha: RELEASE_SHA, sourceArchiveSha256: SOURCE_SHA,
+    buildConfigSha256: BUILD_CONFIG_SHA,
   }));
   for (const [bucket, object] of [
     ['foreign-build-source', 'source/source.tgz'],
@@ -247,11 +337,13 @@ test('Cloud Build is pinned to the governed source staging bucket and receipt pr
     const drift = structuredClone(receipt);
     const oldUri = Object.keys(drift.sourceProvenance.fileHashes)[0];
     const newUri = `gs://${bucket}/${object}#123`;
+    drift.source.storageSource = { bucket, object, generation: '123' };
     drift.sourceProvenance.resolvedStorageSource = { bucket, object, generation: '123' };
     drift.sourceProvenance.fileHashes[newUri] = drift.sourceProvenance.fileHashes[oldUri];
     delete drift.sourceProvenance.fileHashes[oldUri];
     assert.throws(() => validateBuildReceipt(drift, {
       releaseSha: RELEASE_SHA, sourceArchiveSha256: SOURCE_SHA,
+      buildConfigSha256: BUILD_CONFIG_SHA,
     }), /Cloud Build receipt/i);
   }
 });
@@ -636,7 +728,9 @@ function realV1JobReadback(expected) {
 
 function fixtureReceiptOutputs(plan, phase) {
   if (phase === 'build') return {
+    buildConfigSha256: plan.buildConfigSha256,
     buildId: '12345678-1234-4234-8234-123456789abc',
+    buildReceiptSha256: 'f'.repeat(64),
     imageDigest: plan.imageDigest,
     sourceArchiveSha256: plan.sourceArchiveSha256,
     sourceProvenance: {
@@ -644,6 +738,7 @@ function fixtureReceiptOutputs(plan, phase) {
       sha256: plan.sourceArchiveSha256,
     },
     ociLabels: {
+      'com.simplify.build-config-sha256': plan.buildConfigSha256,
       'com.simplify.source-archive-sha256': plan.sourceArchiveSha256,
       'org.opencontainers.image.revision': plan.releaseSha,
       'org.opencontainers.image.source': 'https://github.com/jimmy00415/Cantonese_Learning_Full_stack',
@@ -846,6 +941,7 @@ test('built image contract loads the governed corpus and rejects every unrelated
     appRoot: imageRoot,
     releaseSha: RELEASE_SHA,
     sourceArchiveSha256: SOURCE_SHA,
+    buildConfigSha256: BUILD_CONFIG_SHA,
   });
   const verified = await verifyImageReleaseRoot({ appRoot: imageRoot });
   assert.equal(verified.ok, true);
@@ -853,6 +949,7 @@ test('built image contract loads the governed corpus and rejects every unrelated
   assert.deepEqual(verified.scriptFiles, IMAGE_SCRIPTS);
   assert.deepEqual(verified.releaseManifest, {
     schemaVersion: 1,
+    buildConfigSha256: BUILD_CONFIG_SHA,
     releaseSha: RELEASE_SHA,
     sourceArchiveSha256: SOURCE_SHA,
     sourcePath: 'git-archive:production-v1',
@@ -904,16 +1001,20 @@ test('release source archive is deterministic, commit-bound, and refuses a dirty
     },
   });
   const releaseSha = git('rev-parse', 'HEAD');
+  const firstReleaseRoot = join(fixtureRoot, 'release-one');
+  const secondReleaseRoot = join(fixtureRoot, 'release-two');
+  await mkdir(firstReleaseRoot);
+  await mkdir(secondReleaseRoot);
 
   const first = await prepareReleaseArchive({
     repositoryRoot,
     releaseSha,
-    destination: join(fixtureRoot, 'source-one.tar.gz'),
+    destination: join(firstReleaseRoot, 'source.tar.gz'),
   });
   const second = await prepareReleaseArchive({
     repositoryRoot,
     releaseSha,
-    destination: join(fixtureRoot, 'source-two.tar.gz'),
+    destination: join(secondReleaseRoot, 'source.tar.gz'),
   });
   assert.equal(first.releaseSha, releaseSha);
   assert.match(first.sourceArchiveSha256, /^[0-9a-f]{64}$/);
@@ -1009,8 +1110,13 @@ test('release plan is archive-bound, digest-pinned, evidence-first, probe-exact,
 
   const build = plan.operations.find(({ id }) => id === 'build-submit');
   assert.equal(build.argv.at(-1), 'C:\\release\\source.tar.gz');
+  assert.equal(build.argv.includes(`--config=${BUILD_CONFIG}`), true);
   assert.equal(build.argv.includes(`--service-account=${BUILD_SA}`), true);
-  assert.equal(build.argv.includes(`--substitutions=_RELEASE_SHA=${RELEASE_SHA},_SOURCE_SHA256=${SOURCE_SHA}`), true);
+  assert.equal(build.argv.includes(
+    `--substitutions=_BUILD_CONFIG_SHA256=${BUILD_CONFIG_SHA},_RELEASE_SHA=${RELEASE_SHA},_SOURCE_SHA256=${SOURCE_SHA}`,
+  ), true);
+  assert.equal(plan.buildConfig, BUILD_CONFIG);
+  assert.equal(plan.buildConfigSha256, BUILD_CONFIG_SHA);
 
   const candidate = plan.operations.find(({ id }) => id === 'candidate-deploy');
   assert.deepEqual(candidate.argv.slice(0, 3), ['run', 'services', 'replace']);
@@ -1101,7 +1207,10 @@ test('candidate deploy is fenced by the canonical gcloud Service v1 dry-run resu
 test('candidate phase feeds raw Service JSON through gcloud 553-compatible secret-mount semantics', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'hkbuddy-candidate-service-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const input = releaseInput({ sourceArchive: join(directory, 'source.tar.gz') });
+  const input = releaseInput({
+    sourceArchive: join(directory, 'source.tar.gz'),
+    buildConfig: join(directory, `${RELEASE_SHA}.${BUILD_CONFIG_SHA}.cloudbuild.yaml`),
+  });
   const plan = buildReleasePlan(input);
   let describeCount = 0;
   let iamGranted = false;
@@ -1507,57 +1616,17 @@ test('evidence publication accepts and reads back only the planned numeric versi
 });
 
 test('build receipt captures one successful verified build, source hash, and final image digest', () => {
-  const build = {
-    id: '12345678-1234-4234-8234-123456789abc',
-    status: 'SUCCESS',
-    serviceAccount: BUILD_SA,
-    substitutions: { _RELEASE_SHA: RELEASE_SHA, _SOURCE_SHA256: SOURCE_SHA },
-    options: { requestedVerifyOption: 'VERIFIED', sourceProvenanceHash: ['SHA256'] },
-    steps: [
-      { id: 'validate-release-sha', status: 'SUCCESS' },
-      { id: 'dependency-security-gate', status: 'SUCCESS' },
-      { id: 'build', status: 'SUCCESS' },
-      { id: 'verify-image-contract', status: 'SUCCESS' },
-      { id: 'verify-oci-labels', status: 'SUCCESS' },
-    ],
-    sourceProvenance: {
-      resolvedStorageSource: {
-        bucket: 'hkbuddy-v1-582852715831-build-source', object: 'source/source.tgz', generation: '123',
-      },
-      fileHashes: {
-        'gs://hkbuddy-v1-582852715831-build-source/source/source.tgz#123': {
-          fileHash: [{ type: 'SHA256', value: Buffer.from(SOURCE_SHA, 'hex').toString('base64') }],
-        },
-      },
-    },
-    results: {
-      images: [{
-        name: `asia-east2-docker.pkg.dev/${PROJECT}/hkbuddy-v1/hkbuddy-v1-api:${RELEASE_SHA}`,
-        digest: IMAGE_DIGEST,
-      }],
-    },
-  };
+  const build = exactCloudBuildReceipt();
   const receipt = validateBuildReceipt(build, {
-    releaseSha: RELEASE_SHA, sourceArchiveSha256: SOURCE_SHA,
+    releaseSha: RELEASE_SHA,
+    sourceArchiveSha256: SOURCE_SHA,
+    buildConfigSha256: BUILD_CONFIG_SHA,
   });
 
-  assert.throws(() => validateBuildReceipt({
-    ...build,
-    steps: build.steps.map((step) => (step.id === 'dependency-security-gate'
-      ? { ...step, status: 'FAILURE' }
-      : step)),
-  }, {
-    releaseSha: RELEASE_SHA, sourceArchiveSha256: SOURCE_SHA,
-  }), /Cloud Build receipt/i);
-  assert.throws(() => validateBuildReceipt({
-    ...build,
-    steps: build.steps.filter(({ id }) => id !== 'dependency-security-gate'),
-  }, {
-    releaseSha: RELEASE_SHA, sourceArchiveSha256: SOURCE_SHA,
-  }), /Cloud Build receipt/i);
-
-  assert.deepEqual(receipt, {
-    buildId: '12345678-1234-4234-8234-123456789abc',
+  assert.deepEqual({ ...receipt, buildReceiptSha256: '<sha256>' }, {
+    buildConfigSha256: BUILD_CONFIG_SHA,
+    buildId: BUILD_ID,
+    buildReceiptSha256: '<sha256>',
     releaseSha: RELEASE_SHA,
     sourceArchiveSha256: SOURCE_SHA,
     sourceProvenance: {
@@ -1566,15 +1635,84 @@ test('build receipt captures one successful verified build, source hash, and fin
     imageDigest: IMAGE_DIGEST,
     provenance: 'VERIFIED',
     ociLabels: {
+      'com.simplify.build-config-sha256': BUILD_CONFIG_SHA,
       'com.simplify.source-archive-sha256': SOURCE_SHA,
       'org.opencontainers.image.revision': RELEASE_SHA,
       'org.opencontainers.image.source': 'https://github.com/jimmy00415/Cantonese_Learning_Full_stack',
     },
   });
+  assert.match(receipt.buildReceiptSha256, /^[0-9a-f]{64}$/);
+
+  const sdkObserved = structuredClone(build);
+  Object.assign(sdkObserved, {
+    createTime: '2026-08-26T01:00:00.123456Z',
+    startTime: '2026-08-26T01:00:01.123456Z',
+    finishTime: '2026-08-26T01:01:01.123456Z',
+    logUrl: `https://console.cloud.google.com/cloud-build/builds;region=${REGION}/${BUILD_ID}?project=${PROJECT}`,
+    timing: {
+      BUILD: { startTime: '2026-08-26T01:00:01.123456Z', endTime: '2026-08-26T01:01:00.123456Z' },
+      FETCHSOURCE: { startTime: '2026-08-26T01:00:00.123456Z', endTime: '2026-08-26T01:00:01.123456Z' },
+      PUSH: { startTime: '2026-08-26T01:01:00.123456Z', endTime: '2026-08-26T01:01:01.123456Z' },
+      SETUPBUILD: { startTime: '2026-08-26T01:00:01.000000Z', endTime: '2026-08-26T01:00:01.123456Z' },
+    },
+  });
+  sdkObserved.steps = sdkObserved.steps.map((step, index) => ({
+    ...step,
+    pullTiming: {
+      startTime: `2026-08-26T01:00:0${index}.000000Z`,
+      endTime: `2026-08-26T01:00:0${index}.100000Z`,
+    },
+    timing: {
+      startTime: `2026-08-26T01:00:0${index}.100000Z`,
+      endTime: `2026-08-26T01:00:0${index}.900000Z`,
+    },
+  }));
+  const sdkReceipt = validateBuildReceipt(sdkObserved, {
+    releaseSha: RELEASE_SHA,
+    sourceArchiveSha256: SOURCE_SHA,
+    buildConfigSha256: BUILD_CONFIG_SHA,
+  });
+  assert.equal(sdkReceipt.buildReceiptSha256, receipt.buildReceiptSha256);
+
+  const invalidReceipts = [
+    (value) => { delete value.name; },
+    (value) => { value.projectId = 'foreign-project'; },
+    (value) => { value.timeout = '1201s'; },
+    (value) => { value.substitutions.EXTRA = 'drift'; },
+    (value) => { value.substitutions._BUILD_CONFIG_SHA256 = 'f'.repeat(64); },
+    (value) => { value.options.workerPool = 'projects/foreign/workerPools/pool'; },
+    (value) => { value.steps[0].name = 'node:latest'; },
+    (value) => { value.steps[1].status = 'FAILURE'; },
+    (value) => { value.steps[2].args.push('--secret=forbidden'); },
+    (value) => { value.steps[3].secretEnv = ['TOKEN']; },
+    (value) => { value.steps.reverse(); },
+    (value) => { value.source.storageSource.generation = '124'; },
+    (value) => { value.sourceProvenance.fileHashes.extra = { fileHash: [] }; },
+    (value) => { value.results.buildStepImages.pop(); },
+    (value) => { value.results.images[0].name = `${value.results.images[0].name}-foreign`; },
+    (value) => { value.approval = { result: 'APPROVED' }; },
+    (value) => { value.warning = [{ priority: 'INFO' }]; },
+    (value) => { value.warnings = [{ priority: 'INFO' }]; },
+    (value) => { value.createTime = 'not-rfc3339'; },
+    (value) => { value.steps[0].timing = { recipe: 'smuggled' }; },
+  ];
+  for (const mutate of invalidReceipts) {
+    const changed = structuredClone(build);
+    mutate(changed);
+    assert.throws(() => validateBuildReceipt(changed, {
+      releaseSha: RELEASE_SHA,
+      sourceArchiveSha256: SOURCE_SHA,
+      buildConfigSha256: BUILD_CONFIG_SHA,
+    }), /Cloud Build receipt/i);
+  }
   assert.throws(() => validateBuildReceipt({ ...receipt, status: 'SUCCESS' }, {
-    releaseSha: RELEASE_SHA, sourceArchiveSha256: SOURCE_SHA,
+    releaseSha: RELEASE_SHA,
+    sourceArchiveSha256: SOURCE_SHA,
+    buildConfigSha256: BUILD_CONFIG_SHA,
   }), /build receipt/i);
 
+  const calls = [];
+  let configChecks = 0;
   return runGcpRelease({
     argv: ['--phase=build', `--confirm-release=${RELEASE_SHA}`],
     input: releaseInput({
@@ -1584,12 +1722,22 @@ test('build receipt captures one successful verified build, source hash, and fin
       previousRevision: null,
       previousImageDigest: null,
     }),
-    execute: async (argv) => (argv[1] === 'submit' ? build : [build]),
+    execute: async (argv) => {
+      calls.push(argv);
+      return structuredClone(build);
+    },
     verifySourceArchive: async () => true,
+    verifyBuildConfig: async () => { configChecks += 1; return true; },
     writeOutput: () => undefined,
   }).then((result) => {
-    assert.equal(result.exitCode, 0);
+    assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
     assert.deepEqual(result.publicReport.buildReceipt, receipt);
+    assert.equal(configChecks, 2);
+    assert.deepEqual(calls[1], [
+      'builds', 'describe', BUILD_ID,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ]);
+    assert.equal(calls.flat().includes('list'), false);
     return runGcpRelease({
       argv: ['--phase=candidate', `--confirm-release=${RELEASE_SHA}`],
       input: releaseInput({ imageDigest: null }),
@@ -1600,6 +1748,61 @@ test('build receipt captures one successful verified build, source hash, and fin
     assert.equal(result.exitCode, 2);
     assert.equal(result.publicReport.code, 'RELEASE_CONTRACT_INVALID');
   });
+});
+
+test('Cloud Build submit response loss is ambiguous and never searches or adopts a build', async () => {
+  const calls = [];
+  let configChecks = 0;
+  const result = await runGcpRelease({
+    argv: ['--phase=build', `--confirm-release=${RELEASE_SHA}`],
+    input: releaseInput({
+      imageDigest: null,
+      databaseSecretVersions: null,
+      evidence: null,
+      previousRevision: null,
+      previousImageDigest: null,
+    }),
+    execute: async (argv) => {
+      calls.push(argv);
+      throw new Error('submit response lost before a validated build id');
+    },
+    verifySourceArchive: async () => true,
+    verifyBuildConfig: async () => { configChecks += 1; return true; },
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.publicReport.mutationPerformed, true);
+  assert.deepEqual(calls.map((argv) => argv.slice(0, 2)), [['builds', 'submit']]);
+  assert.equal(calls.flat().includes('list'), false);
+  assert.equal(calls.flat().includes('describe'), false);
+  assert.equal(configChecks, 2);
+});
+
+test('Cloud Build describe must deep-match submit after strict normalization', async () => {
+  const submitted = exactCloudBuildReceipt();
+  const described = structuredClone(submitted);
+  described.results.images[0].digest = `sha256:${'f'.repeat(64)}`;
+  const calls = [];
+  const result = await runGcpRelease({
+    argv: ['--phase=build', `--confirm-release=${RELEASE_SHA}`],
+    input: releaseInput({
+      imageDigest: null,
+      databaseSecretVersions: null,
+      evidence: null,
+      previousRevision: null,
+      previousImageDigest: null,
+    }),
+    execute: async (argv) => {
+      calls.push(argv);
+      return argv[1] === 'submit' ? structuredClone(submitted) : structuredClone(described);
+    },
+    verifySourceArchive: async () => true,
+    verifyBuildConfig: async () => true,
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 1);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1].slice(0, 3), ['builds', 'describe', BUILD_ID]);
 });
 
 test('candidate readback requires private authenticated tagged QA and the exact immutable revision', () => {
@@ -1891,7 +2094,7 @@ test('later promotion response loss restores exact prior stable traffic and pres
       if (argv.includes('update-traffic')
         && argv.includes(`--to-revisions=${plan.previousRevision}=100`)) {
         stableState = stablePriorReadback(plan);
-        return structuredClone(stableState);
+        return trafficTargetAcknowledgement(plan.previousRevision);
       }
       if (argv[1] === 'services' && argv[2] === 'describe') {
         if (argv[3] === CANDIDATE_SERVICE) return candidateServiceReadback(plan);
@@ -1917,6 +2120,9 @@ test('later promotion response loss restores exact prior stable traffic and pres
     argv.includes('update-traffic')
     && argv.includes(`--to-revisions=${plan.previousRevision}=100`)
   ));
+  assert.deepEqual(calls[restoreIndex + 1].slice(0, 4), [
+    'run', 'services', 'describe', STABLE_SERVICE,
+  ]);
   const finalIamIndex = calls.findLastIndex((argv) => argv.includes('get-iam-policy')
     && argv[3] === STABLE_SERVICE);
   assert.equal(restoreIndex >= 0 && restoreIndex < finalIamIndex, true);
@@ -2364,6 +2570,10 @@ test('changed release archive bytes are rejected before the first Cloud Build mu
   const directory = await mkdtemp(join(tmpdir(), 'hkbuddy-release-build-input-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const sourceArchive = join(directory, 'source.tar.gz');
+  const buildConfigContents = 'steps: []\n';
+  const buildConfigSha256 = createHash('sha256').update(buildConfigContents).digest('hex');
+  const buildConfig = join(directory, `${RELEASE_SHA}.${buildConfigSha256}.cloudbuild.yaml`);
+  await writeFile(buildConfig, buildConfigContents);
   await writeFile(sourceArchive, 'original archive bytes');
   const claimed = createHash('sha256').update('original archive bytes').digest('hex');
   await writeFile(sourceArchive, 'changed after manifest freeze');
@@ -2373,6 +2583,8 @@ test('changed release archive bytes are rejected before the first Cloud Build mu
     input: releaseInput({
       sourceArchive,
       sourceArchiveSha256: claimed,
+      buildConfig,
+      buildConfigSha256,
       imageDigest: null,
       databaseSecretVersions: null,
       evidence: null,
@@ -2389,35 +2601,10 @@ test('changed release archive bytes are rejected before the first Cloud Build mu
 
 test('Cloud Build receipt requires the exact generation-bound SHA256 source provenance', () => {
   const sourceHash = Buffer.from(SOURCE_SHA, 'hex').toString('base64');
-  const build = {
-    id: '12345678-1234-4234-8234-123456789abc',
-    status: 'SUCCESS',
-    serviceAccount: BUILD_SA,
-    substitutions: { _RELEASE_SHA: RELEASE_SHA, _SOURCE_SHA256: SOURCE_SHA },
-    options: { requestedVerifyOption: 'VERIFIED', sourceProvenanceHash: ['SHA256'] },
-    steps: [
-      'validate-release-sha', 'dependency-security-gate', 'build',
-      'verify-image-contract', 'verify-oci-labels',
-    ].map((id) => ({ id, status: 'SUCCESS' })),
-    sourceProvenance: {
-      resolvedStorageSource: {
-        bucket: 'hkbuddy-v1-582852715831-build-source', object: 'source/source.tar.gz', generation: '123',
-      },
-      fileHashes: {
-        'gs://hkbuddy-v1-582852715831-build-source/source/source.tar.gz#123': {
-          fileHash: [{ type: 'SHA256', value: sourceHash }],
-        },
-      },
-    },
-    results: {
-      images: [{
-        name: `asia-east2-docker.pkg.dev/${PROJECT}/hkbuddy-v1/hkbuddy-v1-api:${RELEASE_SHA}`,
-        digest: IMAGE_DIGEST,
-      }],
-    },
-  };
+  const build = exactCloudBuildReceipt();
   assert.doesNotThrow(() => validateBuildReceipt(build, {
     releaseSha: RELEASE_SHA, sourceArchiveSha256: SOURCE_SHA,
+    buildConfigSha256: BUILD_CONFIG_SHA,
   }));
   for (const sourceProvenance of [
     {},
@@ -2441,6 +2628,7 @@ test('Cloud Build receipt requires the exact generation-bound SHA256 source prov
   ]) {
     assert.throws(() => validateBuildReceipt({ ...build, sourceProvenance }, {
       releaseSha: RELEASE_SHA, sourceArchiveSha256: SOURCE_SHA,
+      buildConfigSha256: BUILD_CONFIG_SHA,
     }), /Cloud Build receipt/i);
   }
 });
@@ -3134,6 +3322,10 @@ test('Cloud Build and infrastructure contracts pin the reviewed build identity a
   assert.match(cloudbuild, /gcr\.io\/cloud-builders\/docker@sha256:[0-9a-f]{64}/);
   assert.match(cloudbuild, /--build-arg=V1_RELEASE_COMMIT_SHA=\$_RELEASE_SHA/);
   assert.match(cloudbuild, /--build-arg=V1_SOURCE_ARCHIVE_SHA256=\$_SOURCE_SHA256/);
+  assert.match(cloudbuild, /BUILD_CONFIG_SHA256=\$_BUILD_CONFIG_SHA256/);
+  assert.match(cloudbuild, /--build-arg=V1_BUILD_CONFIG_SHA256=\$_BUILD_CONFIG_SHA256/);
+  assert.match(cloudbuild, /--label=com\.simplify\.build-config-sha256=\$_BUILD_CONFIG_SHA256/);
+  assert.match(cloudbuild, /index \.Config\.Labels "com\.simplify\.build-config-sha256"/);
   assert.match(cloudbuild, /--label=org\.opencontainers\.image\.source=https:\/\/github\.com\/jimmy00415\/Cantonese_Learning_Full_stack/);
   assert.match(cloudbuild, /index \.Config\.Labels "org\.opencontainers\.image\.source"/);
   const dependencyGate = cloudbuild.indexOf('- id: dependency-security-gate');
@@ -3148,12 +3340,11 @@ test('Cloud Build and infrastructure contracts pin the reviewed build identity a
   assert.equal(dependencyInstall > dependencyGate, true);
   assert.equal(dependencyAudit > dependencyInstall, true);
   assert.equal(imageBuild > dependencyAudit, true);
-  assert.match(cloudbuild, /DEPENDENCY_SECURITY_RECEIPT/);
-  assert.match(cloudbuild, /DEPENDENCY_SECURITY_EXCEPTION_REVIEWED/);
-  assert.match(cloudbuild, /dependency_security_receipt="\$\$\(npm run --silent security:dependencies\)"/);
+  assert.match(cloudbuild, /npm run --silent security:dependencies/);
   assert.match(cloudbuild, /waitFor:\s*\n\s*- dependency-security-gate/);
   assert.match(dockerfile, /ARG V1_RELEASE_COMMIT_SHA/);
   assert.match(dockerfile, /ARG V1_SOURCE_ARCHIVE_SHA256/);
+  assert.match(dockerfile, /ARG V1_BUILD_CONFIG_SHA256/);
   assert.match(dockerfile, /COPY --chown=node:node scripts\/create-image-release-manifest\.js \.\/scripts\/create-image-release-manifest\.js/);
   assert.match(dockerfile, /RUN node scripts\/create-image-release-manifest\.js/);
   assert.equal(dockerignore.includes('!scripts/create-image-release-manifest.js'), true);

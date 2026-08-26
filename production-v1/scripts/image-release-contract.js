@@ -72,10 +72,13 @@ export function assertImageReleaseScriptList(fileNames) {
 }
 
 function assertReleaseManifest(value) {
-  const expectedKeys = ['releaseSha', 'schemaVersion', 'sourceArchiveSha256', 'sourcePath'];
+  const expectedKeys = [
+    'buildConfigSha256', 'releaseSha', 'schemaVersion', 'sourceArchiveSha256', 'sourcePath',
+  ];
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || Object.keys(value).sort().join('\0') !== expectedKeys.sort().join('\0')
     || value.schemaVersion !== 1
+    || !DIGEST.test(String(value.buildConfigSha256 ?? ''))
     || !RELEASE_SHA.test(String(value.releaseSha ?? ''))
     || !DIGEST.test(String(value.sourceArchiveSha256 ?? ''))
     || value.sourcePath !== 'git-archive:production-v1') throw imageReleaseError();
@@ -110,7 +113,9 @@ export async function verifyImageReleaseRoot({
   if ((process.env.V1_RELEASE_COMMIT_SHA
       && process.env.V1_RELEASE_COMMIT_SHA !== releaseManifest.releaseSha)
     || (process.env.V1_SOURCE_ARCHIVE_SHA256
-      && process.env.V1_SOURCE_ARCHIVE_SHA256 !== releaseManifest.sourceArchiveSha256)) {
+      && process.env.V1_SOURCE_ARCHIVE_SHA256 !== releaseManifest.sourceArchiveSha256)
+    || (process.env.V1_BUILD_CONFIG_SHA256
+      && process.env.V1_BUILD_CONFIG_SHA256 !== releaseManifest.buildConfigSha256)) {
     throw imageReleaseError();
   }
   let corpus;

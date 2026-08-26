@@ -98,9 +98,12 @@ async function defaultInspectGit(environment = process.env) {
   if (Buffer.byteLength(raw, 'utf8') > 1_024) return null;
   const manifest = JSON.parse(raw);
   const keys = Object.keys(manifest ?? {}).sort();
-  if (keys.join('\0') !== ['releaseSha', 'schemaVersion', 'sourceArchiveSha256', 'sourcePath'].sort().join('\0')
+  if (keys.join('\0') !== [
+    'buildConfigSha256', 'releaseSha', 'schemaVersion', 'sourceArchiveSha256', 'sourcePath',
+  ].sort().join('\0')
     || manifest.schemaVersion !== 1
     || manifest.releaseSha !== environment.V1_RELEASE_COMMIT_SHA
+    || !DIGEST.test(String(manifest.buildConfigSha256 ?? ''))
     || !DIGEST.test(String(manifest.sourceArchiveSha256 ?? ''))
     || manifest.sourcePath !== 'git-archive:production-v1') return null;
   return { commitSha: manifest.releaseSha, clean: true };

@@ -46,6 +46,8 @@ const STABLE_REVISION = /^hkbuddy-v1-api-[0-9a-f]{12}$/;
 const CANDIDATE_REVISION = /^hkbuddy-v1-api-candidate-[0-9a-f]{12}$/;
 const BUILD_SOURCE_PREFIX = 'source/';
 const BUILD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const NODE_BUILDER = 'node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5';
+const DOCKER_BUILDER = 'gcr.io/cloud-builders/docker@sha256:2e8d40d8e48dc14fab4213d5e532d74f63fd403d9e8d7f6463096a75820286c3';
 const ACCEPTANCE_RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const FORBIDDEN_SECRET_KEY = /^(?:authorization|proxy-authorization|cookie|set-cookie|access[_-]?token|id[_-]?token|refresh[_-]?token|token|jwt)$/i;
@@ -77,7 +79,6 @@ const MOBILE_SCREENSHOT_IDS = Object.freeze([
   'first-visit', 'text-source', 'voice-transcript', 'mobile-safe-area',
 ]);
 const APP_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
-const CLOUD_BUILD_CONFIG = resolve(APP_ROOT, 'cloudbuild.yaml');
 const execFileAsync = promisify(execFile);
 
 const EVIDENCE_DEFINITIONS = Object.freeze({
@@ -339,6 +340,20 @@ async function gitOutput(repositoryRoot, argv) {
   return result.stdout.trim();
 }
 
+async function gitBlob(repositoryRoot, releaseSha, member) {
+  const result = await execFileAsync('git', [
+    '--no-optional-locks', '-C', repositoryRoot, 'cat-file', 'blob', `${releaseSha}:${member}`,
+  ], {
+    encoding: 'buffer',
+    windowsHide: true,
+    maxBuffer: 1024 * 1024,
+  });
+  if (!Buffer.isBuffer(result.stdout) || result.stdout.length === 0) {
+    throw new Error('release Git blob is empty');
+  }
+  return result.stdout;
+}
+
 function pathIsOutside(parent, child) {
   const member = relative(parent, child);
   return member === '..' || member.startsWith(`..${sep}`);
@@ -352,8 +367,10 @@ export async function prepareReleaseArchive({ repositoryRoot, releaseSha, destin
   }
   let canonicalRepository;
   let canonicalDestination;
+  let canonicalBuildConfig;
   let intermediateTar;
   let archiveStarted = false;
+  let buildConfigStarted = false;
   try {
     canonicalRepository = await realpath(repositoryRoot);
     const canonicalParent = await realpath(dirname(destination));
@@ -391,6 +408,35 @@ export async function prepareReleaseArchive({ repositoryRoot, releaseSha, destin
       throw new Error('release source is not one clean production commit');
     }
 
+    const buildConfigBytes = await gitBlob(
+      canonicalRepository,
+      releaseSha,
+      'production-v1/cloudbuild.yaml',
+    );
+    const buildConfigSha256 = createHash('sha256').update(buildConfigBytes).digest('hex');
+    canonicalBuildConfig = join(
+      canonicalParent,
+      `${releaseSha}.${buildConfigSha256}.cloudbuild.yaml`,
+    );
+    if (!pathIsOutside(canonicalRepository, canonicalBuildConfig)) {
+      throw new Error('build config inside repository');
+    }
+    try {
+      await lstat(canonicalBuildConfig);
+      throw new Error('build config exists');
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+    await writeFile(canonicalBuildConfig, buildConfigBytes, { flag: 'wx', mode: 0o600 });
+    buildConfigStarted = true;
+    const frozenBuildConfig = await lstat(canonicalBuildConfig);
+    const frozenBuildConfigBytes = await readFile(canonicalBuildConfig);
+    if (!frozenBuildConfig.isFile() || frozenBuildConfig.isSymbolicLink()
+      || frozenBuildConfig.size !== buildConfigBytes.length
+      || createHash('sha256').update(frozenBuildConfigBytes).digest('hex') !== buildConfigSha256) {
+      throw new Error('frozen build config drift');
+    }
+
     archiveStarted = true;
     await gitOutput(canonicalRepository, [
       'archive', '--format=tar', `--mtime=@${commitTimestamp}`, `--output=${intermediateTar}`,
@@ -413,6 +459,8 @@ export async function prepareReleaseArchive({ repositoryRoot, releaseSha, destin
       releaseSha,
       sourceArchive: canonicalDestination,
       sourceArchiveSha256: await sha256File(canonicalDestination),
+      buildConfig: canonicalBuildConfig,
+      buildConfigSha256,
     });
   } catch {
     if (archiveStarted && canonicalDestination) {
@@ -420,6 +468,9 @@ export async function prepareReleaseArchive({ repositoryRoot, releaseSha, destin
     }
     if (archiveStarted && intermediateTar) {
       await rm(intermediateTar, { force: true }).catch(() => undefined);
+    }
+    if (buildConfigStarted && canonicalBuildConfig) {
+      await rm(canonicalBuildConfig, { force: true }).catch(() => undefined);
     }
     throw new Error('Release archive requires one clean commit');
   }
@@ -481,6 +532,8 @@ export async function runPrepareReleaseArchive({
       releaseSha: result.releaseSha,
       sourceArchive: result.sourceArchive,
       sourceArchiveSha256: result.sourceArchiveSha256,
+      buildConfig: result.buildConfig,
+      buildConfigSha256: result.buildConfigSha256,
     });
   } catch {
     return publish(writeOutput, 1, {
@@ -817,7 +870,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
   const unresolvedAcceptanceOutputs = ['build', 'migration', 'inventory', 'acceptance', 'rollback'].includes(phase)
     && input.acceptanceOutputs === null;
   if (!exactKeys(input, [
-    'acceptanceOutputs', 'acceptanceRunId', 'databaseSecretVersions', 'evidence', 'imageDigest', 'legacyInventory', 'previousRevision',
+    'acceptanceOutputs', 'acceptanceRunId', 'buildConfig', 'buildConfigSha256', 'databaseSecretVersions', 'evidence', 'imageDigest', 'legacyInventory', 'previousRevision',
     'previousImageDigest', 'projectNumber', 'releaseSha', 'sourceArchive', 'sourceArchiveSha256', 'task8Evidence',
   ])
     || !RELEASE_SHA.test(String(input.releaseSha ?? ''))
@@ -828,6 +881,10 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     || input.projectNumber !== GCP_IDENTITY.projectNumber
     || !isAbsoluteFile(input.sourceArchive)
     || !/\.(?:tar\.gz|tgz)$/i.test(input.sourceArchive)
+    || !isAbsoluteFile(input.buildConfig)
+    || !DIGEST.test(String(input.buildConfigSha256 ?? ''))
+    || dirname(input.buildConfig) !== dirname(input.sourceArchive)
+    || basename(input.buildConfig) !== `${input.releaseSha}.${input.buildConfigSha256}.cloudbuild.yaml`
     || (!unresolvedDatabase && (
       !exactKeys(input.databaseSecretVersions, ['app', 'migrator', 'session'])
       || Object.values(input.databaseSecretVersions).some((value) => !NUMERIC_VERSION.test(String(value ?? '')))
@@ -1081,6 +1138,8 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     region: REGION,
     releaseSha,
     sourceArchiveSha256: input.sourceArchiveSha256,
+    buildConfig: input.buildConfig,
+    buildConfigSha256: input.buildConfigSha256,
     projectNumber: input.projectNumber,
     acceptanceRunId,
     candidateService: CANDIDATE_SERVICE,
@@ -1110,17 +1169,16 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
 
   const operations = [
     operation('build', 'build-submit', [
-      'builds', 'submit', `--config=${CLOUD_BUILD_CONFIG}`,
+      'builds', 'submit', `--config=${input.buildConfig}`,
       `--project=${PROJECT}`, `--region=${REGION}`,
       `--service-account=${BUILD_SERVICE_ACCOUNT}`,
       `--gcs-source-staging-dir=gs://${GCP_IDENTITY.buildSourceBucket}/source`,
-      `--substitutions=_RELEASE_SHA=${releaseSha},_SOURCE_SHA256=${input.sourceArchiveSha256}`,
+      `--substitutions=_BUILD_CONFIG_SHA256=${input.buildConfigSha256},_RELEASE_SHA=${releaseSha},_SOURCE_SHA256=${input.sourceArchiveSha256}`,
       '--format=json', input.sourceArchive,
     ]),
     operation('build', 'build-readback', [
-      'builds', 'list', `--project=${PROJECT}`, `--region=${REGION}`,
-      `--filter=substitutions._RELEASE_SHA=${releaseSha} AND substitutions._SOURCE_SHA256=${input.sourceArchiveSha256}`,
-      '--sort-by=~createTime', '--limit=2', '--format=json',
+      'builds', 'describe', '{validated-build-id}',
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
     operation('migration', 'migration-deploy', [
       'run', 'jobs', 'deploy', MIGRATION_JOB, `--project=${PROJECT}`, `--region=${REGION}`,
@@ -1455,6 +1513,8 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     releaseSha,
     sourceArchive: input.sourceArchive,
     sourceArchiveSha256: input.sourceArchiveSha256,
+    buildConfig: input.buildConfig,
+    buildConfigSha256: input.buildConfigSha256,
     imageDigest: input.imageDigest,
     image,
     previousRevision,
@@ -1492,66 +1552,236 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
   });
 }
 
-export function validateBuildReceipt(value, { releaseSha, sourceArchiveSha256 } = {}) {
+function expectedCloudBuildSteps({ releaseSha, sourceArchiveSha256, buildConfigSha256 }) {
   const imageName = `asia-east2-docker.pkg.dev/${PROJECT}/${REPOSITORY}/${STABLE_SERVICE}:${releaseSha}`;
-  const image = value?.results?.images;
-  const source = value?.sourceProvenance?.resolvedStorageSource;
-  const sourceUri = exactKeys(source, ['bucket', 'generation', 'object'])
-    && source.bucket === GCP_IDENTITY.buildSourceBucket
-    && typeof source.object === 'string' && source.object.startsWith(BUILD_SOURCE_PREFIX)
-    && source.object.length > BUILD_SOURCE_PREFIX.length
-    && NUMERIC_VERSION.test(String(source.generation ?? ''))
-    ? `gs://${source.bucket}/${source.object}#${source.generation}`
-    : null;
-  const fileHashes = value?.sourceProvenance?.fileHashes;
-  const provenanceKeys = fileHashes && typeof fileHashes === 'object' && !Array.isArray(fileHashes)
-    ? Object.keys(fileHashes) : [];
-  const hashes = sourceUri && provenanceKeys.length === 1 && provenanceKeys[0] === sourceUri
-    ? fileHashes[sourceUri]?.fileHash : null;
-  let sourceHashMatches = false;
-  if (Array.isArray(hashes) && hashes.length === 1
-    && exactKeys(hashes[0], ['type', 'value']) && hashes[0].type === 'SHA256'
-    && typeof hashes[0].value === 'string') {
-    try {
-      const decoded = Buffer.from(hashes[0].value, 'base64');
-      sourceHashMatches = decoded.length === 32
-        && decoded.toString('base64') === hashes[0].value
-        && decoded.toString('hex') === sourceArchiveSha256;
-    } catch { sourceHashMatches = false; }
-  }
-  const expectedSteps = [
-    'validate-release-sha', 'dependency-security-gate', 'build',
-    'verify-image-contract', 'verify-oci-labels',
+  const validateInputs = "if (!/^[0-9a-f]{40}$/.test(process.env.RELEASE_SHA || '') || !/^[0-9a-f]{64}$/.test(process.env.SOURCE_SHA256 || '') || !/^[0-9a-f]{64}$/.test(process.env.BUILD_CONFIG_SHA256 || '')) { process.stderr.write('invalid release SHA\\n'); process.exit(2); }";
+  const verifyLabels = [
+    `test "$(docker inspect --format='{{ index .Config.Labels "org.opencontainers.image.revision" }}' ${imageName})" = "${releaseSha}"`,
+    `test "$(docker inspect --format='{{ index .Config.Labels "com.simplify.source-archive-sha256" }}' ${imageName})" = "${sourceArchiveSha256}"`,
+    `test "$(docker inspect --format='{{ index .Config.Labels "com.simplify.build-config-sha256" }}' ${imageName})" = "${buildConfigSha256}"`,
+    `test "$(docker inspect --format='{{ index .Config.Labels "org.opencontainers.image.source" }}' ${imageName})" = "${OCI_SOURCE}"`,
+  ].join(' && ');
+  return [
+    {
+      id: 'validate-release-sha', name: NODE_BUILDER, entrypoint: 'node',
+      args: ['-e', validateInputs],
+      env: [
+        `RELEASE_SHA=${releaseSha}`,
+        `SOURCE_SHA256=${sourceArchiveSha256}`,
+        `BUILD_CONFIG_SHA256=${buildConfigSha256}`,
+      ],
+      waitFor: ['-'], status: 'SUCCESS', exitCode: 0,
+    },
+    {
+      id: 'dependency-security-gate', name: NODE_BUILDER, entrypoint: 'sh',
+      args: ['-ceu', 'npm ci --omit=dev --ignore-scripts --no-audit && npm run --silent security:dependencies'],
+      env: [], waitFor: ['validate-release-sha'], status: 'SUCCESS', exitCode: 0,
+    },
+    {
+      id: 'build', name: DOCKER_BUILDER, entrypoint: 'docker',
+      args: [
+        'build', '--file=Dockerfile', `--tag=${imageName}`,
+        `--label=org.opencontainers.image.revision=${releaseSha}`,
+        `--label=org.opencontainers.image.source=${OCI_SOURCE}`,
+        `--label=com.simplify.source-archive-sha256=${sourceArchiveSha256}`,
+        `--label=com.simplify.build-config-sha256=${buildConfigSha256}`,
+        `--build-arg=V1_RELEASE_COMMIT_SHA=${releaseSha}`,
+        `--build-arg=V1_SOURCE_ARCHIVE_SHA256=${sourceArchiveSha256}`,
+        `--build-arg=V1_BUILD_CONFIG_SHA256=${buildConfigSha256}`,
+        '.',
+      ],
+      env: [], waitFor: ['dependency-security-gate'], status: 'SUCCESS', exitCode: 0,
+    },
+    {
+      id: 'verify-image-contract', name: DOCKER_BUILDER, entrypoint: 'docker',
+      args: [
+        'run', '--rm', '--entrypoint=node',
+        `--env=V1_RELEASE_COMMIT_SHA=${releaseSha}`,
+        `--env=V1_SOURCE_ARCHIVE_SHA256=${sourceArchiveSha256}`,
+        `--env=V1_BUILD_CONFIG_SHA256=${buildConfigSha256}`,
+        imageName, 'scripts/image-release-contract.js',
+      ],
+      env: [], waitFor: ['build'], status: 'SUCCESS', exitCode: 0,
+    },
+    {
+      id: 'verify-oci-labels', name: DOCKER_BUILDER, entrypoint: 'sh',
+      args: ['-ceu', verifyLabels],
+      env: [], waitFor: ['verify-image-contract'], status: 'SUCCESS', exitCode: 0,
+    },
   ];
-  const valid = Boolean(
-    RELEASE_SHA.test(String(releaseSha ?? ''))
-    && DIGEST.test(String(sourceArchiveSha256 ?? ''))
-    && BUILD_ID.test(String(value?.id ?? ''))
-    && value.status === 'SUCCESS'
-    && value.serviceAccount === BUILD_SERVICE_ACCOUNT
-    && value.substitutions?._RELEASE_SHA === releaseSha
-    && value.substitutions?._SOURCE_SHA256 === sourceArchiveSha256
-    && value.options?.requestedVerifyOption === 'VERIFIED'
-    && exact(value.options?.sourceProvenanceHash, ['SHA256'])
-    && Array.isArray(value.steps)
-    && exact(value.steps.map(({ id, status } = {}) => ({ id, status })), expectedSteps.map((id) => ({
-      id, status: 'SUCCESS',
-    })))
-    && exactKeys(value.sourceProvenance, ['fileHashes', 'resolvedStorageSource'])
-    && sourceHashMatches
-    && Array.isArray(image) && image.length === 1
-    && image[0]?.name === imageName
-    && IMAGE_DIGEST.test(String(image[0]?.digest ?? ''))
-  );
-  if (!valid) throw new Error('Cloud Build receipt is invalid');
+}
+
+const CLOUD_BUILD_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
+
+function validCloudBuildTimestamp(value) {
+  return typeof value === 'string' && CLOUD_BUILD_TIMESTAMP.test(value)
+    && Number.isFinite(Date.parse(value));
+}
+
+function validCloudBuildTimeSpan(value) {
+  return exactKeys(value, ['endTime', 'startTime'])
+    && validCloudBuildTimestamp(value.startTime)
+    && validCloudBuildTimestamp(value.endTime)
+    && Date.parse(value.startTime) <= Date.parse(value.endTime);
+}
+
+function validateOutputOnlyBuildObservation(value) {
+  const observedTimes = ['createTime', 'startTime', 'finishTime'].filter((key) => (
+    Object.hasOwn(value, key)
+  ));
+  if (observedTimes.length > 0) {
+    if (observedTimes.length !== 3
+      || !observedTimes.every((key) => validCloudBuildTimestamp(value[key]))
+      || Date.parse(value.createTime) > Date.parse(value.startTime)
+      || Date.parse(value.startTime) > Date.parse(value.finishTime)) throw new Error();
+  }
+  if (Object.hasOwn(value, 'logUrl')
+    && (typeof value.logUrl !== 'string' || value.logUrl.length > 2_048
+      || !new RegExp(`^https://console\\.cloud\\.google\\.com/[^\\s]*${value.id}[^\\s]*$`)
+        .test(value.logUrl))) throw new Error();
+  if (Object.hasOwn(value, 'timing')) {
+    const keys = Object.keys(value.timing ?? {});
+    const allowed = new Set(['BUILD', 'FETCHSOURCE', 'PUSH', 'SETUPBUILD']);
+    if (keys.length < 1 || keys.some((key) => !allowed.has(key)
+      || !validCloudBuildTimeSpan(value.timing[key]))) throw new Error();
+  }
+}
+
+function normalizeCloudBuildReceipt(value, { releaseSha, sourceArchiveSha256, buildConfigSha256 }) {
+  try {
+    const requiredBuildKeys = [
+      'id', 'images', 'name', 'options', 'projectId', 'results', 'serviceAccount',
+      'source', 'sourceProvenance', 'status', 'steps', 'substitutions', 'timeout',
+    ];
+    const outputOnlyBuildKeys = ['createTime', 'finishTime', 'logUrl', 'startTime', 'timing'];
+    const actualBuildKeys = Object.keys(value ?? {});
+    if (!RELEASE_SHA.test(String(releaseSha ?? ''))
+      || !DIGEST.test(String(sourceArchiveSha256 ?? ''))
+      || !DIGEST.test(String(buildConfigSha256 ?? ''))
+      || requiredBuildKeys.some((key) => !actualBuildKeys.includes(key))
+      || actualBuildKeys.some((key) => !requiredBuildKeys.includes(key)
+        && !outputOnlyBuildKeys.includes(key))
+      || !BUILD_ID.test(String(value.id ?? ''))
+      || value.name !== `projects/${PROJECT}/locations/${REGION}/builds/${value.id}`
+      || value.projectId !== PROJECT
+      || value.status !== 'SUCCESS'
+      || value.serviceAccount !== BUILD_SERVICE_ACCOUNT
+      || value.timeout !== '1200s') throw new Error();
+    validateOutputOnlyBuildObservation(value);
+
+    const imageName = `asia-east2-docker.pkg.dev/${PROJECT}/${REPOSITORY}/${STABLE_SERVICE}:${releaseSha}`;
+    if (!exact(value.images, [imageName])
+      || !exactKeys(value.substitutions, [
+        '_BUILD_CONFIG_SHA256', '_RELEASE_SHA', '_SOURCE_SHA256',
+      ])
+      || !exact(value.substitutions, {
+        _BUILD_CONFIG_SHA256: buildConfigSha256,
+        _RELEASE_SHA: releaseSha,
+        _SOURCE_SHA256: sourceArchiveSha256,
+      })
+      || !exactKeys(value.options, ['logging', 'requestedVerifyOption', 'sourceProvenanceHash'])
+      || value.options.logging !== 'CLOUD_LOGGING_ONLY'
+      || value.options.requestedVerifyOption !== 'VERIFIED'
+      || !exact(value.options.sourceProvenanceHash, ['SHA256'])) throw new Error();
+
+    const expectedSteps = expectedCloudBuildSteps({
+      releaseSha, sourceArchiveSha256, buildConfigSha256,
+    });
+    if (!Array.isArray(value.steps) || value.steps.length !== expectedSteps.length) throw new Error();
+    const steps = value.steps.map((step, index) => {
+      const keys = Object.keys(step ?? {}).sort();
+      const required = ['args', 'entrypoint', 'id', 'name', 'status', 'waitFor'];
+      const allowed = [...required, 'env', 'pullTiming', 'timing'];
+      if (Object.hasOwn(step ?? {}, 'exitCode')) allowed.push('exitCode');
+      if (required.some((key) => !keys.includes(key))
+        || keys.some((key) => !allowed.includes(key))
+        || (Object.hasOwn(step, 'pullTiming') && !validCloudBuildTimeSpan(step.pullTiming))
+        || (Object.hasOwn(step, 'timing') && !validCloudBuildTimeSpan(step.timing))
+        || (Object.hasOwn(step, 'exitCode') && step.exitCode !== 0)) throw new Error();
+      const normalized = {
+        id: step.id,
+        name: step.name,
+        entrypoint: step.entrypoint,
+        args: step.args,
+        env: step.env ?? [],
+        waitFor: step.waitFor,
+        status: step.status,
+        exitCode: 0,
+      };
+      if (!exact(normalized, expectedSteps[index])) throw new Error();
+      return normalized;
+    });
+
+    if (!exactKeys(value.source, ['storageSource'])
+      || !exactKeys(value.source.storageSource, ['bucket', 'generation', 'object'])
+      || value.source.storageSource.bucket !== GCP_IDENTITY.buildSourceBucket
+      || typeof value.source.storageSource.object !== 'string'
+      || !value.source.storageSource.object.startsWith(BUILD_SOURCE_PREFIX)
+      || value.source.storageSource.object.length <= BUILD_SOURCE_PREFIX.length
+      || !NUMERIC_VERSION.test(String(value.source.storageSource.generation ?? ''))
+      || !exactKeys(value.sourceProvenance, ['fileHashes', 'resolvedStorageSource'])
+      || !exact(value.sourceProvenance.resolvedStorageSource, value.source.storageSource)) throw new Error();
+    const sourceUri = `gs://${value.source.storageSource.bucket}/${value.source.storageSource.object}#${value.source.storageSource.generation}`;
+    if (!exactKeys(value.sourceProvenance.fileHashes, [sourceUri])) throw new Error();
+    const hashRecord = value.sourceProvenance.fileHashes[sourceUri];
+    if (!exactKeys(hashRecord, ['fileHash']) || !Array.isArray(hashRecord.fileHash)
+      || hashRecord.fileHash.length !== 1
+      || !exactKeys(hashRecord.fileHash[0], ['type', 'value'])
+      || hashRecord.fileHash[0].type !== 'SHA256') throw new Error();
+    const decoded = Buffer.from(hashRecord.fileHash[0].value, 'base64');
+    if (decoded.length !== 32
+      || decoded.toString('base64') !== hashRecord.fileHash[0].value
+      || decoded.toString('hex') !== sourceArchiveSha256) throw new Error();
+
+    const expectedBuilderImages = [NODE_BUILDER, NODE_BUILDER, DOCKER_BUILDER, DOCKER_BUILDER, DOCKER_BUILDER]
+      .map((builder) => `sha256:${builder.split('@sha256:')[1]}`);
+    if (!exactKeys(value.results, ['buildStepImages', 'images'])
+      || !exact(value.results.buildStepImages, expectedBuilderImages)
+      || !Array.isArray(value.results.images) || value.results.images.length !== 1
+      || !exactKeys(value.results.images[0], ['digest', 'name'])
+      || value.results.images[0].name !== imageName
+      || !IMAGE_DIGEST.test(String(value.results.images[0].digest ?? ''))) throw new Error();
+
+    return Object.freeze(canonical({
+      id: value.id,
+      images: value.images,
+      name: value.name,
+      options: value.options,
+      projectId: value.projectId,
+      results: value.results,
+      serviceAccount: value.serviceAccount,
+      source: value.source,
+      sourceProvenance: value.sourceProvenance,
+      status: value.status,
+      steps,
+      substitutions: value.substitutions,
+      timeout: value.timeout,
+    }));
+  } catch {
+    throw new Error('Cloud Build receipt is invalid');
+  }
+}
+
+export function validateBuildReceipt(value, {
+  releaseSha, sourceArchiveSha256, buildConfigSha256,
+} = {}) {
+  const normalized = normalizeCloudBuildReceipt(value, {
+    releaseSha, sourceArchiveSha256, buildConfigSha256,
+  });
+  const image = normalized.results.images;
+  const source = normalized.source.storageSource;
+  const sourceUri = `gs://${source.bucket}/${source.object}#${source.generation}`;
   return Object.freeze({
-    buildId: value.id,
+    buildConfigSha256,
+    buildId: normalized.id,
+    buildReceiptSha256: canonicalSha256(normalized),
     releaseSha,
     sourceArchiveSha256,
     sourceProvenance: Object.freeze({ uri: sourceUri, sha256: sourceArchiveSha256 }),
     imageDigest: image[0].digest,
     provenance: 'VERIFIED',
     ociLabels: Object.freeze({
+      'com.simplify.build-config-sha256': buildConfigSha256,
       'com.simplify.source-archive-sha256': sourceArchiveSha256,
       'org.opencontainers.image.revision': releaseSha,
       'org.opencontainers.image.source': OCI_SOURCE,
@@ -2889,13 +3119,19 @@ function expectedAcceptanceJobs(plan) {
 
 function validateReceiptOutputs(phase, outputs, plan) {
   const expectedLabels = {
+    'com.simplify.build-config-sha256': plan.buildConfigSha256,
     'com.simplify.source-archive-sha256': plan.sourceArchiveSha256,
     'org.opencontainers.image.revision': plan.releaseSha,
     'org.opencontainers.image.source': OCI_SOURCE,
   };
   if (phase === 'build') {
-    if (!exactKeys(outputs, ['buildId', 'imageDigest', 'ociLabels', 'sourceArchiveSha256', 'sourceProvenance'])
+    if (!exactKeys(outputs, [
+      'buildConfigSha256', 'buildId', 'buildReceiptSha256', 'imageDigest',
+      'ociLabels', 'sourceArchiveSha256', 'sourceProvenance',
+    ])
+      || outputs.buildConfigSha256 !== plan.buildConfigSha256
       || !BUILD_ID.test(String(outputs.buildId ?? ''))
+      || !DIGEST.test(String(outputs.buildReceiptSha256 ?? ''))
       || !IMAGE_DIGEST.test(String(outputs.imageDigest ?? ''))
       || (plan.imageDigest !== null && outputs.imageDigest !== plan.imageDigest)
       || outputs.sourceArchiveSha256 !== plan.sourceArchiveSha256
@@ -3077,7 +3313,9 @@ function releasePhaseReceiptOutputs(phase, plan, context) {
   if (phase === 'build') {
     const value = context.buildReceipt;
     return Object.freeze({
+      buildConfigSha256: value.buildConfigSha256,
       buildId: value.buildId,
+      buildReceiptSha256: value.buildReceiptSha256,
       imageDigest: value.imageDigest,
       sourceArchiveSha256: value.sourceArchiveSha256,
       sourceProvenance: value.sourceProvenance,
@@ -3462,6 +3700,7 @@ export async function runGcpRelease({
   verifyEvidence = validateEvidenceArtifactSet,
   inspectCollected = inspectCollectedEvidenceArtifact,
   verifySourceArchive = verifyReleaseArchiveBytes,
+  verifyBuildConfig = verifyReleaseArchiveBytes,
   verifyTask8Evidence = validateTask8EvidenceArtifact,
   writeCandidateSpec = writeCandidateServiceSpecFile,
   writeStableSpec = writeStableServiceSpecFile,
@@ -3519,6 +3758,17 @@ export async function runGcpRelease({
     } catch {
       return publish(writeOutput, 1, {
         status: 'failed', code: 'RELEASE_SOURCE_ARCHIVE_INVALID', mutationPerformed: false,
+        releaseSha: plan.releaseSha, phase: selection.phase, completed: [],
+      });
+    }
+    try {
+      if (typeof verifyBuildConfig !== 'function'
+        || await verifyBuildConfig(plan.buildConfig, plan.buildConfigSha256) !== true) {
+        throw new Error('frozen build config drift');
+      }
+    } catch {
+      return publish(writeOutput, 1, {
+        status: 'failed', code: 'RELEASE_BUILD_CONFIG_INVALID', mutationPerformed: false,
         releaseSha: plan.releaseSha, phase: selection.phase, completed: [],
       });
     }
@@ -3702,7 +3952,21 @@ export async function runGcpRelease({
       let receipt;
       let canonicalServiceAbsence = false;
       try {
-        receipt = await executor(member.argv);
+        const operationArgv = member.id === 'build-readback'
+          ? [
+            'builds', 'describe', buildReceipt?.buildId,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]
+          : member.argv;
+        try {
+          receipt = await executor(operationArgv);
+        } finally {
+          if (member.id === 'build-submit'
+            && (typeof verifyBuildConfig !== 'function'
+              || await verifyBuildConfig(plan.buildConfig, plan.buildConfigSha256) !== true)) {
+            throw new Error('Frozen build config drifted after submit');
+          }
+        }
       } catch (error) {
         if (member.id === 'candidate-deploy') {
           const current = await executor([
@@ -3788,17 +4052,16 @@ export async function runGcpRelease({
         buildReceipt = validateBuildReceipt(receipt, {
           releaseSha: plan.releaseSha,
           sourceArchiveSha256: plan.sourceArchiveSha256,
+          buildConfigSha256: plan.buildConfigSha256,
         });
         if (plan.imageDigest && buildReceipt.imageDigest !== plan.imageDigest) {
           throw new Error('Build digest does not match the release manifest');
         }
       } else if (member.id === 'build-readback') {
-        if (!Array.isArray(receipt) || receipt.length !== 1) {
-          throw new Error('Build readback is ambiguous');
-        }
-        const readback = validateBuildReceipt(receipt[0], {
+        const readback = validateBuildReceipt(receipt, {
           releaseSha: plan.releaseSha,
           sourceArchiveSha256: plan.sourceArchiveSha256,
+          buildConfigSha256: plan.buildConfigSha256,
         });
         if (!buildReceipt || !exact(readback, buildReceipt)) {
           throw new Error('Build readback differs from submission');
@@ -4268,20 +4531,31 @@ export async function runGcpRelease({
             alreadyRestored = false;
           }
           if (!alreadyRestored) {
+            let responseLost = false;
             try {
               const restored = await executor([
                 'run', 'services', 'update-traffic', STABLE_SERVICE,
                 `--to-revisions=${plan.previousRevision}=100`,
                 `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
               ]);
-              validateStableService(restored, plan);
+              validateTrafficTargetAcknowledgement(restored, {
+                revision: plan.previousRevision, serviceUrl: plan.serviceOrigin,
+              });
             } catch {
+              responseLost = true;
               const restored = await executor([
                 'run', 'services', 'describe', STABLE_SERVICE,
                 `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
               ]);
               validateStableService(restored, plan);
               responseLossRecoveries.push('later-promotion-stable-compensation');
+            }
+            if (!responseLost) {
+              const restored = await executor([
+                'run', 'services', 'describe', STABLE_SERVICE,
+                `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+              ]);
+              validateStableService(restored, plan);
             }
           }
           const freshStable = await executor([
