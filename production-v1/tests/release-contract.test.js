@@ -5,6 +5,7 @@ import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promi
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
+import { GCP_IDENTITY } from '../src/gcp-identity.js';
 import { fileURLToPath } from 'node:url';
 import { gunzipSync } from 'node:zlib';
 
@@ -2566,21 +2567,21 @@ test('Cloud Build and infrastructure contracts pin the reviewed build identity a
 
   const contract = JSON.parse(await readFile(new URL('../infra/gcp/resource-contract.json', import.meta.url), 'utf8'));
   assert.equal(contract.resources.cloudRun.startupProbe.path, '/api/health/ready');
-  const deployer = `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`;
-  const acceptance = `serviceAccount:hkbuddy-acceptance@${PROJECT}.iam.gserviceaccount.com`;
-  assert.equal(contract.resources.serviceAccounts.some(({ id }) => id === 'hkbuddy-acceptance'), true);
+  const deployer = `serviceAccount:${GCP_IDENTITY.serviceAccounts.deployer}`;
+  const acceptance = `serviceAccount:${GCP_IDENTITY.serviceAccounts.acceptance}`;
+  assert.equal(contract.resources.serviceAccounts.some(({ id }) => id === 'hkbuddy-v1-acceptance'), true);
   assert.deepEqual(contract.iam.bindings.filter(({ member }) => member === acceptance), [
-    { scope: `bucket:${PROJECT}-media`, member: acceptance, role: 'roles/storage.objectUser' },
+    { scope: `bucket:${GCP_IDENTITY.bucket}`, member: acceptance, role: 'roles/storage.objectUser' },
     {
-      scope: `bucket:${PROJECT}-media`, member: acceptance,
-      role: `projects/${PROJECT}/roles/hkbuddyAcceptanceBucketMetadataReader`,
+      scope: `bucket:${GCP_IDENTITY.bucket}`, member: acceptance,
+      role: `projects/${GCP_IDENTITY.projectId}/roles/hkbuddyV1AcceptanceBucketMetadataReader`,
     },
-    { scope: 'secret:hkbuddy-db-app-url', member: acceptance, role: 'roles/secretmanager.secretAccessor' },
-    { scope: 'secret:hkbuddy-db-migrator-url', member: acceptance, role: 'roles/secretmanager.secretAccessor' },
+    { scope: `secret:${GCP_IDENTITY.secrets.dbAppUrl}`, member: acceptance, role: 'roles/secretmanager.secretAccessor' },
+    { scope: `secret:${GCP_IDENTITY.secrets.dbMigratorUrl}`, member: acceptance, role: 'roles/secretmanager.secretAccessor' },
     { scope: 'project', member: acceptance, role: 'roles/logging.logWriter' },
   ]);
   assert.equal(contract.iam.bindings.some(({ scope, member, role }) => (
-    scope === 'service-account:hkbuddy-acceptance' && member === deployer
+    scope === 'service-account:hkbuddy-v1-acceptance' && member === deployer
       && role === 'roles/iam.serviceAccountUser'
   )), true);
   assert.equal(contract.iam.bindings.some(({ member, role }) => (
@@ -2594,10 +2595,11 @@ test('Cloud Build and infrastructure contracts pin the reviewed build identity a
     scope === 'project' && member === deployer && role === 'roles/cloudbuild.builds.editor'
   )), true);
   for (const { secret } of Object.values(EVIDENCE)) {
+    const v1Secret = `hkbuddy-v1-${secret.slice('hkbuddy-'.length)}`;
     assert.equal(contract.iam.bindings.some(({ scope, member, role }) => (
-      scope === `secret:${secret}` && member === deployer
+      scope === `secret:${v1Secret}` && member === deployer
         && role === 'roles/secretmanager.secretVersionAdder'
-    )), true, secret);
+    )), true, v1Secret);
   }
   assert.equal(JSON.stringify(contract).includes('roles/run.admin'), true);
   assert.equal(contract.iam.bindings.some(({ role }) => role === 'roles/run.admin'), false);

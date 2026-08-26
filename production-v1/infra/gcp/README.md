@@ -1,12 +1,12 @@
 # Hong Kong Buddy Production V1 — guarded GCP provisioning
 
-This directory is the executable infrastructure contract for the isolated
-Production V1 project. It does not refer to, update, or delete any legacy Hong
-Kong Buddy resource.
+This directory is the executable infrastructure contract for the existing,
+billed Motion Expert shared project. It creates only the V1-namespaced resource
+island and never adopts, updates, or deletes a non-V1 resource.
 
 ## Fixed boundary
 
-- Project: `hkbuddy-prod-v1-20260826`
+- Project: `motion-expert-hk-ltd-webpage` (project number `582852715831`)
 - Organization: `797368190621`
 - Billing account: `01F9FD-24EA9B-A9232C`
 - Cloud Run, Cloud SQL, Artifact Registry, and media storage: `asia-east2`
@@ -26,10 +26,11 @@ scripts fail before mutation.
 
 ## Commands
 
-`npm run gcp:preflight` is read-only. It checks the active CLI identity, target
-organization, open billing account, and whether the target project is absent or
-already matches its fixed parent. It never creates, enables, links, patches, or
-deletes anything.
+`npm run gcp:preflight` is read-only. It requires the existing active shared
+project, its exact project number and display name, no project labels, its open
+billing link, and the three protected baseline IAM bindings. It never creates,
+links, patches, or deletes the project, billing link, default network, or any
+unrelated IAM policy.
 
 The billing account must report `currencyCode=HKD`. Google requires a fixed
 budget amount to use the billing account's native currency, so the reviewed
@@ -39,7 +40,7 @@ mismatch fails before mutation.
 An optional existing target-project Monitoring channel can be checked with:
 
 ```text
-npm run gcp:preflight -- --notification-channel=projects/hkbuddy-prod-v1-20260826/notificationChannels/NUMERIC_ID
+npm run gcp:preflight -- --notification-channel=projects/motion-expert-hk-ltd-webpage/notificationChannels/NUMERIC_ID
 ```
 
 The channel must have `type=email`, be enabled, and have
@@ -51,7 +52,7 @@ unverified channel is not treated as usable.
 prints the planned fixed operation IDs. The mutating first-stage bootstrap is:
 
 ```text
-npm run gcp:provision -- --confirm-project=hkbuddy-prod-v1-20260826
+npm run gcp:provision -- --confirm-project=motion-expert-hk-ltd-webpage
 ```
 
 That exact form creates or verifies only the project, billing, and API
@@ -59,7 +60,7 @@ foundation, then stops at the required channel gate. After the operator creates
 and verifies the email channel, the mutating resume form is:
 
 ```text
-npm run gcp:provision -- --confirm-project=hkbuddy-prod-v1-20260826 --notification-channel=projects/hkbuddy-prod-v1-20260826/notificationChannels/NUMERIC_ID
+npm run gcp:provision -- --confirm-project=motion-expert-hk-ltd-webpage --notification-channel=projects/motion-expert-hk-ltd-webpage/notificationChannels/NUMERIC_ID
 ```
 
 No abbreviated confirmation, alternate project, extra flag, or legacy identity
@@ -210,7 +211,7 @@ resource, re-audits all five service accounts for user-managed keys, rejects a
 public bucket member, and compares the managed project, bucket, repository,
 secret, and service-account IAM policies to exact per-scope allowlists. It also
 lists project custom roles and requires the one fixed GA
-`hkbuddyAcceptanceBucketMetadataReader` definition with exactly
+`hkbuddyV1AcceptanceBucketMetadataReader` definition with exactly
 `storage.buckets.get`; an extra permission, role, deletion, or stage drift is a
 hard failure. Any
 extra managed workload binding, conditional replacement, or missing binding

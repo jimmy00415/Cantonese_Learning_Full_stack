@@ -1,14 +1,26 @@
 {
   "schemaVersion": 1,
   "project": {
-    "id": "hkbuddy-prod-v1-20260826",
-    "displayName": "Hong Kong Buddy Production V1",
+    "id": "motion-expert-hk-ltd-webpage",
+    "displayName": "Motion Expert HK LTD Webpage",
     "organizationId": "797368190621",
     "billingAccountId": "01F9FD-24EA9B-A9232C",
-    "labels": {
-      "application": "hong-kong-buddy",
-      "environment": "production-v1"
-    }
+    "mode": "existing-billed-shared",
+    "protectedBindings": [
+      {
+        "member": "user:admin@motionexp.com",
+        "role": "roles/owner"
+      },
+      {
+        "member": "serviceAccount:service-582852715831@compute-system.iam.gserviceaccount.com",
+        "role": "roles/compute.serviceAgent"
+      },
+      {
+        "member": "serviceAccount:582852715831@cloudservices.gserviceaccount.com",
+        "role": "roles/editor"
+      }
+    ],
+    "labels": {}
   },
   "locations": {
     "runtime": "asia-east2",
@@ -39,7 +51,7 @@
   ],
   "resources": {
     "artifactRegistry": {
-      "repository": "hkbuddy",
+      "repository": "hkbuddy-v1",
       "format": "DOCKER",
       "mode": "STANDARD_REPOSITORY",
       "location": "asia-east2",
@@ -47,35 +59,35 @@
     },
     "serviceAccounts": [
       {
-        "id": "hkbuddy-runtime",
-        "email": "hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "id": "hkbuddy-v1-runtime",
+        "email": "hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "displayName": "Hong Kong Buddy Cloud Run runtime"
       },
       {
-        "id": "hkbuddy-build",
-        "email": "hkbuddy-build@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "id": "hkbuddy-v1-build",
+        "email": "hkbuddy-v1-build@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "displayName": "Hong Kong Buddy Cloud Build"
       },
       {
-        "id": "hkbuddy-migrator",
-        "email": "hkbuddy-migrator@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "id": "hkbuddy-v1-migrator",
+        "email": "hkbuddy-v1-migrator@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "displayName": "Hong Kong Buddy database migrator"
       },
       {
-        "id": "hkbuddy-deployer",
-        "email": "hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "id": "hkbuddy-v1-deployer",
+        "email": "hkbuddy-v1-deployer@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "displayName": "Hong Kong Buddy release deployer"
       },
       {
-        "id": "hkbuddy-acceptance",
-        "email": "hkbuddy-acceptance@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "id": "hkbuddy-v1-acceptance",
+        "email": "hkbuddy-v1-acceptance@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "displayName": "Hong Kong Buddy dependency acceptance"
       }
     ],
     "customRoles": [
       {
-        "id": "hkbuddyAcceptanceBucketMetadataReader",
-        "name": "projects/hkbuddy-prod-v1-20260826/roles/hkbuddyAcceptanceBucketMetadataReader",
+        "id": "hkbuddyV1AcceptanceBucketMetadataReader",
+        "name": "projects/motion-expert-hk-ltd-webpage/roles/hkbuddyV1AcceptanceBucketMetadataReader",
         "title": "HK Buddy acceptance bucket metadata reader",
         "description": "Read fixed media bucket metadata for dependency acceptance",
         "includedPermissions": [
@@ -85,16 +97,16 @@
       }
     ],
     "network": {
-      "vpc": "hkbuddy-prod-vpc",
-      "subnet": "hkbuddy-ae2-run",
+      "vpc": "hkbuddy-v1-vpc",
+      "subnet": "hkbuddy-v1-ae2-run",
       "subnetCidr": "10.24.0.0/26",
       "privateGoogleAccess": true,
-      "psaRange": "hkbuddy-google-managed-services",
+      "psaRange": "hkbuddy-v1-google-services",
       "psaCidr": "10.25.0.0/16",
       "egress": "private-ranges-only"
     },
     "cloudSql": {
-      "instance": "hkbuddy-pg",
+      "instance": "hkbuddy-v1-pg",
       "database": "hkbuddy_v1",
       "databaseVersion": "POSTGRES_16",
       "availabilityType": "REGIONAL",
@@ -120,19 +132,19 @@
             "pg_read_all_data",
             "pg_write_all_data"
           ],
-          "secret": "hkbuddy-db-app-url"
+          "secret": "hkbuddy-v1-db-app-url"
         },
         {
           "name": "hkbuddy_migrator",
           "databaseRoles": [
             "cloudsqlsuperuser"
           ],
-          "secret": "hkbuddy-db-migrator-url"
+          "secret": "hkbuddy-v1-db-migrator-url"
         }
       ]
     },
     "bucket": {
-      "name": "hkbuddy-prod-v1-20260826-media",
+      "name": "hkbuddy-v1-582852715831-media",
       "location": "asia-east2",
       "uniformBucketLevelAccess": true,
       "publicAccessPrevention": "enforced",
@@ -143,64 +155,64 @@
     },
     "secrets": [
       {
-        "id": "hkbuddy-db-app-url",
+        "id": "hkbuddy-v1-db-app-url",
         "purpose": "runtime PostgreSQL URL",
         "versionPolicy": "numeric-only"
       },
       {
-        "id": "hkbuddy-db-migrator-url",
+        "id": "hkbuddy-v1-db-migrator-url",
         "purpose": "migration PostgreSQL URL",
         "versionPolicy": "numeric-only"
       },
       {
-        "id": "hkbuddy-session-secret",
+        "id": "hkbuddy-v1-session-secret",
         "purpose": "anonymous session signing",
         "versionPolicy": "numeric-only"
       },
       {
-        "id": "hkbuddy-db-bootstrap-state",
+        "id": "hkbuddy-v1-db-bootstrap-state",
         "purpose": "non-secret database-user binding receipt",
         "versionPolicy": "numeric-only"
       },
       {
-        "id": "hkbuddy-legacy-inventory",
+        "id": "hkbuddy-v1-legacy-inventory",
         "purpose": "immutable legacy inventory evidence",
         "versionPolicy": "numeric-only",
         "baseProvisioningVersion": false
       },
       {
-        "id": "hkbuddy-dependency-acceptance",
+        "id": "hkbuddy-v1-dependency-acceptance",
         "purpose": "immutable dependency acceptance evidence",
         "versionPolicy": "numeric-only",
         "baseProvisioningVersion": false
       },
       {
-        "id": "hkbuddy-llm-smoke",
+        "id": "hkbuddy-v1-llm-smoke",
         "purpose": "immutable LLM smoke evidence",
         "versionPolicy": "numeric-only",
         "baseProvisioningVersion": false
       },
       {
-        "id": "hkbuddy-asr-smoke",
+        "id": "hkbuddy-v1-asr-smoke",
         "purpose": "immutable ASR smoke evidence",
         "versionPolicy": "numeric-only",
         "baseProvisioningVersion": false
       },
       {
-        "id": "hkbuddy-tts-smoke",
+        "id": "hkbuddy-v1-tts-smoke",
         "purpose": "immutable TTS smoke evidence",
         "versionPolicy": "numeric-only",
         "baseProvisioningVersion": false
       },
       {
-        "id": "hkbuddy-ios-voice-acceptance",
+        "id": "hkbuddy-v1-ios-voice-acceptance",
         "purpose": "immutable iOS voice acceptance evidence",
         "versionPolicy": "numeric-only",
         "baseProvisioningVersion": false
       }
     ],
     "cloudRun": {
-      "service": "hkbuddy-api",
+      "service": "hkbuddy-v1-api",
       "executionEnvironment": "gen2",
       "cpu": 2,
       "memory": "1Gi",
@@ -307,7 +319,7 @@
           "id": "sql-backup-failure",
           "displayName": "HK Buddy V1 Cloud SQL backup failure",
           "kind": "log-match",
-          "filter": "logName=\"projects/hkbuddy-prod-v1-20260826/logs/cloudaudit.googleapis.com%2Fsystem_event\" AND protoPayload.methodName=\"cloudsql.instances.automatedBackup\" AND resource.type=\"cloudsql_database\" AND protoPayload.metadata.windowStatus=(\"STATUS_FAILED\" OR \"STATUS_ATTEMPT_FAILED\")"
+          "filter": "logName=\"projects/motion-expert-hk-ltd-webpage/logs/cloudaudit.googleapis.com%2Fsystem_event\" AND protoPayload.methodName=\"cloudsql.instances.automatedBackup\" AND resource.type=\"cloudsql_database\" AND protoPayload.metadata.windowStatus=(\"STATUS_FAILED\" OR \"STATUS_ATTEMPT_FAILED\")"
         },
         {
           "id": "sql-failover",
@@ -340,7 +352,7 @@
       "currency": "HKD",
       "amount": 2300,
       "calendarPeriod": "MONTH",
-      "projectFilter": "projects/hkbuddy-prod-v1-20260826",
+      "projectFilter": "projects/motion-expert-hk-ltd-webpage",
       "thresholds": [
         {
           "percent": 0.5,
@@ -445,171 +457,171 @@
     "bindings": [
       {
         "scope": "project",
-        "member": "serviceAccount:hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "member": "serviceAccount:hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/aiplatform.user"
       },
       {
         "scope": "project",
-        "member": "serviceAccount:hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "member": "serviceAccount:hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/speech.client"
       },
       {
         "scope": "project",
-        "member": "serviceAccount:hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "member": "serviceAccount:hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/serviceusage.serviceUsageConsumer"
       },
       {
-        "scope": "bucket:hkbuddy-prod-v1-20260826-media",
-        "member": "serviceAccount:hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "scope": "bucket:hkbuddy-v1-582852715831-media",
+        "member": "serviceAccount:hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/storage.objectUser"
       },
       {
-        "scope": "secret:hkbuddy-db-app-url",
-        "member": "serviceAccount:hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "scope": "secret:hkbuddy-v1-db-app-url",
+        "member": "serviceAccount:hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/secretmanager.secretAccessor"
       },
       {
-        "scope": "secret:hkbuddy-session-secret",
-        "member": "serviceAccount:hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "scope": "secret:hkbuddy-v1-session-secret",
+        "member": "serviceAccount:hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/secretmanager.secretAccessor"
       },
       {
-        "scope": "secret:hkbuddy-legacy-inventory",
-        "member": "serviceAccount:hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "scope": "secret:hkbuddy-v1-legacy-inventory",
+        "member": "serviceAccount:hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/secretmanager.secretAccessor"
       },
       {
-        "scope": "secret:hkbuddy-dependency-acceptance",
-        "member": "serviceAccount:hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "scope": "secret:hkbuddy-v1-dependency-acceptance",
+        "member": "serviceAccount:hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/secretmanager.secretAccessor"
       },
       {
-        "scope": "secret:hkbuddy-llm-smoke",
-        "member": "serviceAccount:hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "scope": "secret:hkbuddy-v1-llm-smoke",
+        "member": "serviceAccount:hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/secretmanager.secretAccessor"
       },
       {
-        "scope": "secret:hkbuddy-asr-smoke",
-        "member": "serviceAccount:hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "scope": "secret:hkbuddy-v1-asr-smoke",
+        "member": "serviceAccount:hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/secretmanager.secretAccessor"
       },
       {
-        "scope": "secret:hkbuddy-tts-smoke",
-        "member": "serviceAccount:hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "scope": "secret:hkbuddy-v1-tts-smoke",
+        "member": "serviceAccount:hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/secretmanager.secretAccessor"
       },
       {
-        "scope": "secret:hkbuddy-ios-voice-acceptance",
-        "member": "serviceAccount:hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "scope": "secret:hkbuddy-v1-ios-voice-acceptance",
+        "member": "serviceAccount:hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/secretmanager.secretAccessor"
       },
       {
-        "scope": "bucket:hkbuddy-prod-v1-20260826-media",
-        "member": "serviceAccount:hkbuddy-acceptance@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "scope": "bucket:hkbuddy-v1-582852715831-media",
+        "member": "serviceAccount:hkbuddy-v1-acceptance@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/storage.objectUser"
       },
       {
-        "scope": "bucket:hkbuddy-prod-v1-20260826-media",
-        "member": "serviceAccount:hkbuddy-acceptance@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
-        "role": "projects/hkbuddy-prod-v1-20260826/roles/hkbuddyAcceptanceBucketMetadataReader"
+        "scope": "bucket:hkbuddy-v1-582852715831-media",
+        "member": "serviceAccount:hkbuddy-v1-acceptance@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
+        "role": "projects/motion-expert-hk-ltd-webpage/roles/hkbuddyV1AcceptanceBucketMetadataReader"
       },
       {
-        "scope": "secret:hkbuddy-db-app-url",
-        "member": "serviceAccount:hkbuddy-acceptance@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "scope": "secret:hkbuddy-v1-db-app-url",
+        "member": "serviceAccount:hkbuddy-v1-acceptance@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/secretmanager.secretAccessor"
       },
       {
-        "scope": "secret:hkbuddy-db-migrator-url",
-        "member": "serviceAccount:hkbuddy-acceptance@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "scope": "secret:hkbuddy-v1-db-migrator-url",
+        "member": "serviceAccount:hkbuddy-v1-acceptance@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/secretmanager.secretAccessor"
       },
       {
         "scope": "project",
-        "member": "serviceAccount:hkbuddy-acceptance@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "member": "serviceAccount:hkbuddy-v1-acceptance@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/logging.logWriter"
       },
       {
-        "scope": "secret:hkbuddy-db-migrator-url",
-        "member": "serviceAccount:hkbuddy-migrator@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "scope": "secret:hkbuddy-v1-db-migrator-url",
+        "member": "serviceAccount:hkbuddy-v1-migrator@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/secretmanager.secretAccessor"
       },
       {
-        "scope": "repository:hkbuddy",
-        "member": "serviceAccount:hkbuddy-build@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "scope": "repository:hkbuddy-v1",
+        "member": "serviceAccount:hkbuddy-v1-build@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/artifactregistry.writer"
       },
       {
         "scope": "project",
-        "member": "serviceAccount:hkbuddy-build@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "member": "serviceAccount:hkbuddy-v1-build@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/logging.logWriter"
       },
       {
-        "scope": "repository:hkbuddy",
-        "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "scope": "repository:hkbuddy-v1",
+        "member": "serviceAccount:hkbuddy-v1-deployer@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/artifactregistry.reader"
       },
       {
         "scope": "project",
-        "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "member": "serviceAccount:hkbuddy-v1-deployer@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/cloudbuild.builds.editor"
       },
       {
         "scope": "project",
-        "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "member": "serviceAccount:hkbuddy-v1-deployer@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/run.developer"
       },
       {
-        "scope": "secret:hkbuddy-legacy-inventory",
-        "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "scope": "secret:hkbuddy-v1-legacy-inventory",
+        "member": "serviceAccount:hkbuddy-v1-deployer@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/secretmanager.secretVersionAdder"
       },
       {
-        "scope": "secret:hkbuddy-dependency-acceptance",
-        "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "scope": "secret:hkbuddy-v1-dependency-acceptance",
+        "member": "serviceAccount:hkbuddy-v1-deployer@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/secretmanager.secretVersionAdder"
       },
       {
-        "scope": "secret:hkbuddy-llm-smoke",
-        "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "scope": "secret:hkbuddy-v1-llm-smoke",
+        "member": "serviceAccount:hkbuddy-v1-deployer@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/secretmanager.secretVersionAdder"
       },
       {
-        "scope": "secret:hkbuddy-asr-smoke",
-        "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "scope": "secret:hkbuddy-v1-asr-smoke",
+        "member": "serviceAccount:hkbuddy-v1-deployer@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/secretmanager.secretVersionAdder"
       },
       {
-        "scope": "secret:hkbuddy-tts-smoke",
-        "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "scope": "secret:hkbuddy-v1-tts-smoke",
+        "member": "serviceAccount:hkbuddy-v1-deployer@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/secretmanager.secretVersionAdder"
       },
       {
-        "scope": "secret:hkbuddy-ios-voice-acceptance",
-        "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "scope": "secret:hkbuddy-v1-ios-voice-acceptance",
+        "member": "serviceAccount:hkbuddy-v1-deployer@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/secretmanager.secretVersionAdder"
       },
       {
-        "scope": "service-account:hkbuddy-runtime",
-        "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "scope": "service-account:hkbuddy-v1-runtime",
+        "member": "serviceAccount:hkbuddy-v1-deployer@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/iam.serviceAccountUser"
       },
       {
-        "scope": "service-account:hkbuddy-migrator",
-        "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "scope": "service-account:hkbuddy-v1-migrator",
+        "member": "serviceAccount:hkbuddy-v1-deployer@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/iam.serviceAccountUser"
       },
       {
-        "scope": "service-account:hkbuddy-build",
-        "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "scope": "service-account:hkbuddy-v1-build",
+        "member": "serviceAccount:hkbuddy-v1-deployer@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/iam.serviceAccountUser"
       },
       {
-        "scope": "service-account:hkbuddy-acceptance",
-        "member": "serviceAccount:hkbuddy-deployer@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com",
+        "scope": "service-account:hkbuddy-v1-acceptance",
+        "member": "serviceAccount:hkbuddy-v1-deployer@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/iam.serviceAccountUser"
       },
       {
-        "scope": "service-account:hkbuddy-build",
+        "scope": "service-account:hkbuddy-v1-build",
         "member": "serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-cloudbuild.iam.gserviceaccount.com",
         "role": "roles/iam.serviceAccountTokenCreator"
       }
@@ -617,7 +629,7 @@
   },
   "safety": {
     "dryRunDefault": true,
-    "exactConfirmation": "--confirm-project=hkbuddy-prod-v1-20260826",
+    "exactConfirmation": "--confirm-project=motion-expert-hk-ltd-webpage",
     "commandTransport": "execFile-argv",
     "secretTransport": "authenticated-https-body",
     "completePostCreateReadback": true,

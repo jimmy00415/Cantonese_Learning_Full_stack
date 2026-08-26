@@ -8,10 +8,12 @@ import {
   loadResourceContract,
   REQUIRED_OPERATOR_ACCOUNT,
 } from './gcp-provision.js';
+import { GCP_IDENTITY } from '../src/gcp-identity.js';
 
-const PROJECT = 'hkbuddy-prod-v1-20260826';
-const ORGANIZATION = '797368190621';
-const BILLING_ACCOUNT = '01F9FD-24EA9B-A9232C';
+const PROJECT = GCP_IDENTITY.projectId;
+const PROJECT_NUMBER = GCP_IDENTITY.projectNumber;
+const ORGANIZATION = GCP_IDENTITY.organizationId;
+const BILLING_ACCOUNT = GCP_IDENTITY.billingAccountId;
 const CHANNEL_NAME = new RegExp(`^projects/${PROJECT}/notificationChannels/[1-9]\\d*$`);
 
 function publish(writeOutput, exitCode, publicReport) {
@@ -30,7 +32,10 @@ function parseArguments(argv) {
 function projectMatches(project) {
   const parent = project?.parent?.id ?? String(project?.parent ?? '').split('/').at(-1);
   return project?.projectId === PROJECT && String(parent) === ORGANIZATION
-    && project?.lifecycleState === 'ACTIVE';
+    && String(project?.projectNumber ?? '') === PROJECT_NUMBER
+    && project?.name === 'Motion Expert HK LTD Webpage'
+    && project?.lifecycleState === 'ACTIVE'
+    && JSON.stringify(project?.labels ?? {}) === '{}';
 }
 
 function safeFailure(code, details = {}) {
@@ -131,20 +136,51 @@ export async function runGcpPreflight({
     ]);
   } catch (error) {
     if (error?.code === 'NOT_FOUND') projectState = 'absent';
-    else if (error?.code === 'FORBIDDEN') projectState = 'create-probe-required';
-    else return publish(writeOutput, 1, safeFailure('PROJECT_STATE_UNKNOWN', { readyForProjectCreation: false }));
+    else if (error?.code === 'FORBIDDEN') projectState = 'unresolved';
+    else return publish(writeOutput, 1, safeFailure('PROJECT_STATE_UNKNOWN'));
   }
-  if (projectState === 'present' && !projectMatches(project)) {
-    return publish(writeOutput, 1, safeFailure('PROJECT_COLLISION_OR_DRIFT', {
-      projectState, readyForProjectCreation: false,
-    }));
+  if (projectState !== 'present' || !projectMatches(project)) {
+    return publish(writeOutput, 1, safeFailure('SHARED_PROJECT_BASELINE_INVALID', { projectState }));
+  }
+
+  let billingLink;
+  try {
+    billingLink = await runCommand([
+      'billing', 'projects', 'describe', PROJECT, `--project=${PROJECT}`, '--format=json',
+    ]);
+  } catch {
+    return publish(writeOutput, 1, safeFailure('SHARED_PROJECT_BASELINE_INVALID', { projectState }));
+  }
+  if (billingLink?.billingEnabled !== true
+    || !String(billingLink.billingAccountName ?? billingLink.billingAccount ?? '').endsWith(BILLING_ACCOUNT)) {
+    return publish(writeOutput, 1, safeFailure('SHARED_PROJECT_BASELINE_INVALID', { projectState }));
+  }
+
+  let projectPolicy;
+  try {
+    projectPolicy = await runCommand([
+      'projects', 'get-iam-policy', PROJECT, `--project=${PROJECT}`, '--format=json',
+    ]);
+  } catch {
+    return publish(writeOutput, 1, safeFailure('SHARED_PROJECT_BASELINE_INVALID', { projectState }));
+  }
+  const protectedBindings = selectedContract.project.protectedBindings;
+  const currentBindings = Array.isArray(projectPolicy?.bindings) ? projectPolicy.bindings : [];
+  if (!protectedBindings.every(({ member, role }) => currentBindings.some((binding) => (
+    binding?.role === role && Array.isArray(binding.members) && binding.members.includes(member)
+  )))) return publish(writeOutput, 1, safeFailure('SHARED_PROJECT_BASELINE_INVALID', { projectState }));
+
+  try {
+    await runCommand([
+      'compute', 'networks', 'describe', 'default', `--project=${PROJECT}`, '--format=json',
+    ]);
+  } catch {
+    return publish(writeOutput, 1, safeFailure('SHARED_PROJECT_BASELINE_INVALID', { projectState }));
   }
 
   let alertChannel = 'not-supplied';
   if (selection.notificationChannel) {
-    if (projectState !== 'present') {
-      alertChannel = projectState === 'absent' ? 'target-project-absent' : 'target-project-unresolved';
-    } else {
+    {
       let channel;
       try {
         channel = await authenticatedRequest({
@@ -167,11 +203,9 @@ export async function runGcpPreflight({
     }
   }
 
-  const requiresConfirmedCreateProbe = projectState === 'create-probe-required';
   return publish(writeOutput, 0, {
-    status: 'dry-run', code: requiresConfirmedCreateProbe ? 'PROJECT_ID_UNRESOLVED' : 'GCP_PREFLIGHT_COMPLETE', projectId: PROJECT,
-    projectState, readyForProjectCreation: projectState === 'absent',
-    ...(requiresConfirmedCreateProbe ? { requiresConfirmedCreateProbe: true } : {}),
+    status: 'dry-run', code: 'GCP_PREFLIGHT_COMPLETE', projectId: PROJECT,
+    projectNumber: PROJECT_NUMBER, projectState,
     alertChannel, mutationPerformed: false,
   });
 }

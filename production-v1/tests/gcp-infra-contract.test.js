@@ -20,14 +20,15 @@ import {
   runGcpProvision,
 } from '../scripts/gcp-provision.js';
 import { runGcpPreflight } from '../scripts/gcp-preflight.js';
+import { GCP_IDENTITY } from '../src/gcp-identity.js';
 
 const CONTRACT_URL = new URL('../infra/gcp/resource-contract.json', import.meta.url);
-const PROJECT = 'hkbuddy-prod-v1-20260826';
+const PROJECT = GCP_IDENTITY.projectId;
 const CHANNEL = `projects/${PROJECT}/notificationChannels/123456789`;
-const PROJECT_NUMBER = '123456789012';
+const PROJECT_NUMBER = GCP_IDENTITY.projectNumber;
 const ACCEPTANCE_BUCKET_METADATA_ROLE = Object.freeze({
-  id: 'hkbuddyAcceptanceBucketMetadataReader',
-  name: `projects/${PROJECT}/roles/hkbuddyAcceptanceBucketMetadataReader`,
+  id: 'hkbuddyV1AcceptanceBucketMetadataReader',
+  name: `projects/${PROJECT}/roles/hkbuddyV1AcceptanceBucketMetadataReader`,
   title: 'HK Buddy acceptance bucket metadata reader',
   description: 'Read fixed media bucket metadata for dependency acceptance',
   includedPermissions: ['storage.buckets.get'],
@@ -66,32 +67,85 @@ async function contractFixture() {
   return JSON.parse(await readFile(CONTRACT_URL, 'utf8'));
 }
 
+test('central identity fixes the shared billed project resource island without legacy cloud identities', async () => {
+  const contract = await contractFixture();
+
+  assert.equal(Object.isFrozen(GCP_IDENTITY), true);
+  assert.equal(GCP_IDENTITY.projectId, 'motion-expert-hk-ltd-webpage');
+  assert.equal(GCP_IDENTITY.projectNumber, '582852715831');
+  assert.equal(GCP_IDENTITY.service, 'hkbuddy-v1-api');
+  assert.equal(GCP_IDENTITY.bucket, 'hkbuddy-v1-582852715831-media');
+  assert.equal(GCP_IDENTITY.network, 'hkbuddy-v1-vpc');
+  assert.equal(contract.project.mode, 'existing-billed-shared');
+  assert.deepEqual(contract.project.protectedBindings, [
+    { member: 'user:admin@motionexp.com', role: 'roles/owner' },
+    { member: 'serviceAccount:service-582852715831@compute-system.iam.gserviceaccount.com', role: 'roles/compute.serviceAgent' },
+    { member: 'serviceAccount:582852715831@cloudservices.gserviceaccount.com', role: 'roles/editor' },
+  ]);
+
+  const serialized = JSON.stringify({ identity: GCP_IDENTITY, contract });
+  for (const legacyIdentity of [
+    'hkbuddy-prod-v1-20260826', '123456789012', 'hkbuddy-api', '"repository":"hkbuddy"',
+    'hkbuddy-prod-v1-20260826-media', 'hkbuddy-pg', 'hkbuddy-prod-vpc',
+    'hkbuddy-ae2-run', 'hkbuddy-google-managed-services', 'hkbuddy-runtime',
+    'hkbuddy-build', 'hkbuddy-migrator', 'hkbuddy-deployer', 'hkbuddy-acceptance',
+    'hkbuddy-db-app-url', 'hkbuddy-db-migrator-url', 'hkbuddy-session-secret',
+    'hkbuddy-db-bootstrap-state', 'hkbuddy-legacy-inventory',
+    'hkbuddy-dependency-acceptance', 'hkbuddy-llm-smoke', 'hkbuddy-asr-smoke',
+    'hkbuddy-tts-smoke', 'hkbuddy-ios-voice-acceptance', 'hkbuddy-migrate',
+  ]) assert.equal(serialized.includes(legacyIdentity), false, legacyIdentity);
+});
+
+test('shared-project control plane forbids project and billing mutations', async () => {
+  const controlPlane = new GcpControlPlane({
+    contract: await contractFixture(),
+    notificationChannel: CHANNEL,
+    gcloud: async () => { throw new Error('must not reach gcloud'); },
+    request: async () => { throw new Error('must not reach HTTPS'); },
+  });
+
+  await assert.rejects(
+    () => controlPlane.create('project'),
+    (error) => error.code === 'SHARED_PROJECT_MUTATION_FORBIDDEN',
+  );
+  await assert.rejects(
+    () => controlPlane.create('billing'),
+    (error) => error.code === 'SHARED_PROJECT_MUTATION_FORBIDDEN',
+  );
+});
+
 test('the executable contract fixes the isolated GCP topology and least-privilege boundary', async () => {
   const contract = await contractFixture();
 
   assert.doesNotThrow(() => assertResourceContract(contract));
   assert.deepEqual(contract.project, {
     id: PROJECT,
-    displayName: 'Hong Kong Buddy Production V1',
-    organizationId: '797368190621',
-    billingAccountId: '01F9FD-24EA9B-A9232C',
-    labels: { application: 'hong-kong-buddy', environment: 'production-v1' },
+    displayName: 'Motion Expert HK LTD Webpage',
+    organizationId: GCP_IDENTITY.organizationId,
+    billingAccountId: GCP_IDENTITY.billingAccountId,
+    mode: 'existing-billed-shared',
+    protectedBindings: [
+      { member: 'user:admin@motionexp.com', role: 'roles/owner' },
+      { member: `serviceAccount:service-${PROJECT_NUMBER}@compute-system.iam.gserviceaccount.com`, role: 'roles/compute.serviceAgent' },
+      { member: `serviceAccount:${PROJECT_NUMBER}@cloudservices.gserviceaccount.com`, role: 'roles/editor' },
+    ],
+    labels: {},
   });
   assert.deepEqual(contract.locations, {
     runtime: 'asia-east2', storage: 'asia-east2', database: 'asia-east2',
     speech: 'asia-southeast1', vertex: 'global',
   });
   assert.deepEqual(contract.resources.artifactRegistry, {
-    repository: 'hkbuddy', format: 'DOCKER', mode: 'STANDARD_REPOSITORY',
+    repository: GCP_IDENTITY.repository, format: 'DOCKER', mode: 'STANDARD_REPOSITORY',
     location: 'asia-east2', description: 'Hong Kong Buddy production containers',
   });
   assert.deepEqual(contract.resources.customRoles, [ACCEPTANCE_BUCKET_METADATA_ROLE]);
   assert.equal(
-    EXPECTED_PROVISION_STEPS.includes('custom-role:hkbuddyAcceptanceBucketMetadataReader'),
+    EXPECTED_PROVISION_STEPS.includes('custom-role:hkbuddyV1AcceptanceBucketMetadataReader'),
     true,
   );
   assert.equal(
-    EXPECTED_PROVISION_STEPS.indexOf('custom-role:hkbuddyAcceptanceBucketMetadataReader')
+    EXPECTED_PROVISION_STEPS.indexOf('custom-role:hkbuddyV1AcceptanceBucketMetadataReader')
       < EXPECTED_PROVISION_STEPS.indexOf('vpc'),
     true,
   );
@@ -108,12 +162,12 @@ test('the executable contract fixes the isolated GCP topology and least-privileg
   ]);
 
   assert.deepEqual(contract.resources.network, {
-    vpc: 'hkbuddy-prod-vpc', subnet: 'hkbuddy-ae2-run', subnetCidr: '10.24.0.0/26',
-    privateGoogleAccess: true, psaRange: 'hkbuddy-google-managed-services',
+    vpc: GCP_IDENTITY.network, subnet: GCP_IDENTITY.subnet, subnetCidr: '10.24.0.0/26',
+    privateGoogleAccess: true, psaRange: GCP_IDENTITY.psaRange,
     psaCidr: '10.25.0.0/16', egress: 'private-ranges-only',
   });
   assert.deepEqual(contract.resources.cloudSql, {
-    instance: 'hkbuddy-pg', database: 'hkbuddy_v1', databaseVersion: 'POSTGRES_16',
+    instance: GCP_IDENTITY.cloudSqlInstance, database: GCP_IDENTITY.database, databaseVersion: 'POSTGRES_16',
     availabilityType: 'REGIONAL', tier: 'db-custom-1-3840', diskType: 'PD_SSD',
     diskSizeGb: 20, storageAutoIncrease: true, privateIpOnly: true,
     sslMode: 'ENCRYPTED_ONLY', backupEnabled: true, backupStartTime: '18:00',
@@ -121,18 +175,18 @@ test('the executable contract fixes the isolated GCP topology and least-privileg
     retainedBackups: 7, retainBackupsOnDelete: true, finalBackup: true,
     finalBackupRetentionDays: 30, deletionProtection: true,
     users: [
-      { name: 'hkbuddy_app', databaseRoles: ['pg_read_all_data', 'pg_write_all_data'], secret: 'hkbuddy-db-app-url' },
-      { name: 'hkbuddy_migrator', databaseRoles: ['cloudsqlsuperuser'], secret: 'hkbuddy-db-migrator-url' },
+      { name: 'hkbuddy_app', databaseRoles: ['pg_read_all_data', 'pg_write_all_data'], secret: GCP_IDENTITY.secrets.dbAppUrl },
+      { name: 'hkbuddy_migrator', databaseRoles: ['cloudsqlsuperuser'], secret: GCP_IDENTITY.secrets.dbMigratorUrl },
     ],
   });
   assert.deepEqual(contract.resources.bucket, {
-    name: 'hkbuddy-prod-v1-20260826-media', location: 'asia-east2',
+    name: GCP_IDENTITY.bucket, location: 'asia-east2',
     uniformBucketLevelAccess: true, publicAccessPrevention: 'enforced',
     versioning: false, softDeleteSeconds: 0, lifecycleDeleteAfterDays: 7,
     retentionPolicy: null,
   });
   assert.deepEqual(contract.resources.cloudRun, {
-    service: 'hkbuddy-api', executionEnvironment: 'gen2', cpu: 2, memory: '1Gi',
+    service: GCP_IDENTITY.service, executionEnvironment: 'gen2', cpu: 2, memory: '1Gi',
     concurrency: 40, minInstances: 1, maxInstances: 1, cpuThrottling: false,
     startupCpuBoost: true, timeoutSeconds: 60, initialTrafficPercent: 0,
     directVpc: true, egress: 'private-ranges-only',
@@ -162,8 +216,8 @@ test('the executable contract fixes the isolated GCP topology and least-privileg
   assert.deepEqual(contract.iam.automaticProjectBindings, AUTOMATIC_PROJECT_BINDINGS);
 
   const evidenceSecretIds = [
-    'hkbuddy-legacy-inventory', 'hkbuddy-dependency-acceptance', 'hkbuddy-llm-smoke',
-    'hkbuddy-asr-smoke', 'hkbuddy-tts-smoke', 'hkbuddy-ios-voice-acceptance',
+    GCP_IDENTITY.secrets.legacy, GCP_IDENTITY.secrets.dependencies, GCP_IDENTITY.secrets.llm,
+    GCP_IDENTITY.secrets.asr, GCP_IDENTITY.secrets.tts, GCP_IDENTITY.secrets.ios,
   ];
   assert.deepEqual(
     contract.resources.secrets.filter(({ baseProvisioningVersion }) => baseProvisioningVersion === false)
@@ -174,12 +228,12 @@ test('the executable contract fixes the isolated GCP topology and least-privileg
     assert.equal(EXPECTED_PROVISION_STEPS.includes(`secret-container:${id}`), true);
     assert.equal(EXPECTED_PROVISION_STEPS.includes(`secret-version:${id}`), false);
     assert.equal(contract.iam.bindings.some(({ scope, member, role }) => (
-      scope === `secret:${id}` && member === `serviceAccount:hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`
+      scope === `secret:${id}` && member === `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`
         && role === 'roles/secretmanager.secretAccessor'
     )), true);
   }
 
-  const runtime = `serviceAccount:hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`;
+  const runtime = `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`;
   const runtimeProjectRoles = contract.iam.bindings
     .filter(({ scope, member }) => scope === 'project' && member === runtime)
     .map(({ role }) => role).sort();
@@ -187,21 +241,21 @@ test('the executable contract fixes the isolated GCP topology and least-privileg
     'roles/aiplatform.user', 'roles/serviceusage.serviceUsageConsumer', 'roles/speech.client',
   ]);
   assert.equal(contract.iam.bindings.some(({ scope, member, role }) => (
-    scope === 'bucket:hkbuddy-prod-v1-20260826-media' && member === runtime
+    scope === `bucket:${GCP_IDENTITY.bucket}` && member === runtime
       && role === 'roles/storage.objectUser'
   )), true);
   assert.equal(contract.iam.bindings.some(({ scope, member, role }) => (
-    scope === 'bucket:hkbuddy-prod-v1-20260826-media'
-      && member === `serviceAccount:hkbuddy-acceptance@${PROJECT}.iam.gserviceaccount.com`
+    scope === `bucket:${GCP_IDENTITY.bucket}`
+      && member === `serviceAccount:${GCP_IDENTITY.serviceAccounts.acceptance}`
       && role === ACCEPTANCE_BUCKET_METADATA_ROLE.name
   )), true);
   assert.equal(contract.iam.bindings.some(({ scope, member, role }) => (
-    scope === 'secret:hkbuddy-db-migrator-url' && member === runtime
+    scope === `secret:${GCP_IDENTITY.secrets.dbMigratorUrl}` && member === runtime
       && role === 'roles/secretmanager.secretAccessor'
   )), false);
   assert.equal(contract.iam.bindings.some(({ scope, member, role }) => (
-    scope === 'service-account:hkbuddy-build'
-      && member === `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`
+    scope === 'service-account:hkbuddy-v1-build'
+      && member === `serviceAccount:${GCP_IDENTITY.serviceAccounts.deployer}`
       && role === 'roles/iam.serviceAccountUser'
   )), true);
   assert.equal(contract.iam.bindings.some(({ scope, role }) => (
@@ -726,7 +780,7 @@ test('custom role provisioning reads, creates, and compares the one-permission G
     request: async () => { throw new Error('REST must not run'); },
   });
 
-  const id = 'custom-role:hkbuddyAcceptanceBucketMetadataReader';
+  const id = 'custom-role:hkbuddyV1AcceptanceBucketMetadataReader';
   const readback = await plane.read(id);
   assert.deepEqual(readback, {
     status: 'present', value: { ...ACCEPTANCE_BUCKET_METADATA_ROLE, deleted: false },
@@ -753,7 +807,7 @@ test('custom role provisioning reads, creates, and compares the one-permission G
 
 function exactManagedIamPolicies(contract) {
   const scopes = [
-    'project', 'bucket:hkbuddy-prod-v1-20260826-media', 'repository:hkbuddy',
+    'project', `bucket:${GCP_IDENTITY.bucket}`, `repository:${GCP_IDENTITY.repository}`,
     ...contract.resources.secrets.map(({ id }) => `secret:${id}`),
     ...contract.resources.serviceAccounts.map(({ id }) => `service-account:${id}`),
   ];
@@ -780,25 +834,25 @@ test('managed IAM final readback is an exact per-scope allowlist and forbids wor
     contract, projectNumber: PROJECT_NUMBER, policiesByScope: exactPolicies,
   }));
   const realEmptyPolicyShape = clone(exactPolicies);
-  delete realEmptyPolicyShape['secret:hkbuddy-db-bootstrap-state'].bindings;
+  delete realEmptyPolicyShape[`secret:${GCP_IDENTITY.secrets.bootstrap}`].bindings;
   assert.doesNotThrow(() => assertExactManagedIamPolicies({
     contract, projectNumber: PROJECT_NUMBER, policiesByScope: realEmptyPolicyShape,
   }));
 
-  const runtime = `serviceAccount:hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`;
-  const deployer = `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`;
+  const runtime = `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`;
+  const deployer = `serviceAccount:${GCP_IDENTITY.serviceAccounts.deployer}`;
   const cases = [
     ['project TokenCreator', 'project', { role: 'roles/iam.serviceAccountTokenCreator', members: [runtime] }],
     ['project Cloud SQL client', 'project', { role: 'roles/cloudsql.client', members: [runtime] }],
-    ['bucket storage admin', 'bucket:hkbuddy-prod-v1-20260826-media', { role: 'roles/storage.admin', members: [runtime] }],
-    ['wrong secret access', 'secret:hkbuddy-db-migrator-url', { role: 'roles/secretmanager.secretAccessor', members: [runtime] }],
-    ['repository writer', 'repository:hkbuddy', { role: 'roles/artifactregistry.writer', members: [runtime] }],
-    ['SA TokenCreator', 'service-account:hkbuddy-runtime', { role: 'roles/iam.serviceAccountTokenCreator', members: [deployer] }],
-    ['public secret access', 'secret:hkbuddy-session-secret', { role: 'roles/secretmanager.secretAccessor', members: ['allUsers'] }],
-    ['external secret access', 'secret:hkbuddy-session-secret', { role: 'roles/secretmanager.secretAccessor', members: ['serviceAccount:foreign@example.test'] }],
-    ['external bucket access', 'bucket:hkbuddy-prod-v1-20260826-media', { role: 'roles/storage.objectViewer', members: ['user:foreign@example.test'] }],
-    ['external repository access', 'repository:hkbuddy', { role: 'roles/artifactregistry.reader', members: ['serviceAccount:foreign@example.test'] }],
-    ['external SA impersonation', 'service-account:hkbuddy-runtime', { role: 'roles/iam.serviceAccountUser', members: ['user:foreign@example.test'] }],
+    ['bucket storage admin', `bucket:${GCP_IDENTITY.bucket}`, { role: 'roles/storage.admin', members: [runtime] }],
+    ['wrong secret access', `secret:${GCP_IDENTITY.secrets.dbMigratorUrl}`, { role: 'roles/secretmanager.secretAccessor', members: [runtime] }],
+    ['repository writer', `repository:${GCP_IDENTITY.repository}`, { role: 'roles/artifactregistry.writer', members: [runtime] }],
+    ['SA TokenCreator', 'service-account:hkbuddy-v1-runtime', { role: 'roles/iam.serviceAccountTokenCreator', members: [deployer] }],
+    ['public secret access', `secret:${GCP_IDENTITY.secrets.session}`, { role: 'roles/secretmanager.secretAccessor', members: ['allUsers'] }],
+    ['external secret access', `secret:${GCP_IDENTITY.secrets.session}`, { role: 'roles/secretmanager.secretAccessor', members: ['serviceAccount:foreign@example.test'] }],
+    ['external bucket access', `bucket:${GCP_IDENTITY.bucket}`, { role: 'roles/storage.objectViewer', members: ['user:foreign@example.test'] }],
+    ['external repository access', `repository:${GCP_IDENTITY.repository}`, { role: 'roles/artifactregistry.reader', members: ['serviceAccount:foreign@example.test'] }],
+    ['external SA impersonation', 'service-account:hkbuddy-v1-runtime', { role: 'roles/iam.serviceAccountUser', members: ['user:foreign@example.test'] }],
     ['external project access', 'project', { role: 'roles/viewer', members: ['user:foreign@example.test'] }],
     ['unexpected Google agent role', 'project', { role: 'roles/editor', members: [`serviceAccount:service-${PROJECT_NUMBER}@gcp-sa-cloudbuild.iam.gserviceaccount.com`] }],
     ['legacy Google APIs agent Editor', 'project', { role: 'roles/editor', members: [`serviceAccount:${PROJECT_NUMBER}@cloudservices.gserviceaccount.com`] }],
@@ -816,7 +870,7 @@ test('managed IAM final readback is an exact per-scope allowlist and forbids wor
 
   await t.test('missing service-agent impersonation binding is rejected', () => {
     const policies = clone(exactPolicies);
-    policies['service-account:hkbuddy-build'].bindings = [];
+    policies['service-account:hkbuddy-v1-build'].bindings = [];
     assert.throws(
       () => assertExactManagedIamPolicies({ contract, projectNumber: PROJECT_NUMBER, policiesByScope: policies }),
       (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
@@ -859,7 +913,7 @@ test('pre-sensitive IAM subset audits reject foreign project owners and secret a
     ['foreign project owner', true, (scope) => (scope === 'project' ? {
       bindings: [{ role: 'roles/owner', members: ['user:foreign@example.test'] }],
     } : { bindings: [] })],
-    ['foreign secret accessor', false, (scope) => (scope === 'secret:hkbuddy-db-app-url' ? {
+    ['foreign secret accessor', false, (scope) => (scope === `secret:${GCP_IDENTITY.secrets.dbAppUrl}` ? {
       bindings: [{ role: 'roles/secretmanager.secretAccessor', members: ['serviceAccount:foreign@example.test'] }],
     } : { bindings: [] })],
   ]) {
@@ -871,8 +925,8 @@ test('pre-sensitive IAM subset audits reject foreign project owners and secret a
           gcloudCalls.push(args);
           let scope;
           if (args[0] === 'projects') scope = 'project';
-          else if (args[0] === 'storage') scope = 'bucket:hkbuddy-prod-v1-20260826-media';
-          else if (args[0] === 'artifacts') scope = 'repository:hkbuddy';
+          else if (args[0] === 'storage') scope = `bucket:${GCP_IDENTITY.bucket}`;
+          else if (args[0] === 'artifacts') scope = `repository:${GCP_IDENTITY.repository}`;
           else if (args[0] === 'secrets') scope = `secret:${args[2]}`;
           else if (args[0] === 'iam') scope = `service-account:${args[3].split('@')[0]}`;
           else throw new Error('unexpected gcloud operation');
@@ -921,9 +975,9 @@ test('pre-sensitive managed IAM audit reads the exact custom role definition bef
   );
 });
 
-function exactBucket({ projectNumber = '123456789012' } = {}) {
+function exactBucket({ projectNumber = GCP_IDENTITY.projectNumber } = {}) {
   return {
-    name: 'hkbuddy-prod-v1-20260826-media', projectNumber, location: 'ASIA-EAST2',
+    name: GCP_IDENTITY.bucket, projectNumber, location: 'ASIA-EAST2',
     iamConfiguration: {
       uniformBucketLevelAccess: { enabled: true }, publicAccessPrevention: 'enforced',
     },
@@ -942,8 +996,8 @@ test('readback compares project display name and labels, repository description,
   });
   const project = {
     projectId: PROJECT, projectNumber: PROJECT_NUMBER, lifecycleState: 'ACTIVE',
-    parent: { id: '797368190621' }, name: 'Hong Kong Buddy Production V1',
-    labels: { application: 'hong-kong-buddy', environment: 'production-v1' },
+    parent: { id: GCP_IDENTITY.organizationId }, name: 'Motion Expert HK LTD Webpage',
+    labels: {},
   };
   assert.equal(plane.compare('project', project), true);
   assert.equal(plane.compare('project', { ...project, name: 'Wrong name' }), false);
@@ -952,7 +1006,7 @@ test('readback compares project display name and labels, repository description,
   }), false);
 
   const repository = {
-    name: `projects/${PROJECT}/locations/asia-east2/repositories/hkbuddy`,
+    name: `projects/${PROJECT}/locations/asia-east2/repositories/${GCP_IDENTITY.repository}`,
     location: 'asia-east2', format: 'DOCKER', mode: 'STANDARD_REPOSITORY',
     description: 'Hong Kong Buddy production containers',
   };
@@ -1046,14 +1100,14 @@ test('Cloud SQL creation uses the supported v1 REST insert with the named PSA ra
   assert.deepEqual(requests, [{
     method: 'POST', url: `https://sqladmin.googleapis.com/v1/projects/${PROJECT}/instances`,
     body: {
-      name: 'hkbuddy-pg', region: 'asia-east2', databaseVersion: 'POSTGRES_16',
+      name: GCP_IDENTITY.cloudSqlInstance, region: 'asia-east2', databaseVersion: 'POSTGRES_16',
       settings: {
         tier: 'db-custom-1-3840', availabilityType: 'REGIONAL',
         dataDiskType: 'PD_SSD', dataDiskSizeGb: '20', storageAutoResize: true,
         ipConfiguration: {
           ipv4Enabled: false,
-          privateNetwork: `projects/${PROJECT}/global/networks/hkbuddy-prod-vpc`,
-          allocatedIpRange: 'hkbuddy-google-managed-services', sslMode: 'ENCRYPTED_ONLY',
+          privateNetwork: `projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`,
+          allocatedIpRange: GCP_IDENTITY.psaRange, sslMode: 'ENCRYPTED_ONLY',
         },
         backupConfiguration: {
           enabled: true, startTime: '18:00', pointInTimeRecoveryEnabled: true,
@@ -1076,9 +1130,9 @@ test('global bucket ownership is target-project exact and a foreign collision ca
       gcloudCalls.push(args);
       if (args[0] === 'projects' && args[1] === 'describe') {
         return {
-          projectId: PROJECT, projectNumber: '123456789012', lifecycleState: 'ACTIVE',
-          parent: { id: '797368190621' },
-          labels: { application: 'hong-kong-buddy', environment: 'production-v1' },
+          projectId: PROJECT, projectNumber: PROJECT_NUMBER, lifecycleState: 'ACTIVE',
+          parent: { id: GCP_IDENTITY.organizationId }, name: 'Motion Expert HK LTD Webpage',
+          labels: {},
         };
       }
       throw new Error('unexpected gcloud operation');
@@ -1112,13 +1166,14 @@ test('bucket insert request contains only writable exact controls and readback i
     request: async (input) => { requests.push(input); return exactBucket(); },
   });
   await plane.read('project');
+  plane.cache.set('project', { projectNumber: GCP_IDENTITY.projectNumber });
   assert.equal(plane.compare('bucket', exactBucket()), true);
   assert.equal(plane.compare('bucket', exactBucket({ projectNumber: '999999999999' })), false);
   await plane.create('bucket');
   const insert = requests.find(({ method }) => method === 'POST');
   assert.equal(insert.body.locationType, undefined);
   assert.deepEqual(insert.body, {
-    name: 'hkbuddy-prod-v1-20260826-media', location: 'asia-east2',
+    name: GCP_IDENTITY.bucket, location: 'asia-east2',
     iamConfiguration: {
       uniformBucketLevelAccess: { enabled: true }, publicAccessPrevention: 'enforced',
     },
@@ -1332,7 +1387,7 @@ test('every non-paginated list readback rejects malformed shapes before any crea
 });
 
 function preflightGcloud({
-  projectPresent = false, forbidden = false, billingCurrency = 'HKD',
+  projectPresent = true, forbidden = false, billingCurrency = 'HKD',
   activeAccount = 'admin@motionexp.com',
 } = {}) {
   const calls = [];
@@ -1348,8 +1403,25 @@ function preflightGcloud({
     if (args[0] === 'billing' && args[1] === 'accounts') return {
       name: 'billingAccounts/01F9FD-24EA9B-A9232C', open: true, currencyCode: billingCurrency,
     };
+    if (args[0] === 'billing' && args[1] === 'projects') return {
+      billingEnabled: true, billingAccountName: 'billingAccounts/01F9FD-24EA9B-A9232C',
+    };
+    if (args[0] === 'compute' && args[1] === 'networks') return {
+      name: 'default', autoCreateSubnetworks: true,
+    };
     if (args[0] === 'projects') {
-      if (projectPresent) return { projectId: PROJECT, parent: { type: 'organization', id: '797368190621' }, lifecycleState: 'ACTIVE' };
+      if (args[1] === 'get-iam-policy') return {
+        bindings: [
+          { role: 'roles/owner', members: ['user:admin@motionexp.com'] },
+          { role: 'roles/compute.serviceAgent', members: [`serviceAccount:service-${PROJECT_NUMBER}@compute-system.iam.gserviceaccount.com`] },
+          { role: 'roles/editor', members: [`serviceAccount:${PROJECT_NUMBER}@cloudservices.gserviceaccount.com`] },
+        ],
+      };
+      if (projectPresent) return {
+        projectId: PROJECT, projectNumber: PROJECT_NUMBER,
+        parent: { type: 'organization', id: GCP_IDENTITY.organizationId },
+        name: 'Motion Expert HK LTD Webpage', labels: {}, lifecycleState: 'ACTIVE',
+      };
       const error = new Error('not found');
       error.code = 'NOT_FOUND';
       throw error;
@@ -1359,7 +1431,7 @@ function preflightGcloud({
   return { calls, gcloud };
 }
 
-test('preflight is read-only, project-explicit, and treats an absent target as a safe create plan', async () => {
+test('preflight is read-only, project-explicit, and requires the existing shared project', async () => {
   const fixture = preflightGcloud();
   const output = [];
   const result = await runGcpPreflight({
@@ -1372,10 +1444,10 @@ test('preflight is read-only, project-explicit, and treats an absent target as a
   assert.equal(result.exitCode, 0);
   assert.deepEqual(result.publicReport, {
     status: 'dry-run', code: 'GCP_PREFLIGHT_COMPLETE', projectId: PROJECT,
-    projectState: 'absent', readyForProjectCreation: true,
+    projectNumber: PROJECT_NUMBER, projectState: 'present',
     alertChannel: 'not-supplied', mutationPerformed: false,
   });
-  assert.equal(fixture.calls.length, 4);
+  assert.equal(fixture.calls.length, 7);
   assert.equal(fixture.calls.every((args) => args.includes(`--project=${PROJECT}`)), true);
   assert.equal(fixture.calls.some((args) => args.includes('create') || args.includes('enable') || args.includes('link')), false);
   assert.deepEqual(output, [`${JSON.stringify(result.publicReport)}\n`]);
@@ -1439,17 +1511,15 @@ test('preflight verifies an enabled target-project Monitoring channel and fails 
     assert.equal(result.publicReport.code, 'ALERT_CHANNEL_UNVERIFIED');
   });
 
-  await t.test('403 project lookup is unresolved, never absent, and needs one confirmed create probe', async () => {
+  await t.test('403 project lookup is a shared-project baseline failure', async () => {
     const fixture = preflightGcloud({ forbidden: true });
     const result = await runGcpPreflight({
       contract: await contractFixture(), gcloud: fixture.gcloud,
       getRestPrincipal: async () => 'admin@motionexp.com', writeOutput: () => undefined,
     });
-    assert.equal(result.exitCode, 0);
-    assert.equal(result.publicReport.code, 'PROJECT_ID_UNRESOLVED');
-    assert.equal(result.publicReport.projectState, 'create-probe-required');
-    assert.equal(result.publicReport.readyForProjectCreation, false);
-    assert.equal(result.publicReport.requiresConfirmedCreateProbe, true);
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.publicReport.code, 'SHARED_PROJECT_BASELINE_INVALID');
+    assert.equal(result.publicReport.projectState, 'unresolved');
     assert.equal(fixture.calls.some((args) => args.includes('create')), false);
   });
 
@@ -1477,8 +1547,8 @@ test('preflight verifies an enabled target-project Monitoring channel and fails 
   });
 });
 
-test('confirmed provisioning uses the single project create-probe path while other 403s remain fatal', async (t) => {
-  await t.test('unresolved project is created once then normal provisioning continues', async () => {
+test('confirmed provisioning requires the existing shared baseline while other 403s remain fatal', async (t) => {
+  await t.test('unresolved project stops before every resource mutation', async () => {
     const plane = new MemoryControlPlane();
     let projectReads = 0;
     const baseRead = plane.read.bind(plane);
@@ -1494,8 +1564,9 @@ test('confirmed provisioning uses the single project create-probe path while oth
       contract: await contractFixture(), controlPlane: plane,
       writeOutput: () => undefined,
     });
-    assert.equal(result.exitCode, 0);
-    assert.equal(plane.calls.filter(([kind, id]) => kind === 'create' && id === 'project').length, 1);
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.publicReport.code, 'SHARED_PROJECT_BASELINE_INVALID');
+    assert.equal(plane.calls.some(([kind]) => kind === 'create'), false);
   });
 
   await t.test('a non-project 403 remains a hard stop', async () => {
@@ -1510,7 +1581,7 @@ test('confirmed provisioning uses the single project create-probe path while oth
       writeOutput: () => undefined,
     });
     assert.equal(result.exitCode, 1);
-    assert.equal(result.publicReport.code, 'RESOURCE_STATE_UNKNOWN');
+    assert.equal(result.publicReport.code, 'SHARED_PROJECT_BASELINE_INVALID');
     assert.equal(result.publicReport.resumeBoundary, 'billing');
     assert.equal(plane.calls.some(([kind, id]) => kind === 'create' && id === 'billing'), false);
   });
@@ -1521,9 +1592,9 @@ class MemoryControlPlane {
     existing = [], unverifiedChannel = false, userManagedKey = false,
     finalReadbackFailure = null, iamSubsetFailure = null,
   } = {}) {
-    this.resources = new Map(existing.map((id) => {
+    this.resources = new Map([...new Set(['project', 'billing', ...existing])].map((id) => {
       const value = { id, exact: true };
-      if (id === 'project') value.projectNumber = '123456789012';
+      if (id === 'project') value.projectNumber = PROJECT_NUMBER;
       if (id === 'cloud-sql-instance') value.privateIp = '10.25.0.3';
       if (id.startsWith('secret-version:')) value.version = '1';
       return [id, value];
@@ -1550,7 +1621,7 @@ class MemoryControlPlane {
     this.calls.push(['create', id]);
     if (context?.sensitive) this.secrets.push(context.sensitive);
     const value = { id, exact: true };
-    if (id === 'project') value.projectNumber = '123456789012';
+    if (id === 'project') value.projectNumber = PROJECT_NUMBER;
     if (id === 'cloud-sql-instance') value.privateIp = '10.25.0.3';
     if (id.startsWith('secret-version:')) value.version = '1';
     this.resources.set(id, value);
@@ -1668,14 +1739,16 @@ test('confirmed provisioning creates every fixed step, performs post-create read
   assert.equal(result.publicReport.status, 'provisioned');
   assert.equal(result.publicReport.mutationPerformed, true);
   assert.deepEqual(result.publicReport.secretVersions, {
-    'hkbuddy-db-app-url': '1', 'hkbuddy-db-migrator-url': '1',
-    'hkbuddy-session-secret': '1', 'hkbuddy-db-bootstrap-state': '1',
+    [GCP_IDENTITY.secrets.dbAppUrl]: '1', [GCP_IDENTITY.secrets.dbMigratorUrl]: '1',
+    [GCP_IDENTITY.secrets.session]: '1', [GCP_IDENTITY.secrets.bootstrap]: '1',
   });
   assert.equal(Object.values(result.publicReport.secretVersions).every((value) => /^\d+$/.test(value)), true);
   assert.equal(JSON.stringify(result).includes('latest'), false);
 
   const created = plane.calls.filter(([kind]) => kind === 'create').map(([, id]) => id);
-  assert.deepEqual(created, EXPECTED_PROVISION_STEPS.filter((id) => id !== 'notification-channel'));
+  assert.deepEqual(created, EXPECTED_PROVISION_STEPS.filter((id) => (
+    !['project', 'billing', 'notification-channel'].includes(id)
+  )));
   for (const id of created) {
     const sequence = plane.calls.filter(([kind, candidate]) => (
       ['read', 'create'].includes(kind) && candidate === id
@@ -1713,7 +1786,7 @@ test('service-account key and mandatory final-readback gates prevent a false pro
       assert.equal(result.publicReport.code, expectedCode);
       assert.deepEqual(
         plane.calls.filter(([kind]) => kind === 'create').map(([, id]) => id),
-        ['project', 'billing', 'apis'],
+        ['apis'],
       );
       assert.equal(plane.calls.some(([kind, id]) => kind === 'create' && (
         ['vpc', 'subnet', 'psa-range', 'psa-connection', 'cloud-sql-instance', 'database', 'bucket'].includes(id)

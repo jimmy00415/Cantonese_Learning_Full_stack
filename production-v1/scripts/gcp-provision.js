@@ -7,11 +7,13 @@ import { promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { GoogleAuth, OAuth2Client } from 'google-auth-library';
+import { GCP_IDENTITY } from '../src/gcp-identity.js';
 
 const execFileAsync = promisify(execFileCallback);
-const PROJECT = 'hkbuddy-prod-v1-20260826';
-const ORGANIZATION = '797368190621';
-const BILLING_ACCOUNT = '01F9FD-24EA9B-A9232C';
+const PROJECT = GCP_IDENTITY.projectId;
+const PROJECT_NUMBER = GCP_IDENTITY.projectNumber;
+const ORGANIZATION = GCP_IDENTITY.organizationId;
+const BILLING_ACCOUNT = GCP_IDENTITY.billingAccountId;
 export const REQUIRED_OPERATOR_ACCOUNT = 'admin@motionexp.com';
 const CONTRACT_PATH = fileURLToPath(new URL('../infra/gcp/resource-contract.json', import.meta.url));
 const NUMERIC_VERSION = /^[1-9]\d*$/;
@@ -78,8 +80,8 @@ const REQUIRED_AUTOMATIC_PROJECT_BINDINGS = Object.freeze([
 ]);
 const REQUIRED_CUSTOM_ROLES = Object.freeze([
   {
-    id: 'hkbuddyAcceptanceBucketMetadataReader',
-    name: `projects/${PROJECT}/roles/hkbuddyAcceptanceBucketMetadataReader`,
+    id: 'hkbuddyV1AcceptanceBucketMetadataReader',
+    name: `projects/${PROJECT}/roles/hkbuddyV1AcceptanceBucketMetadataReader`,
     title: 'HK Buddy acceptance bucket metadata reader',
     description: 'Read fixed media bucket metadata for dependency acceptance',
     includedPermissions: ['storage.buckets.get'],
@@ -87,51 +89,43 @@ const REQUIRED_CUSTOM_ROLES = Object.freeze([
   },
 ]);
 const REQUIRED_IAM_BINDINGS = Object.freeze([
-  { scope: 'project', member: `serviceAccount:hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/aiplatform.user' },
-  { scope: 'project', member: `serviceAccount:hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/speech.client' },
-  { scope: 'project', member: `serviceAccount:hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/serviceusage.serviceUsageConsumer' },
-  { scope: 'bucket:hkbuddy-prod-v1-20260826-media', member: `serviceAccount:hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/storage.objectUser' },
-  { scope: 'secret:hkbuddy-db-app-url', member: `serviceAccount:hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretAccessor' },
-  { scope: 'secret:hkbuddy-session-secret', member: `serviceAccount:hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretAccessor' },
-  { scope: 'secret:hkbuddy-legacy-inventory', member: `serviceAccount:hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretAccessor' },
-  { scope: 'secret:hkbuddy-dependency-acceptance', member: `serviceAccount:hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretAccessor' },
-  { scope: 'secret:hkbuddy-llm-smoke', member: `serviceAccount:hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretAccessor' },
-  { scope: 'secret:hkbuddy-asr-smoke', member: `serviceAccount:hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretAccessor' },
-  { scope: 'secret:hkbuddy-tts-smoke', member: `serviceAccount:hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretAccessor' },
-  { scope: 'secret:hkbuddy-ios-voice-acceptance', member: `serviceAccount:hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretAccessor' },
-  { scope: 'bucket:hkbuddy-prod-v1-20260826-media', member: `serviceAccount:hkbuddy-acceptance@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/storage.objectUser' },
-  { scope: 'bucket:hkbuddy-prod-v1-20260826-media', member: `serviceAccount:hkbuddy-acceptance@${PROJECT}.iam.gserviceaccount.com`, role: `projects/${PROJECT}/roles/hkbuddyAcceptanceBucketMetadataReader` },
-  { scope: 'secret:hkbuddy-db-app-url', member: `serviceAccount:hkbuddy-acceptance@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretAccessor' },
-  { scope: 'secret:hkbuddy-db-migrator-url', member: `serviceAccount:hkbuddy-acceptance@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretAccessor' },
-  { scope: 'project', member: `serviceAccount:hkbuddy-acceptance@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/logging.logWriter' },
-  { scope: 'secret:hkbuddy-db-migrator-url', member: `serviceAccount:hkbuddy-migrator@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretAccessor' },
-  { scope: 'repository:hkbuddy', member: `serviceAccount:hkbuddy-build@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/artifactregistry.writer' },
-  { scope: 'project', member: `serviceAccount:hkbuddy-build@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/logging.logWriter' },
-  { scope: 'repository:hkbuddy', member: `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/artifactregistry.reader' },
-  { scope: 'project', member: `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/cloudbuild.builds.editor' },
-  { scope: 'project', member: `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/run.developer' },
-  { scope: 'secret:hkbuddy-legacy-inventory', member: `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretVersionAdder' },
-  { scope: 'secret:hkbuddy-dependency-acceptance', member: `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretVersionAdder' },
-  { scope: 'secret:hkbuddy-llm-smoke', member: `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretVersionAdder' },
-  { scope: 'secret:hkbuddy-asr-smoke', member: `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretVersionAdder' },
-  { scope: 'secret:hkbuddy-tts-smoke', member: `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretVersionAdder' },
-  { scope: 'secret:hkbuddy-ios-voice-acceptance', member: `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/secretmanager.secretVersionAdder' },
-  { scope: 'service-account:hkbuddy-runtime', member: `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/iam.serviceAccountUser' },
-  { scope: 'service-account:hkbuddy-migrator', member: `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/iam.serviceAccountUser' },
-  { scope: 'service-account:hkbuddy-build', member: `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/iam.serviceAccountUser' },
-  { scope: 'service-account:hkbuddy-acceptance', member: `serviceAccount:hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, role: 'roles/iam.serviceAccountUser' },
-  { scope: 'service-account:hkbuddy-build', member: 'serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-cloudbuild.iam.gserviceaccount.com', role: 'roles/iam.serviceAccountTokenCreator' },
+  { scope: 'project', member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`, role: 'roles/aiplatform.user' },
+  { scope: 'project', member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`, role: 'roles/speech.client' },
+  { scope: 'project', member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`, role: 'roles/serviceusage.serviceUsageConsumer' },
+  { scope: `bucket:${GCP_IDENTITY.bucket}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`, role: 'roles/storage.objectUser' },
+  { scope: `secret:${GCP_IDENTITY.secrets.dbAppUrl}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`, role: 'roles/secretmanager.secretAccessor' },
+  { scope: `secret:${GCP_IDENTITY.secrets.session}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`, role: 'roles/secretmanager.secretAccessor' },
+  { scope: `secret:${GCP_IDENTITY.secrets.legacy}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`, role: 'roles/secretmanager.secretAccessor' },
+  { scope: `secret:${GCP_IDENTITY.secrets.dependencies}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`, role: 'roles/secretmanager.secretAccessor' },
+  { scope: `secret:${GCP_IDENTITY.secrets.llm}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`, role: 'roles/secretmanager.secretAccessor' },
+  { scope: `secret:${GCP_IDENTITY.secrets.asr}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`, role: 'roles/secretmanager.secretAccessor' },
+  { scope: `secret:${GCP_IDENTITY.secrets.tts}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`, role: 'roles/secretmanager.secretAccessor' },
+  { scope: `secret:${GCP_IDENTITY.secrets.ios}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`, role: 'roles/secretmanager.secretAccessor' },
+  { scope: `bucket:${GCP_IDENTITY.bucket}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.acceptance}`, role: 'roles/storage.objectUser' },
+  { scope: `bucket:${GCP_IDENTITY.bucket}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.acceptance}`, role: `projects/${PROJECT}/roles/hkbuddyV1AcceptanceBucketMetadataReader` },
+  { scope: `secret:${GCP_IDENTITY.secrets.dbAppUrl}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.acceptance}`, role: 'roles/secretmanager.secretAccessor' },
+  { scope: `secret:${GCP_IDENTITY.secrets.dbMigratorUrl}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.acceptance}`, role: 'roles/secretmanager.secretAccessor' },
+  { scope: 'project', member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.acceptance}`, role: 'roles/logging.logWriter' },
+  { scope: `secret:${GCP_IDENTITY.secrets.dbMigratorUrl}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.migrator}`, role: 'roles/secretmanager.secretAccessor' },
+  { scope: `repository:${GCP_IDENTITY.repository}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.build}`, role: 'roles/artifactregistry.writer' },
+  { scope: 'project', member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.build}`, role: 'roles/logging.logWriter' },
+  { scope: `repository:${GCP_IDENTITY.repository}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.deployer}`, role: 'roles/artifactregistry.reader' },
+  { scope: 'project', member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.deployer}`, role: 'roles/cloudbuild.builds.editor' },
+  { scope: 'project', member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.deployer}`, role: 'roles/run.developer' },
+  ...[GCP_IDENTITY.secrets.legacy, GCP_IDENTITY.secrets.dependencies, GCP_IDENTITY.secrets.llm, GCP_IDENTITY.secrets.asr, GCP_IDENTITY.secrets.tts, GCP_IDENTITY.secrets.ios].map((id) => ({ scope: `secret:${id}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.deployer}`, role: 'roles/secretmanager.secretVersionAdder' })),
+  ...['runtime', 'migrator', 'build', 'acceptance'].map((name) => ({ scope: `service-account:hkbuddy-v1-${name}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.deployer}`, role: 'roles/iam.serviceAccountUser' })),
+  { scope: 'service-account:hkbuddy-v1-build', member: 'serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-cloudbuild.iam.gserviceaccount.com', role: 'roles/iam.serviceAccountTokenCreator' },
 ]);
 const FORBIDDEN_TEXT = Object.freeze([
   'hkbuddy-pilot-0630', 'hkbuddy-pilot-0630.azurewebsites.net',
 ]);
 const GENERATED_SECRET_IDS = Object.freeze([
-  'hkbuddy-db-app-url', 'hkbuddy-db-migrator-url',
-  'hkbuddy-session-secret', 'hkbuddy-db-bootstrap-state',
+  GCP_IDENTITY.secrets.dbAppUrl, GCP_IDENTITY.secrets.dbMigratorUrl,
+  GCP_IDENTITY.secrets.session, GCP_IDENTITY.secrets.bootstrap,
 ]);
 const EVIDENCE_SECRET_IDS = Object.freeze([
-  'hkbuddy-legacy-inventory', 'hkbuddy-dependency-acceptance', 'hkbuddy-llm-smoke',
-  'hkbuddy-asr-smoke', 'hkbuddy-tts-smoke', 'hkbuddy-ios-voice-acceptance',
+  GCP_IDENTITY.secrets.legacy, GCP_IDENTITY.secrets.dependencies, GCP_IDENTITY.secrets.llm,
+  GCP_IDENTITY.secrets.asr, GCP_IDENTITY.secrets.tts, GCP_IDENTITY.secrets.ios,
 ]);
 const SECRET_CONTAINER_IDS = Object.freeze([...GENERATED_SECRET_IDS, ...EVIDENCE_SECRET_IDS]);
 
@@ -179,10 +173,16 @@ export function assertResourceContract(contract) {
   requireExact(contract.schemaVersion, 1);
   requireExact(contract.project, {
     id: PROJECT,
-    displayName: 'Hong Kong Buddy Production V1',
+    displayName: 'Motion Expert HK LTD Webpage',
     organizationId: ORGANIZATION,
     billingAccountId: BILLING_ACCOUNT,
-    labels: { application: 'hong-kong-buddy', environment: 'production-v1' },
+    mode: 'existing-billed-shared',
+    protectedBindings: [
+      { member: 'user:admin@motionexp.com', role: 'roles/owner' },
+      { member: `serviceAccount:service-${PROJECT_NUMBER}@compute-system.iam.gserviceaccount.com`, role: 'roles/compute.serviceAgent' },
+      { member: `serviceAccount:${PROJECT_NUMBER}@cloudservices.gserviceaccount.com`, role: 'roles/editor' },
+    ],
+    labels: {},
   });
   requireExact(contract.locations, {
     runtime: 'asia-east2', storage: 'asia-east2', database: 'asia-east2',
@@ -196,24 +196,24 @@ export function assertResourceContract(contract) {
     'network', 'secrets', 'serviceAccounts',
   ]);
   requireExact(resources?.artifactRegistry, {
-    repository: 'hkbuddy', format: 'DOCKER', mode: 'STANDARD_REPOSITORY', location: 'asia-east2',
+    repository: GCP_IDENTITY.repository, format: 'DOCKER', mode: 'STANDARD_REPOSITORY', location: 'asia-east2',
     description: 'Hong Kong Buddy production containers',
   });
   requireExact(resources?.serviceAccounts, [
-    { id: 'hkbuddy-runtime', email: `hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`, displayName: 'Hong Kong Buddy Cloud Run runtime' },
-    { id: 'hkbuddy-build', email: `hkbuddy-build@${PROJECT}.iam.gserviceaccount.com`, displayName: 'Hong Kong Buddy Cloud Build' },
-    { id: 'hkbuddy-migrator', email: `hkbuddy-migrator@${PROJECT}.iam.gserviceaccount.com`, displayName: 'Hong Kong Buddy database migrator' },
-    { id: 'hkbuddy-deployer', email: `hkbuddy-deployer@${PROJECT}.iam.gserviceaccount.com`, displayName: 'Hong Kong Buddy release deployer' },
-    { id: 'hkbuddy-acceptance', email: `hkbuddy-acceptance@${PROJECT}.iam.gserviceaccount.com`, displayName: 'Hong Kong Buddy dependency acceptance' },
+    { id: 'hkbuddy-v1-runtime', email: GCP_IDENTITY.serviceAccounts.runtime, displayName: 'Hong Kong Buddy Cloud Run runtime' },
+    { id: 'hkbuddy-v1-build', email: GCP_IDENTITY.serviceAccounts.build, displayName: 'Hong Kong Buddy Cloud Build' },
+    { id: 'hkbuddy-v1-migrator', email: GCP_IDENTITY.serviceAccounts.migrator, displayName: 'Hong Kong Buddy database migrator' },
+    { id: 'hkbuddy-v1-deployer', email: GCP_IDENTITY.serviceAccounts.deployer, displayName: 'Hong Kong Buddy release deployer' },
+    { id: 'hkbuddy-v1-acceptance', email: GCP_IDENTITY.serviceAccounts.acceptance, displayName: 'Hong Kong Buddy dependency acceptance' },
   ]);
   requireExact(resources?.customRoles, REQUIRED_CUSTOM_ROLES);
   requireExact(resources?.network, {
-    vpc: 'hkbuddy-prod-vpc', subnet: 'hkbuddy-ae2-run', subnetCidr: '10.24.0.0/26',
-    privateGoogleAccess: true, psaRange: 'hkbuddy-google-managed-services',
+    vpc: GCP_IDENTITY.network, subnet: GCP_IDENTITY.subnet, subnetCidr: '10.24.0.0/26',
+    privateGoogleAccess: true, psaRange: GCP_IDENTITY.psaRange,
     psaCidr: '10.25.0.0/16', egress: 'private-ranges-only',
   });
   requireExact(resources?.cloudSql, {
-    instance: 'hkbuddy-pg', database: 'hkbuddy_v1', databaseVersion: 'POSTGRES_16',
+    instance: GCP_IDENTITY.cloudSqlInstance, database: GCP_IDENTITY.database, databaseVersion: 'POSTGRES_16',
     availabilityType: 'REGIONAL', tier: 'db-custom-1-3840', diskType: 'PD_SSD',
     diskSizeGb: 20, storageAutoIncrease: true, privateIpOnly: true,
     sslMode: 'ENCRYPTED_ONLY', backupEnabled: true, backupStartTime: '18:00',
@@ -221,30 +221,30 @@ export function assertResourceContract(contract) {
     retainedBackups: 7, retainBackupsOnDelete: true, finalBackup: true,
     finalBackupRetentionDays: 30, deletionProtection: true,
     users: [
-      { name: 'hkbuddy_app', databaseRoles: ['pg_read_all_data', 'pg_write_all_data'], secret: 'hkbuddy-db-app-url' },
-      { name: 'hkbuddy_migrator', databaseRoles: ['cloudsqlsuperuser'], secret: 'hkbuddy-db-migrator-url' },
+      { name: 'hkbuddy_app', databaseRoles: ['pg_read_all_data', 'pg_write_all_data'], secret: GCP_IDENTITY.secrets.dbAppUrl },
+      { name: 'hkbuddy_migrator', databaseRoles: ['cloudsqlsuperuser'], secret: GCP_IDENTITY.secrets.dbMigratorUrl },
     ],
   });
   requireExact(resources?.bucket, {
-    name: 'hkbuddy-prod-v1-20260826-media', location: 'asia-east2',
+    name: GCP_IDENTITY.bucket, location: 'asia-east2',
     uniformBucketLevelAccess: true, publicAccessPrevention: 'enforced',
     versioning: false, softDeleteSeconds: 0, lifecycleDeleteAfterDays: 7,
     retentionPolicy: null,
   });
   requireExact(resources?.secrets, [
-    { id: 'hkbuddy-db-app-url', purpose: 'runtime PostgreSQL URL', versionPolicy: 'numeric-only' },
-    { id: 'hkbuddy-db-migrator-url', purpose: 'migration PostgreSQL URL', versionPolicy: 'numeric-only' },
-    { id: 'hkbuddy-session-secret', purpose: 'anonymous session signing', versionPolicy: 'numeric-only' },
-    { id: 'hkbuddy-db-bootstrap-state', purpose: 'non-secret database-user binding receipt', versionPolicy: 'numeric-only' },
-    { id: 'hkbuddy-legacy-inventory', purpose: 'immutable legacy inventory evidence', versionPolicy: 'numeric-only', baseProvisioningVersion: false },
-    { id: 'hkbuddy-dependency-acceptance', purpose: 'immutable dependency acceptance evidence', versionPolicy: 'numeric-only', baseProvisioningVersion: false },
-    { id: 'hkbuddy-llm-smoke', purpose: 'immutable LLM smoke evidence', versionPolicy: 'numeric-only', baseProvisioningVersion: false },
-    { id: 'hkbuddy-asr-smoke', purpose: 'immutable ASR smoke evidence', versionPolicy: 'numeric-only', baseProvisioningVersion: false },
-    { id: 'hkbuddy-tts-smoke', purpose: 'immutable TTS smoke evidence', versionPolicy: 'numeric-only', baseProvisioningVersion: false },
-    { id: 'hkbuddy-ios-voice-acceptance', purpose: 'immutable iOS voice acceptance evidence', versionPolicy: 'numeric-only', baseProvisioningVersion: false },
+    { id: GCP_IDENTITY.secrets.dbAppUrl, purpose: 'runtime PostgreSQL URL', versionPolicy: 'numeric-only' },
+    { id: GCP_IDENTITY.secrets.dbMigratorUrl, purpose: 'migration PostgreSQL URL', versionPolicy: 'numeric-only' },
+    { id: GCP_IDENTITY.secrets.session, purpose: 'anonymous session signing', versionPolicy: 'numeric-only' },
+    { id: GCP_IDENTITY.secrets.bootstrap, purpose: 'non-secret database-user binding receipt', versionPolicy: 'numeric-only' },
+    { id: GCP_IDENTITY.secrets.legacy, purpose: 'immutable legacy inventory evidence', versionPolicy: 'numeric-only', baseProvisioningVersion: false },
+    { id: GCP_IDENTITY.secrets.dependencies, purpose: 'immutable dependency acceptance evidence', versionPolicy: 'numeric-only', baseProvisioningVersion: false },
+    { id: GCP_IDENTITY.secrets.llm, purpose: 'immutable LLM smoke evidence', versionPolicy: 'numeric-only', baseProvisioningVersion: false },
+    { id: GCP_IDENTITY.secrets.asr, purpose: 'immutable ASR smoke evidence', versionPolicy: 'numeric-only', baseProvisioningVersion: false },
+    { id: GCP_IDENTITY.secrets.tts, purpose: 'immutable TTS smoke evidence', versionPolicy: 'numeric-only', baseProvisioningVersion: false },
+    { id: GCP_IDENTITY.secrets.ios, purpose: 'immutable iOS voice acceptance evidence', versionPolicy: 'numeric-only', baseProvisioningVersion: false },
   ]);
   requireExact(resources?.cloudRun, {
-    service: 'hkbuddy-api', executionEnvironment: 'gen2', cpu: 2, memory: '1Gi',
+    service: GCP_IDENTITY.service, executionEnvironment: 'gen2', cpu: 2, memory: '1Gi',
     concurrency: 40, minInstances: 1, maxInstances: 1, cpuThrottling: false,
     startupCpuBoost: true, timeoutSeconds: 60, initialTrafficPercent: 0,
     directVpc: true, egress: 'private-ranges-only',
@@ -286,7 +286,7 @@ export function assertResourceContract(contract) {
     automaticProjectBindings: REQUIRED_AUTOMATIC_PROJECT_BINDINGS,
     bindings: REQUIRED_IAM_BINDINGS,
   });
-  const runtime = `serviceAccount:hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`;
+  const runtime = `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`;
   const runtimeProjectRoles = contract.iam.bindings
     .filter(({ scope, member }) => scope === 'project' && member === runtime)
     .map(({ role }) => role).sort();
@@ -294,10 +294,10 @@ export function assertResourceContract(contract) {
     'roles/aiplatform.user', 'roles/serviceusage.serviceUsageConsumer', 'roles/speech.client',
   ]);
   if (!contract.iam.bindings.some(({ scope, member, role }) => (
-    scope === 'bucket:hkbuddy-prod-v1-20260826-media' && member === runtime
+    scope === `bucket:${GCP_IDENTITY.bucket}` && member === runtime
       && role === 'roles/storage.objectUser'
   )) || contract.iam.bindings.some(({ scope, member }) => (
-    scope === 'secret:hkbuddy-db-migrator-url' && member === runtime
+    scope === `secret:${GCP_IDENTITY.secrets.dbMigratorUrl}` && member === runtime
   ))) throw contractError();
 
   requireExact(contract.safety, {
@@ -931,11 +931,11 @@ function provisionSteps(contract) {
     ...contract.resources.customRoles.map(({ id }) => `custom-role:${id}`),
     'vpc', 'subnet', 'psa-range', 'psa-connection', 'cloud-sql-instance', 'database', 'bucket',
     ...contract.resources.secrets.map(({ id }) => `secret-container:${id}`),
-    'secret-version:hkbuddy-db-app-url',
-    'secret-version:hkbuddy-db-migrator-url',
-    'secret-version:hkbuddy-session-secret',
+    `secret-version:${GCP_IDENTITY.secrets.dbAppUrl}`,
+    `secret-version:${GCP_IDENTITY.secrets.dbMigratorUrl}`,
+    `secret-version:${GCP_IDENTITY.secrets.session}`,
     'db-user:hkbuddy_app', 'db-user:hkbuddy_migrator',
-    'secret-version:hkbuddy-db-bootstrap-state',
+    `secret-version:${GCP_IDENTITY.secrets.bootstrap}`,
     ...iamStepIds(contract),
   ];
 }
@@ -949,15 +949,15 @@ const STATIC_EXPECTED_STEPS = [
   'monitoring-policy:sql-restart', 'monitoring-policy:cloud-build-failure',
   'monitoring-policy:run-deployment-failure',
   'artifact-registry',
-  'service-account:hkbuddy-runtime', 'service-account:hkbuddy-build',
-  'service-account:hkbuddy-migrator', 'service-account:hkbuddy-deployer',
-  'service-account:hkbuddy-acceptance',
-  'custom-role:hkbuddyAcceptanceBucketMetadataReader',
+  'service-account:hkbuddy-v1-runtime', 'service-account:hkbuddy-v1-build',
+  'service-account:hkbuddy-v1-migrator', 'service-account:hkbuddy-v1-deployer',
+  'service-account:hkbuddy-v1-acceptance',
+  'custom-role:hkbuddyV1AcceptanceBucketMetadataReader',
   'vpc', 'subnet', 'psa-range', 'psa-connection', 'cloud-sql-instance', 'database', 'bucket',
   ...SECRET_CONTAINER_IDS.map((id) => `secret-container:${id}`),
-  'secret-version:hkbuddy-db-app-url', 'secret-version:hkbuddy-db-migrator-url',
-  'secret-version:hkbuddy-session-secret', 'db-user:hkbuddy_app',
-  'db-user:hkbuddy_migrator', 'secret-version:hkbuddy-db-bootstrap-state',
+  `secret-version:${GCP_IDENTITY.secrets.dbAppUrl}`, `secret-version:${GCP_IDENTITY.secrets.dbMigratorUrl}`,
+  `secret-version:${GCP_IDENTITY.secrets.session}`, 'db-user:hkbuddy_app',
+  'db-user:hkbuddy_migrator', `secret-version:${GCP_IDENTITY.secrets.bootstrap}`,
   ...Array.from({ length: 34 }, (_, index) => `iam:${String(index + 1).padStart(2, '0')}`),
 ];
 
@@ -1014,10 +1014,10 @@ function secretVersionFromValue(value) {
 }
 
 function sensitiveInputFor(id, { contract, controlPlane, randomBytes, secretVersions }) {
-  if (id === 'secret-version:hkbuddy-session-secret') {
+  if (id === `secret-version:${GCP_IDENTITY.secrets.session}`) {
     return { value: randomSecret(randomBytes) };
   }
-  if (id === 'secret-version:hkbuddy-db-app-url' || id === 'secret-version:hkbuddy-db-migrator-url') {
+  if (id === `secret-version:${GCP_IDENTITY.secrets.dbAppUrl}` || id === `secret-version:${GCP_IDENTITY.secrets.dbMigratorUrl}`) {
     const app = id.endsWith('app-url');
     const user = app ? 'hkbuddy_app' : 'hkbuddy_migrator';
     const sql = contextValue(controlPlane, 'cloud-sql-instance');
@@ -1030,11 +1030,11 @@ function sensitiveInputFor(id, { contract, controlPlane, randomBytes, secretVers
   }
   if (id === 'db-user:hkbuddy_app' || id === 'db-user:hkbuddy_migrator') {
     const user = id.slice('db-user:'.length);
-    const secretId = user === 'hkbuddy_app' ? 'hkbuddy-db-app-url' : 'hkbuddy-db-migrator-url';
+    const secretId = user === 'hkbuddy_app' ? GCP_IDENTITY.secrets.dbAppUrl : GCP_IDENTITY.secrets.dbMigratorUrl;
     const secret = contextValue(controlPlane, `secret-version:${secretId}`);
     return { databaseUrl: secret?.secretValue };
   }
-  if (id === 'secret-version:hkbuddy-db-bootstrap-state') {
+  if (id === `secret-version:${GCP_IDENTITY.secrets.bootstrap}`) {
     return {
       value: canonicalJson({
         schemaVersion: 1,
@@ -1143,7 +1143,7 @@ export async function runGcpProvision({
   const completed = [];
   const secretVersions = {};
   for (const id of STATIC_EXPECTED_STEPS) {
-    if (id === 'billing' || id === 'secret-version:hkbuddy-db-app-url') {
+    if (id === 'billing' || id === `secret-version:${GCP_IDENTITY.secrets.dbAppUrl}`) {
       const projectOnly = id === 'billing';
       try {
         await plane.auditManagedIamPolicies({ projectOnly });
@@ -1206,12 +1206,11 @@ export async function runGcpProvision({
           compare: (value) => plane.compare(id, value, { secretVersions }),
         });
         void result;
-      } else if (id === 'project') {
-        await ensureProjectResource({
-          read: () => plane.read(id, { notificationChannel: selection.channel, secretVersions }),
-          create: () => plane.create(id, { notificationChannel: selection.channel, secretVersions }),
-          compare: (value) => plane.compare(id, value, { notificationChannel: selection.channel, secretVersions }),
-        });
+      } else if (id === 'project' || id === 'billing') {
+        const current = await plane.read(id, { notificationChannel: selection.channel, secretVersions });
+        if (current?.status !== 'present' || !plane.compare(id, current.value, {
+          notificationChannel: selection.channel, secretVersions,
+        })) throw commandError('SHARED_PROJECT_BASELINE_INVALID');
       } else {
         await ensureExactResource({
           id, mutate: true,
@@ -1305,6 +1304,7 @@ export class GcpControlPlane {
   }
 
   async create(id, context = {}) {
+    if (id === 'project' || id === 'billing') throw commandError('SHARED_PROJECT_MUTATION_FORBIDDEN');
     const value = await this.#create(id, context);
     if (id.startsWith('db-user:')) this.createdUsers.add(id.slice('db-user:'.length));
     return value;
@@ -1424,25 +1424,25 @@ export class GcpControlPlane {
     }
     if (id === 'vpc') {
       return { status: 'present', value: await this.#gcloud([
-        'compute', 'networks', 'describe', 'hkbuddy-prod-vpc',
+        'compute', 'networks', 'describe', GCP_IDENTITY.network,
         `--project=${PROJECT}`, '--format=json',
       ]) };
     }
     if (id === 'subnet') {
       return { status: 'present', value: await this.#gcloud([
-        'compute', 'networks', 'subnets', 'describe', 'hkbuddy-ae2-run',
+        'compute', 'networks', 'subnets', 'describe', GCP_IDENTITY.subnet,
         '--region=asia-east2', `--project=${PROJECT}`, '--format=json',
       ]) };
     }
     if (id === 'psa-range') {
       return { status: 'present', value: await this.#gcloud([
-        'compute', 'addresses', 'describe', 'hkbuddy-google-managed-services', '--global',
+        'compute', 'addresses', 'describe', GCP_IDENTITY.psaRange, '--global',
         `--project=${PROJECT}`, '--format=json',
       ]) };
     }
     if (id === 'psa-connection') {
       const values = await this.#gcloud([
-        'services', 'vpc-peerings', 'list', '--network=hkbuddy-prod-vpc',
+        'services', 'vpc-peerings', 'list', `--network=${GCP_IDENTITY.network}`,
         '--service=servicenetworking.googleapis.com', `--project=${PROJECT}`, '--format=json',
       ]);
       const listing = requireObjectList(values);
@@ -1452,21 +1452,21 @@ export class GcpControlPlane {
     }
     if (id === 'cloud-sql-instance') {
       const raw = await this.#gcloud([
-        'sql', 'instances', 'describe', 'hkbuddy-pg', `--project=${PROJECT}`, '--format=json',
+        'sql', 'instances', 'describe', GCP_IDENTITY.cloudSqlInstance, `--project=${PROJECT}`, '--format=json',
       ]);
       const privateIp = raw?.ipAddresses?.find(({ type }) => type === 'PRIVATE')?.ipAddress;
       return { status: 'present', value: { ...raw, privateIp } };
     }
     if (id === 'database') {
       return { status: 'present', value: await this.#gcloud([
-        'sql', 'databases', 'describe', 'hkbuddy_v1', '--instance=hkbuddy-pg',
+        'sql', 'databases', 'describe', GCP_IDENTITY.database, `--instance=${GCP_IDENTITY.cloudSqlInstance}`,
         `--project=${PROJECT}`, '--format=json',
       ]) };
     }
     if (id === 'bucket') {
       const value = await this.#rest({
         method: 'GET',
-        url: 'https://storage.googleapis.com/storage/v1/b/hkbuddy-prod-v1-20260826-media?projection=full',
+        url: `https://storage.googleapis.com/storage/v1/b/${GCP_IDENTITY.bucket}?projection=full`,
       });
       if (String(value?.projectNumber ?? '') !== this.#projectNumber()) {
         throw commandError('BUCKET_ID_COLLISION');
@@ -1495,16 +1495,6 @@ export class GcpControlPlane {
   }
 
   async #create(id, context) {
-    if (id === 'project') return this.#gcloud([
-      'projects', 'create', PROJECT, `--organization=${ORGANIZATION}`,
-      '--name=Hong Kong Buddy Production V1',
-      '--labels=application=hong-kong-buddy,environment=production-v1',
-      `--project=${PROJECT}`, '--format=json',
-    ]);
-    if (id === 'billing') return this.#gcloud([
-      'billing', 'projects', 'link', PROJECT, `--billing-account=${BILLING_ACCOUNT}`,
-      `--project=${PROJECT}`, '--format=json',
-    ]);
     if (id === 'apis') return this.#gcloud([
       'services', 'enable', ...REQUIRED_APIS, `--project=${PROJECT}`, '--format=json',
     ]);
@@ -1531,44 +1521,44 @@ export class GcpControlPlane {
       ]);
     }
     if (id === 'vpc') return this.#gcloud([
-      'compute', 'networks', 'create', 'hkbuddy-prod-vpc', '--subnet-mode=custom',
+      'compute', 'networks', 'create', GCP_IDENTITY.network, '--subnet-mode=custom',
       '--bgp-routing-mode=regional', `--project=${PROJECT}`, '--format=json',
     ]);
     if (id === 'subnet') {
       await this.#assertCidrAvailable('10.24.0.0/26', 'subnet');
       return this.#gcloud([
-        'compute', 'networks', 'subnets', 'create', 'hkbuddy-ae2-run',
-        '--network=hkbuddy-prod-vpc', '--region=asia-east2', '--range=10.24.0.0/26',
+        'compute', 'networks', 'subnets', 'create', GCP_IDENTITY.subnet,
+        `--network=${GCP_IDENTITY.network}`, '--region=asia-east2', '--range=10.24.0.0/26',
         '--enable-private-ip-google-access', `--project=${PROJECT}`, '--format=json',
       ]);
     }
     if (id === 'psa-range') {
       await this.#assertCidrAvailable('10.25.0.0/16', 'psa');
       return this.#gcloud([
-        'compute', 'addresses', 'create', 'hkbuddy-google-managed-services', '--global',
+        'compute', 'addresses', 'create', GCP_IDENTITY.psaRange, '--global',
         '--purpose=VPC_PEERING', '--addresses=10.25.0.0', '--prefix-length=16',
-        '--network=hkbuddy-prod-vpc',
+        `--network=${GCP_IDENTITY.network}`,
         '--description=Private services access for Hong Kong Buddy Cloud SQL',
         `--project=${PROJECT}`, '--format=json',
       ]);
     }
     if (id === 'psa-connection') return this.#gcloud([
-      'services', 'vpc-peerings', 'connect', '--network=hkbuddy-prod-vpc',
-      '--ranges=hkbuddy-google-managed-services', '--service=servicenetworking.googleapis.com',
+      'services', 'vpc-peerings', 'connect', `--network=${GCP_IDENTITY.network}`,
+      `--ranges=${GCP_IDENTITY.psaRange}`, '--service=servicenetworking.googleapis.com',
       `--project=${PROJECT}`, '--format=json',
     ]);
     if (id === 'cloud-sql-instance') {
       const operation = await this.#rest({
         method: 'POST', url: `https://sqladmin.googleapis.com/v1/projects/${PROJECT}/instances`,
         body: {
-          name: 'hkbuddy-pg', region: 'asia-east2', databaseVersion: 'POSTGRES_16',
+          name: GCP_IDENTITY.cloudSqlInstance, region: 'asia-east2', databaseVersion: 'POSTGRES_16',
           settings: {
             tier: 'db-custom-1-3840', availabilityType: 'REGIONAL',
             dataDiskType: 'PD_SSD', dataDiskSizeGb: '20', storageAutoResize: true,
             ipConfiguration: {
               ipv4Enabled: false,
-              privateNetwork: `projects/${PROJECT}/global/networks/hkbuddy-prod-vpc`,
-              allocatedIpRange: 'hkbuddy-google-managed-services', sslMode: 'ENCRYPTED_ONLY',
+              privateNetwork: `projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`,
+              allocatedIpRange: GCP_IDENTITY.psaRange, sslMode: 'ENCRYPTED_ONLY',
             },
             backupConfiguration: {
               enabled: true, startTime: '18:00', pointInTimeRecoveryEnabled: true,
@@ -1583,14 +1573,14 @@ export class GcpControlPlane {
       return this.#waitForSqlOperation(operation, 'v1');
     }
     if (id === 'database') return this.#gcloud([
-      'sql', 'databases', 'create', 'hkbuddy_v1', '--instance=hkbuddy-pg',
+      'sql', 'databases', 'create', GCP_IDENTITY.database, `--instance=${GCP_IDENTITY.cloudSqlInstance}`,
       `--project=${PROJECT}`, '--format=json',
     ]);
     if (id === 'bucket') return this.#rest({
       method: 'POST',
       url: `https://storage.googleapis.com/storage/v1/b?project=${PROJECT}&projection=full`,
       body: {
-        name: 'hkbuddy-prod-v1-20260826-media', location: 'asia-east2',
+        name: GCP_IDENTITY.bucket, location: 'asia-east2',
         iamConfiguration: {
           uniformBucketLevelAccess: { enabled: true }, publicAccessPrevention: 'enforced',
         },
@@ -1630,6 +1620,7 @@ export class GcpControlPlane {
     if (id === 'project') {
       const parent = value.parent?.id ?? String(value.parent ?? '').split('/').at(-1);
       return value.projectId === PROJECT && String(parent) === ORGANIZATION
+        && String(value.projectNumber ?? '') === PROJECT_NUMBER
         && value.lifecycleState === 'ACTIVE'
         && (value.displayName ?? value.name) === this.contract.project.displayName
         && exact(value.labels ?? {}, this.contract.project.labels);
@@ -1643,7 +1634,7 @@ export class GcpControlPlane {
       return REQUIRED_APIS.every((api) => enabled.has(api));
     }
     if (id === 'artifact-registry') {
-      return value.format === 'DOCKER' && String(value.name ?? '').endsWith('/repositories/hkbuddy')
+      return value.format === 'DOCKER' && String(value.name ?? '').endsWith(`/repositories/${GCP_IDENTITY.repository}`)
         && value.mode === 'STANDARD_REPOSITORY'
         && (value.location ?? String(value.name).split('/locations/')[1]?.split('/')[0]) === 'asia-east2'
         && value.description === 'Hong Kong Buddy production containers';
@@ -1673,20 +1664,20 @@ export class GcpControlPlane {
         deleted: false,
       });
     }
-    if (id === 'vpc') return value.name === 'hkbuddy-prod-vpc'
+    if (id === 'vpc') return value.name === GCP_IDENTITY.network
       && value.autoCreateSubnetworks === false && String(value.routingConfig?.routingMode ?? '').toUpperCase() === 'REGIONAL';
-    if (id === 'subnet') return value.name === 'hkbuddy-ae2-run'
+    if (id === 'subnet') return value.name === GCP_IDENTITY.subnet
       && value.region?.endsWith('/asia-east2') && value.ipCidrRange === '10.24.0.0/26'
-      && value.privateIpGoogleAccess === true && value.network?.endsWith('/networks/hkbuddy-prod-vpc');
-    if (id === 'psa-range') return value.name === 'hkbuddy-google-managed-services'
+      && value.privateIpGoogleAccess === true && value.network?.endsWith(`/networks/${GCP_IDENTITY.network}`);
+    if (id === 'psa-range') return value.name === GCP_IDENTITY.psaRange
       && value.address === '10.25.0.0' && Number(value.prefixLength) === 16
-      && value.purpose === 'VPC_PEERING' && value.network?.endsWith('/networks/hkbuddy-prod-vpc');
+      && value.purpose === 'VPC_PEERING' && value.network?.endsWith(`/networks/${GCP_IDENTITY.network}`);
     if (id === 'psa-connection') {
       const ranges = value.reservedPeeringRanges ?? value.reservedPeeringRange ?? [];
-      return ranges.includes('hkbuddy-google-managed-services');
+      return ranges.includes(GCP_IDENTITY.psaRange);
     }
     if (id === 'cloud-sql-instance') return this.#compareCloudSql(value);
-    if (id === 'database') return value.name === 'hkbuddy_v1' && value.instance === 'hkbuddy-pg'
+    if (id === 'database') return value.name === GCP_IDENTITY.database && value.instance === GCP_IDENTITY.cloudSqlInstance
       && value.project === PROJECT;
     if (id === 'bucket') return this.#compareBucket(value);
     if (id.startsWith('secret-container:')) {
@@ -1716,14 +1707,14 @@ export class GcpControlPlane {
     const onlyPrivate = Array.isArray(value.ipAddresses)
       && value.ipAddresses.length > 0
       && value.ipAddresses.every(({ type }) => type === 'PRIVATE');
-    return value.name === 'hkbuddy-pg' && value.project === PROJECT
+    return value.name === GCP_IDENTITY.cloudSqlInstance && value.project === PROJECT
       && value.region === 'asia-east2' && value.databaseVersion === 'POSTGRES_16'
       && value.state === 'RUNNABLE' && settings.availabilityType === 'REGIONAL'
       && settings.tier === 'db-custom-1-3840' && settings.dataDiskType === 'PD_SSD'
       && Number(settings.dataDiskSizeGb) === 20 && settings.storageAutoResize === true
       && ip.ipv4Enabled === false
-      && ip.privateNetwork === `projects/${PROJECT}/global/networks/hkbuddy-prod-vpc`
-      && ip.allocatedIpRange === 'hkbuddy-google-managed-services'
+      && ip.privateNetwork === `projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`
+      && ip.allocatedIpRange === GCP_IDENTITY.psaRange
       && ip.sslMode === 'ENCRYPTED_ONLY' && onlyPrivate && Boolean(value.privateIp)
       && backup.enabled === true && backup.startTime === '18:00'
       && backup.pointInTimeRecoveryEnabled === true
@@ -1738,7 +1729,7 @@ export class GcpControlPlane {
   #compareBucket(value) {
     const rules = value.lifecycle?.rule ?? [];
     const policy = value.iamConfiguration ?? {};
-    return value.name === 'hkbuddy-prod-v1-20260826-media'
+    return value.name === GCP_IDENTITY.bucket
       && String(value.projectNumber ?? '') === this.#projectNumber()
       && value.location === 'ASIA-EAST2'
       && policy.uniformBucketLevelAccess?.enabled === true
@@ -1789,7 +1780,7 @@ export class GcpControlPlane {
       let receipt;
       try { receipt = JSON.parse(value.secretValue); } catch { return false; }
       return exact(receipt, {
-        schemaVersion: 1, projectId: PROJECT, instance: 'hkbuddy-pg', database: 'hkbuddy_v1',
+        schemaVersion: 1, projectId: PROJECT, instance: GCP_IDENTITY.cloudSqlInstance, database: GCP_IDENTITY.database,
         appUser: 'hkbuddy_app', appSecretVersion: context.secretVersions?.['hkbuddy-db-app-url'],
         migratorUser: 'hkbuddy_migrator', migratorSecretVersion: context.secretVersions?.['hkbuddy-db-migrator-url'],
         appDatabaseRoles: ['pg_read_all_data', 'pg_write_all_data'],
@@ -1802,7 +1793,7 @@ export class GcpControlPlane {
   async #readDatabaseUser(user) {
     const listing = await this.#rest({
       method: 'GET',
-      url: `https://sqladmin.googleapis.com/sql/v1beta4/projects/${PROJECT}/instances/hkbuddy-pg/users`,
+      url: `https://sqladmin.googleapis.com/sql/v1beta4/projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}/users`,
     });
     if (!listing || typeof listing !== 'object' || Array.isArray(listing)) {
       throw commandError('LIST_RESPONSE_AMBIGUOUS');
@@ -1838,7 +1829,7 @@ export class GcpControlPlane {
     }
     const result = await this.#rest({
       method: 'POST',
-      url: `https://sqladmin.googleapis.com/sql/v1beta4/projects/${PROJECT}/instances/hkbuddy-pg/users`,
+      url: `https://sqladmin.googleapis.com/sql/v1beta4/projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}/users`,
       body: {
         name: user, host: '', type: 'BUILT_IN', password,
         databaseRoles: [...definition.databaseRoles],
@@ -1956,8 +1947,8 @@ export class GcpControlPlane {
   #metricFilter(policy) {
     const run = policy.metricType.startsWith('run.googleapis.com/');
     return run
-      ? `resource.type=\"cloud_run_revision\" AND resource.label.service_name=\"hkbuddy-api\" AND resource.label.location=\"asia-east2\" AND metric.type=\"${policy.metricType}\"`
-      : `resource.type=\"cloudsql_database\" AND resource.label.database_id=\"${PROJECT}:hkbuddy-pg\" AND metric.type=\"${policy.metricType}\"`;
+      ? `resource.type=\"cloud_run_revision\" AND resource.label.service_name=\"${GCP_IDENTITY.service}\" AND resource.label.location=\"asia-east2\" AND metric.type=\"${policy.metricType}\"`
+      : `resource.type=\"cloudsql_database\" AND resource.label.database_id=\"${PROJECT}:${GCP_IDENTITY.cloudSqlInstance}\" AND metric.type=\"${policy.metricType}\"`;
   }
 
   #policyBody(policyId, channel) {
@@ -2112,7 +2103,7 @@ export class GcpControlPlane {
     assertCidrAvailable({
       desired,
       kind,
-      network: `projects/${PROJECT}/global/networks/hkbuddy-prod-vpc`,
+      network: `projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`,
       subnets: requireObjectList(subnets), routes: requireObjectList(routes),
       addresses: requireObjectList(addresses),
     });
@@ -2129,7 +2120,7 @@ export class GcpControlPlane {
       [scope, await this.#iamPolicy(scope)]
     )));
     const policiesByScope = new Map(policyEntries);
-    const bucketPolicy = policiesByScope.get('bucket:hkbuddy-prod-v1-20260826-media');
+    const bucketPolicy = policiesByScope.get(`bucket:${GCP_IDENTITY.bucket}`);
     const publicMember = (bucketPolicy?.bindings ?? []).some(({ members }) => (
       members?.some((member) => ['allUsers', 'allAuthenticatedUsers'].includes(member))
     ));
