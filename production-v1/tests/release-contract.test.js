@@ -28,6 +28,7 @@ import {
   prepareReleaseArchive,
   runPrepareReleaseArchive,
   runGcpRelease as runGcpReleaseImpl,
+  releasePhaseIdentitySha256,
   releaseMutationPlanIdentity,
   releaseActionReceiptPath,
   finalizeReleasePhaseReceipt,
@@ -38,6 +39,7 @@ import {
   validateEvidenceArtifactFile,
   validateEvidenceVersionReceipt,
   validateMigrationExecutionReceipt,
+  validateReleaseReceiptChain,
   validateReleaseJobReadback,
   validateServiceIamReceipt,
   validateTrafficReceipt,
@@ -857,6 +859,7 @@ function fixtureReceiptChain(plan, through) {
       sequence: index + 1,
       releaseSha: plan.releaseSha,
       releaseIdentitySha256: plan.releaseIdentitySha256,
+      phaseIdentitySha256: releasePhaseIdentitySha256(plan, phase),
       candidateService: CANDIDATE_SERVICE,
       stableService: STABLE_SERVICE,
       trafficState: 'candidate-service-private-100',
@@ -1274,14 +1277,18 @@ test('release plan is archive-bound, digest-pinned, evidence-first, probe-exact,
   assert.equal(serialized.includes('add-cloudsql-instances'), false);
 });
 
-test('release identity and candidate phase plan bind semantic secret-version and Service spec drift', async () => {
+test('immutable release identity and resolved candidate phase identity separate semantic secret-version drift', async () => {
   const baselineInput = releaseInput();
   const driftedInput = releaseInput({
     databaseSecretVersions: { app: '70', migrator: '8', session: '9' },
   });
   const baselinePlan = buildReleasePlan(baselineInput);
   const driftedPlan = buildReleasePlan(driftedInput);
-  assert.notEqual(baselinePlan.releaseIdentitySha256, driftedPlan.releaseIdentitySha256);
+  assert.equal(baselinePlan.releaseIdentitySha256, driftedPlan.releaseIdentitySha256);
+  assert.notEqual(
+    releasePhaseIdentitySha256(baselinePlan, 'candidate'),
+    releasePhaseIdentitySha256(driftedPlan, 'candidate'),
+  );
 
   const phasePlanHashes = [];
   for (const input of [baselineInput, driftedInput]) {
@@ -2236,6 +2243,17 @@ test('build checkpoint follows authoritative describe and receipt precedes termi
     kind: 'build', buildId: BUILD_ID, receiptSha256: normalized.buildReceiptSha256,
   });
   assert.equal(checkpointPayload.observationSha256, intentPayload.afterSha256);
+  const buildPlan = buildReleasePlan(buildInput, { phase: 'build' });
+  const buildMutation = buildPlan.operations.find(({ id }) => id === 'build-submit');
+  assert.deepEqual(releaseMutationPlanIdentity(buildPlan, buildMutation).expectedAfter.observation, {
+    buildConfigSha256: BUILD_CONFIG_SHA,
+    image: `asia-east2-docker.pkg.dev/${PROJECT}/hkbuddy-v1/hkbuddy-v1-api:${RELEASE_SHA}`,
+    kind: 'cloud-build',
+    ociLabels: normalized.ociLabels,
+    provenance: 'VERIFIED',
+    releaseSha: RELEASE_SHA,
+    sourceArchiveSha256: SOURCE_SHA,
+  });
   for (const state of ['before', 'after']) {
     const syntheticMarkerSha256 = createHash('sha256').update(JSON.stringify(canonicalFixture({
       operationId: 'build-submit',
@@ -2245,6 +2263,121 @@ test('build checkpoint follows authoritative describe and receipt precedes termi
     }))).digest('hex');
     assert.notEqual(intentPayload[`${state}Sha256`], syntheticMarkerSha256);
   }
+});
+
+test('build readAfter must be present and exact before an observation checkpoint is written', async () => {
+  const buildInput = releaseInput({
+    imageDigest: null,
+    databaseSecretVersions: null,
+    evidence: null,
+    previousRevision: null,
+    previousImageDigest: null,
+  });
+  for (const describeResult of [
+    undefined,
+    (() => {
+      const changed = exactCloudBuildReceipt();
+      changed.results.images[0].digest = `sha256:${'9'.repeat(64)}`;
+      return changed;
+    })(),
+  ]) {
+    const store = createTestStateStore();
+    let call = 0;
+    const result = await runGcpReleaseImpl({
+      argv: ['--phase=build', `--confirm-release=${RELEASE_SHA}`],
+      input: buildInput,
+      verifySourceArchive: async () => true,
+      verifyBuildConfig: async () => true,
+      openStateStore: async () => store,
+      execute: async () => {
+        call += 1;
+        return call === 1 ? exactCloudBuildReceipt() : structuredClone(describeResult);
+      },
+      persistReceipt: async () => true,
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1);
+    assert.equal(store.records.some(({ recordType }) => recordType === 'checkpoint'), false);
+  }
+});
+
+test('one immutable build identity validly precedes resolved migration while migration secret drift stays bound', async () => {
+  const common = {
+    previousRevision: null,
+    previousImageDigest: null,
+    evidence: null,
+    acceptanceOutputs: null,
+  };
+  const buildInput = releaseInput({
+    ...common,
+    imageDigest: null,
+    databaseSecretVersions: null,
+  });
+  const migrationInput = releaseInput(common);
+  const buildPlan = buildReleasePlan(buildInput, { phase: 'build' });
+  const migrationPlan = buildReleasePlan(migrationInput, { phase: 'migration' });
+  assert.equal(buildPlan.releaseIdentitySha256, migrationPlan.releaseIdentitySha256);
+
+  const buildReceipt = finalizeReleasePhaseReceipt({
+    schemaVersion: 2,
+    phase: 'build',
+    sequence: 1,
+    releaseSha: buildPlan.releaseSha,
+    releaseIdentitySha256: buildPlan.releaseIdentitySha256,
+    phaseIdentitySha256: releasePhaseIdentitySha256(buildPlan, 'build'),
+    candidateService: CANDIDATE_SERVICE,
+    stableService: STABLE_SERVICE,
+    trafficState: 'candidate-service-private-100',
+    stableTrafficState: buildPlan.expectedStable.initialTrafficState,
+    previousReceiptSha256: null,
+    completed: buildPlan.operations.filter(({ phase }) => phase === 'build').map(({ id }) => id),
+    outputs: fixtureReceiptOutputs(migrationPlan, 'build'),
+  });
+  const store = createTestStateStore();
+  let stateOpened = false;
+  let migrationReceipt = null;
+  const result = await runGcpRelease({
+    argv: ['--phase=migration', `--confirm-release=${RELEASE_SHA}`],
+    input: migrationInput,
+    loadReceipts: async () => [structuredClone(buildReceipt)],
+    openStateStore: async () => {
+      stateOpened = true;
+      return store;
+    },
+    persistReceipt: async (_plan, receipt) => {
+      migrationReceipt = structuredClone(receipt);
+      return true;
+    },
+    execute: async (argv) => {
+      if (argv[2] === 'deploy') return { metadata: { name: 'hkbuddy-v1-migrate' } };
+      if (argv[2] === 'describe') return realV1JobReadback(migrationPlan.expectedMigrationJob);
+      if (argv[2] === 'execute') return realV1ExecutionReadback(migrationPlan.expectedMigrationJob);
+      if (argv[2] === 'executions' && argv[3] === 'describe') {
+        return realV1ExecutionReadback(migrationPlan.expectedMigrationJob);
+      }
+      throw new Error(`unexpected operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  assert.equal(stateOpened, true);
+  assert.equal(migrationReceipt.phase, 'migration');
+
+  const drifted = buildReleasePlan(releaseInput({
+    ...common,
+    databaseSecretVersions: { app: '7', migrator: '10', session: '9' },
+  }), { phase: 'migration' });
+  assert.notEqual(migrationPlan.semanticReleaseSpecSha256, drifted.semanticReleaseSpecSha256);
+  assert.notEqual(
+    releasePhaseIdentitySha256(migrationPlan, 'migration'),
+    releasePhaseIdentitySha256(drifted, 'migration'),
+  );
+  assert.throws(
+    () => validateReleaseReceiptChain([buildReceipt, migrationReceipt], drifted, {
+      through: 'migration',
+    }),
+    /receipt chain/i,
+  );
 });
 
 test('receipt-before-terminal restart appends only the missing terminal record', async () => {
@@ -4756,6 +4889,7 @@ test('real-shape migration, authenticated workload, and tag-free promotion share
       sequence: receipts.length + 1,
       releaseSha: plan.releaseSha,
       releaseIdentitySha256: plan.releaseIdentitySha256,
+      phaseIdentitySha256: releasePhaseIdentitySha256(plan, phase),
       candidateService: CANDIDATE_SERVICE,
       stableService: STABLE_SERVICE,
       trafficState: 'candidate-service-private-100',
@@ -4822,6 +4956,7 @@ test('real-shape migration, authenticated workload, and tag-free promotion share
     sequence: receipts.length + 1,
     releaseSha: refreshedPlan.releaseSha,
     releaseIdentitySha256: refreshedPlan.releaseIdentitySha256,
+    phaseIdentitySha256: releasePhaseIdentitySha256(refreshedPlan, 'mobile'),
     candidateService: CANDIDATE_SERVICE,
     stableService: STABLE_SERVICE,
     trafficState: 'candidate-service-private-100',

@@ -1158,7 +1158,6 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     stableService: STABLE_SERVICE,
     trafficState: candidateTrafficState(),
     stableTrafficState,
-    databaseSecretVersions,
     previousRevision,
     previousImageDigest,
   });
@@ -3370,7 +3369,8 @@ export function validateReleaseReceiptChain(value, plan, { through = 'mobile' } 
     const phase = RECEIPT_PHASES[index];
     if (!exactKeys(receipt, [
       'candidateService', 'completed', 'outputs', 'phase', 'previousReceiptSha256',
-      'receiptSha256', 'releaseIdentitySha256', 'releaseSha', 'schemaVersion', 'sequence',
+      'phaseIdentitySha256', 'receiptSha256', 'releaseIdentitySha256', 'releaseSha',
+      'schemaVersion', 'sequence',
       'stableService', 'stableTrafficState', 'trafficState',
     ])
       || receipt.schemaVersion !== 2 || receipt.phase !== phase || receipt.sequence !== index + 1
@@ -3379,6 +3379,7 @@ export function validateReleaseReceiptChain(value, plan, { through = 'mobile' } 
       || receipt.trafficState !== candidateTrafficState(plan)
       || receipt.stableTrafficState !== plan.expectedStable.initialTrafficState
       || receipt.releaseIdentitySha256 !== plan.releaseIdentitySha256
+      || receipt.phaseIdentitySha256 !== releasePhaseIdentitySha256(plan, phase)
       || receipt.previousReceiptSha256 !== previousReceiptSha256
       || !exact(receipt.completed, expectedReceiptCompleted(plan, phase))
       || finalizeReleasePhaseReceipt(receipt).receiptSha256 !== receipt.receiptSha256) {
@@ -3664,6 +3665,7 @@ function createReleasePhaseReceipt(phase, plan, completed, context, priorReceipt
     sequence,
     releaseSha: plan.releaseSha,
     releaseIdentitySha256: plan.releaseIdentitySha256,
+    phaseIdentitySha256: releasePhaseIdentitySha256(plan, phase),
     candidateService: CANDIDATE_SERVICE,
     stableService: STABLE_SERVICE,
     trafficState: candidateTrafficState(plan),
@@ -3729,7 +3731,7 @@ function mutationRetryPolicy(reconcileKind) {
 function mutationSpec(plan, operationId) {
   if (operationId === 'build-submit') return Object.freeze({
     buildConfigSha256: plan.buildConfigSha256,
-    image: plan.image,
+    image: `asia-east2-docker.pkg.dev/${PROJECT}/${REPOSITORY}/${STABLE_SERVICE}:${plan.releaseSha}`,
     project: PROJECT,
     region: REGION,
     releaseSha: plan.releaseSha,
@@ -3756,8 +3758,11 @@ function mutationSpec(plan, operationId) {
     const key = operationId.slice(operationId.indexOf(':') + 1);
     return plan.evidence[key];
   }
-  if (operationId.startsWith('evidence-collect-copy:')
-    || operationId.startsWith('evidence-output-delete:')) {
+  if (operationId.startsWith('evidence-collect-copy:')) {
+    const key = operationId.slice(operationId.indexOf(':') + 1);
+    return Object.freeze({ object: plan.acceptanceOutputs[key] });
+  }
+  if (operationId.startsWith('evidence-output-delete:')) {
     const key = operationId.slice(operationId.indexOf(':') + 1);
     return Object.freeze({
       evidence: plan.evidence[key],
@@ -3797,6 +3802,307 @@ function mutationSpec(plan, operationId) {
   throw new Error('Release mutation has no semantic specification');
 }
 
+function plannedMutationAfterObservation(plan, operationId) {
+  if (operationId === 'build-submit') return Object.freeze({
+    buildConfigSha256: plan.buildConfigSha256,
+    image: `asia-east2-docker.pkg.dev/${PROJECT}/${REPOSITORY}/${STABLE_SERVICE}:${plan.releaseSha}`,
+    kind: 'cloud-build',
+    ociLabels: Object.freeze({
+      'com.simplify.build-config-sha256': plan.buildConfigSha256,
+      'com.simplify.source-archive-sha256': plan.sourceArchiveSha256,
+      'org.opencontainers.image.revision': plan.releaseSha,
+      'org.opencontainers.image.source': OCI_SOURCE,
+    }),
+    provenance: 'VERIFIED',
+    releaseSha: plan.releaseSha,
+    sourceArchiveSha256: plan.sourceArchiveSha256,
+  });
+  if (operationId === 'migration-deploy'
+    || (operationId.endsWith('-deploy')
+      && !['candidate-deploy', 'promote-stable-deploy'].includes(operationId))) {
+    const expected = operationId === 'migration-deploy' ? plan.expectedMigrationJob
+      : plan.expectedJobs[operationId.slice(0, -'-deploy'.length)];
+    return Object.freeze({ job: expected, kind: 'cloud-run-job' });
+  }
+  if (operationId === 'migration-execute' || operationId.endsWith('-execute')) {
+    const expected = operationId === 'migration-execute' ? plan.expectedMigrationJob
+      : plan.expectedJobs[operationId.slice(0, -'-execute'.length)];
+    return Object.freeze({
+      job: expected.job,
+      kind: 'cloud-run-job-execution',
+      parallelism: expected.parallelism,
+      status: 'SUCCEEDED',
+      taskCount: expected.taskCount,
+    });
+  }
+  if (operationId.startsWith('inventory-publish:')
+    || operationId.startsWith('evidence-publish:')) {
+    const key = operationId.slice(operationId.indexOf(':') + 1);
+    const expected = plan.evidence[key];
+    return Object.freeze({
+      kind: 'secret-version',
+      name: `projects/${PROJECT}/secrets/${expected.secret}/versions/${expected.secretVersion}`,
+      state: 'ENABLED',
+      version: expected.secretVersion,
+    });
+  }
+  if (operationId.startsWith('evidence-collect-copy:')) {
+    const key = operationId.slice(operationId.indexOf(':') + 1);
+    const expected = plan.acceptanceOutputs[key];
+    return Object.freeze({
+      bucket: expected.bucket,
+      destination: expected.filePath,
+      generation: expected.generation,
+      kind: 'gcs-object-copy',
+      object: expected.object,
+    });
+  }
+  if (operationId.startsWith('evidence-output-delete:')) {
+    const key = operationId.slice(operationId.indexOf(':') + 1);
+    const expected = plan.acceptanceOutputs[key];
+    return Object.freeze({
+      bucket: expected.bucket,
+      generation: expected.generation,
+      kind: 'gcs-object-absence',
+      object: expected.object,
+      state: 'absent',
+    });
+  }
+  if (operationId === 'candidate-deploy') return Object.freeze({
+    artifact: plan.image,
+    kind: 'cloud-run-service',
+    revision: candidateRevisionContract(plan.expectedCandidate),
+    service: Object.freeze({
+      invokerIamDisabled: false,
+      service: CANDIDATE_SERVICE,
+      traffic: plan.expectedCandidate.traffic,
+    }),
+  });
+  if (operationId === 'promote-stable-deploy') return Object.freeze({
+    artifact: plan.image,
+    kind: 'cloud-run-service',
+    revision: candidateRevisionContract(plan.expectedStable),
+    service: Object.freeze({
+      invokerIamDisabled: false,
+      service: STABLE_SERVICE,
+      traffic: plan.expectedStable.stagedTraffic,
+    }),
+  });
+  if (operationId === 'candidate-private-iam-grant') return Object.freeze({
+    bindings: Object.freeze([Object.freeze({
+      members: Object.freeze([`user:${PROMOTION_AUTHORITY}`]), role: 'roles/run.invoker',
+    })]),
+    kind: 'cloud-run-service-iam',
+    service: CANDIDATE_SERVICE,
+  });
+  if (operationId === 'promote-public-service') return Object.freeze({
+    bindings: Object.freeze([Object.freeze({
+      members: Object.freeze(['allUsers']), role: 'roles/run.invoker',
+    })]),
+    kind: 'cloud-run-service-iam',
+    service: STABLE_SERVICE,
+  });
+  if (operationId === 'candidate-cleanup-delete') return Object.freeze({
+    kind: 'cloud-run-service-absence', service: CANDIDATE_SERVICE, state: 'absent',
+  });
+  if (operationId === 'promote-traffic' || operationId === 'rollback-traffic') {
+    const revision = operationId === 'promote-traffic'
+      ? plan.stableRevision : plan.previousRevision;
+    return Object.freeze({
+      kind: 'cloud-run-service-traffic',
+      service: STABLE_SERVICE,
+      traffic: Object.freeze([Object.freeze({ revision, tag: null, percent: 100 })]),
+    });
+  }
+  throw new Error('Release mutation has no planned after observation');
+}
+
+function canonicalMutationAfterObservation(plan, operationId, observed) {
+  const expected = plannedMutationAfterObservation(plan, operationId);
+  if (observed === undefined) throw new Error('Authoritative mutation read-after is unavailable');
+  if (operationId === 'build-submit') {
+    const receipt = validateBuildReceipt(observed, {
+      releaseSha: plan.releaseSha,
+      sourceArchiveSha256: plan.sourceArchiveSha256,
+      buildConfigSha256: plan.buildConfigSha256,
+    });
+    const actual = Object.freeze({
+      buildConfigSha256: receipt.buildConfigSha256,
+      image: `asia-east2-docker.pkg.dev/${PROJECT}/${REPOSITORY}/${STABLE_SERVICE}:${receipt.releaseSha}`,
+      kind: 'cloud-build',
+      ociLabels: receipt.ociLabels,
+      provenance: receipt.provenance,
+      releaseSha: receipt.releaseSha,
+      sourceArchiveSha256: receipt.sourceArchiveSha256,
+    });
+    if (!exact(actual, expected)) throw new Error('Cloud Build after observation differs from plan');
+    return actual;
+  }
+  if (operationId === 'migration-deploy'
+    || (operationId.endsWith('-deploy')
+      && !['candidate-deploy', 'promote-stable-deploy'].includes(operationId))) {
+    const job = operationId === 'migration-deploy' ? plan.expectedMigrationJob
+      : plan.expectedJobs[operationId.slice(0, -'-deploy'.length)];
+    validateReleaseJobReadback(observed, job);
+    const actual = Object.freeze({
+      job: exact(observed, job) ? observed : normalizeV1JobReadback(observed),
+      kind: 'cloud-run-job',
+    });
+    if (!exact(actual, expected)) throw new Error('Cloud Run Job after observation differs from plan');
+    return actual;
+  }
+  if (operationId === 'migration-execute' || operationId.endsWith('-execute')) {
+    const job = operationId === 'migration-execute' ? plan.expectedMigrationJob
+      : plan.expectedJobs[operationId.slice(0, -'-execute'.length)];
+    const receipt = operationId === 'migration-execute'
+      ? validateMigrationExecutionReceipt(observed, { releaseSha: plan.releaseSha })
+      : validateReleaseJobExecutionReceipt(observed, job);
+    const actual = Object.freeze({
+      job: receipt.job,
+      kind: 'cloud-run-job-execution',
+      parallelism: receipt.parallelism,
+      status: 'SUCCEEDED',
+      taskCount: receipt.taskCount,
+    });
+    if (!exact(actual, expected)) throw new Error('Cloud Run execution after observation differs from plan');
+    return actual;
+  }
+  if (operationId.startsWith('inventory-publish:')
+    || operationId.startsWith('evidence-publish:')) {
+    const key = operationId.slice(operationId.indexOf(':') + 1);
+    const version = plan.evidence[key];
+    validateEvidenceVersionReceipt(observed, version);
+    const actual = Object.freeze({
+      kind: 'secret-version', name: observed.name, state: observed.state,
+      version: version.secretVersion,
+    });
+    if (!exact(actual, expected)) throw new Error('Secret version after observation differs from plan');
+    return actual;
+  }
+  if (operationId.startsWith('evidence-collect-copy:')) {
+    const source = observed?.source;
+    const collected = observed?.collected;
+    const key = operationId.slice(operationId.indexOf(':') + 1);
+    const output = plan.acceptanceOutputs[key];
+    if (!source || source.bucket !== output.bucket || source.object !== output.object
+      || source.generation !== output.generation || !Number.isSafeInteger(source.size)
+      || source.size < 2 || !collected || collected.byteLength !== source.size
+      || !DIGEST.test(String(collected.artifactSha256 ?? ''))
+      || !DIGEST.test(String(collected.objectSha256 ?? ''))) {
+      throw new Error('Collected object after observation is invalid');
+    }
+    return expected;
+  }
+  if (operationId.startsWith('evidence-output-delete:')) {
+    if (!Array.isArray(observed) || observed.length !== 0) {
+      throw new Error('Deleted object after observation is invalid');
+    }
+    return expected;
+  }
+  if (operationId === 'candidate-deploy' || operationId === 'promote-stable-deploy') {
+    const serviceExpected = operationId === 'candidate-deploy'
+      ? plan.expectedCandidate : plan.expectedStable;
+    const service = normalizeCandidateService(observed?.service);
+    if (operationId === 'candidate-deploy') validateCandidateService(observed?.service, serviceExpected);
+    else validateStableStagedService(observed?.service, plan);
+    const revision = normalizeCandidateRevision(observed?.revision, serviceExpected);
+    if (!exact(revision, candidateRevisionContract(serviceExpected))) {
+      throw new Error('Cloud Run revision after observation differs from plan');
+    }
+    validateCandidateArtifact(observed?.artifact, plan.image);
+    const actual = Object.freeze({
+      artifact: plan.image,
+      kind: 'cloud-run-service',
+      revision,
+      service,
+    });
+    if (!exact(actual, expected)) throw new Error('Cloud Run Service after observation differs from plan');
+    return actual;
+  }
+  if (operationId === 'candidate-private-iam-grant'
+    || operationId === 'promote-public-service') {
+    const policy = operationId === 'candidate-private-iam-grant'
+      ? 'candidate-private' : 'stable-public';
+    validateServiceIamReceipt(observed, { policy, requireEtag: true });
+    const normalized = normalizeServiceIamPolicy(observed, { requireEtag: true });
+    const actual = Object.freeze({
+      bindings: normalized.bindings,
+      kind: 'cloud-run-service-iam',
+      service: operationId === 'candidate-private-iam-grant'
+        ? CANDIDATE_SERVICE : STABLE_SERVICE,
+    });
+    if (!exact(actual, expected)) throw new Error('Cloud Run IAM after observation differs from plan');
+    return actual;
+  }
+  if (operationId === 'candidate-cleanup-delete') {
+    if (!(observed === null || exact(observed, { state: 'absent' }))) {
+      throw new Error('Cloud Run deletion after observation is invalid');
+    }
+    return expected;
+  }
+  if (operationId === 'promote-traffic' || operationId === 'rollback-traffic') {
+    const revision = operationId === 'promote-traffic'
+      ? plan.stableRevision : plan.previousRevision;
+    validateTrafficReceipt(observed, { revision });
+    const normalized = normalizeCandidateService(observed);
+    const actual = Object.freeze({
+      kind: 'cloud-run-service-traffic', service: normalized.service, traffic: normalized.traffic,
+    });
+    if (!exact(actual, expected)) throw new Error('Cloud Run traffic after observation differs from plan');
+    return actual;
+  }
+  throw new Error('Release mutation has no authoritative after observation');
+}
+
+function receiptPhaseSemanticSpec(plan, phase) {
+  if (phase === 'build') return mutationSpec(plan, 'build-submit');
+  if (phase === 'migration') return plan.expectedMigrationJob;
+  if (phase === 'inventory') return plan.evidence.legacyInventory;
+  if (phase === 'acceptance') return plan.expectedJobs;
+  if (phase === 'collect') return plan.acceptanceOutputs;
+  if (phase === 'evidence') return Object.freeze({
+    acceptanceOutputs: plan.acceptanceOutputs,
+    evidence: plan.evidence,
+  });
+  if (phase === 'candidate') return Object.freeze({
+    candidate: plan.expectedCandidate,
+    serviceSpecSha256: canonicalSha256(plan.candidateServiceSpec),
+  });
+  if (['readiness', 'workload', 'mobile'].includes(phase)) {
+    const evidence = plan.task8Evidence[phase];
+    return Object.freeze({
+      candidateOrigin: plan.candidateOrigin,
+      candidateRevision: plan.candidateRevision,
+      candidateService: CANDIDATE_SERVICE,
+      evidenceContract: Object.freeze({
+        filePath: evidence.filePath,
+        schemaVersion: evidence.schemaVersion,
+        stableService: evidence.stableService,
+        stableTrafficState: evidence.stableTrafficState,
+        trafficState: evidence.trafficState,
+      }),
+      imageDigest: plan.imageDigest,
+      stableService: STABLE_SERVICE,
+    });
+  }
+  throw new Error('Release receipt phase semantic specification is invalid');
+}
+
+export function releasePhaseIdentitySha256(plan, phase) {
+  if (!plan || !RECEIPT_PHASES.includes(phase)) {
+    throw new Error('Release receipt phase identity is invalid');
+  }
+  const operations = plan.operations.filter((member) => member.phase === phase);
+  return canonicalSha256({
+    releaseIdentitySha256: plan.releaseIdentitySha256,
+    phase,
+    operations: operations.map(({ id, argv }) => ({ id, argv })),
+    mutationContracts: operations.filter(({ id }) => operationMayMutate(id))
+      .map((member) => releaseMutationPlanIdentity(plan, member)),
+    semanticSpec: receiptPhaseSemanticSpec(plan, phase),
+  });
+}
+
 function mutationStateProjection(plan, operationId, state) {
   const spec = mutationSpec(plan, operationId);
   const specSha256 = canonicalSha256(spec);
@@ -3815,6 +4121,7 @@ function mutationStateProjection(plan, operationId, state) {
   });
   return Object.freeze({
     identity,
+    observation: plannedMutationAfterObservation(plan, operationId),
     reconcileKind,
     specSha256,
     state: operationId === 'candidate-cleanup-delete'
@@ -3901,7 +4208,12 @@ function createReleaseMutationAdapter(plan, member, context) {
       });
     },
     mutate: Object.freeze([...member.argv]),
-    readAfter() { return identity.expectedAfter; },
+    readAfter(observed) {
+      return Object.freeze({
+        ...identity.expectedAfter,
+        observation: canonicalMutationAfterObservation(plan, member.id, observed),
+      });
+    },
     canonicalState(state, observed) {
       return state === 'before' ? this.readBefore(observed) : this.readAfter(observed);
     },
@@ -4777,6 +5089,7 @@ export async function runGcpRelease({
   const collectedObjectReceipts = new Map();
   const candidateReadbacks = {};
   const promotionReadbacks = {};
+  const promotionStableReadbacks = {};
   let buildReceipt = null;
   let migrationExecutionReceipt = null;
   let migrationExecutionName = null;
@@ -5074,12 +5387,15 @@ export async function runGcpRelease({
           acceptanceExecutionReceipts,
           buildReceipt,
           collectedEvidence,
+          collectedObjectReceipts,
+          candidateReadbacks,
           migrationExecutionReceipt,
+          promotionStableReadbacks,
         }));
         const beforeState = mutationAdapter.canonicalState(
           'before', mutationBeforeObservations.get(member.id),
         );
-        const afterState = mutationAdapter.canonicalState('after');
+        const afterState = mutationAdapter.expectedAfter;
         journalAfterSha256 = restartingMutation
           ? existingJournalIntent.payload.afterSha256 : canonicalSha256(afterState);
         if (restartingMutation) {
@@ -5357,12 +5673,15 @@ export async function runGcpRelease({
         || member.id === 'promote-stable-staged-readback') {
         validateStableStagedService(receipt, plan);
         if (member.id === 'promote-stable-staged-readback') {
+          promotionStableReadbacks.service = receipt;
           mutationBeforeObservations.set('promote-traffic', receipt);
         }
       } else if (member.id === 'promote-stable-revision-readback') {
         validateStableRevisionReadback(receipt, plan);
+        promotionStableReadbacks.revision = receipt;
       } else if (member.id === 'promote-stable-artifact-readback') {
         validateCandidateArtifact(receipt, plan.image);
+        promotionStableReadbacks.artifact = receipt;
       } else if (member.id === 'promote-stable-private-iam-readback') {
         validateServiceIamReceipt(receipt, { policy: 'stable-private', requireEtag: true });
         promotionIamBaseline = normalizeServiceIamPolicy(receipt, { requireEtag: true });
@@ -5456,7 +5775,10 @@ export async function runGcpRelease({
               acceptanceExecutionReceipts,
               buildReceipt,
               collectedEvidence,
+              collectedObjectReceipts,
+              candidateReadbacks,
               migrationExecutionReceipt,
+              promotionStableReadbacks,
             }));
             const mutationOrdinal = 1;
             const beforeState = adapter.canonicalState(
@@ -5572,7 +5894,28 @@ export async function runGcpRelease({
       if (pendingJournal !== null
         && journalCheckpointBoundary(pendingJournal.operationId) === member.id) {
         try {
-          const canonicalAfter = pendingJournal.adapter.canonicalState('after', receipt);
+          const operationId = pendingJournal.operationId;
+          const observedAfter = operationId === 'candidate-deploy'
+            ? {
+              artifact: candidateReadbacks.artifact,
+              revision: candidateReadbacks.revision,
+              service: candidateReadbacks.service,
+            }
+            : (operationId === 'promote-stable-deploy'
+              ? {
+                artifact: promotionStableReadbacks.artifact,
+                revision: promotionStableReadbacks.revision,
+                service: promotionStableReadbacks.service,
+              }
+              : (operationId.startsWith('evidence-collect-copy:')
+                ? {
+                  collected: collectedEvidence[operationId.slice(operationId.indexOf(':') + 1)],
+                  source: collectedObjectReceipts.get(
+                    operationId.slice(operationId.indexOf(':') + 1),
+                  ),
+                }
+                : receipt));
+          const canonicalAfter = pendingJournal.adapter.canonicalState('after', observedAfter);
           const observationSha256 = canonicalSha256(canonicalAfter);
           if (observationSha256 !== pendingJournal.afterSha256) {
             throw new Error('Authoritative mutation state differs from the durable intent');

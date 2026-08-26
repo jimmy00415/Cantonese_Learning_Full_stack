@@ -6,6 +6,7 @@ import test from 'node:test';
 import {
   buildReleasePlan,
   finalizeReleasePhaseReceipt,
+  releasePhaseIdentitySha256,
   runGcpRelease,
   validateCandidateReadback,
   validateCandidateControlPlaneReadbacks,
@@ -236,6 +237,7 @@ function receiptChain(plan, through) {
       sequence: index + 1,
       releaseSha: plan.releaseSha,
       releaseIdentitySha256: plan.releaseIdentitySha256,
+      phaseIdentitySha256: releasePhaseIdentitySha256(plan, phase),
       candidateService: CANDIDATE_SERVICE,
       stableService: STABLE_SERVICE,
       trafficState: 'candidate-service-private-100',
