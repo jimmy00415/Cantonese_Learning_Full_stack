@@ -1728,12 +1728,33 @@ function normalizeCloudBuildReceipt(value, { releaseSha, sourceArchiveSha256, bu
 
     const expectedBuilderImages = [NODE_BUILDER, NODE_BUILDER, DOCKER_BUILDER, DOCKER_BUILDER, DOCKER_BUILDER]
       .map((builder) => `sha256:${builder.split('@sha256:')[1]}`);
+    const builtImage = value.results?.images?.[0];
+    const builtImageKeys = Object.keys(builtImage ?? {}).sort();
+    const expectedArtifactRegistryPackage = [
+      `projects/${PROJECT}/locations/${REGION}/repositories/${REPOSITORY}`,
+      `packages/${STABLE_SERVICE}/versions/${builtImage?.digest}`,
+    ].join('/');
     if (!exactKeys(value.results, ['buildStepImages', 'images'])
       || !exact(value.results.buildStepImages, expectedBuilderImages)
       || !Array.isArray(value.results.images) || value.results.images.length !== 1
-      || !exactKeys(value.results.images[0], ['digest', 'name'])
-      || value.results.images[0].name !== imageName
-      || !IMAGE_DIGEST.test(String(value.results.images[0].digest ?? ''))) throw new Error();
+      || !['artifactRegistryPackage', 'digest', 'name'].every((key) => builtImageKeys.includes(key))
+      || builtImageKeys.some((key) => ![
+        'artifactRegistryPackage', 'digest', 'name', 'pushTiming',
+      ].includes(key))
+      || builtImage.name !== imageName
+      || !IMAGE_DIGEST.test(String(builtImage.digest ?? ''))
+      || builtImage.artifactRegistryPackage !== expectedArtifactRegistryPackage
+      || (Object.hasOwn(builtImage, 'pushTiming')
+        && !validCloudBuildTimeSpan(builtImage.pushTiming))) throw new Error();
+
+    const normalizedResults = {
+      buildStepImages: value.results.buildStepImages,
+      images: [{
+        artifactRegistryPackage: builtImage.artifactRegistryPackage,
+        digest: builtImage.digest,
+        name: builtImage.name,
+      }],
+    };
 
     return Object.freeze(canonical({
       id: value.id,
@@ -1741,7 +1762,7 @@ function normalizeCloudBuildReceipt(value, { releaseSha, sourceArchiveSha256, bu
       name: value.name,
       options: value.options,
       projectId: value.projectId,
-      results: value.results,
+      results: normalizedResults,
       serviceAccount: value.serviceAccount,
       source: value.source,
       sourceProvenance: value.sourceProvenance,
@@ -4524,31 +4545,37 @@ export async function runGcpRelease({
             alreadyRestored = false;
           }
           if (!alreadyRestored) {
-            let responseLost = false;
+            let responseLost = null;
+            let acknowledgementError = null;
+            let acknowledgement;
             try {
-              const restored = await executor([
+              acknowledgement = await executor([
                 'run', 'services', 'update-traffic', STABLE_SERVICE,
                 `--to-revisions=${plan.previousRevision}=100`,
                 `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
               ]);
-              validateTrafficTargetAcknowledgement(restored, {
-                revision: plan.previousRevision, serviceUrl: plan.serviceOrigin,
-              });
-            } catch {
-              responseLost = true;
-              const restored = await executor([
-                'run', 'services', 'describe', STABLE_SERVICE,
-                `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-              ]);
-              validateStableService(restored, plan);
+            } catch (error) {
+              responseLost = error;
+            }
+            if (responseLost === null) {
+              try {
+                validateTrafficTargetAcknowledgement(acknowledgement, {
+                  revision: plan.previousRevision, serviceUrl: plan.serviceOrigin,
+                });
+              } catch (error) {
+                acknowledgementError = error;
+              }
+            }
+            const restored = await executor([
+              'run', 'services', 'describe', STABLE_SERVICE,
+              `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+            ]);
+            validateStableService(restored, plan);
+            if (responseLost !== null) {
               responseLossRecoveries.push('later-promotion-stable-compensation');
             }
-            if (!responseLost) {
-              const restored = await executor([
-                'run', 'services', 'describe', STABLE_SERVICE,
-                `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-              ]);
-              validateStableService(restored, plan);
+            if (acknowledgementError !== null) {
+              throw acknowledgementError;
             }
           }
           const freshStable = await executor([

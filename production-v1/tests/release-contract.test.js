@@ -270,7 +270,11 @@ function exactCloudBuildReceipt() {
         `sha256:${DOCKER_BUILDER.split('@sha256:')[1]}`,
         `sha256:${DOCKER_BUILDER.split('@sha256:')[1]}`,
       ],
-      images: [{ name: imageName, digest: IMAGE_DIGEST }],
+      images: [{
+        name: imageName,
+        digest: IMAGE_DIGEST,
+        artifactRegistryPackage: `projects/${PROJECT}/locations/${REGION}/repositories/hkbuddy-v1/packages/hkbuddy-v1-api/versions/${IMAGE_DIGEST}`,
+      }],
     },
   };
 }
@@ -1667,6 +1671,10 @@ test('build receipt captures one successful verified build, source hash, and fin
       endTime: `2026-08-26T01:00:0${index}.900000Z`,
     },
   }));
+  sdkObserved.results.images[0].pushTiming = {
+    startTime: '2026-08-26T01:01:00.123456Z',
+    endTime: '2026-08-26T01:01:01.123456Z',
+  };
   const sdkReceipt = validateBuildReceipt(sdkObserved, {
     releaseSha: RELEASE_SHA,
     sourceArchiveSha256: SOURCE_SHA,
@@ -1690,6 +1698,10 @@ test('build receipt captures one successful verified build, source hash, and fin
     (value) => { value.sourceProvenance.fileHashes.extra = { fileHash: [] }; },
     (value) => { value.results.buildStepImages.pop(); },
     (value) => { value.results.images[0].name = `${value.results.images[0].name}-foreign`; },
+    (value) => { delete value.results.images[0].artifactRegistryPackage; },
+    (value) => { value.results.images[0].artifactRegistryPackage = value.results.images[0].artifactRegistryPackage.replace('/hkbuddy-v1/', '/foreign/'); },
+    (value) => { value.results.images[0].pushTiming = { recipe: 'smuggled' }; },
+    (value) => { value.results.images[0].status = 'SUCCESS'; },
     (value) => { value.approval = { result: 'APPROVED' }; },
     (value) => { value.warning = [{ priority: 'INFO' }]; },
     (value) => { value.warnings = [{ priority: 'INFO' }]; },
@@ -2126,6 +2138,78 @@ test('later promotion response loss restores exact prior stable traffic and pres
   const finalIamIndex = calls.findLastIndex((argv) => argv.includes('get-iam-policy')
     && argv[3] === STABLE_SERVICE);
   assert.equal(restoreIndex >= 0 && restoreIndex < finalIamIndex, true);
+});
+
+test('later promotion rejects a malformed compensation acknowledgement even when describe is restored', async () => {
+  const input = releaseInput();
+  const plan = buildReleasePlan(input);
+  const priorRevision = { revision: plan.previousRevision, image: plan.previousImage };
+  const calls = [];
+  let stableState = stablePriorReadback(plan);
+  let trafficAttempted = false;
+  let postTrafficDescribeCount = 0;
+  let malformedRestoreReturned = false;
+
+  const result = await runGcpRelease({
+    argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    writeStableSpec: async () => true,
+    execute: async (argv) => {
+      calls.push(argv);
+      if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
+      if (argv[0] === 'artifacts') return {
+        image: argv.includes(plan.previousImage) ? plan.previousImage : plan.image,
+      };
+      if (argv.includes('get-iam-policy')) return argv[3] === CANDIDATE_SERVICE
+        ? candidatePrivateIam() : stablePublicIam();
+      if (argv[1] === 'revisions') {
+        if (argv[3] === plan.candidateRevision) return structuredClone(plan.expectedCandidate);
+        if (argv[3] === plan.stableRevision) return structuredClone(plan.expectedStable);
+        return structuredClone(priorRevision);
+      }
+      if (argv[1] === 'services' && argv[2] === 'replace') {
+        if (argv.includes('--dry-run')) return structuredClone(plan.stableServiceSpec);
+        stableState = stableStagedReadback(plan);
+        return structuredClone(stableState);
+      }
+      if (argv.includes('update-traffic')
+        && argv.includes(`--to-revisions=${plan.stableRevision}=100`)) {
+        trafficAttempted = true;
+        stableState = stablePromotedReadback(plan);
+        throw new Error('promotion traffic response was lost');
+      }
+      if (argv.includes('update-traffic')
+        && argv.includes(`--to-revisions=${plan.previousRevision}=100`)) {
+        malformedRestoreReturned = true;
+        stableState = stablePriorReadback(plan);
+        return {};
+      }
+      if (argv[1] === 'services' && argv[2] === 'describe') {
+        if (argv[3] === CANDIDATE_SERVICE) return candidateServiceReadback(plan);
+        if (trafficAttempted && !malformedRestoreReturned) {
+          postTrafficDescribeCount += 1;
+          if (postTrafficDescribeCount === 2) throw new Error('fresh promotion readback unavailable');
+        }
+        return structuredClone(stableState);
+      }
+      throw new Error(`unexpected operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.publicReport.promotionServiceRestored, false);
+  assert.equal(result.publicReport.promotionIamRestored, false);
+  assert.equal(result.publicReport.responseLossRecoveries.includes(
+    'later-promotion-stable-compensation',
+  ), false);
+  assert.equal(malformedRestoreReturned, true);
+  const restoreIndex = calls.findIndex((argv) => argv.includes(
+    `--to-revisions=${plan.previousRevision}=100`,
+  ));
+  assert.deepEqual(calls[restoreIndex + 1].slice(0, 4), [
+    'run', 'services', 'describe', STABLE_SERVICE,
+  ]);
 });
 
 test('later promotion compensation fails closed when stable state drifts after deployment', async () => {
