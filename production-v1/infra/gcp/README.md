@@ -19,6 +19,16 @@ island and never adopts, updates, or deletes a non-V1 resource.
 - Cloud SQL transport: `sslmode=require`, with instance-side
   `ENCRYPTED_ONLY`
 
+The selected project is a shared control-plane boundary, not a dedicated
+project. Billing, quota, required API enablement, audit logs, and project IAM
+are shared. The default VPC and automatically created subnets, the three
+protected baseline IAM bindings, existing data, and every unrelated service are
+read-only inventory. No launch command may create or relink the project, alter
+its display name or labels, mutate the default network, broaden unrelated IAM,
+or adopt, repair, rename, peer, or delete an existing resource. A foreign or
+partial object at a managed identity is drift and stops the run before a write.
+The earlier dedicated-project creation/billing procedure is superseded.
+
 ### Exact provisioned identities
 
 The Tasks 1–2 operator boundary uses only these executable V1 identities:
@@ -143,7 +153,7 @@ mutation. The script rejects every effective `CLOUDSDK_AUTH_*` credential
 override and any active gcloud `auth` override, including impersonation,
 access-token-file, and credential-file settings. It introspects the actual
 access token and compares the returned email rather than trusting the requested
-account argument. This also makes the project-creator `roles/owner` baseline explicit
+account argument. This also makes the protected human `roles/owner` baseline explicit
 instead of accepting whichever identity happens to be active. The bearer token
 is never placed in an argument or report. This operator authentication path is
 separate from the runtime: Cloud Run uses its attached service account through
@@ -273,8 +283,8 @@ The Cloud Build service agent's automatically managed project-level
 re-created by this script. Exact official service-agent member/role pairs for
 the enabled or used APIs are permitted if Google materializes them; arbitrary
 Google-managed roles, external users/service accounts, public principals, and
-extra project or resource bindings are rejected. In particular, a new project's
-Google APIs Service Agent may have only the current
+extra project or resource bindings are rejected. In particular, the shared
+project's Google APIs Service Agent may have only the current
 `roles/compute.instanceGroupManagerServiceAgent` entitlement; legacy
 project-level `roles/editor` is not allowed.
 
@@ -368,7 +378,8 @@ policy and by the exact HKD 2300 budget alert.
 
 ## Release boundary
 
-This task creates the isolated project foundation. It does not build an image,
+This task provisions or exactly reads back only the isolated resource island
+inside the protected existing project. It does not build an image,
 run migration 001, create a Cloud Run candidate, or route traffic. Those actions
 belong to the frozen-release tasks after this contract and its independent
 review are green. The Cloud Run template in the JSON is the binding input for
@@ -376,3 +387,34 @@ that later deployment: one instance, always-allocated CPU, Direct VPC, zero
 initial traffic, and separate live/ready probes. That later task also supplies
 the six accepted evidence versions; this base task deliberately leaves those
 containers versionless.
+
+### Stable, candidate, promotion, and rollback safety
+
+The stable service origin is exactly
+`https://hkbuddy-v1-api-582852715831.asia-east2.run.app`. A frozen commit
+`<40-lowercase-hex>` produces revision `hkbuddy-v1-api-<first-12-hex>`, tag
+`candidate-<first-12-hex>`, and private tagged origin
+`https://candidate-<first-12-hex>---hkbuddy-v1-api-582852715831.asia-east2.run.app`.
+Candidate deployment preserves the previous evidenced revision at 100% stable
+traffic, assigns the candidate 0% stable traffic, and does not add a public
+invoker binding.
+
+The manifest-driven release phases are dry-run unless the exact frozen SHA is
+confirmed:
+
+```text
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=candidate
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=candidate --confirm-release=40_HEX_SHA
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=promote --confirm-release=40_HEX_SHA
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=rollback --confirm-release=40_HEX_SHA
+```
+
+Promotion freshly validates the candidate service/revision/IAM/image, immutable
+readiness/workload/mobile artifacts, and 200 production traces before it can add
+the reviewed public invoker and route the candidate to 100%. Rollback is a
+separate recovery phase that routes the exact `previousRevision` from the
+manifest back to 100%, removes the candidate tag, and verifies readback. Neither
+phase deletes the candidate, database, media, evidence, protected baseline, or
+any unrelated service. A failed candidate remains unpromoted; if candidate
+deployment partially changed service state, the controller restores the exact
+prior IAM and stable traffic or fails closed with the recovery boundary visible.

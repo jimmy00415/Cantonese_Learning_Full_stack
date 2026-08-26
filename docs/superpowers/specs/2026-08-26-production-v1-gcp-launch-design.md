@@ -9,9 +9,12 @@
 - Implementation boundary: the existing linked worktree on
   `feat/production-v1-ai-senior`; `frontend/`, `backend/`, `backend/public/`, and
   `hkbuddy-pilot-0630` remain unchanged.
-- Cloud boundary: a new project named `Hong Kong Buddy Production V1` with the
-  globally unique project ID `hkbuddy-prod-v1-20260826`, under organization
-  `797368190621` and billing account `01F9FD-24EA9B-A9232C`.
+- Cloud boundary: the existing billed shared host project
+  `motion-expert-hk-ltd-webpage` (`582852715831`), under organization
+  `797368190621` and billing account `01F9FD-24EA9B-A9232C`, contains one exact
+  `hkbuddy-v1-*` resource island. The earlier dedicated target
+  `hkbuddy-prod-v1-20260826` and its project-creation/billing-link procedure are
+  explicitly superseded and must not be used by an operator command.
 - Visual reference: Intercom-inspired conversational clarity on the existing
   warm cream/white Hong Kong Buddy system. No Intercom, Meta, or WhatsApp brand
   asset or product chrome is copied.
@@ -21,6 +24,12 @@ This document is a launch addendum to
 existing durability, privacy, evidence, retention, and fail-closed contracts
 remain authoritative unless this addendum explicitly replaces a cloud-provider
 or interaction decision.
+
+The approved shared-host identity and non-adoption amendment is
+`docs/superpowers/specs/2026-08-26-production-v1-shared-project-isolation-design.md`.
+It replaces the original project/resource identity decision in this addendum;
+all product, provider, privacy, evidence, SLO, promotion, and rollback
+requirements below remain binding.
 
 ## Outcome
 
@@ -278,17 +287,29 @@ student browser
   -> Cloud Logging / Monitoring / budget notifications
 ```
 
-Initial resource identities:
+Binding resource identities:
 
-- project: `hkbuddy-prod-v1-20260826`;
-- runtime service account: `hkbuddy-runtime`;
-- deployer service account: `hkbuddy-deployer`;
-- Artifact Registry repository: `hkbuddy` in `asia-east2`;
-- Cloud Run service: `hkbuddy-api` in `asia-east2`;
-- Cloud SQL instance: `hkbuddy-pg` in `asia-east2`;
+- project: `motion-expert-hk-ltd-webpage` (`582852715831`);
+- runtime/build/migration/deployment/acceptance service accounts:
+  `hkbuddy-v1-runtime`, `hkbuddy-v1-build`, `hkbuddy-v1-migrator`,
+  `hkbuddy-v1-deployer`, and `hkbuddy-v1-acceptance` in the selected project;
+- Artifact Registry repository: `hkbuddy-v1` in `asia-east2`;
+- Cloud Run service: `hkbuddy-v1-api` in `asia-east2`;
+- Cloud SQL instance: `hkbuddy-v1-pg` in `asia-east2`;
 - database/user: `hkbuddy_v1` / `hkbuddy_app`;
-- media bucket: `hkbuddy-prod-v1-20260826-media`;
+- media bucket: `hkbuddy-v1-582852715831-media`;
+- VPC/subnet/private-services range: `hkbuddy-v1-vpc`,
+  `hkbuddy-v1-ae2-run`, and `hkbuddy-v1-google-services`;
 - budget display name: `Hong Kong Buddy Production V1 monthly guard`.
+
+This is logical isolation inside a shared project. API enablement, quota,
+billing, audit logs, and project IAM remain shared. The default VPC and its
+subnets, baseline IAM, existing data, and unrelated services are protected
+read-only state. Provisioning is create-or-exact-readback for the resource
+island only: it never creates or relinks the project, attaches to or modifies
+the default network, broadens unrelated IAM, or adopts, repairs, renames, peers,
+or deletes an existing resource. Any managed-name collision, partial ownership,
+or protected-state drift fails before mutation.
 
 Cloud Run uses one minimum and one maximum instance for the first release, two
 vCPU, one GiB memory, concurrency 40, startup CPU boost, and a bounded request
@@ -363,7 +384,10 @@ Singapore STT, and TTS latency are measured rather than assumed.
 
 1. Commit the GCP adapter, deployment, language, knowledge, and test changes.
 2. Freeze a clean commit SHA.
-3. Create and configure only the named GCP project/resources.
+3. Verify the selected existing shared project and configure only the exact
+   `hkbuddy-v1-*` resource island. Project creation, billing-link changes,
+   default-VPC changes, unrelated IAM changes, and resource adoption are
+   forbidden.
    The dependency-acceptance identity receives object access plus one fixed GA
    custom role containing only `storage.buckets.get`, bound only on the media
    bucket, so it can attest the exact bucket project without gaining bucket
@@ -386,18 +410,28 @@ Singapore STT, and TTS latency are measured rather than assumed.
    publish and read back the accepted numeric Secret Manager versions. Delete
    only those verified generations and prove zero release-output residue.
    Artifact SHA-256 values remain separate from Secret version numbers.
-7. Only after those evidence versions exist, boot the digest-pinned Cloud Run
-   candidate at zero traffic with the evidence mounted as read-only files.
+7. Only after those evidence versions exist, boot digest-pinned revision
+   `hkbuddy-v1-api-<12 lowercase hex>` behind the SHA-bound private
+   `candidate-<12 lowercase hex>` tag at zero stable traffic, with the evidence
+   mounted as read-only files. The previous evidenced revision remains at 100%
+   and public invocation is unchanged.
 8. Run candidate-specific mobile, retention, readiness, and latency acceptance
    against the same resource identities, image digest, and frozen commit.
-9. Promote the Cloud Run revision only when every release artifact is green.
-10. Return the stable HTTPS URL and generate a decode-verified QR code from that
-    exact URL outside tracked source.
+9. Promote only after fresh candidate/service/IAM/image and immutable
+   readiness/workload/mobile/trace validation. Then add the reviewed public
+   invoker binding, route the candidate to 100%, remove its tag, and read back
+   the stable service.
+10. Return the exact stable origin
+    `https://hkbuddy-v1-api-582852715831.asia-east2.run.app` and generate a
+    decode-verified QR code from that URL outside tracked source.
 
-Rollback moves traffic to the previous evidenced Cloud Run revision. It does
-not mutate the legacy Azure app, database, Blob container, workflow, hostname,
-or settings. Database migration 1 is additive; rollback never drops production
-data. New cloud resources are not deleted automatically.
+Rollback is separately confirmed and moves `hkbuddy-v1-api` traffic to the
+exact previous evidenced V1 revision at 100%, removes the candidate tag, and
+verifies stable readback. It does not delete the candidate, production data,
+resource island, protected shared-project state, or unrelated services, and it
+does not mutate the legacy Azure app, database, Blob container, workflow,
+hostname, or settings. Database migration 1 is additive; rollback never drops
+production data.
 
 ## Explicitly deferred
 

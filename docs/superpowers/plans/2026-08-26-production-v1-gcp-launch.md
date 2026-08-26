@@ -4,7 +4,7 @@
 
 **Goal:** Deploy an isolated, production-gated Hong Kong Buddy V1 on Google Cloud that feels like messaging a capable HKBU senior, answers from reviewed official evidence, and supports English, Cantonese, and Mandarin text plus asynchronous voice messages.
 
-**Architecture:** Preserve the tested Node/Express modular monolith, PostgreSQL transaction model, durable dispatcher, SSE replay, strict citation validator, and privacy lifecycle. Add Google ADC-backed Vertex AI, Speech-to-Text V2, Text-to-Speech, and private Cloud Storage adapters. Run one warm Cloud Run instance in Hong Kong against a new Cloud SQL database and new GCS bucket. Every campus fact remains governed by the bundled reviewed corpus; monitoring can propose changes but never promote them automatically.
+**Architecture:** Preserve the tested Node/Express modular monolith, PostgreSQL transaction model, durable dispatcher, SSE replay, strict citation validator, and privacy lifecycle. Add Google ADC-backed Vertex AI, Speech-to-Text V2, Text-to-Speech, and private Cloud Storage adapters. Run one warm Cloud Run instance in Hong Kong against the exact `hkbuddy-v1-*` Cloud SQL, GCS, network, identity, and release island inside the protected existing shared host project. Every campus fact remains governed by the bundled reviewed corpus; monitoring can propose changes but never promote them automatically.
 
 **Tech Stack:** Node.js 22 ESM, Express 5, PostgreSQL 16, Google Cloud Run, Cloud SQL, Cloud Storage, Secret Manager, Artifact Registry, Cloud Build, Vertex AI Gemini 2.5 Flash, Speech-to-Text V2 Chirp 2, Text-to-Speech, vanilla HTML/CSS/JavaScript, Node test runner.
 
@@ -14,7 +14,9 @@
 
 - Work only in `.worktrees/production-v1-ai-senior` on `feat/production-v1-ai-senior`.
 - Do not modify or deploy `frontend/`, `backend/`, `backend/public/`, the legacy Azure workflow, `hkbuddy-pilot-0630`, legacy DNS, databases, or Blob containers.
-- Use only project `hkbuddy-prod-v1-20260826`; pass `--project` and the isolated Cloud SDK configuration on every mutating GCP command.
+- Use only host project `motion-expert-hk-ltd-webpage` (`582852715831`); every mutating command must bind that exact project and the isolated Cloud SDK configuration.
+- Project creation, billing-link changes, display-name/label changes, default-VPC changes, unrelated IAM changes, resource adoption, destructive repair, and cross-project mutation are forbidden. The earlier dedicated project `hkbuddy-prod-v1-20260826` is superseded history only.
+- Treat billing, quota, required API enablement, audit logs, and project IAM as shared. Treat the default VPC/subnets, protected baseline IAM, existing data, and unrelated services as immutable inventory.
 - Never print, commit, or persist access tokens, database passwords, session secrets, prompts, transcripts, audio, or raw provider bodies.
 - Use Application Default Credentials from the attached Cloud Run service account. Do not create service-account keys or accept `GOOGLE_API_KEY`.
 - Preserve fail-closed readiness. A missing or stale provider, storage, iOS voice, latency, or frozen-SHA evidence gate stays visibly red.
@@ -213,7 +215,7 @@ Wire enums are exactly `en | yue-Hant-HK | cmn-Hans-CN` and `text | voice`.
 - [ ] **Step 6: Verify green.** Run knowledge tests, the full suite, syntax checks, and inspect the generated safe source/claim/category counts.
 - [ ] **Step 7: Commit.** `feat(v1): expand governed HKBU guidance`
 
-## Task 6: Create the isolated GCP project and production resources
+## Task 6: Protect the shared host and provision the resource island
 
 **Files:**
 
@@ -224,8 +226,8 @@ Wire enums are exactly `en | yue-Hant-HK | cmn-Hans-CN` and `text | voice`.
 - Create: `production-v1/tests/gcp-infra-contract.test.js`
 - Modify: `production-v1/package.json`
 
-- [ ] **Step 1: Write failing infrastructure-contract tests.** Require the exact new project/resource identities, org/billing binding, API list, least-privilege service accounts, Hong Kong runtime/storage/database locations, Singapore STT boundary, one-instance cap, no public bucket member, Secret Manager numeric versions, backups/PITR/deletion protection, monitoring alerts, and the binding native-currency HKD 2300 budget thresholds.
-- [ ] **Step 2: Implement safe preflight and provisioning commands.** Default is read-only dry-run. Mutation requires `--confirm-project=hkbuddy-prod-v1-20260826`; every command passes the project explicitly, is idempotent/read-before-write, emits no secret values, and refuses any legacy project/resource identity.
+- [ ] **Step 1: Write failing infrastructure-contract tests.** Require existing project `motion-expert-hk-ltd-webpage`, number `582852715831`, its exact org/billing/display-name/label/protected-IAM baseline, the exact `hkbuddy-v1-*` resources, API list, least-privilege service accounts, Hong Kong runtime/storage/database locations, Singapore STT boundary, one-instance cap, no public bucket member, Secret Manager numeric versions, backups/PITR/deletion protection, monitoring alerts, and the binding native-currency HKD 2300 budget thresholds. Prove the default network, unrelated resources, and foreign managed identities are never mutation targets.
+- [ ] **Step 2: Implement safe preflight and non-adoption provisioning.** Default is read-only dry-run. Mutation requires `--confirm-project=motion-expert-hk-ltd-webpage`; every command passes the host project explicitly, is create-or-exact-readback, emits no secret values, and stops on protected-state drift, collision, partial ownership, or any legacy/foreign identity before mutation.
 - [ ] **Step 3: Verify local infrastructure contracts.**
 
   ```powershell
@@ -234,9 +236,9 @@ Wire enums are exactly `en | yue-Hant-HK | cmn-Hans-CN` and `text | voice`.
   npm.cmd run check
   ```
 
-- [ ] **Step 4: Create and bill the isolated project.** Create `hkbuddy-prod-v1-20260826` under organization `797368190621`, link billing account `01F9FD-24EA9B-A9232C`, and enable only the documented APIs.
-- [ ] **Step 5: Create the production topology.** Create Artifact Registry, runtime/build identities, VPC/subnet/private service access, Cloud SQL PostgreSQL 16 with HA/backups/PITR/deletion protection, the private GCS bucket with UBLA/PAP/lifecycle, secret containers, monitoring policies, and the monthly budget. Generate session/database secrets in memory and add them as numeric Secret Manager versions without printing them.
-- [ ] **Step 6: Read back every control.** Export only non-secret safe metadata, verify IAM contains no broad runtime role, bucket has no public binding, SQL has the intended availability/private connectivity, and no command referenced a legacy resource.
+- [ ] **Step 4: Superseded — do not create or bill a dedicated project.** The former creation/linking target `hkbuddy-prod-v1-20260826` is historical only. Require the selected shared project and existing billing link to match exactly; never create, relink, relabel, or adopt them.
+- [ ] **Step 5: Create the exact production resource island.** Create or exactly read back repository `hkbuddy-v1`, service `hkbuddy-v1-api`, instance/database `hkbuddy-v1-pg` / `hkbuddy_v1`, bucket `hkbuddy-v1-582852715831-media`, VPC/subnet/PSA range `hkbuddy-v1-vpc` / `hkbuddy-v1-ae2-run` / `hkbuddy-v1-google-services`, exact `hkbuddy-v1-*` service accounts, secrets, Jobs, monitoring policies, and budget. Generate session/database secrets in memory and add them as numeric Secret Manager versions without printing them.
+- [ ] **Step 6: Read back every control and protected boundary.** Export only non-secret safe metadata; verify the protected baseline/default VPC/existing data/unrelated services are unchanged, IAM contains no broad runtime role, the bucket has no public binding, SQL has the intended availability/private connectivity, and no command targeted a legacy, foreign, consumer, or unrelated resource.
 - [ ] **Step 7: Commit.** `chore(v1): codify isolated GCP production`
 
 ## Task 7: Freeze, build, migrate, and deploy the candidate
@@ -262,7 +264,7 @@ Wire enums are exactly `en | yue-Hant-HK | cmn-Hans-CN` and `text | voice`.
 - [ ] **Step 4: Build one immutable image.** Use Cloud Build and Artifact Registry; after a fresh production-only dependency install and before the Docker build, require the exact reviewed dependency-security PASS receipt and fail closed on expiry or drift. Tag by the full frozen SHA, require the successful gate step in the final Build receipt, and capture the immutable image digest. Do not build from an uncommitted directory.
 - [ ] **Step 5: Run migration through an isolated job.** Mount the numeric database secret version, connect through the intended VPC/Cloud SQL path, apply and verify migration 001, then remove the job execution. Never expose the database publicly or print its URL.
 - [ ] **Step 6: Produce and publish preboot evidence.** Publish/read back the reviewed legacy inventory first. Run the digest-pinned dependency Job as the dedicated acceptance identity, whose bucket access is limited to object operations plus one fixed custom `storage.buckets.get` permission on the media bucket, and run LLM/ASR/TTS Jobs as the exact runtime identity. Each Job writes one create-only private, release/run-scoped GCS object. Describe and download one exact numeric generation, verify semantic and exact-byte SHA-256 values independently, publish/read back each accepted JSON artifact as one numeric Secret Manager version, then delete only those generations and prove zero output residue without logging secret content.
-- [ ] **Step 7: Deploy a zero-traffic candidate.** Only after all required evidence versions exist, attach the runtime service account, exact Cloud SQL/GCS/AI settings, numeric secret/evidence versions, one-instance cap, always-allocated CPU, dependency-safe startup plus separate liveness/readiness probes, and frozen image digest. The public app receives no traffic until readiness is green.
+- [ ] **Step 7: Deploy a zero-traffic candidate.** Only after all required evidence versions exist, deploy revision `hkbuddy-v1-api-<first-12-hex>` under private tag `candidate-<first-12-hex>` with exact origin `https://candidate-<first-12-hex>---hkbuddy-v1-api-582852715831.asia-east2.run.app`; attach the exact runtime identity, Cloud SQL/GCS/AI settings, numeric secret/evidence versions, one-instance cap, always-allocated CPU, dependency-safe startup plus separate liveness/readiness probes, and frozen image digest. Preserve the previous evidenced revision at 100% stable traffic and do not add public invocation during candidate deployment.
 - [ ] **Step 8: Commit only documentation that predates evidence.** After the candidate exists, no tracked mutation is allowed; generated real-gate reports remain ignored and bind to the frozen SHA.
 
 ## Task 8: Run real gates, mobile QA, promotion, and handoff
@@ -276,13 +278,13 @@ Wire enums are exactly `en | yue-Hant-HK | cmn-Hans-CN` and `text | voice`.
 - [ ] **Step 2: Verify candidate resource continuity.** Confirm the candidate names the same Cloud SQL/GCS resource IDs and release-bound dependency evidence produced before boot; any mismatch requires a new evidence version and a new candidate revision.
 - [ ] **Step 3: Run readiness and workload gates.** Require `/api/health/live=200`, `/api/health/ready=200`, 200 text turns across 20 sessions at concurrency five, multilingual ASR/TTS samples, no duplicates/loss, and every latency/grounding SLO from the spec. A failed paid smoke is diagnosed before any repeat.
 - [ ] **Step 4: Run same-viewport mobile QA.** In the in-app browser at 390x844, verify first visit, language/mode changes, text send, editable voice transcript, ready-but-not-autoplaying audio, verified sources, unknown-answer handoff, retry/reload, consent, clear conversation, keyboard focus, safe areas, and no horizontal overflow. Capture fresh screenshots from the deployed candidate.
-- [ ] **Step 5: Promote once.** Route 100% traffic to the evidenced revision only after all gates pass. Read back the service URL, traffic split, revision, image digest, min/max instances, IAM, SQL, bucket, alerts, and budget. If any post-promotion gate fails, move traffic to the last known-good V1 revision or to zero; never route to legacy.
+- [ ] **Step 5: Promote once.** Freshly revalidate candidate service/revision/IAM/image plus immutable readiness/workload/mobile artifacts and 200 production traces. Only then add the reviewed public invoker, route `hkbuddy-v1-api` 100% to the evidenced revision, remove the candidate tag, and read back stable origin `https://hkbuddy-v1-api-582852715831.asia-east2.run.app`, traffic, revision, digest, min/max instances, IAM, SQL, bucket, alerts, and budget. If a post-promotion gate fails, separately confirm rollback to the exact previous evidenced V1 revision at 100%; never delete data/resources or route to legacy.
 - [ ] **Step 6: Generate and verify the QR code.** Encode the exact promoted HTTPS URL, decode-test it locally, and render it with the live link in the handoff.
 - [ ] **Step 7: Final verification.** Use `superpowers:verification-before-completion`; report implementation, runtime health, knowledge freshness, speech capability, measured latency, cost guard, and any honest readiness limitation separately.
 
 ## Definition of done
 
-- The live Cloud Run URL opens the isolated V1 and no legacy resource was changed.
+- The stable Cloud Run origin `https://hkbuddy-v1-api-582852715831.asia-east2.run.app` opens the isolated V1; no legacy resource, protected shared-project baseline, existing data, or unrelated service was changed.
 - English, Cantonese, and Mandarin preferences are explicit and immutable per message.
 - Text and optional non-autoplay voice replies work on a 390px mobile viewport.
 - Governed questions cite current official evidence; unsupported questions do not guess or link an unrelated office.

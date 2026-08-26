@@ -41,7 +41,7 @@ V1 runs as one new application replica behind HTTPS:
 - Node/Express serves the chat UI, API, dispatcher, and SSE updates.
 - A new PostgreSQL resource stores sessions, conversations, turns, event replay,
   quotas, media ownership, deletion outbox, and durable worker state.
-- The private `hkbuddy-prod-v1-20260826-media` GCS bucket stores opaque
+- The private `hkbuddy-v1-582852715831-media` GCS bucket stores opaque
   voice/TTS attempt objects with uniform bucket-level access and public-access
   prevention.
 - The reviewed HKBU corpus in `data/knowledge/hkbu-v1.json` is the grounding
@@ -52,6 +52,23 @@ V1 runs as one new application replica behind HTTPS:
   All three share Application Default Credentials from the attached Cloud Run
   runtime service account. API keys, access-token settings, credential JSON,
   and credential-file paths are rejected.
+
+The production resource island is fixed to the already billed shared host
+project `motion-expert-hk-ltd-webpage` (`582852715831`): Artifact Registry
+repository `hkbuddy-v1`, Cloud Run service `hkbuddy-v1-api`, Cloud SQL instance
+`hkbuddy-v1-pg` with database `hkbuddy_v1`, VPC `hkbuddy-v1-vpc`, subnet
+`hkbuddy-v1-ae2-run`, PSA range `hkbuddy-v1-google-services`, and the exact
+`hkbuddy-v1-*` service accounts, secrets, and Jobs in
+`infra/gcp/resource-contract.json`. The application resource island is
+dedicated, but project API enablement, quota, billing, audit logs, and the
+project IAM boundary are shared.
+
+The default VPC and its subnets, protected baseline IAM, existing data, and all
+unrelated services are read-only inventory. Provisioning never attaches to,
+updates, peers, deletes, renames, repairs, or adopts them. A same-name resource
+with foreign ownership or any protected-state drift stops before mutation. The
+earlier dedicated-project creation and billing-link procedure is superseded;
+operators must not create or relink a project for this release.
 
 Production does not listen on a port until the first retention run succeeds and
 all six live checks are ready: database, private media, corpus, retention,
@@ -119,10 +136,15 @@ values. The production boundary uses these setting names:
 - PostgreSQL: `V1_STORE_DRIVER`, `V1_DATABASE_URL`,
   `V1_POSTGRES_RESOURCE_ID`
 - private GCS: `V1_MEDIA_DRIVER=gcs`,
-  `V1_GOOGLE_CLOUD_PROJECT=hkbuddy-prod-v1-20260826`,
-  `V1_GCS_BUCKET=hkbuddy-prod-v1-20260826-media`, and
-  `V1_GCS_RESOURCE_ID=//storage.googleapis.com/projects/_/buckets/hkbuddy-prod-v1-20260826-media`;
+  `V1_GOOGLE_CLOUD_PROJECT=motion-expert-hk-ltd-webpage`,
+  `V1_GCS_BUCKET=hkbuddy-v1-582852715831-media`, and
+  `V1_GCS_RESOURCE_ID=//storage.googleapis.com/projects/_/buckets/hkbuddy-v1-582852715831-media`;
   authentication is attached-service-account ADC only
+- Cloud Run identity/origins:
+  `V1_RUNTIME_SERVICE_ACCOUNT=hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com`,
+  `V1_PUBLIC_ORIGIN=https://hkbuddy-v1-api-582852715831.asia-east2.run.app`,
+  and a SHA-bound private candidate origin of
+  `https://candidate-<12-lowercase-hex>---hkbuddy-v1-api-582852715831.asia-east2.run.app`
 - model: `V1_LLM_PROVIDER`, `V1_LLM_CREDENTIAL_VERSION`, plus the selected
   provider's complete V1-prefixed credential, endpoint, model/deployment,
   API-version, and request-profile set
@@ -143,7 +165,7 @@ values. The production boundary uses these setting names:
   `V1_TTS_SMOKE_EVIDENCE_VERSION`, `V1_IOS_VOICE_ACCEPTANCE_FILE`,
   `V1_IOS_VOICE_ACCEPTANCE_VERSION`
 
-Production database and Blob selection accepts only V1-prefixed settings.
+Production database and GCS selection accepts only V1-prefixed settings.
 Production LLM selection follows the same V1-only rule. Unprefixed settings are
 local-compatibility inputs and cannot satisfy production. Dependency init,
 readiness, startup, PostgreSQL connection, query, and statement waits also have
@@ -152,7 +174,7 @@ watchdog interval is configured separately with
 `V1_READINESS_WATCHDOG_INTERVAL_MS`.
 
 For the Google release, configure `V1_GOOGLE_CLOUD_PROJECT` as
-`hkbuddy-prod-v1-20260826`, `V1_VERTEX_LOCATION=global`, and
+`motion-expert-hk-ltd-webpage`, `V1_VERTEX_LOCATION=global`, and
 `V1_VERTEX_MODEL=gemini-2.5-flash`. STT is fixed to `chirp_2` through the `_`
 recognizer in `asia-southeast1`. TTS uses the regional
 `asia-southeast1` endpoint and exactly one evidenced Chirp 3 HD Achernar voice
@@ -263,23 +285,33 @@ cookies are V1's current identity boundary; do not describe them as student SSO.
 `Dockerfile` pins the Node 22 OCI base, installs production packages with
 `npm ci` from `package-lock.json`, copies only runtime, migration, and public
 assets, and runs as the unprivileged `node` user on port 8080. Local Docker is
-not required for this tranche. Build the frozen source later with Cloud Build:
+not required for this tranche. The reviewed release controller, not an ad hoc
+project command, builds the frozen source in the selected shared host:
 
 ```powershell
-gcloud.cmd builds submit --project=hkbuddy-prod-v1-20260826 --config=cloudbuild.yaml --substitutions=_RELEASE_SHA=<lowercase-40-hex-sha> .
+node scripts/gcp-release.js --manifest=<absolute-release-manifest.json> --phase=build
+node scripts/gcp-release.js --manifest=<absolute-release-manifest.json> --phase=build --confirm-release=<lowercase-40-hex-sha>
 ```
 
-The build rejects a noncanonical SHA and publishes only
-`asia-east2-docker.pkg.dev/hkbuddy-prod-v1-20260826/hkbuddy/hkbuddy-api:<sha>`.
+The build rejects a noncanonical SHA and publishes only through
+`hkbuddy-v1-build@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com` to
+`asia-east2-docker.pkg.dev/motion-expert-hk-ltd-webpage/hkbuddy-v1/hkbuddy-v1-api@sha256:<64-lowercase-hex>`.
 Run `npm.cmd run migrate` as a separate one-shot job; it is never part of
 `CMD` or application startup.
 
-Deploy only as a new application with new resource identities, DNS/hostname, and
-secret scope. Start with exactly one replica. Promote traffic only after privacy,
-real provider, iOS voice, dependency, retention, readiness, and latency gates all
-pass for the same frozen commit.
+Deploy only the digest-pinned revision `hkbuddy-v1-api-<12-lowercase-hex>` under
+the SHA-bound `candidate-<12-lowercase-hex>` tag. Candidate deployment keeps the
+existing stable revision at 100%, gives the candidate 0% stable traffic, and
+keeps public invocation unchanged. Promote only after privacy, real provider,
+iOS voice, dependency, retention, readiness, mobile, and latency gates all pass
+for the same frozen commit and the controller freshly revalidates their
+immutable receipts. Promotion adds the reviewed public invoker binding and
+routes `hkbuddy-v1-api` to the accepted candidate at 100%; it also removes the
+candidate tag.
 
-Rollback routes traffic away from the new V1 application or restores its previous
-frozen release. Do not edit, restart, redeploy, migrate, or repoint
-`hkbuddy-pilot-0630` as part of V1 rollback. No old app deployment or
-configuration is changed by these procedures.
+Rollback is separately confirmed and routes `hkbuddy-v1-api` back to the exact
+previous evidenced V1 revision at 100%, removes the candidate tag, and verifies
+the stable readback. It does not delete data or resources and never edits,
+restarts, redeploys, migrates, or repoints `hkbuddy-pilot-0630`. No legacy app,
+protected shared-project state, or unrelated service is changed by candidate,
+promotion, or rollback.
