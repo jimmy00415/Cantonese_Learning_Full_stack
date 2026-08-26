@@ -55,7 +55,8 @@ V1 runs as one new application replica behind HTTPS:
 
 The production resource island is fixed to the already billed shared host
 project `motion-expert-hk-ltd-webpage` (`582852715831`): Artifact Registry
-repository `hkbuddy-v1`, Cloud Run service `hkbuddy-v1-api`, Cloud SQL instance
+repository `hkbuddy-v1`, public stable Cloud Run service `hkbuddy-v1-api`,
+private candidate Cloud Run service `hkbuddy-v1-api-candidate`, Cloud SQL instance
 `hkbuddy-v1-pg` with database `hkbuddy_v1`, VPC `hkbuddy-v1-vpc`, subnet
 `hkbuddy-v1-ae2-run`, PSA range `hkbuddy-v1-google-services`, and the exact
 regional private lifecycle-bounded Cloud Build source bucket
@@ -310,6 +311,15 @@ only the digest-pinned revision
 `hkbuddy-v1-api-candidate` service, with the SHA-bound
 `candidate-<12-lowercase-hex>` tag at 100% private traffic. It has only the
 reviewed operator's Cloud Run Invoker binding: no public principal is accepted.
+Both controlled Service specs pin
+`run.googleapis.com/invoker-iam-disabled` to exact lowercase string `false`.
+Every live candidate, stable, promotion, rollback, cleanup, response-loss, and
+compensation readback also proves the Invoker IAM check remains enabled: a raw
+Cloud Run v1 Service may omit the annotation because enabled is the safe
+default, or may contain a no-whitespace case-insensitive spelling of `false`.
+Boolean values, whitespace, `true`, malformed annotations, wrong Service shape,
+and annotation drift fail before dependent mutation; a private IAM policy alone
+is not privacy evidence.
 Identity-token audience is the untagged candidate-service root; authenticated
 requests target the tagged candidate URL. Task 8 and phase receipts record
 `trafficState=candidate-service-private-100` plus `stableTrafficState` as
@@ -341,6 +351,11 @@ revision at 100% and leaves the private candidate service unchanged. Receipt-
 bound candidate cleanup is valid on first and later releases: it validates the
 exact candidate service/revision/tag/image/private IAM, deletes only
 `hkbuddy-v1-api-candidate`, and verifies canonical candidate-service absence.
+If the receipt-bound initial precheck is already-absent through the exact
+candidate-specific `CLOUD_RUN_SERVICE_NOT_FOUND` classifier, cleanup performs no
+revision, artifact, IAM, or delete operation and repeats the exact canonical
+absence readback before reporting no mutation. A raw null describe, generic
+404, wrong identity, or ambiguous error is never an absence witness.
 It never changes stable traffic or IAM. These phases do not delete data and
 never edit,
 restarts, redeploys, migrates, or repoints `hkbuddy-pilot-0630`. No legacy app,

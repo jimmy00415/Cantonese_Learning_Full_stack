@@ -33,7 +33,8 @@ The earlier dedicated-project creation/billing procedure is superseded.
 
 The Tasks 1–2 operator boundary uses only these executable V1 identities:
 
-- Cloud Run service: `hkbuddy-v1-api`
+- Cloud Run services: public stable `hkbuddy-v1-api` and private candidate
+  `hkbuddy-v1-api-candidate`
 - Artifact Registry Docker repository: `hkbuddy-v1`
 - media bucket: `hkbuddy-v1-582852715831-media`
 - regional Cloud Build source bucket: `hkbuddy-v1-582852715831-build-source`
@@ -111,14 +112,29 @@ from the installed Cloud SDK 553 Compute v1 schema:
 | `SERVERLESS` | regional | no network or subnetwork selector | IPv4 range |
 | `VPC_PEERING` | global | exact project network selfLink | IPv4 range |
 
-Single-address rows must omit `prefixLength`; they are normalized to `/32` only
-for overlap calculation. Range rows require a canonical network-base IPv4
-prefix from 8 through 30. Global rows omit `region`; regional rows bind the
-exact `asia-east2` region. Both `RESERVED` and `IN_USE` rows are fully validated
-and included in overlap checks. `RESERVING`, unknown status, an incomplete or
-wrong-scope/selector shape, and unknown purposes fail closed. External
-`NAT_AUTO` is outside this INTERNAL model; INTERNAL `NAT_AUTO`,
-`CROSS_SITE_NETWORK`, and `PRIVATE_NAT` are rejected.
+Every Address also requires its exact host-project, name-matching Address
+`selfLink`. Global purposes use the exact global Address path and omit `region`;
+regional purposes use an exact regional Address path whose region agrees with
+`item.region`. A subnetwork selector must be in that same region. This applies
+even to selector-free `SERVERLESS`; it does not falsely require every unrelated
+regional row in the host project to be `asia-east2`.
+
+Single-address INTERNAL rows must omit `prefixLength`; they are normalized to
+`/32` only for overlap calculation. Range rows require a canonical network-base
+IPv4 prefix from 8 through 30. Both `RESERVED` and `IN_USE` rows are fully
+validated and included in overlap checks. `RESERVING`, unknown status, an
+incomplete or wrong-scope/selector shape, and unknown purposes fail closed.
+INTERNAL `NAT_AUTO`, `CROSS_SITE_NETWORK`, and `PRIVATE_NAT` are rejected.
+
+A complete ordinary `EXTERNAL` row is validated before being excluded from
+INTERNAL IPv4 overlap math. It must have stable `RESERVED` or `IN_USE` status,
+an exact host-project/name/scope Address `selfLink`, and a canonical address
+matching `IPV4` or `IPV6`. Ordinary external purpose is absent. A regional `NAT_AUTO`
+is allowed only with exact regional scope. IPv4 rejects IPv6-only endpoint fields.
+Global IPv6 rejects regional fields. Regional IPv6 may carry prefix length 96,
+`ipv6EndpointType` `VM` or `NETLB`, and a same-region exact subnetwork selector.
+Missing address/selfLink, transient `RESERVING`, unknown purpose/status,
+noncanonical IP, foreign project, or contradictory scope fails closed.
 
 The billing account must report `currencyCode=HKD`. Google requires a fixed
 budget amount to use the billing account's native currency, so the reviewed
@@ -503,6 +519,14 @@ Every candidate is routed at 100% on that private service, whose exact Invoker
 policy contains only `user:admin@motionexp.com`; `allUsers` and
 `allAuthenticatedUsers` are forbidden. Identity tokens use the untagged
 candidate-service root as audience while requests target the tagged QA origin.
+The controlled candidate and stable Service specs pin
+`run.googleapis.com/invoker-iam-disabled` to exact lowercase string `false`.
+Raw Cloud Run v1 live readbacks accept only annotation absence (the enabled
+default) or a present no-whitespace string whose case-folded value is `false`;
+malformed annotations, boolean values, semantic true, wrong apiVersion/kind,
+spec-only traffic, or drift fail before dependent mutation. This same proof is
+required for candidate/stable deploy and readback, promotion, cleanup, rollback,
+response-loss recovery, and compensation; IAM policy alone is insufficient.
 The stable service is not changed during candidate deployment or acceptance.
 Candidate, readiness, workload, mobile, trace, and phase receipts bind
 `candidateService`, `stableService`,
@@ -548,6 +572,10 @@ cleanup is separately receipt-bound on both first and
 later releases: it validates the exact candidate service/revision/tag/image and
 private IAM, deletes only `hkbuddy-v1-api-candidate`, and verifies canonical
 candidate-specific absence. It never changes stable traffic or stable IAM.
+An exact initial candidate-specific canonical absence is an `already-absent`
+no-mutation recovery: revision, artifact, IAM, and delete operations are skipped,
+then canonical absence is read back again. Raw null output, generic 404, wrong
+identity, and ambiguous errors never count as absence.
 Neither recovery phase deletes database, media, evidence, protected baseline,
 or unrelated services. Drift or an unprovable response-loss state fails closed
 with the recovery boundary visible.

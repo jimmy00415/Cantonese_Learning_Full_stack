@@ -2674,10 +2674,12 @@ test('every internal RESERVED address family is canonical and participates in pr
       name: 'foreign-endpoint', purpose: 'GCE_ENDPOINT', address: '10.24.0.1',
       addressType: 'INTERNAL', status: 'RESERVED', region,
       subnetwork: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/regions/asia-east2/subnetworks/default`,
+      selfLink: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/regions/asia-east2/addresses/foreign-endpoint`,
     }, 'CIDR_OVERLAP'],
     ['PRIVATE_SERVICE_CONNECT global single address overlap', {
       name: 'foreign-psc', purpose: 'PRIVATE_SERVICE_CONNECT', address: '10.25.0.1',
       addressType: 'INTERNAL', status: 'RESERVED', network,
+      selfLink: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/addresses/foreign-psc`,
     }, 'CIDR_OVERLAP'],
     ['unsupported internal purpose', {
       name: 'foreign-unknown', purpose: 'UNSUPPORTED_FAMILY', address: '192.168.0.1',

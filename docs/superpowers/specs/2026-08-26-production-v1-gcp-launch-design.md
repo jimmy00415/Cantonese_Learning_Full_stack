@@ -418,7 +418,15 @@ Singapore STT, and TTS latency are measured rather than assumed.
    read-only files. The tag exists only on that private service. Authentication
    mints an in-memory ID token for the untagged candidate-service root while the
    request targets the tagged URL. Exact candidate IAM contains only the
-   reviewed private invoker and no public principal. The receipt records
+   reviewed private invoker and no public principal. Controlled candidate and
+   stable Service specs pin `run.googleapis.com/invoker-iam-disabled` to exact
+   lowercase string `false`. Raw Cloud Run v1 live readbacks accept only
+   annotation absence (IAM check enabled by default) or a no-whitespace string
+   case-folding exactly to `false`; malformed/boolean/true values, wrong
+   apiVersion/kind, spec-only traffic, or drift fail before dependent mutation.
+   The normalized false invariant is part of the hashed candidate contract and
+   applies to deploy/readback, promotion, cleanup, rollback, response-loss, and
+   compensation; private IAM alone is insufficient. The receipt records
    `trafficState=candidate-service-private-100`, both service identities, and
    stable absent or genuine-prior-stable-at-100 state. The public stable service
    is unchanged during acceptance.
@@ -429,7 +437,8 @@ Singapore STT, and TTS latency are measured rather than assumed.
    keep the genuine prior stable revision at 100%, stage the accepted stable
    revision untagged at 0%, verify exact image/config and a tag-free stable
    service, then atomically switch the accepted stable revision to 100%; stable
-   public IAM is read-only. On the first release, create stable privately at
+   public IAM is read-only. Every stable readback revalidates the same Invoker
+   IAM enabled truth. On the first release, create stable privately at
    100%, verify its service/revision/image/config and private IAM, then add
    `allUsers:roles/run.invoker` as the final mutation, followed only by IAM
    readback. Response-loss compensation restores the exact prior stable state
@@ -445,6 +454,10 @@ unchanged public IAM. It neither depends on nor mutates the private candidate
 service. Receipt-bound candidate cleanup is a separate operation: it validates
 the exact candidate service/revision/tag/image/private IAM, deletes only
 `hkbuddy-v1-api-candidate`, and verifies candidate-specific canonical absence.
+An exact already-absent initial precheck skips revision, artifact, IAM, and
+delete operations but repeats canonical absence readback before reporting no
+mutation. Raw null output, generic 404, wrong identity, and ambiguous errors are
+not absence witnesses.
 Neither operation deletes production data, the resource island, protected
 shared-project state, or unrelated services, and neither mutates the legacy
 Azure app, database, Blob container, workflow, hostname, or settings. Database

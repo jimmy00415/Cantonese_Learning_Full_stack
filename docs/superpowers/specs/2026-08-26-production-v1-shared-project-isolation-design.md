@@ -124,8 +124,14 @@ fresh preflight:
    namespace, except the fixed database/user names whose scope is the dedicated
    Cloud SQL instance.
 3. The proposed subnet and private-service CIDRs do not overlap any project
-   subnet, route, supported internal `RESERVED` address family, or peering
-   range; unsupported or incomplete internal-address shapes fail closed.
+   subnet, route, supported INTERNAL `RESERVED`/`IN_USE` address family, or
+   peering range. Every INTERNAL Address binds an exact host-project,
+   name-matching Address `selfLink`, global/regional scope, matching region, and
+   same-region subnetwork where selected. Complete ordinary IPv4/IPv6 EXTERNAL
+   rows and regional `NAT_AUTO` are shape-validated before exclusion from IPv4
+   overlap math; regional IPv6 endpoint/range fields are bounded to prefix 96,
+   `VM`/`NETLB`, and a same-region subnetwork. Transient, incomplete, foreign,
+   unsupported, noncanonical, or contradictory address shapes fail closed.
 4. No existing project-level IAM binding, default-network object, DNS resource,
    domain, BigQuery dataset, or unrelated resource is a mutation target.
 5. Existing resources with a managed identity must match the complete expected
@@ -168,6 +174,15 @@ SHA tag on that service only. The untagged candidate-service root is the
 in-memory ID-token audience and the tagged URL is the authenticated request
 target. Exact candidate IAM contains only the reviewed private invoker and no
 `allUsers` or `allAuthenticatedUsers`. Every candidate receipt records
+the normalized `invokerIamDisabled=false` privacy invariant in its hashed
+candidate contract. Controlled candidate and stable Service specs pin
+`run.googleapis.com/invoker-iam-disabled` to exact lowercase string `false`.
+Raw Cloud Run v1 live readbacks accept only annotation absence (the enabled
+default) or a no-whitespace string case-folding exactly to `false`; malformed,
+boolean, semantic-true, wrong apiVersion/kind, spec-only traffic, or drifted
+readbacks fail before dependent candidate, promotion, cleanup, rollback,
+response-loss, or compensation mutation. IAM policy alone is not privacy proof.
+Every candidate receipt also records
 `trafficState=candidate-service-private-100` plus the exact stable service and
 whether stable is absent or retains its genuine prior revision at 100%. The
 public `hkbuddy-v1-api` service is unchanged during candidate acceptance.
@@ -198,7 +213,11 @@ mobile acceptance, then promotion, with the release manifest refreshed at each
 producer/consumer boundary. Candidate cleanup loads through the candidate
 receipt, revalidates its service/revision/tag/image/private IAM, deletes only
 `hkbuddy-v1-api-candidate`, and verifies candidate-specific canonical absence;
-it never changes stable traffic or IAM. Later rollback loads the complete mobile
+an exact candidate-specific already-absent precheck skips revision, artifact,
+IAM, and delete operations but still repeats canonical absence readback before
+reporting no mutation. Raw null output, generic 404, wrong identity, or ambiguous
+transport is never absence evidence. Cleanup never changes stable traffic or
+IAM. Later rollback loads the complete mobile
 chain, revalidates the receipt-proven prior stable revision/image/service, and
 mutates only `hkbuddy-v1-api` traffic. It does not depend on the candidate
 service still existing. First-release rollback is unavailable and performs no

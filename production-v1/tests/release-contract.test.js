@@ -759,6 +759,7 @@ function runGcpRelease(options) {
 function candidateServiceReadback(plan) {
   return {
     service: CANDIDATE_SERVICE,
+    invokerIamDisabled: false,
     traffic: [{
       revision: plan.candidateRevision, tag: plan.candidateTag, percent: 100,
     }],
@@ -768,6 +769,7 @@ function candidateServiceReadback(plan) {
 function stablePriorReadback(plan) {
   return {
     service: STABLE_SERVICE,
+    invokerIamDisabled: false,
     traffic: [{ revision: plan.previousRevision, percent: 100 }],
   };
 }
@@ -775,6 +777,7 @@ function stablePriorReadback(plan) {
 function stableStagedReadback(plan) {
   return {
     service: STABLE_SERVICE,
+    invokerIamDisabled: false,
     traffic: plan.expectedStable.stagedTraffic.map(({ revision, percent }) => ({ revision, percent })),
   };
 }
@@ -782,6 +785,7 @@ function stableStagedReadback(plan) {
 function stablePromotedReadback(plan) {
   return {
     service: STABLE_SERVICE,
+    invokerIamDisabled: false,
     traffic: [{ revision: plan.stableRevision, percent: 100 }],
   };
 }
@@ -1102,7 +1106,8 @@ test('candidate phase feeds raw Service JSON through gcloud 553-compatible secre
     execute: async (argv) => {
       if (argv[1] === 'services' && argv[2] === 'replace') {
         const raw = JSON.parse(await readFile(argv[3], 'utf8'));
-        return dryRun(raw);
+        dryRun(raw);
+        return argv.includes('--dry-run') ? raw : candidateServiceReadback(plan);
       }
       if (argv[1] === 'services' && argv[2] === 'describe') {
         describeCount += 1;
@@ -1111,6 +1116,7 @@ test('candidate phase feeds raw Service JSON through gcloud 553-compatible secre
         }
         return {
           service: CANDIDATE_SERVICE,
+          invokerIamDisabled: false,
           traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 100 }],
         };
       }
@@ -1136,6 +1142,7 @@ test('candidate phase feeds raw Service JSON through gcloud 553-compatible secre
   assert.doesNotThrow(() => validateCandidateControlPlaneReadbacks({
     service: {
       service: CANDIDATE_SERVICE,
+      invokerIamDisabled: false,
       traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 100 }],
     },
     revision: structuredClone(plan.expectedCandidate),
@@ -1599,6 +1606,7 @@ test('confirmed candidate fails closed unless every control-plane readback match
   const readbacks = {
     service: {
       service: CANDIDATE_SERVICE,
+      invokerIamDisabled: false,
       traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 100 }],
     },
     revision: structuredClone(plan.expectedCandidate),
@@ -1642,6 +1650,9 @@ test('confirmed candidate fails closed unless every control-plane readback match
       }
       return structuredClone(readbacks.service);
     }
+    if (argv[1] === 'services' && argv[2] === 'replace') {
+      return structuredClone(readbacks.service);
+    }
     return { deployed: true };
     };
   };
@@ -1682,8 +1693,8 @@ test('release orchestrator is dry-run first and executes only one exactly confir
     execute: async (argv) => {
       calls.push(argv);
       if (argv[1] === 'services' && argv[2] === 'describe') return rolledBack
-        ? { service: 'hkbuddy-v1-api', traffic: [{ revision: input.previousRevision, percent: 100 }] }
-        : { service: 'hkbuddy-v1-api', traffic: [{ revision: STABLE_REVISION, percent: 100 }] };
+        ? { service: 'hkbuddy-v1-api', invokerIamDisabled: false, traffic: [{ revision: input.previousRevision, percent: 100 }] }
+        : { service: 'hkbuddy-v1-api', invokerIamDisabled: false, traffic: [{ revision: STABLE_REVISION, percent: 100 }] };
       if (argv[1] === 'revisions') return argv[3] === input.previousRevision
         ? { revision: input.previousRevision, image: plan.previousImage }
         : structuredClone(plan.expectedStable);
@@ -1692,7 +1703,7 @@ test('release orchestrator is dry-run first and executes only one exactly confir
       };
       if (argv.includes('update-traffic')) {
         rolledBack = true;
-        return { service: 'hkbuddy-v1-api', traffic: [{ revision: input.previousRevision, percent: 100 }] };
+        return { service: 'hkbuddy-v1-api', invokerIamDisabled: false, traffic: [{ revision: input.previousRevision, percent: 100 }] };
       }
       if (argv.includes('get-iam-policy')) return {
         bindings: [{ role: 'roles/run.invoker', members: ['allUsers'] }],
@@ -1727,6 +1738,7 @@ test('rollback rejects a zero-percent candidate tag that remains reachable', asy
   const input = releaseInput();
   const staleTaggedService = {
     service: 'hkbuddy-v1-api',
+    invokerIamDisabled: false,
     traffic: [
       { revision: input.previousRevision, percent: 100 },
       { revision: REVISION, tag: CANDIDATE_TAG, percent: 0 },
@@ -1921,6 +1933,7 @@ test('later promotion compensation fails closed when stable state drifts after d
         if (!stableDeployed) return stablePriorReadback(plan);
         return {
           service: STABLE_SERVICE,
+          invokerIamDisabled: false,
           traffic: [{ revision: `${STABLE_SERVICE}-foreign000000`, percent: 100 }],
         };
       }
@@ -2050,6 +2063,7 @@ test('first promotion compensation fails closed on foreign stable state after de
         }
         return {
           service: STABLE_SERVICE,
+          invokerIamDisabled: false,
           traffic: [{ revision: `${STABLE_SERVICE}-foreign000000`, percent: 100 }],
         };
       }
@@ -2174,12 +2188,14 @@ test('empty-host bootstrap is allowed only on canonical NOT_FOUND and creates a 
         if (serviceDescribeCount === 1) {
           throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
         }
-        return { service: CANDIDATE_SERVICE, traffic: [
+        return { service: CANDIDATE_SERVICE, invokerIamDisabled: false, traffic: [
           { revision: REVISION, tag: CANDIDATE_TAG, percent: 100 },
         ] };
       }
       if (argv.includes('--dry-run')) return structuredClone(plan.candidateServiceSpec);
-      if (argv[1] === 'services' && argv[2] === 'replace') return { deployed: true };
+      if (argv[1] === 'services' && argv[2] === 'replace') {
+        return candidateServiceReadback(plan);
+      }
       if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
       if (argv.includes('get-iam-policy')) return iamGranted
         ? candidatePrivateIam('candidate-private-granted')
@@ -2222,6 +2238,8 @@ test('first-release Service API default traffic normalizes to the exact private 
   const plan = buildReleasePlan(releaseInput({ previousRevision: null, previousImageDigest: null }));
   assert.doesNotThrow(() => validateCandidateControlPlaneReadbacks({
     service: {
+      apiVersion: 'serving.knative.dev/v1',
+      kind: 'Service',
       metadata: { name: CANDIDATE_SERVICE },
       status: { traffic: [{ revisionName: REVISION, tag: CANDIDATE_TAG }] },
     },
@@ -2231,6 +2249,8 @@ test('first-release Service API default traffic normalizes to the exact private 
   }, plan));
   assert.throws(() => validateCandidateControlPlaneReadbacks({
     service: {
+      apiVersion: 'serving.knative.dev/v1',
+      kind: 'Service',
       metadata: { name: CANDIDATE_SERVICE },
       status: { traffic: [{ revisionName: REVISION, tag: CANDIDATE_TAG, percent: 0 }] },
     },
@@ -2263,7 +2283,7 @@ test('later rollback validates immutable receipts and fresh revision/image/servi
     execute: async (argv) => {
       calls.push(argv);
       if (argv[1] === 'services' && argv[2] === 'describe') {
-        return { service: 'hkbuddy-v1-api', traffic: [{ revision: REVISION, percent: 100 }] };
+        return { service: 'hkbuddy-v1-api', invokerIamDisabled: false, traffic: [{ revision: REVISION, percent: 100 }] };
       }
       if (argv[1] === 'revisions' && argv[3] === REVISION) {
         return structuredClone(plan.expectedCandidate);
@@ -2286,7 +2306,7 @@ test('later rollback validates immutable receipts and fresh revision/image/servi
     execute: async (argv) => {
       staleImageCalls.push(argv);
       if (argv[1] === 'services' && argv[2] === 'describe') {
-        return { service: 'hkbuddy-v1-api', traffic: [{ revision: REVISION, percent: 100 }] };
+        return { service: 'hkbuddy-v1-api', invokerIamDisabled: false, traffic: [{ revision: REVISION, percent: 100 }] };
       }
       if (argv[1] === 'revisions') return argv[3] === input.previousRevision
         ? { revision: input.previousRevision, image: plan.previousImage }

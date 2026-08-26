@@ -434,34 +434,49 @@ function addressAudit(addresses, desired = '10.250.0.0/24') {
   });
 }
 
+function regionalAddressLink(name) {
+  return `${REGION_LINK}/addresses/${name}`;
+}
+
+function globalAddressLink(name) {
+  return `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/addresses/${name}`;
+}
+
 const LEGAL_INTERNAL_ADDRESSES = Object.freeze([
   ['DNS_RESOLVER', {
     name: 'dns-resolver', purpose: 'DNS_RESOLVER', address: '192.168.10.1',
     addressType: 'INTERNAL', status: 'RESERVED', region: REGION_LINK, subnetwork: SUBNETWORK,
+    selfLink: regionalAddressLink('dns-resolver'),
   }],
   ['GCE_ENDPOINT', {
     name: 'gce-endpoint', purpose: 'GCE_ENDPOINT', address: '192.168.10.2',
     addressType: 'INTERNAL', status: 'IN_USE', region: REGION_LINK, subnetwork: SUBNETWORK,
+    selfLink: regionalAddressLink('gce-endpoint'),
   }],
   ['SHARED_LOADBALANCER_VIP', {
     name: 'shared-vip', purpose: 'SHARED_LOADBALANCER_VIP', address: '192.168.10.3',
     addressType: 'INTERNAL', status: 'RESERVED', region: REGION_LINK, subnetwork: SUBNETWORK,
+    selfLink: regionalAddressLink('shared-vip'),
   }],
   ['IPSEC_INTERCONNECT', {
     name: 'ipsec-range', purpose: 'IPSEC_INTERCONNECT', address: '192.168.20.0', prefixLength: 24,
     addressType: 'INTERNAL', status: 'IN_USE', region: REGION_LINK, network: NETWORK,
+    selfLink: regionalAddressLink('ipsec-range'),
   }],
   ['PRIVATE_SERVICE_CONNECT', {
     name: 'psc-endpoint', purpose: 'PRIVATE_SERVICE_CONNECT', address: '192.168.30.1',
     addressType: 'INTERNAL', status: 'RESERVED', network: NETWORK,
+    selfLink: globalAddressLink('psc-endpoint'),
   }],
   ['SERVERLESS', {
     name: 'serverless-range', purpose: 'SERVERLESS', address: '192.168.40.0', prefixLength: 24,
     addressType: 'INTERNAL', status: 'RESERVED', region: REGION_LINK,
+    selfLink: regionalAddressLink('serverless-range'),
   }],
   ['VPC_PEERING', {
     name: 'peering-range', purpose: 'VPC_PEERING', address: '192.168.50.0', prefixLength: 24,
     addressType: 'INTERNAL', status: 'IN_USE', network: NETWORK,
+    selfLink: globalAddressLink('peering-range'),
   }],
 ]);
 
@@ -479,7 +494,8 @@ test('IN_USE ranges participate in overlap while external NAT_AUTO is excluded',
   );
   assert.doesNotThrow(() => addressAudit([{
     name: 'external-nat-auto', purpose: 'NAT_AUTO', address: '10.250.0.1',
-    addressType: 'EXTERNAL', status: 'IN_USE', region: REGION_LINK,
+    ipVersion: 'IPV4', addressType: 'EXTERNAL', status: 'IN_USE', region: REGION_LINK,
+    selfLink: regionalAddressLink('external-nat-auto'),
   }]));
 });
 
@@ -503,30 +519,39 @@ test('INTERNAL address validation rejects purpose, prefix, scope, selector, and 
     }],
     ['single with prefix', {
       ...LEGAL_INTERNAL_ADDRESSES[0][1], name: 'single-prefix', prefixLength: 32,
+      selfLink: regionalAddressLink('single-prefix'),
     }],
     ['range prefix 31', {
       ...LEGAL_INTERNAL_ADDRESSES[3][1], name: 'range-prefix-31', address: '192.168.60.0', prefixLength: 31,
+      selfLink: regionalAddressLink('range-prefix-31'),
     }],
     ['range non-base address', {
       ...LEGAL_INTERNAL_ADDRESSES[3][1], name: 'range-non-base', address: '192.168.60.1', prefixLength: 24,
+      selfLink: regionalAddressLink('range-non-base'),
     }],
     ['DNS network selector', {
       ...LEGAL_INTERNAL_ADDRESSES[0][1], name: 'dns-network', subnetwork: undefined, network: NETWORK,
+      selfLink: regionalAddressLink('dns-network'),
     }],
     ['IPSEC subnetwork selector', {
       ...LEGAL_INTERNAL_ADDRESSES[3][1], name: 'ipsec-subnetwork', network: undefined, subnetwork: SUBNETWORK,
+      selfLink: regionalAddressLink('ipsec-subnetwork'),
     }],
     ['PSC regional scope', {
       ...LEGAL_INTERNAL_ADDRESSES[4][1], name: 'psc-regional', region: REGION_LINK,
+      selfLink: globalAddressLink('psc-regional'),
     }],
     ['SERVERLESS network selector', {
       ...LEGAL_INTERNAL_ADDRESSES[5][1], name: 'serverless-network', network: NETWORK,
+      selfLink: regionalAddressLink('serverless-network'),
     }],
     ['RESERVING status', {
       ...LEGAL_INTERNAL_ADDRESSES[6][1], name: 'reserving', status: 'RESERVING',
+      selfLink: globalAddressLink('reserving'),
     }],
     ['unknown status', {
       ...LEGAL_INTERNAL_ADDRESSES[6][1], name: 'unknown-status', status: 'UNKNOWN',
+      selfLink: globalAddressLink('unknown-status'),
     }],
   ];
   for (const [name, raw] of invalid) {

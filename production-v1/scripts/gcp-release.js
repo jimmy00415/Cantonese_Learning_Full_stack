@@ -36,6 +36,7 @@ const MIGRATOR_SERVICE_ACCOUNT = GCP_IDENTITY.serviceAccounts.migrator;
 const ACCEPTANCE_SERVICE_ACCOUNT = GCP_IDENTITY.serviceAccounts.acceptance;
 const PROMOTION_AUTHORITY = 'admin@motionexp.com';
 const OCI_SOURCE = 'https://github.com/jimmy00415/Cantonese_Learning_Full_stack';
+const INVOKER_IAM_DISABLED_ANNOTATION = 'run.googleapis.com/invoker-iam-disabled';
 const RELEASE_SHA = /^[0-9a-f]{40}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/;
@@ -539,7 +540,10 @@ function cloudRunServiceSpec({
     kind: 'Service',
     metadata: Object.freeze({
       name: service,
-      annotations: Object.freeze({ 'run.googleapis.com/ingress': 'all' }),
+      annotations: Object.freeze({
+        'run.googleapis.com/ingress': 'all',
+        [INVOKER_IAM_DISABLED_ANNOTATION]: 'false',
+      }),
     }),
     spec: Object.freeze({
       template: Object.freeze({
@@ -1288,6 +1292,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     project: PROJECT,
     region: REGION,
     service: CANDIDATE_SERVICE,
+    invokerIamDisabled: false,
     revision: candidateRevision,
     tag: candidateTag,
     ...revisionContract,
@@ -1302,6 +1307,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     project: PROJECT,
     region: REGION,
     service: STABLE_SERVICE,
+    invokerIamDisabled: false,
     revision: stableRevision,
     tag: null,
     ...revisionContract,
@@ -1542,9 +1548,10 @@ function normalizeCandidateRevision(value, expected) {
 
 function validateCandidateServiceSpecDryRun(value, plan) {
   const template = value?.spec?.template;
-  const normalizedService = normalizeCandidateService(value);
+  const normalizedService = normalizeControlledServiceSpec(value);
   if (value?.apiVersion !== 'serving.knative.dev/v1' || value?.kind !== 'Service'
     || !template || normalizedService?.service !== CANDIDATE_SERVICE
+    || value?.metadata?.annotations?.[INVOKER_IAM_DISABLED_ANNOTATION] !== 'false'
     || !exact(normalizedService.traffic, [{
       revision: plan.candidateRevision,
       tag: plan.candidateTag,
@@ -1561,9 +1568,10 @@ function validateCandidateServiceSpecDryRun(value, plan) {
 
 function validateStableServiceSpecDryRun(value, plan) {
   const template = value?.spec?.template;
-  const normalizedService = normalizeCandidateService(value);
+  const normalizedService = normalizeControlledServiceSpec(value);
   if (value?.apiVersion !== 'serving.knative.dev/v1' || value?.kind !== 'Service'
     || !template || normalizedService?.service !== STABLE_SERVICE
+    || value?.metadata?.annotations?.[INVOKER_IAM_DISABLED_ANNOTATION] !== 'false'
     || !exact(normalizedService.traffic, plan.expectedStable.stagedTraffic)
     || !exact(
       normalizeCandidateRevision({ metadata: template.metadata, spec: template.spec }, plan.expectedStable),
@@ -1574,13 +1582,55 @@ function validateStableServiceSpecDryRun(value, plan) {
   return true;
 }
 
+function normalizeControlledServiceSpec(value) {
+  if (value?.apiVersion !== 'serving.knative.dev/v1' || value?.kind !== 'Service'
+    || typeof value?.metadata?.name !== 'string' || !Array.isArray(value?.spec?.traffic)
+    || value.metadata.annotations?.[INVOKER_IAM_DISABLED_ANNOTATION] !== 'false') return null;
+  return normalizeCandidateService({
+    service: value.metadata.name,
+    traffic: value.spec.traffic,
+    invokerIamDisabled: false,
+  });
+}
+
 function normalizeCandidateService(value) {
-  const direct = value?.service && Array.isArray(value.traffic);
-  const traffic = direct ? value.traffic : value?.status?.traffic ?? value?.spec?.traffic;
-  const service = direct ? value.service : value?.metadata?.name;
-  if (!service || !Array.isArray(traffic)) return null;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const direct = typeof value.service === 'string' && Array.isArray(value.traffic);
+  const rawTraffic = value?.status?.traffic;
+  const raw = value?.apiVersion === 'serving.knative.dev/v1' && value?.kind === 'Service'
+    && typeof value?.metadata?.name === 'string' && Array.isArray(rawTraffic);
+  if (direct === raw) return null;
+  const traffic = direct ? value.traffic : rawTraffic;
+  const service = direct ? value.service : value.metadata.name;
+  const metadata = value?.metadata;
+  const annotationsDefined = metadata && Object.hasOwn(metadata, 'annotations');
+  const serviceAnnotations = metadata?.annotations;
+  const annotationsPrototype = serviceAnnotations !== null
+    && typeof serviceAnnotations === 'object'
+    ? Object.getPrototypeOf(serviceAnnotations)
+    : undefined;
+  const annotationsValid = !annotationsDefined || (serviceAnnotations !== null
+    && typeof serviceAnnotations === 'object' && !Array.isArray(serviceAnnotations)
+    && (annotationsPrototype === Object.prototype || annotationsPrototype === null));
+  if (!direct && !annotationsValid) return null;
+  const rawAnnotationPresent = annotationsValid && annotationsDefined
+    && Object.hasOwn(serviceAnnotations, INVOKER_IAM_DISABLED_ANNOTATION);
+  let invokerIamDisabled;
+  if (direct) {
+    if (rawAnnotationPresent || !Object.hasOwn(value, 'invokerIamDisabled')
+      || value.invokerIamDisabled !== false) return null;
+    invokerIamDisabled = false;
+  } else {
+    if (rawAnnotationPresent) {
+      const annotation = serviceAnnotations[INVOKER_IAM_DISABLED_ANNOTATION];
+      if (typeof annotation !== 'string' || annotation !== annotation.trim()
+        || annotation.toLowerCase() !== 'false') return null;
+    }
+    invokerIamDisabled = false;
+  }
   return {
     service,
+    invokerIamDisabled,
     traffic: traffic.map((member) => ({
       revision: member.revision ?? member.revisionName,
       tag: member.tag ?? null,
@@ -1593,7 +1643,8 @@ function normalizeCandidateService(value) {
 
 function validateCandidateService(value, expected) {
   const normalized = normalizeCandidateService(value);
-  if (!normalized || normalized.service !== expected.service) {
+  if (!normalized || normalized.service !== expected.service
+    || normalized.invokerIamDisabled !== false) {
     throw new Error('Cloud Run candidate service readback is invalid');
   }
   if (!exact(normalized.traffic, expected.traffic)) {
@@ -1605,6 +1656,7 @@ function validateCandidateService(value, expected) {
 function validateStableStagedService(value, plan) {
   const normalized = normalizeCandidateService(value);
   if (!normalized || normalized.service !== STABLE_SERVICE
+    || normalized.invokerIamDisabled !== false
     || !exact(normalized.traffic, plan.expectedStable.stagedTraffic)
     || normalized.traffic.some(({ tag }) => tag !== null)) {
     throw new Error('Cloud Run staged stable service readback is invalid');
@@ -1623,6 +1675,7 @@ function validateStableRevisionReadback(value, plan) {
 function validateStableService(value, { previousRevision } = {}) {
   const normalized = normalizeCandidateService(value);
   if (!normalized || normalized.service !== STABLE_SERVICE
+    || normalized.invokerIamDisabled !== false
     || normalized.traffic.some(({ tag }) => tag !== null)) {
     throw new Error('Cloud Run stable service readback is invalid');
   }
@@ -1641,7 +1694,8 @@ function validateCandidateCleanupService(value, plan) {
 
 function validatePromotedService(value, plan) {
   const normalized = normalizeCandidateService(value);
-  if (!normalized || normalized.service !== STABLE_SERVICE) {
+  if (!normalized || normalized.service !== STABLE_SERVICE
+    || normalized.invokerIamDisabled !== false) {
     throw new Error('Cloud Run promotion service readback is invalid');
   }
   validateTrafficReceipt(value, { revision: plan.stableRevision });
@@ -1654,7 +1708,7 @@ function validatePromotedService(value, plan) {
 function validatePromotionCompensationSource(value, plan) {
   const normalized = normalizeCandidateService(value);
   if (!normalized || normalized.service !== STABLE_SERVICE || normalized.traffic.length < 1
-    || normalized.traffic.length > 2) {
+    || normalized.traffic.length > 2 || normalized.invokerIamDisabled !== false) {
     throw new Error('Cloud Run promotion compensation source is invalid');
   }
   if (plan.previousRevision === null) {
@@ -3450,6 +3504,8 @@ export async function runGcpRelease({
   let promotionIamMutationAttempted = false;
   let promotionTrafficMutationAttempted = false;
   let workloadArtifactPublished = false;
+  let candidateCleanupState = null;
+  let activeOperationId = null;
   const responseLossRecoveries = [];
   if (task8Attestations.workload && task8Attestations.workload !== true) {
     try {
@@ -3512,6 +3568,9 @@ export async function runGcpRelease({
       await verifyEvidence(plan.evidence, { releaseSha: plan.releaseSha });
     }
     for (const member of selected) {
+      if (candidateCleanupState === 'already-absent'
+        && member.id !== 'candidate-cleanup-absence-readback') continue;
+      activeOperationId = member.id;
       if (operationMayMutate(member.id)) mutationAttempted = true;
       if (member.id === 'candidate-deploy') candidateDeployMutationAttempted = true;
       if (member.id === 'candidate-private-iam-grant') candidateIamMutationAttempted = true;
@@ -3519,6 +3578,7 @@ export async function runGcpRelease({
       if (member.id === 'promote-public-service') promotionIamMutationAttempted = true;
       if (member.id === 'promote-traffic') promotionTrafficMutationAttempted = true;
       let receipt;
+      let canonicalServiceAbsence = false;
       try {
         receipt = await executor(member.argv);
       } catch (error) {
@@ -3593,12 +3653,13 @@ export async function runGcpRelease({
           receipt = { responseLossRecovered: true };
           responseLossRecoveries.push('candidate-cleanup-delete');
         } else {
-        const canonicalServiceAbsence = error?.code === 'CLOUD_RUN_SERVICE_NOT_FOUND';
-        const absenceRead = member.id === 'candidate-service-precheck'
-          || member.id === 'candidate-cleanup-absence-readback'
-          || (member.id === 'promote-stable-service-precheck' && plan.previousRevision === null);
-        if (!canonicalServiceAbsence || !absenceRead) throw error;
-        receipt = null;
+          canonicalServiceAbsence = error?.code === 'CLOUD_RUN_SERVICE_NOT_FOUND';
+          const absenceRead = member.id === 'candidate-service-precheck'
+            || member.id === 'candidate-cleanup-service-precheck'
+            || member.id === 'candidate-cleanup-absence-readback'
+            || (member.id === 'promote-stable-service-precheck' && plan.previousRevision === null);
+          if (!canonicalServiceAbsence || !absenceRead) throw error;
+          receipt = null;
         }
       }
       if (member.id === 'build-submit') {
@@ -3634,6 +3695,7 @@ export async function runGcpRelease({
         }
       } else if (member.id === 'promote-candidate-service-readback') {
         promotionReadbacks.service = receipt;
+        validateCandidateService(receipt, plan.expectedCandidate);
       } else if (member.id === 'promote-candidate-revision-readback') {
         promotionReadbacks.revision = receipt;
       } else if (member.id === 'promote-candidate-iam-readback') {
@@ -3644,7 +3706,9 @@ export async function runGcpRelease({
         validateCandidateControlPlaneReadbacks(promotionReadbacks, plan);
       } else if (member.id === 'promote-stable-service-precheck') {
         if (plan.previousRevision === null) {
-          if (receipt !== null) throw new Error('First stable service already exists');
+          if (receipt !== null || !canonicalServiceAbsence) {
+            throw new Error('First stable service already exists or absence is unproven');
+          }
         } else {
           if (receipt === null) throw new Error('Prior stable service is absent');
           validateStableService(receipt, plan);
@@ -3695,13 +3759,17 @@ export async function runGcpRelease({
           throw new Error('Stable public IAM changed during promotion');
         }
       } else if (member.id === 'candidate-service-precheck') {
-        if (receipt !== null) throw new Error('Candidate service already exists; cleanup is required');
+        if (receipt !== null || !canonicalServiceAbsence) {
+          throw new Error('Candidate service already exists or absence is unproven; cleanup is required');
+        }
         if (typeof writeCandidateSpec !== 'function'
           || await writeCandidateSpec(plan) !== true) {
           throw new Error('Candidate Service YAML is unavailable');
         }
       } else if (member.id === 'candidate-spec-dry-run') {
         validateCandidateServiceSpecDryRun(receipt, plan);
+      } else if (member.id === 'candidate-deploy') {
+        validateCandidateService(receipt, plan.expectedCandidate);
       } else if (member.id === 'candidate-private-iam-baseline-readback') {
         validateServiceIamReceipt(receipt, { policy: 'stable-private', requireEtag: true });
       } else if (member.id === 'candidate-private-iam-grant') {
@@ -3711,13 +3779,16 @@ export async function runGcpRelease({
         validateServiceIamReceipt(receipt, { policy: 'candidate-private', requireEtag: true });
       } else if (member.id === 'candidate-service-readback') {
         candidateReadbacks.service = receipt;
+        validateCandidateService(receipt, plan.expectedCandidate);
       } else if (member.id === 'candidate-revision-readback') {
         candidateReadbacks.revision = receipt;
       } else if (member.id === 'candidate-artifact-readback') {
         candidateReadbacks.artifact = receipt;
         validateCandidateArtifact(receipt, plan.image);
       } else if (member.id === 'candidate-cleanup-service-precheck') {
-        validateRecoveryPrecheck(receipt, plan, 'candidate-cleanup');
+        if (receipt === null && canonicalServiceAbsence) candidateCleanupState = 'already-absent';
+        else if (receipt === null) throw new Error('Candidate service absence is unproven');
+        else validateRecoveryPrecheck(receipt, plan, 'candidate-cleanup');
       } else if (member.id === 'candidate-cleanup-revision-readback') {
         validateCandidateRevisionReadback(receipt, plan);
       } else if (member.id === 'candidate-cleanup-artifact-readback') {
@@ -3725,11 +3796,13 @@ export async function runGcpRelease({
       } else if (member.id === 'candidate-cleanup-private-iam-readback') {
         validateServiceIamReceipt(receipt, { policy: 'candidate-private', requireEtag: true });
       } else if (member.id === 'candidate-cleanup-delete') {
-        if (!receipt || typeof receipt !== 'object') {
-          throw new Error('Candidate service deletion receipt is invalid');
-        }
+        // gcloud 553 synchronous service deletion returns empty stdout/null.
+        // The following exact service-specific absence readback is the receipt.
       } else if (member.id === 'candidate-cleanup-absence-readback') {
-        if (receipt !== null) throw new Error('Candidate service remains after cleanup');
+        if (receipt !== null || !canonicalServiceAbsence) {
+          throw new Error('Candidate service remains or absence is unproven after cleanup');
+        }
+        if (candidateCleanupState === null) candidateCleanupState = 'deleted';
       } else if (member.id === 'promote-traffic' || member.id === 'promote-readback') {
         validatePromotedService(receipt, plan);
       } else if (member.id === 'rollback-service-precheck') {
@@ -3789,6 +3862,7 @@ export async function runGcpRelease({
         }
       }
       completed.push(member.id);
+      activeOperationId = null;
     }
     if (selection.phase === 'candidate') {
       validateCandidateControlPlaneReadbacks(candidateReadbacks, plan);
@@ -4136,7 +4210,7 @@ export async function runGcpRelease({
       status: 'failed', code: compensationFailed ? compensationCode : 'RELEASE_PHASE_FAILED',
       mutationPerformed: mutationAttempted,
       releaseSha: plan.releaseSha, phase: selection.phase, completed,
-      resumeBoundary: selected[completed.length]?.id ?? null,
+      resumeBoundary: activeOperationId ?? selected.find(({ id }) => !completed.includes(id))?.id ?? null,
       ...(candidateServiceRestored === null ? {} : { candidateServiceRestored }),
       ...(promotionServiceRestored === null ? {} : { promotionServiceRestored }),
       ...(promotionIamRestored === null ? {} : { promotionIamRestored }),
@@ -4155,6 +4229,9 @@ export async function runGcpRelease({
   if (selection.phase === 'migration') publicReport.migrationExecutionReceipt = migrationExecutionReceipt;
   if (responseLossRecoveries.length > 0) {
     publicReport.responseLossRecoveries = responseLossRecoveries;
+  }
+  if (candidateCleanupState !== null) {
+    publicReport.candidateCleanupState = candidateCleanupState;
   }
   if (receiptPhaseIndex >= 0) {
     try {

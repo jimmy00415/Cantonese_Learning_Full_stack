@@ -36,7 +36,7 @@
 - Modify: `production-v1/package.json`
 
 **Interfaces:**
-- Produces: frozen `GCP_IDENTITY` with `projectId`, `projectNumber`, `organizationId`, `billingAccountId`, `region`, `speechRegion`, `service`, `repository`, `bucket`, `buildSourceBucket`, `cloudSqlInstance`, `network`, `subnet`, `psaRange`, `serviceAccounts`, `secrets`, and `jobs`.
+- Produces: frozen `GCP_IDENTITY` with `projectId`, `projectNumber`, `organizationId`, `billingAccountId`, `region`, `speechRegion`, stable `service='hkbuddy-v1-api'`, private `candidateService='hkbuddy-v1-api-candidate'`, `repository`, `bucket`, `buildSourceBucket`, `cloudSqlInstance`, `network`, `subnet`, `psaRange`, `serviceAccounts`, `secrets`, and `jobs`.
 - Produces: resource contract with `project.mode === 'existing-billed-shared'`, exact protected baseline, and exact namespaced resources.
 - Consumes: no prior task interface.
 
@@ -50,6 +50,7 @@ import { GCP_IDENTITY } from '../src/gcp-identity.js';
 assert.equal(GCP_IDENTITY.projectId, 'motion-expert-hk-ltd-webpage');
 assert.equal(GCP_IDENTITY.projectNumber, '582852715831');
 assert.equal(GCP_IDENTITY.service, 'hkbuddy-v1-api');
+assert.equal(GCP_IDENTITY.candidateService, 'hkbuddy-v1-api-candidate');
 assert.equal(GCP_IDENTITY.bucket, 'hkbuddy-v1-582852715831-media');
 assert.equal(GCP_IDENTITY.network, 'hkbuddy-v1-vpc');
 assert.equal(contract.project.mode, 'existing-billed-shared');
@@ -85,6 +86,7 @@ export const GCP_IDENTITY = Object.freeze({
   region: 'asia-east2',
   speechRegion: 'asia-southeast1',
   service: 'hkbuddy-v1-api',
+  candidateService: 'hkbuddy-v1-api-candidate',
   repository: 'hkbuddy-v1',
   bucket: 'hkbuddy-v1-582852715831-media',
   cloudSqlInstance: 'hkbuddy-v1-pg',
@@ -201,6 +203,13 @@ Provision only these network identities:
 
 Keep read-before-write, exact post-create readback, no adoption, drift stop,
 secret-redaction, key audit, and least-privilege IAM behavior unchanged.
+The pre-mutation CIDR audit binds every INTERNAL Address to an exact
+host-project/name Address `selfLink`, global or regional scope, matching region,
+and same-region subnetwork selector where applicable. It validates complete
+ordinary IPv4/IPv6 EXTERNAL rows and regional `NAT_AUTO` before excluding them
+from INTERNAL IPv4 overlap math, including bounded regional IPv6 endpoint/range
+shape; transient, missing, foreign, noncanonical, or contradictory rows fail
+closed with zero mutation.
 
 - [ ] **Step 4: Run focused tests and dry-run preflight fixtures**
 
@@ -338,6 +347,13 @@ service. Candidate IAM is limited to the exact reviewed private invoker; the
 untagged candidate root is the ID-token audience, and candidate receipts bind
 `trafficState=candidate-service-private-100`, both service names, and exact
 stable absent or genuine-prior-stable-at-100 state.
+Both controlled Service specs pin `run.googleapis.com/invoker-iam-disabled` to
+exact lowercase string `false`; raw Cloud Run v1 readbacks require exact
+apiVersion/kind, authoritative status traffic, and annotation absence or an
+unpadded case-insensitive `false`. Bind normalized `invokerIamDisabled=false`
+into the candidate contract hash and reject malformed/boolean/true/drifted
+privacy state before deploy/readback, promotion, cleanup, rollback,
+response-loss, or compensation mutation.
 
 Cloud Build submit must use exact staging directory
 `gs://hkbuddy-v1-582852715831-build-source/source`, and provenance must match its
@@ -350,7 +366,11 @@ stable: a later release preserves the genuine prior stable revision at 100%,
 stages the accepted stable revision untagged at 0%, verifies it is tag-free, and
 then switches it to 100%; a first release creates stable privately at 100% and
 makes `allUsers:roles/run.invoker` the final mutation after exact verification.
-Receipt-bound cleanup validates and deletes only the candidate service. Later
+Receipt-bound cleanup validates and deletes only the candidate service. An
+exact candidate-specific already-absent precheck skips revision, artifact, IAM,
+and delete operations but still repeats canonical absence readback before a
+no-mutation success; raw null, generic 404, wrong identity, and ambiguous
+transport fail closed. Later
 rollback accepts only the exact prior stable revision plus paired immutable
 image and mutates only stable traffic; first-release rollback is unavailable
 with zero calls.
@@ -519,6 +539,11 @@ accepted revision. On any ambiguous first-release IAM/service/readback, restore
 the accepted private stable state and exact private IAM before reporting
 compensation. Candidate cleanup separately validates its receipt, deletes only
 `hkbuddy-v1-api-candidate`, and verifies canonical absence.
+If its initial exact candidate-specific precheck is already-absent, it skips
+revision/artifact/IAM/delete, repeats canonical absence readback, and reports no
+mutation; raw null output, generic 404, wrong identity, and ambiguous transport
+fail closed. Every candidate/stable and compensation readback revalidates the
+enabled Invoker IAM check rather than trusting IAM policy alone.
 Generate a QR code for the final stable HTTPS URL and
 report exact deployed revision, image digest, release commit, acceptance result,
 known shared-project boundary, URL, and QR artifact.
