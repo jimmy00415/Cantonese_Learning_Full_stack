@@ -9,6 +9,8 @@ import { createGzip } from 'node:zlib';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { createDefaultGcloudExecutor } from './gcp-provision.js';
+import { containsForbiddenPersistedSecret } from './persisted-secret-contract.js';
+import { writeAtomicCreateOnly } from './release-state-store.js';
 import { GCP_IDENTITY } from '../src/gcp-identity.js';
 import { finalizeReleaseEvidenceRecord } from '../src/services/release-evidence.js';
 import { finalizeEvidenceRecord } from '../src/services/voice-evidence.js';
@@ -50,8 +52,6 @@ const NODE_BUILDER = 'node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be
 const DOCKER_BUILDER = 'gcr.io/cloud-builders/docker@sha256:2e8d40d8e48dc14fab4213d5e532d74f63fd403d9e8d7f6463096a75820286c3';
 const ACCEPTANCE_RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const FORBIDDEN_SECRET_KEY = /^(?:authorization|proxy-authorization|cookie|set-cookie|access[_-]?token|id[_-]?token|refresh[_-]?token|token|jwt)$/i;
-const FORBIDDEN_SECRET_VALUE = /(?:\bBearer\s+[A-Za-z0-9._~+/=-]{20,}|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|postgres(?:ql)?:\/\/[^/@\s:]+:[^/@\s]+@)/i;
 const PHASES = Object.freeze([
   'build', 'migration', 'inventory', 'acceptance', 'collect', 'evidence', 'candidate',
   'readiness', 'workload', 'mobile', 'candidate-cleanup', 'promote', 'rollback',
@@ -129,14 +129,7 @@ function exactKeys(value, expected) {
     && Object.keys(value).sort().join('\0') === [...expected].sort().join('\0'));
 }
 
-export function containsForbiddenPersistedSecret(value) {
-  if (typeof value === 'string') return FORBIDDEN_SECRET_VALUE.test(value);
-  if (Array.isArray(value)) return value.some(containsForbiddenPersistedSecret);
-  if (!value || typeof value !== 'object') return false;
-  return Object.entries(value).some(([key, child]) => (
-    FORBIDDEN_SECRET_KEY.test(key) || containsForbiddenPersistedSecret(child)
-  ));
-}
+export { containsForbiddenPersistedSecret } from './persisted-secret-contract.js';
 
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
@@ -3300,9 +3293,9 @@ async function persistReleaseReceipt(plan, receipt) {
   }
   const contents = `${JSON.stringify(receipt, null, 2)}\n`;
   try {
-    await writeFile(filePath, contents, { encoding: 'utf8', flag: 'wx' });
+    await writeAtomicCreateOnly(filePath, Buffer.from(contents));
   } catch (error) {
-    if (error?.code !== 'EEXIST') throw error;
+    if (!/exists/i.test(String(error?.message ?? ''))) throw error;
     const existing = await readFile(filePath);
     if (!existing.equals(Buffer.from(contents))) throw new Error('Release receipt already exists with different bytes');
   }
