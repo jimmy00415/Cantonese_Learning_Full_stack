@@ -21,15 +21,15 @@ import {
 import { acceptanceTimingQueryDigest } from '../src/telemetry/acceptance-timings.js';
 
 const COMMIT = '1'.repeat(40);
-const PROJECT_NUMBER = '123456789012';
-const STABLE_ORIGIN = `https://hkbuddy-api-${PROJECT_NUMBER}.asia-east2.run.app`;
-const ORIGIN = `https://candidate-${COMMIT.slice(0, 12)}---hkbuddy-api-${PROJECT_NUMBER}.asia-east2.run.app`;
+const PROJECT_NUMBER = '582852715831';
+const STABLE_ORIGIN = `https://hkbuddy-v1-api-${PROJECT_NUMBER}.asia-east2.run.app`;
+const ORIGIN = `https://candidate-${COMMIT.slice(0, 12)}---hkbuddy-v1-api-${PROJECT_NUMBER}.asia-east2.run.app`;
 const MANIFEST_PATH = resolve('latency-asr-fixtures.json');
 const CWD = resolve('..');
 const NOW = new Date('2026-08-25T12:00:00.000Z');
 const SOURCE_ARCHIVE_SHA256 = '2'.repeat(64);
 const CANDIDATE_IMAGE_DIGEST = `sha256:${'3'.repeat(64)}`;
-const CANDIDATE_REVISION = `hkbuddy-api-${COMMIT.slice(0, 12)}`;
+const CANDIDATE_REVISION = `hkbuddy-v1-api-${COMMIT.slice(0, 12)}`;
 const TEST_ID_TOKEN = [
   Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url'),
   Buffer.from(JSON.stringify({
@@ -272,12 +272,12 @@ function createHarness({
       return Array.from({ length: 200 }, (_, index) => ({
         insertId: `request-${String(index + 1).padStart(3, '0')}`,
         timestamp: new Date(NOW.getTime() + index).toISOString(),
-        trace: `projects/hkbuddy-prod-v1-20260826/traces/${query.expectedTraceIds[index]}`,
+        trace: `projects/motion-expert-hk-ltd-webpage/traces/${query.expectedTraceIds[index]}`,
         resource: {
           type: 'cloud_run_revision',
           labels: {
-            project_id: 'hkbuddy-prod-v1-20260826', location: 'asia-east2',
-            service_name: 'hkbuddy-api', revision_name: `hkbuddy-api-${COMMIT.slice(0, 12)}`,
+            project_id: 'motion-expert-hk-ltd-webpage', location: 'asia-east2',
+            service_name: 'hkbuddy-v1-api', revision_name: `hkbuddy-v1-api-${COMMIT.slice(0, 12)}`,
           },
         },
         httpRequest: {
@@ -398,8 +398,10 @@ test('command is inert unless exact arguments, explicit load confirmation, froze
     ['origin has explicit port', { argv: exactArgv('https://v1-candidate.example.com:8443') }, 'CANDIDATE_ORIGIN_INVALID'],
     ['localhost', { argv: exactArgv('https://localhost') }, 'CANDIDATE_ORIGIN_INVALID'],
     ['known legacy target', { argv: exactArgv('https://hkbuddy-pilot-0630.azurewebsites.net') }, 'CANDIDATE_ORIGIN_INVALID'],
-    ['unrelated Cloud Run tag', { argv: exactArgv(`https://other---hkbuddy-api-${PROJECT_NUMBER}.asia-east2.run.app`) }, 'CANDIDATE_ORIGIN_INVALID'],
-    ['foreign project number', { argv: exactArgv(`https://candidate-${COMMIT.slice(0, 12)}---hkbuddy-api-999999999999.asia-east2.run.app`) }, 'CANDIDATE_ORIGIN_INVALID'],
+    ['unrelated Cloud Run tag', { argv: exactArgv(`https://other---hkbuddy-v1-api-${PROJECT_NUMBER}.asia-east2.run.app`) }, 'CANDIDATE_ORIGIN_INVALID'],
+    ['old service identity', { argv: exactArgv(`https://candidate-${COMMIT.slice(0, 12)}---hkbuddy-api-${PROJECT_NUMBER}.asia-east2.run.app`) }, 'CANDIDATE_ORIGIN_INVALID'],
+    ['old project number', { argv: exactArgv(`https://candidate-${COMMIT.slice(0, 12)}---hkbuddy-v1-api-93662314720.asia-east2.run.app`) }, 'CANDIDATE_ORIGIN_INVALID'],
+    ['foreign project number', { argv: exactArgv(`https://candidate-${COMMIT.slice(0, 12)}---hkbuddy-v1-api-999999999999.asia-east2.run.app`) }, 'CANDIDATE_ORIGIN_INVALID'],
     ['configured candidate mismatch', { environment: { V1_LOAD_TEST_CONFIRM: 'true', V1_RELEASE_COMMIT_SHA: COMMIT, V1_PUBLIC_ORIGIN: STABLE_ORIGIN, V1_CANDIDATE_ORIGIN: 'https://example.com' } }, 'CANDIDATE_ORIGIN_INVALID'],
   ];
 

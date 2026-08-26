@@ -41,21 +41,21 @@ import {
   validateTrafficReceipt,
 } from '../scripts/gcp-release.js';
 
-const PROJECT = 'hkbuddy-prod-v1-20260826';
+const PROJECT = 'motion-expert-hk-ltd-webpage';
 const REGION = 'asia-east2';
 const RELEASE_SHA = 'a'.repeat(40);
 const SOURCE_SHA = 'b'.repeat(64);
 const IMAGE_DIGEST = `sha256:${'c'.repeat(64)}`;
-const PROJECT_NUMBER = '123456789012';
+const PROJECT_NUMBER = '582852715831';
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const BUILD_SA = `projects/${PROJECT}/serviceAccounts/hkbuddy-build@${PROJECT}.iam.gserviceaccount.com`;
-const RUNTIME_SA = `hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`;
-const ACCEPTANCE_SA = `hkbuddy-acceptance@${PROJECT}.iam.gserviceaccount.com`;
+const BUILD_SA = `projects/${PROJECT}/serviceAccounts/hkbuddy-v1-build@${PROJECT}.iam.gserviceaccount.com`;
+const RUNTIME_SA = `hkbuddy-v1-runtime@${PROJECT}.iam.gserviceaccount.com`;
+const ACCEPTANCE_SA = `hkbuddy-v1-acceptance@${PROJECT}.iam.gserviceaccount.com`;
 const ACCEPTANCE_RUN_ID = '123e4567-e89b-42d3-a456-426614174000';
 const CANDIDATE_TAG = `candidate-${RELEASE_SHA.slice(0, 12)}`;
-const REVISION = `hkbuddy-api-${RELEASE_SHA.slice(0, 12)}`;
-const STABLE_ORIGIN = `https://hkbuddy-api-${PROJECT_NUMBER}.${REGION}.run.app`;
-const CANDIDATE_ORIGIN = `https://${CANDIDATE_TAG}---hkbuddy-api-${PROJECT_NUMBER}.${REGION}.run.app`;
+const REVISION = `hkbuddy-v1-api-${RELEASE_SHA.slice(0, 12)}`;
+const STABLE_ORIGIN = `https://hkbuddy-v1-api-${PROJECT_NUMBER}.${REGION}.run.app`;
+const CANDIDATE_ORIGIN = `https://${CANDIDATE_TAG}---hkbuddy-v1-api-${PROJECT_NUMBER}.${REGION}.run.app`;
 const QA_SUBJECT_SHA256 = createHash('sha256').update('admin@motionexp.com').digest('hex');
 const IMAGE_SCRIPTS = Object.freeze([
   'scripts/image-release-contract.js',
@@ -67,52 +67,52 @@ const IMAGE_SCRIPTS = Object.freeze([
 
 const EVIDENCE = Object.freeze({
   legacyInventory: Object.freeze({
-    secret: 'hkbuddy-legacy-inventory', secretVersion: '11',
+    secret: 'hkbuddy-v1-legacy-inventory', secretVersion: '11',
     artifactSha256: '1'.repeat(64), objectSha256: 'a'.repeat(64), filePath: 'C:\\release\\legacy-inventory.json',
   }),
   dependencyAcceptance: Object.freeze({
-    secret: 'hkbuddy-dependency-acceptance', secretVersion: '12',
+    secret: 'hkbuddy-v1-dependency-acceptance', secretVersion: '12',
     artifactSha256: '2'.repeat(64), objectSha256: 'b'.repeat(64), filePath: 'C:\\release\\dependency-acceptance.json',
   }),
   llmSmoke: Object.freeze({
-    secret: 'hkbuddy-llm-smoke', secretVersion: '13',
+    secret: 'hkbuddy-v1-llm-smoke', secretVersion: '13',
     artifactSha256: '3'.repeat(64), objectSha256: 'c'.repeat(64), filePath: 'C:\\release\\llm-smoke.json',
   }),
   asrSmoke: Object.freeze({
-    secret: 'hkbuddy-asr-smoke', secretVersion: '14',
+    secret: 'hkbuddy-v1-asr-smoke', secretVersion: '14',
     artifactSha256: '4'.repeat(64), objectSha256: 'd'.repeat(64), filePath: 'C:\\release\\asr-smoke.json',
   }),
   ttsSmoke: Object.freeze({
-    secret: 'hkbuddy-tts-smoke', secretVersion: '15',
+    secret: 'hkbuddy-v1-tts-smoke', secretVersion: '15',
     artifactSha256: '5'.repeat(64), objectSha256: 'e'.repeat(64), filePath: 'C:\\release\\tts-smoke.json',
   }),
   iosVoiceAcceptance: Object.freeze({
-    secret: 'hkbuddy-ios-voice-acceptance', secretVersion: '16',
+    secret: 'hkbuddy-v1-ios-voice-acceptance', secretVersion: '16',
     artifactSha256: '6'.repeat(64), objectSha256: 'f'.repeat(64), filePath: 'C:\\release\\ios-voice-acceptance.json',
   }),
 });
 
 const ACCEPTANCE_OUTPUTS = Object.freeze({
   dependencyAcceptance: Object.freeze({
-    bucket: `${PROJECT}-media`,
+    bucket: 'hkbuddy-v1-582852715831-media',
     object: `release-evidence/${RELEASE_SHA}/dependency-acceptance/${ACCEPTANCE_RUN_ID}.json`,
     generation: '101',
     filePath: EVIDENCE.dependencyAcceptance.filePath,
   }),
   llmSmoke: Object.freeze({
-    bucket: `${PROJECT}-media`,
+    bucket: 'hkbuddy-v1-582852715831-media',
     object: `release-evidence/${RELEASE_SHA}/llm-smoke/llm-${ACCEPTANCE_RUN_ID}.json`,
     generation: '102',
     filePath: EVIDENCE.llmSmoke.filePath,
   }),
   asrSmoke: Object.freeze({
-    bucket: `${PROJECT}-media`,
+    bucket: 'hkbuddy-v1-582852715831-media',
     object: `release-evidence/${RELEASE_SHA}/voice-smoke/asr-${ACCEPTANCE_RUN_ID}.json`,
     generation: '103',
     filePath: EVIDENCE.asrSmoke.filePath,
   }),
   ttsSmoke: Object.freeze({
-    bucket: `${PROJECT}-media`,
+    bucket: 'hkbuddy-v1-582852715831-media',
     object: `release-evidence/${RELEASE_SHA}/voice-smoke/tts-${ACCEPTANCE_RUN_ID}.json`,
     generation: '104',
     filePath: EVIDENCE.ttsSmoke.filePath,
@@ -142,7 +142,7 @@ function releaseInput(overrides = {}) {
     },
     legacyInventory: EVIDENCE.legacyInventory,
     evidence: EVIDENCE,
-    previousRevision: 'hkbuddy-api-stable123456',
+    previousRevision: 'hkbuddy-v1-api-stable123456',
     ...overrides,
   };
 }
@@ -154,6 +154,41 @@ function canonicalFixture(value) {
   }
   return value;
 }
+
+test('release command histories bind only the selected V1 resource island', () => {
+  const plan = buildReleasePlan(releaseInput());
+  const contract = JSON.stringify(plan);
+  const history = JSON.stringify(plan.operations);
+  for (const expected of [
+    '--project=motion-expert-hk-ltd-webpage',
+    'asia-east2-docker.pkg.dev/motion-expert-hk-ltd-webpage/hkbuddy-v1/hkbuddy-v1-api@sha256:',
+    'projects/motion-expert-hk-ltd-webpage/serviceAccounts/hkbuddy-v1-build@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com',
+    'hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com',
+    'hkbuddy-v1-migrator@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com',
+    'hkbuddy-v1-acceptance@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com',
+    'hkbuddy-v1-migrate',
+    'hkbuddy-v1-dependency-acceptance',
+    'hkbuddy-v1-llm-smoke',
+    'hkbuddy-v1-asr-smoke',
+    'hkbuddy-v1-tts-smoke',
+    'hkbuddy-v1-582852715831-media',
+    'https://hkbuddy-v1-api-582852715831.asia-east2.run.app',
+  ]) assert.equal(contract.includes(expected), true, expected);
+  for (const forbidden of [
+    'hkbuddy-prod-v1-20260826',
+    '93662314720',
+    '/hkbuddy/hkbuddy-api',
+    'hkbuddy-runtime@',
+    'hkbuddy-migrate"',
+    'foreign-project-999',
+  ]) assert.equal(history.includes(forbidden), false, forbidden);
+});
+
+test('release plan rejects old and foreign project numbers before producing commands', () => {
+  for (const projectNumber of ['93662314720', '999999999999']) {
+    assert.throws(() => buildReleasePlan(releaseInput({ projectNumber })), /release contract/i);
+  }
+});
 
 function validWorkloadAcceptanceRecord() {
   const queryDigests = Array.from({ length: 20 }, (_, index) => (
@@ -316,7 +351,7 @@ function validWorkloadAcceptanceRecord() {
     releaseBinding: {
       project: PROJECT,
       region: REGION,
-      service: 'hkbuddy-api',
+      service: 'hkbuddy-v1-api',
       releaseSha: RELEASE_SHA,
       sourceArchiveSha256: SOURCE_SHA,
       imageDigest: IMAGE_DIGEST,
@@ -405,7 +440,7 @@ function controlPlaneLogEntries(record) {
     resource: {
       type: 'cloud_run_revision',
       labels: {
-        project_id: PROJECT, location: REGION, service_name: 'hkbuddy-api',
+        project_id: PROJECT, location: REGION, service_name: 'hkbuddy-v1-api',
         revision_name: REVISION,
       },
     },
@@ -522,8 +557,8 @@ function fixtureReceiptOutputs(plan, phase) {
     },
   };
   if (phase === 'migration') return {
-    executionName: 'hkbuddy-migrate-release-001',
-    job: 'hkbuddy-migrate', imageDigest: plan.imageDigest,
+    executionName: 'hkbuddy-v1-migrate-release-001',
+    job: 'hkbuddy-v1-migrate', imageDigest: plan.imageDigest,
   };
   if (phase === 'inventory') return {
     evidenceSecretVersions: { legacyInventory: plan.evidence.legacyInventory.secretVersion },
@@ -798,7 +833,7 @@ test('release plan is archive-bound, digest-pinned, evidence-first, probe-exact,
   assert.equal(serviceSpec.apiVersion, 'serving.knative.dev/v1');
   assert.equal(serviceSpec.spec.template.metadata.name, REVISION);
   assert.equal(serviceSpec.spec.template.spec.containers[0].image,
-    `asia-east2-docker.pkg.dev/${PROJECT}/hkbuddy/hkbuddy-api@${IMAGE_DIGEST}`);
+    `asia-east2-docker.pkg.dev/${PROJECT}/hkbuddy-v1/hkbuddy-v1-api@${IMAGE_DIGEST}`);
   assert.equal(serviceSpec.spec.template.spec.containers[0].startupProbe.httpGet.path, '/api/health/ready');
   assert.equal(serviceSpec.spec.template.spec.containers[0].livenessProbe.httpGet.path, '/api/health/live');
   assert.equal(serviceSpec.spec.template.spec.containers[0].readinessProbe.httpGet.path, '/api/health/ready');
@@ -809,7 +844,7 @@ test('release plan is archive-bound, digest-pinned, evidence-first, probe-exact,
   assert.equal(new Set(mountPaths).size, mountPaths.length,
     'Cloud Run v1 rejects multiple secret volumes mounted at one directory');
   assert.deepEqual(serviceSpec.spec.traffic, [
-    { revisionName: 'hkbuddy-api-stable123456', percent: 100 },
+    { revisionName: 'hkbuddy-v1-api-stable123456', percent: 100 },
     { revisionName: REVISION, tag: CANDIDATE_TAG, percent: 0 },
   ]);
   const specEnv = Object.fromEntries(serviceSpec.spec.template.spec.containers[0].env
@@ -831,11 +866,11 @@ test('release plan is archive-bound, digest-pinned, evidence-first, probe-exact,
   });
   const publicAuth = plan.operations.find(({ id }) => id === 'promote-public-service');
   assert.deepEqual(publicAuth.argv.slice(0, 5), [
-    'run', 'services', 'add-iam-policy-binding', 'hkbuddy-api', '--member=allUsers',
+    'run', 'services', 'add-iam-policy-binding', 'hkbuddy-v1-api', '--member=allUsers',
   ]);
   assert.equal(publicAuth.argv.includes('--role=roles/run.invoker'), true);
   const rollback = plan.operations.find(({ id }) => id === 'rollback-traffic');
-  assert.equal(rollback.argv.includes('--to-revisions=hkbuddy-api-stable123456=100'), true);
+  assert.equal(rollback.argv.includes('--to-revisions=hkbuddy-v1-api-stable123456=100'), true);
 
   const serialized = JSON.stringify(plan);
   assert.equal(serialized.includes(':latest'), false);
@@ -856,7 +891,7 @@ test('candidate deploy is fenced by the canonical gcloud Service v1 dry-run resu
       calls.push(argv);
       if (argv[1] === 'services' && argv[2] === 'describe') {
         return {
-          service: 'hkbuddy-api',
+          service: 'hkbuddy-v1-api',
           traffic: [{ revision: input.previousRevision, percent: 100 }],
         };
       }
@@ -908,9 +943,9 @@ test('candidate phase feeds raw Service JSON through gcloud 553-compatible secre
       if (argv[1] === 'services' && argv[2] === 'describe') {
         describeCount += 1;
         return describeCount === 1 ? {
-          service: 'hkbuddy-api', traffic: [{ revision: input.previousRevision, percent: 100 }],
+          service: 'hkbuddy-v1-api', traffic: [{ revision: input.previousRevision, percent: 100 }],
         } : {
-          service: 'hkbuddy-api', traffic: [
+          service: 'hkbuddy-v1-api', traffic: [
             { revision: input.previousRevision, percent: 100 },
             { revision: REVISION, tag: CANDIDATE_TAG, percent: 0 },
           ],
@@ -936,7 +971,7 @@ test('preboot acceptance jobs are digest-pinned, identity-exact, and produce evi
   const plan = buildReleasePlan(releaseInput());
   const dependency = plan.operations.find(({ id }) => id === 'dependency-acceptance-deploy');
   assert.equal(dependency.phase, 'acceptance');
-  assert.equal(dependency.argv.includes(`--image=asia-east2-docker.pkg.dev/${PROJECT}/hkbuddy/hkbuddy-api@${IMAGE_DIGEST}`), true);
+  assert.equal(dependency.argv.includes(`--image=asia-east2-docker.pkg.dev/${PROJECT}/hkbuddy-v1/hkbuddy-v1-api@${IMAGE_DIGEST}`), true);
   assert.equal(dependency.argv.includes(`--service-account=${ACCEPTANCE_SA}`), true);
   assert.equal(dependency.argv.includes('--command=node'), true);
   assert.equal(dependency.argv.includes(`--args=scripts/real-dependencies-acceptance.js,--release-sha=${RELEASE_SHA}`), true);
@@ -947,10 +982,10 @@ test('preboot acceptance jobs are digest-pinned, identity-exact, and produce evi
   assert.match(dependencyEnv, new RegExp(`V1_ACCEPTANCE_GCS_PREFIX=v1-accept/${ACCEPTANCE_RUN_ID}/`));
   assert.match(dependencyEnv, new RegExp(`V1_DEPENDENCY_ACCEPTANCE_OUTPUT_OBJECT=release-evidence/${RELEASE_SHA}/dependency-acceptance/${ACCEPTANCE_RUN_ID}\\.json`));
   const dependencySecrets = dependency.argv.find((value) => value.startsWith('--set-secrets='));
-  assert.match(dependencySecrets, /V1_DATABASE_URL=hkbuddy-db-app-url:7/);
-  assert.match(dependencySecrets, /V1_ACCEPTANCE_DATABASE_URL=hkbuddy-db-app-url:7/);
-  assert.match(dependencySecrets, /V1_ACCEPTANCE_MIGRATOR_DATABASE_URL=hkbuddy-db-migrator-url:8/);
-  assert.match(dependencySecrets, /\/var\/run\/secrets\/hkbuddy\/legacy-inventory\/legacy-inventory\.json=hkbuddy-legacy-inventory:11/);
+  assert.match(dependencySecrets, /V1_DATABASE_URL=hkbuddy-v1-db-app-url:7/);
+  assert.match(dependencySecrets, /V1_ACCEPTANCE_DATABASE_URL=hkbuddy-v1-db-app-url:7/);
+  assert.match(dependencySecrets, /V1_ACCEPTANCE_MIGRATOR_DATABASE_URL=hkbuddy-v1-db-migrator-url:8/);
+  assert.match(dependencySecrets, /\/var\/run\/secrets\/hkbuddy\/legacy-inventory\/legacy-inventory\.json=hkbuddy-v1-legacy-inventory:11/);
 
   const expected = {
     'dependency-acceptance': { serviceAccount: ACCEPTANCE_SA, script: 'scripts/real-dependencies-acceptance.js' },
@@ -961,7 +996,7 @@ test('preboot acceptance jobs are digest-pinned, identity-exact, and produce evi
   for (const [key, contract] of Object.entries(expected)) {
     const deploy = plan.operations.find(({ id }) => id === `${key}-deploy`);
     assert.equal(deploy.argv.includes(`--service-account=${contract.serviceAccount}`), true, key);
-    assert.equal(deploy.argv.includes(`--image=asia-east2-docker.pkg.dev/${PROJECT}/hkbuddy/hkbuddy-api@${IMAGE_DIGEST}`), true, key);
+    assert.equal(deploy.argv.includes(`--image=asia-east2-docker.pkg.dev/${PROJECT}/hkbuddy-v1/hkbuddy-v1-api@${IMAGE_DIGEST}`), true, key);
     assert.equal(deploy.argv.some((value) => value.includes(contract.script)), true, key);
     assert.equal(plan.operations.some(({ id }) => id === `${key}-readback`), true, key);
     assert.equal(plan.operations.some(({ id }) => id === `${key}-execute`), true, key);
@@ -1183,13 +1218,13 @@ test('generation-bound private evidence collection derives exact safe digests fr
 
 test('evidence publication accepts and reads back only the planned numeric versions', async () => {
   assert.equal(validateEvidenceVersionReceipt({
-    name: `projects/${PROJECT}/secrets/hkbuddy-llm-smoke/versions/13`,
+    name: `projects/${PROJECT}/secrets/hkbuddy-v1-llm-smoke/versions/13`,
     state: 'ENABLED',
-  }, { secret: 'hkbuddy-llm-smoke', secretVersion: '13' }), true);
+  }, { secret: 'hkbuddy-v1-llm-smoke', secretVersion: '13' }), true);
   assert.throws(() => validateEvidenceVersionReceipt({
-    name: `projects/${PROJECT}/secrets/hkbuddy-llm-smoke/versions/14`,
+    name: `projects/${PROJECT}/secrets/hkbuddy-v1-llm-smoke/versions/14`,
     state: 'ENABLED',
-  }, { secret: 'hkbuddy-llm-smoke', secretVersion: '13' }), /evidence version/i);
+  }, { secret: 'hkbuddy-v1-llm-smoke', secretVersion: '13' }), /evidence version/i);
 
   const versionsBySecret = Object.fromEntries(Object.values(EVIDENCE).map((value) => (
     [value.secret, value.secretVersion]
@@ -1276,7 +1311,7 @@ test('build receipt captures one successful verified build, source hash, and fin
     },
     results: {
       images: [{
-        name: `asia-east2-docker.pkg.dev/${PROJECT}/hkbuddy/hkbuddy-api:${RELEASE_SHA}`,
+        name: `asia-east2-docker.pkg.dev/${PROJECT}/hkbuddy-v1/hkbuddy-v1-api:${RELEASE_SHA}`,
         digest: IMAGE_DIGEST,
       }],
     },
@@ -1366,7 +1401,7 @@ test('confirmed candidate fails closed unless every control-plane readback match
   const plan = buildReleasePlan(input);
   const readbacks = {
     service: {
-      service: 'hkbuddy-api',
+      service: 'hkbuddy-v1-api',
       traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 0 }],
     },
     revision: structuredClone(plan.expectedCandidate),
@@ -1395,7 +1430,7 @@ test('confirmed candidate fails closed unless every control-plane readback match
     if (argv[1] === 'services' && argv[2] === 'describe') {
       serviceDescribeCount += 1;
       return serviceDescribeCount === 1
-        ? { service: 'hkbuddy-api', traffic: [{ revision: 'hkbuddy-api-stable123456', percent: 100 }] }
+        ? { service: 'hkbuddy-v1-api', traffic: [{ revision: 'hkbuddy-v1-api-stable123456', percent: 100 }] }
         : structuredClone(readbacks.service);
     }
     return { deployed: true };
@@ -1435,7 +1470,7 @@ test('release orchestrator is dry-run first and executes only one exactly confir
     argv: ['--phase=rollback', `--confirm-release=${RELEASE_SHA}`], input,
     execute: async (argv) => {
       calls.push(argv);
-      return { service: 'hkbuddy-api', traffic: [{ revision: input.previousRevision, percent: 100 }] };
+      return { service: 'hkbuddy-v1-api', traffic: [{ revision: input.previousRevision, percent: 100 }] };
     },
     writeOutput: () => undefined,
   });
@@ -1455,13 +1490,13 @@ test('rollback removes the candidate tag before restoring the prior revision', (
   const plan = buildReleasePlan(releaseInput());
   const rollback = plan.operations.find(({ id }) => id === 'rollback-traffic');
   assert.equal(rollback.argv.includes(`--remove-tags=${CANDIDATE_TAG}`), true);
-  assert.equal(rollback.argv.includes('--to-revisions=hkbuddy-api-stable123456=100'), true);
+  assert.equal(rollback.argv.includes('--to-revisions=hkbuddy-v1-api-stable123456=100'), true);
 });
 
 test('rollback rejects a zero-percent candidate tag that remains reachable', async () => {
   const input = releaseInput();
   const staleTaggedService = {
-    service: 'hkbuddy-api',
+    service: 'hkbuddy-v1-api',
     traffic: [
       { revision: input.previousRevision, percent: 100 },
       { revision: REVISION, tag: CANDIDATE_TAG, percent: 0 },
@@ -1481,7 +1516,7 @@ test('public promotion requires the reviewed owner identity before its first mut
   const plan = buildReleasePlan(input);
   const candidateReadbacks = {
     service: {
-      service: 'hkbuddy-api',
+      service: 'hkbuddy-v1-api',
       traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 0 }],
     },
     revision: structuredClone(plan.expectedCandidate),
@@ -1523,7 +1558,7 @@ test('public promotion requires the reviewed owner identity before its first mut
         return structuredClone(candidateReadbacks.service);
       }
       if (argv[1] === 'services' && argv[2] === 'describe' && promoted) promotedReadbackCount += 1;
-      return { service: 'hkbuddy-api', traffic: [{ revision: REVISION, percent: 100 }] };
+      return { service: 'hkbuddy-v1-api', traffic: [{ revision: REVISION, percent: 100 }] };
     },
     writeOutput: () => undefined,
   });
@@ -1602,7 +1637,7 @@ test('promotion restores the exact private IAM snapshot when the public grant la
       if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
       if (argv[1] === 'services' && argv[2] === 'describe') {
         return {
-          service: 'hkbuddy-api',
+          service: 'hkbuddy-v1-api',
           traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 0 }],
         };
       }
@@ -1649,7 +1684,7 @@ test('ambiguous promotion traffic is compensated before IAM and repeated retries
     };
     let currentPolicy = structuredClone(privatePolicy);
     let currentService = {
-      service: 'hkbuddy-api',
+      service: 'hkbuddy-v1-api',
       traffic: [
         { revision: input.previousRevision, percent: 100 },
         { revision: REVISION, tag: CANDIDATE_TAG, percent: 0 },
@@ -1697,14 +1732,14 @@ test('ambiguous promotion traffic is compensated before IAM and repeated retries
         }
         if (argv.includes('update-traffic') && argv.includes(`--to-revisions=${REVISION}=100`)) {
           if (mutationLands) currentService = {
-            service: 'hkbuddy-api', traffic: [{ revision: REVISION, percent: 100 }],
+            service: 'hkbuddy-v1-api', traffic: [{ revision: REVISION, percent: 100 }],
           };
           throw new Error('promotion traffic response was lost');
         }
         if (argv.includes('update-traffic')
           && argv.includes(`--to-revisions=${input.previousRevision}=100`)) {
           currentService = {
-            service: 'hkbuddy-api', traffic: [{ revision: input.previousRevision, percent: 100 }],
+            service: 'hkbuddy-v1-api', traffic: [{ revision: input.previousRevision, percent: 100 }],
           };
           return structuredClone(currentService);
         }
@@ -1744,7 +1779,7 @@ test('a failed traffic compensation is explicit and blocks the promotion result'
   };
   let currentPolicy = structuredClone(privatePolicy);
   const candidateService = {
-    service: 'hkbuddy-api',
+    service: 'hkbuddy-v1-api',
     traffic: [
       { revision: input.previousRevision, percent: 100 },
       { revision: REVISION, tag: CANDIDATE_TAG, percent: 0 },
@@ -1854,7 +1889,7 @@ test('Cloud Build receipt requires the exact generation-bound SHA256 source prov
     },
     results: {
       images: [{
-        name: `asia-east2-docker.pkg.dev/${PROJECT}/hkbuddy/hkbuddy-api:${RELEASE_SHA}`,
+        name: `asia-east2-docker.pkg.dev/${PROJECT}/hkbuddy-v1/hkbuddy-v1-api:${RELEASE_SHA}`,
         digest: IMAGE_DIGEST,
       }],
     },
@@ -1945,8 +1980,8 @@ test('migration execution accepts the real Cloud Run Jobs v1 terminal success sh
     apiVersion: 'run.googleapis.com/v1',
     kind: 'Execution',
     metadata: {
-      name: 'hkbuddy-migrate-release-001',
-      labels: { 'run.googleapis.com/job': 'hkbuddy-migrate' },
+      name: 'hkbuddy-v1-migrate-release-001',
+      labels: { 'run.googleapis.com/job': 'hkbuddy-v1-migrate' },
     },
     spec: { taskCount: 1, parallelism: 1 },
     status: {
@@ -1960,8 +1995,8 @@ test('migration execution accepts the real Cloud Run Jobs v1 terminal success sh
     },
   };
   assert.deepEqual(validateMigrationExecutionReceipt(execution, { releaseSha: RELEASE_SHA }), {
-    name: 'hkbuddy-migrate-release-001',
-    job: 'hkbuddy-migrate',
+    name: 'hkbuddy-v1-migrate-release-001',
+    job: 'hkbuddy-v1-migrate',
     taskCount: 1,
     parallelism: 1,
     succeededCount: 1,
@@ -2004,14 +2039,14 @@ test('migration phase persists the canonical short v1 execution identity with om
       return true;
     },
     execute: async (argv) => {
-      if (argv[2] === 'deploy') return { metadata: { name: 'hkbuddy-migrate' } };
+      if (argv[2] === 'deploy') return { metadata: { name: 'hkbuddy-v1-migrate' } };
       if (argv[2] === 'describe') return realV1JobReadback(plan.expectedMigrationJob);
       if (argv[2] === 'execute') return {
         apiVersion: 'run.googleapis.com/v1',
         kind: 'Execution',
         metadata: {
-          name: 'hkbuddy-migrate-release-001',
-          labels: { 'run.googleapis.com/job': 'hkbuddy-migrate' },
+          name: 'hkbuddy-v1-migrate-release-001',
+          labels: { 'run.googleapis.com/job': 'hkbuddy-v1-migrate' },
         },
         spec: { taskCount: 1, parallelism: 1 },
         status: {
@@ -2025,8 +2060,8 @@ test('migration phase persists the canonical short v1 execution identity with om
     writeOutput: () => undefined,
   });
   assert.equal(result.exitCode, 0);
-  assert.equal(result.publicReport.migrationExecutionReceipt.name, 'hkbuddy-migrate-release-001');
-  assert.equal(persisted.outputs.executionName, 'hkbuddy-migrate-release-001');
+  assert.equal(result.publicReport.migrationExecutionReceipt.name, 'hkbuddy-v1-migrate-release-001');
+  assert.equal(persisted.outputs.executionName, 'hkbuddy-v1-migrate-release-001');
   assert.doesNotMatch(persisted.outputs.executionName, /\/executions\//);
 });
 
@@ -2353,13 +2388,13 @@ test('real-shape migration, authenticated workload, and tag-free promotion share
     loadReceipts: async () => structuredClone(receipts),
     persistReceipt,
     execute: async (argv) => {
-      if (argv[2] === 'deploy') return { metadata: { name: 'hkbuddy-migrate' } };
+      if (argv[2] === 'deploy') return { metadata: { name: 'hkbuddy-v1-migrate' } };
       if (argv[2] === 'describe') return realV1JobReadback(plan.expectedMigrationJob);
       if (argv[2] === 'execute') return {
         apiVersion: 'run.googleapis.com/v1', kind: 'Execution',
         metadata: {
-          name: 'hkbuddy-migrate-release-001',
-          labels: { 'run.googleapis.com/job': 'hkbuddy-migrate' },
+          name: 'hkbuddy-v1-migrate-release-001',
+          labels: { 'run.googleapis.com/job': 'hkbuddy-v1-migrate' },
         },
         spec: { taskCount: 1, parallelism: 1 },
         status: {
@@ -2447,7 +2482,7 @@ test('real-shape migration, authenticated workload, and tag-free promotion share
   }));
 
   let currentService = {
-    service: 'hkbuddy-api',
+    service: 'hkbuddy-v1-api',
     traffic: [
       { revision: input.previousRevision, percent: 100 },
       { revision: REVISION, tag: CANDIDATE_TAG, percent: 0 },
@@ -2484,7 +2519,7 @@ test('real-shape migration, authenticated workload, and tag-free promotion share
         return structuredClone(currentPolicy);
       }
       if (argv.includes('update-traffic')) {
-        currentService = { service: 'hkbuddy-api', traffic: [{ revision: REVISION, percent: 100 }] };
+        currentService = { service: 'hkbuddy-v1-api', traffic: [{ revision: REVISION, percent: 100 }] };
         return structuredClone(currentService);
       }
       if (argv[1] === 'services' && argv[2] === 'describe') {
@@ -2520,7 +2555,7 @@ test('promotion rereads the exact private zero-traffic candidate before granting
   const traffic = operations.find(({ id }) => id === 'promote-traffic');
   assert.equal(traffic.argv.includes(`--remove-tags=${CANDIDATE_TAG}`), true);
   const readback = operations.find(({ id }) => id === 'promote-readback');
-  assert.deepEqual(readback.argv.slice(0, 4), ['run', 'services', 'describe', 'hkbuddy-api']);
+  assert.deepEqual(readback.argv.slice(0, 4), ['run', 'services', 'describe', 'hkbuddy-v1-api']);
 });
 
 function planPhase(plan, phase) {
@@ -2531,7 +2566,13 @@ test('Cloud Build and infrastructure contracts pin the reviewed build identity a
   const cloudbuild = await readFile(new URL('../cloudbuild.yaml', import.meta.url), 'utf8');
   const dockerfile = await readFile(new URL('../Dockerfile', import.meta.url), 'utf8');
   const dockerignore = await readFile(new URL('../.dockerignore', import.meta.url), 'utf8');
-  assert.match(cloudbuild, new RegExp(`serviceAccount: projects/${PROJECT}/serviceAccounts/hkbuddy-build@${PROJECT.replaceAll('.', '\\.')}`));
+  assert.match(cloudbuild, new RegExp(`serviceAccount: projects/${PROJECT}/serviceAccounts/hkbuddy-v1-build@${PROJECT.replaceAll('.', '\\.')}`));
+  assert.match(cloudbuild, /asia-east2-docker\.pkg\.dev\/\$PROJECT_ID\/hkbuddy-v1\/hkbuddy-v1-api:\$_RELEASE_SHA/);
+  for (const forbidden of [
+    'hkbuddy-prod-v1-20260826',
+    '/hkbuddy/hkbuddy-api:',
+    'serviceAccounts/hkbuddy-build@',
+  ]) assert.equal(cloudbuild.includes(forbidden), false, forbidden);
   assert.match(cloudbuild, /requestedVerifyOption: VERIFIED/);
   assert.match(cloudbuild, /sourceProvenanceHash:\s*\n\s*- SHA256/);
   assert.match(cloudbuild, /gcr\.io\/cloud-builders\/docker@sha256:[0-9a-f]{64}/);
@@ -2594,8 +2635,7 @@ test('Cloud Build and infrastructure contracts pin the reviewed build identity a
   assert.equal(contract.iam.bindings.some(({ scope, member, role }) => (
     scope === 'project' && member === deployer && role === 'roles/cloudbuild.builds.editor'
   )), true);
-  for (const { secret } of Object.values(EVIDENCE)) {
-    const v1Secret = `hkbuddy-v1-${secret.slice('hkbuddy-'.length)}`;
+  for (const { secret: v1Secret } of Object.values(EVIDENCE)) {
     assert.equal(contract.iam.bindings.some(({ scope, member, role }) => (
       scope === `secret:${v1Secret}` && member === deployer
         && role === 'roles/secretmanager.secretVersionAdder'

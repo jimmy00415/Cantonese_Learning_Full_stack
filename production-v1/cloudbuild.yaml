@@ -48,7 +48,7 @@ steps:
     args:
       - build
       - --file=Dockerfile
-      - --tag=asia-east2-docker.pkg.dev/$PROJECT_ID/hkbuddy/hkbuddy-api:$_RELEASE_SHA
+      - --tag=asia-east2-docker.pkg.dev/$PROJECT_ID/hkbuddy-v1/hkbuddy-v1-api:$_RELEASE_SHA
       - --label=org.opencontainers.image.revision=$_RELEASE_SHA
       - --label=org.opencontainers.image.source=https://github.com/jimmy00415/Cantonese_Learning_Full_stack
       - --label=com.simplify.source-archive-sha256=$_SOURCE_SHA256
@@ -65,7 +65,7 @@ steps:
       - --entrypoint=node
       - --env=V1_RELEASE_COMMIT_SHA=$_RELEASE_SHA
       - --env=V1_SOURCE_ARCHIVE_SHA256=$_SOURCE_SHA256
-      - asia-east2-docker.pkg.dev/$PROJECT_ID/hkbuddy/hkbuddy-api:$_RELEASE_SHA
+      - asia-east2-docker.pkg.dev/$PROJECT_ID/hkbuddy-v1/hkbuddy-v1-api:$_RELEASE_SHA
       - scripts/image-release-contract.js
   - id: verify-oci-labels
     name: gcr.io/cloud-builders/docker@sha256:2e8d40d8e48dc14fab4213d5e532d74f63fd403d9e8d7f6463096a75820286c3
@@ -76,18 +76,18 @@ steps:
       - -ceu
       - >-
         test "$(docker inspect --format='{{ index .Config.Labels "org.opencontainers.image.revision" }}'
-        asia-east2-docker.pkg.dev/$PROJECT_ID/hkbuddy/hkbuddy-api:$_RELEASE_SHA)" = "$_RELEASE_SHA" &&
+        asia-east2-docker.pkg.dev/$PROJECT_ID/hkbuddy-v1/hkbuddy-v1-api:$_RELEASE_SHA)" = "$_RELEASE_SHA" &&
         test "$(docker inspect --format='{{ index .Config.Labels "com.simplify.source-archive-sha256" }}'
-        asia-east2-docker.pkg.dev/$PROJECT_ID/hkbuddy/hkbuddy-api:$_RELEASE_SHA)" = "$_SOURCE_SHA256" &&
+        asia-east2-docker.pkg.dev/$PROJECT_ID/hkbuddy-v1/hkbuddy-v1-api:$_RELEASE_SHA)" = "$_SOURCE_SHA256" &&
         test "$(docker inspect --format='{{ index .Config.Labels "org.opencontainers.image.source" }}'
-        asia-east2-docker.pkg.dev/$PROJECT_ID/hkbuddy/hkbuddy-api:$_RELEASE_SHA)" =
+        asia-east2-docker.pkg.dev/$PROJECT_ID/hkbuddy-v1/hkbuddy-v1-api:$_RELEASE_SHA)" =
         "https://github.com/jimmy00415/Cantonese_Learning_Full_stack"
 images:
-  - asia-east2-docker.pkg.dev/$PROJECT_ID/hkbuddy/hkbuddy-api:$_RELEASE_SHA
+  - asia-east2-docker.pkg.dev/$PROJECT_ID/hkbuddy-v1/hkbuddy-v1-api:$_RELEASE_SHA
 options:
   logging: CLOUD_LOGGING_ONLY
   requestedVerifyOption: VERIFIED
   sourceProvenanceHash:
     - SHA256
-serviceAccount: projects/hkbuddy-prod-v1-20260826/serviceAccounts/hkbuddy-build@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com
+serviceAccount: projects/motion-expert-hk-ltd-webpage/serviceAccounts/hkbuddy-v1-build@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com
 timeout: 1200s

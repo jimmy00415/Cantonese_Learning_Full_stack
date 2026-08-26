@@ -7,19 +7,21 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
 import { validateCanonicalWav } from '../src/media/canonical-wav.js';
+import { GCP_IDENTITY } from '../src/gcp-identity.js';
 export { decodeCanonicalMp3, validateCanonicalMp3 } from '../src/media/canonical-mp3.js';
 import { decodeCanonicalMp3 } from '../src/media/canonical-mp3.js';
 import { createDefaultGcloudTextExecutor } from './gcp-provision.js';
 
 const execFileAsync = promisify(execFile);
-const PROJECT = 'hkbuddy-prod-v1-20260826';
-const REGION = 'asia-east2';
-const SERVICE = 'hkbuddy-api';
+const PROJECT = GCP_IDENTITY.projectId;
+const PROJECT_NUMBER = GCP_IDENTITY.projectNumber;
+const REGION = GCP_IDENTITY.region;
+const SERVICE = GCP_IDENTITY.service;
 const QA_PRINCIPAL = 'admin@motionexp.com';
 const RELEASE_SHA = /^[0-9a-f]{40}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/;
-const CANDIDATE_REVISION = /^hkbuddy-api-[0-9a-f]{12}$/;
+const CANDIDATE_REVISION = /^hkbuddy-v1-api-[0-9a-f]{12}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SAMPLE_ID = /^[a-z0-9][a-z0-9._-]{0,79}$/;
 const REPLY_LANGUAGES = Object.freeze(['en', 'yue-Hant-HK', 'cmn-Hans-CN']);
@@ -325,9 +327,9 @@ function safeCandidateOrigin(value, { commitSha, stableOrigin, configuredCandida
   try { url = new URL(value); } catch { return null; }
   let stable;
   try { stable = new URL(stableOrigin); } catch { return null; }
-  const stableMatch = /^hkbuddy-api-(\d{6,20})\.asia-east2\.run\.app$/.exec(stable.hostname);
-  if (!stableMatch || stable.origin !== stableOrigin || stable.protocol !== 'https:') return null;
-  const expected = `https://candidate-${String(commitSha).slice(0, 12)}---hkbuddy-api-${stableMatch[1]}.asia-east2.run.app`;
+  const expectedStable = `https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app`;
+  if (stable.origin !== stableOrigin || stable.protocol !== 'https:' || stableOrigin !== expectedStable) return null;
+  const expected = `https://candidate-${String(commitSha).slice(0, 12)}---${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app`;
   if (url.protocol !== 'https:'
     || value !== url.origin
     || url.username || url.password || url.port

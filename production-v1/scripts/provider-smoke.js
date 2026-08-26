@@ -3,6 +3,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { loadLlmSmokeConfiguration } from '../src/config.js';
+import { GCP_IDENTITY } from '../src/gcp-identity.js';
 import { createLlmProvider } from '../src/providers/llm.js';
 import {
   finalizeReleaseEvidenceRecord,
@@ -164,7 +165,7 @@ export async function runProviderSmoke({
 
   const productionJob = env.V1_RELEASE_MANIFEST_FILE === '/app/release-manifest.json';
   const expectedOutput = new RegExp(`^release-evidence/${config.releaseCommitSha}/llm-smoke/llm-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\\.json$`);
-  if (productionJob && !writeEvidence && (env.V1_LLM_SMOKE_OUTPUT_BUCKET !== 'hkbuddy-prod-v1-20260826-media'
+  if (productionJob && !writeEvidence && (env.V1_LLM_SMOKE_OUTPUT_BUCKET !== GCP_IDENTITY.bucket
     || !expectedOutput.test(String(env.V1_LLM_SMOKE_OUTPUT_OBJECT ?? '')))) {
     render(stderr, outputRecord({ provider: config.llm.provider, code: 'LLM_SMOKE_OUTPUT_INVALID' }));
     return 2;

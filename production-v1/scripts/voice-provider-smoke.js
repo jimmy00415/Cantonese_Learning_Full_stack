@@ -4,6 +4,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { loadConfig, loadVoiceSmokeConfiguration } from '../src/config.js';
+import { GCP_IDENTITY } from '../src/gcp-identity.js';
 import { decodeCanonicalMp3 } from '../src/media/canonical-mp3.js';
 import { validateCanonicalWav } from '../src/media/canonical-wav.js';
 import { createAsrProvider } from '../src/providers/asr.js';
@@ -17,7 +18,7 @@ import { writeImmutableGcsEvidence } from '../src/services/gcs-evidence-writer.j
 
 const RELEASE_SHA = /^[0-9a-f]{40}$/i;
 const FIXED_TTS_PHRASE = '你好，這是 Hong Kong Buddy 的非敏感語音驗證。';
-const RUNTIME_IDENTITY = 'hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com';
+const RUNTIME_IDENTITY = GCP_IDENTITY.serviceAccounts.runtime;
 const FIXTURE_DEFINITIONS = Object.freeze([
   Object.freeze({
     responseLanguage: 'yue-Hant-HK', locale: 'yue-Hant-HK', referenceId: 'voice-smoke-yue-v1',
@@ -181,7 +182,7 @@ export async function runVoiceProviderSmoke({
   }
   const productionJob = environment.V1_RELEASE_MANIFEST_FILE === '/app/release-manifest.json';
   const expectedOutput = new RegExp(`^release-evidence/${config.releaseCommitSha}/voice-smoke/${selection.capability}-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\\.json$`);
-  if (productionJob && !writeEvidence && (environment.V1_VOICE_SMOKE_OUTPUT_BUCKET !== 'hkbuddy-prod-v1-20260826-media'
+  if (productionJob && !writeEvidence && (environment.V1_VOICE_SMOKE_OUTPUT_BUCKET !== GCP_IDENTITY.bucket
     || !expectedOutput.test(String(environment.V1_VOICE_SMOKE_OUTPUT_OBJECT ?? '')))) {
     const output = { capability: selection.capability, provider: selected.provider, result: 'fail', errorCode: 'VOICE_EVIDENCE_OUTPUT_INVALID' };
     safeOutput(writeOutput, output);

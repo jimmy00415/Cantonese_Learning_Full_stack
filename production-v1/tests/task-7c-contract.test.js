@@ -17,6 +17,7 @@ import {
   validateCanonicalMp3,
 } from '../scripts/production-latency-workload.js';
 import { runVoiceProviderSmoke } from '../scripts/voice-provider-smoke.js';
+import { GCP_IDENTITY } from '../src/gcp-identity.js';
 import { createAcceptanceTimingRecorder } from '../src/telemetry/acceptance-timings.js';
 import { createApp } from '../src/app.js';
 import { loadConfig, loadVoiceSmokeConfiguration } from '../src/config.js';
@@ -580,7 +581,7 @@ test('Google speech evidence v2 requires three locales, content-free metrics, de
 });
 
 test('Google ASR smoke generates three pinned non-sensitive LINEAR16 fixtures before locale-bound transcription', async () => {
-  const runtimeIdentity = 'hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com';
+  const runtimeIdentity = GCP_IDENTITY.serviceAccounts.runtime;
   const environment = {
     NODE_ENV: 'test', V1_RELEASE_COMMIT_SHA: COMMIT,
     V1_GOOGLE_CLOUD_PROJECT: 'motion-expert-hk-ltd-webpage',

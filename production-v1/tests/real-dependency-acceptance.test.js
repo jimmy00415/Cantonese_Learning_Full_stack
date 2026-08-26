@@ -23,17 +23,17 @@ const SOURCE_ARCHIVE_SHA256 = '2'.repeat(64);
 const RUN_ID = '123e4567-e89b-42d3-a456-426614174000';
 const SCHEMA = `v1_accept_${RUN_ID.replaceAll('-', '')}`;
 const GCS_PREFIX = `v1-accept/${RUN_ID}/`;
-const PROJECT_ID = 'hkbuddy-prod-v1-20260826';
-const PROJECT_NUMBER = '93662314720';
-const BUCKET_NAME = 'hkbuddy-prod-v1-20260826-media';
+const PROJECT_ID = 'motion-expert-hk-ltd-webpage';
+const PROJECT_NUMBER = '582852715831';
+const BUCKET_NAME = 'hkbuddy-v1-582852715831-media';
 const GCS_RESOURCE_ID = `//storage.googleapis.com/projects/_/buckets/${BUCKET_NAME}`;
-const POSTGRES_RESOURCE_ID = `//sqladmin.googleapis.com/projects/${PROJECT_ID}/instances/hkbuddy-pg/databases/hkbuddy_v1`;
+const POSTGRES_RESOURCE_ID = `//sqladmin.googleapis.com/projects/${PROJECT_ID}/instances/hkbuddy-v1-pg/databases/hkbuddy_v1`;
 const DATABASE_URL = 'postgresql://hkbuddy_app:private-password@10.25.0.3:5432/hkbuddy_v1?sslmode=require';
 const MIGRATOR_DATABASE_URL = 'postgresql://hkbuddy_migrator:private-migrator-password@10.25.0.3:5432/hkbuddy_v1?sslmode=require';
 const INVENTORY_FILE = resolve('approved-legacy-inventory.json');
 const RELEASE_MANIFEST_FILE = '/app/release-manifest.json';
 const OUTPUT_OBJECT = `release-evidence/${COMMIT}/dependency-acceptance/${RUN_ID}.json`;
-const ACCEPTANCE_SERVICE_ACCOUNT = `hkbuddy-acceptance@${PROJECT_ID}.iam.gserviceaccount.com`;
+const ACCEPTANCE_SERVICE_ACCOUNT = `hkbuddy-v1-acceptance@${PROJECT_ID}.iam.gserviceaccount.com`;
 
 const CORE_CHECKS = Object.freeze([
   'postgres-migration-health',

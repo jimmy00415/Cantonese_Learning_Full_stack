@@ -12,6 +12,7 @@ import {
   postgresIdentitySha256,
   validateLegacyResourceInventory,
 } from '../src/services/release-evidence.js';
+import { GCP_IDENTITY } from '../src/gcp-identity.js';
 import { PostgresStore } from '../src/stores/postgres-store.js';
 
 const RELEASE_SHA = /^[0-9a-f]{40}$/;
@@ -21,16 +22,16 @@ const GCS_PREFIX = /^v1-accept\/([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9
 const ATTEMPT_NONCE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const EVIDENCE_OUTPUT_OBJECT = /^release-evidence\/([0-9a-f]{40})\/dependency-acceptance\/([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.json$/;
 const CHECK_NAME = /^[a-z0-9][a-z0-9-]{0,79}$/;
-const PROJECT_ID = 'hkbuddy-prod-v1-20260826';
-const PROJECT_NUMBER = '93662314720';
-const BUCKET_NAME = 'hkbuddy-prod-v1-20260826-media';
+const PROJECT_ID = GCP_IDENTITY.projectId;
+const PROJECT_NUMBER = GCP_IDENTITY.projectNumber;
+const BUCKET_NAME = GCP_IDENTITY.bucket;
 const APP_DATABASE_USER = 'hkbuddy_app';
 const MIGRATOR_DATABASE_USER = 'hkbuddy_migrator';
 const RELEASE_MANIFEST_FILE = '/app/release-manifest.json';
-const ACCEPTANCE_SERVICE_ACCOUNT = `hkbuddy-acceptance@${PROJECT_ID}.iam.gserviceaccount.com`;
+const ACCEPTANCE_SERVICE_ACCOUNT = GCP_IDENTITY.serviceAccounts.acceptance;
 const SERVICE_ACCOUNT_METADATA_URL = 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email';
 const GCS_RESOURCE_ID = `//storage.googleapis.com/projects/_/buckets/${BUCKET_NAME}`;
-const POSTGRES_RESOURCE_ID = `//sqladmin.googleapis.com/projects/${PROJECT_ID}/instances/hkbuddy-pg/databases/hkbuddy_v1`;
+const POSTGRES_RESOURCE_ID = `//sqladmin.googleapis.com/projects/${PROJECT_ID}/instances/${GCP_IDENTITY.cloudSqlInstance}/databases/${GCP_IDENTITY.database}`;
 const GCS_REQUIRED_PERMISSIONS = Object.freeze([
   'storage.objects.create',
   'storage.objects.delete',

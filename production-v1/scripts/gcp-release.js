@@ -9,6 +9,7 @@ import { createGzip } from 'node:zlib';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { createDefaultGcloudExecutor } from './gcp-provision.js';
+import { GCP_IDENTITY } from '../src/gcp-identity.js';
 import { finalizeReleaseEvidenceRecord } from '../src/services/release-evidence.js';
 import { finalizeEvidenceRecord } from '../src/services/voice-evidence.js';
 import {
@@ -18,19 +19,20 @@ import {
   runLatencyAcceptance,
 } from './production-latency-workload.js';
 
-const PROJECT = 'hkbuddy-prod-v1-20260826';
-const REGION = 'asia-east2';
-const SERVICE = 'hkbuddy-api';
-const MIGRATION_JOB = 'hkbuddy-migrate';
-const DEPENDENCY_ACCEPTANCE_JOB = 'hkbuddy-dependency-acceptance';
-const LLM_SMOKE_JOB = 'hkbuddy-llm-smoke';
-const ASR_SMOKE_JOB = 'hkbuddy-asr-smoke';
-const TTS_SMOKE_JOB = 'hkbuddy-tts-smoke';
-const REPOSITORY = 'hkbuddy';
-const BUILD_SERVICE_ACCOUNT = `projects/${PROJECT}/serviceAccounts/hkbuddy-build@${PROJECT}.iam.gserviceaccount.com`;
-const RUNTIME_SERVICE_ACCOUNT = `hkbuddy-runtime@${PROJECT}.iam.gserviceaccount.com`;
-const MIGRATOR_SERVICE_ACCOUNT = `hkbuddy-migrator@${PROJECT}.iam.gserviceaccount.com`;
-const ACCEPTANCE_SERVICE_ACCOUNT = `hkbuddy-acceptance@${PROJECT}.iam.gserviceaccount.com`;
+const PROJECT = GCP_IDENTITY.projectId;
+const REGION = GCP_IDENTITY.region;
+const SERVICE = GCP_IDENTITY.service;
+const MIGRATION_JOB = GCP_IDENTITY.jobs.migration;
+const DEPENDENCY_ACCEPTANCE_JOB = GCP_IDENTITY.jobs.dependencies;
+const LLM_SMOKE_JOB = GCP_IDENTITY.jobs.llm;
+const ASR_SMOKE_JOB = GCP_IDENTITY.jobs.asr;
+const TTS_SMOKE_JOB = GCP_IDENTITY.jobs.tts;
+const REPOSITORY = GCP_IDENTITY.repository;
+const MEDIA_BUCKET = GCP_IDENTITY.bucket;
+const BUILD_SERVICE_ACCOUNT = `projects/${PROJECT}/serviceAccounts/${GCP_IDENTITY.serviceAccounts.build}`;
+const RUNTIME_SERVICE_ACCOUNT = GCP_IDENTITY.serviceAccounts.runtime;
+const MIGRATOR_SERVICE_ACCOUNT = GCP_IDENTITY.serviceAccounts.migrator;
+const ACCEPTANCE_SERVICE_ACCOUNT = GCP_IDENTITY.serviceAccounts.acceptance;
 const PROMOTION_AUTHORITY = 'admin@motionexp.com';
 const OCI_SOURCE = 'https://github.com/jimmy00415/Cantonese_Learning_Full_stack';
 const RELEASE_SHA = /^[0-9a-f]{40}$/;
@@ -38,7 +40,7 @@ const DIGEST = /^[0-9a-f]{64}$/;
 const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/;
 const NUMERIC_VERSION = /^[1-9]\d*$/;
 const PROJECT_NUMBER = /^\d{6,20}$/;
-const REVISION = /^hkbuddy-api-[a-z0-9](?:[a-z0-9-]{0,47}[a-z0-9])?$/;
+const REVISION = /^hkbuddy-v1-api-[a-z0-9](?:[a-z0-9-]{0,44}[a-z0-9])?$/;
 const BUILD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ACCEPTANCE_RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -76,37 +78,37 @@ const execFileAsync = promisify(execFile);
 
 const EVIDENCE_DEFINITIONS = Object.freeze({
   legacyInventory: Object.freeze({
-    secret: 'hkbuddy-legacy-inventory',
+    secret: GCP_IDENTITY.secrets.legacy,
     mountPath: '/var/run/secrets/hkbuddy/legacy-inventory/legacy-inventory.json',
     fileEnv: 'V1_LEGACY_RESOURCE_INVENTORY_FILE',
     versionEnv: 'V1_LEGACY_RESOURCE_INVENTORY_VERSION',
   }),
   dependencyAcceptance: Object.freeze({
-    secret: 'hkbuddy-dependency-acceptance',
+    secret: GCP_IDENTITY.secrets.dependencies,
     mountPath: '/var/run/secrets/hkbuddy/dependency-acceptance/dependency-acceptance.json',
     fileEnv: 'V1_DEPENDENCY_ACCEPTANCE_EVIDENCE_FILE',
     versionEnv: 'V1_DEPENDENCY_ACCEPTANCE_EVIDENCE_VERSION',
   }),
   llmSmoke: Object.freeze({
-    secret: 'hkbuddy-llm-smoke',
+    secret: GCP_IDENTITY.secrets.llm,
     mountPath: '/var/run/secrets/hkbuddy/llm-smoke/llm-smoke.json',
     fileEnv: 'V1_LLM_SMOKE_EVIDENCE_FILE',
     versionEnv: 'V1_LLM_SMOKE_EVIDENCE_VERSION',
   }),
   asrSmoke: Object.freeze({
-    secret: 'hkbuddy-asr-smoke',
+    secret: GCP_IDENTITY.secrets.asr,
     mountPath: '/var/run/secrets/hkbuddy/asr-smoke/asr-smoke.json',
     fileEnv: 'V1_ASR_SMOKE_EVIDENCE_FILE',
     versionEnv: 'V1_ASR_SMOKE_EVIDENCE_VERSION',
   }),
   ttsSmoke: Object.freeze({
-    secret: 'hkbuddy-tts-smoke',
+    secret: GCP_IDENTITY.secrets.tts,
     mountPath: '/var/run/secrets/hkbuddy/tts-smoke/tts-smoke.json',
     fileEnv: 'V1_TTS_SMOKE_EVIDENCE_FILE',
     versionEnv: 'V1_TTS_SMOKE_EVIDENCE_VERSION',
   }),
   iosVoiceAcceptance: Object.freeze({
-    secret: 'hkbuddy-ios-voice-acceptance',
+    secret: GCP_IDENTITY.secrets.ios,
     mountPath: '/var/run/secrets/hkbuddy/ios-voice-acceptance/ios-voice-acceptance.json',
     fileEnv: 'V1_IOS_VOICE_ACCEPTANCE_FILE',
     versionEnv: 'V1_IOS_VOICE_ACCEPTANCE_VERSION',
@@ -387,7 +389,7 @@ function assertAcceptanceOutputs(value, { releaseSha, runId } = {}) {
   for (const [key, object] of Object.entries(expectedObjects)) {
     const member = value[key];
     if (!exactKeys(member, ['bucket', 'filePath', 'generation', 'object'])
-      || member.bucket !== `${PROJECT}-media`
+      || member.bucket !== MEDIA_BUCKET
       || member.object !== object
       || !NUMERIC_VERSION.test(String(member.generation ?? ''))
       || !isAbsoluteFile(member.filePath)
@@ -406,15 +408,15 @@ function environmentFor({ releaseSha, serviceOrigin, candidateOrigin, evidence }
     V1_RUNTIME_SERVICE_ACCOUNT: RUNTIME_SERVICE_ACCOUNT,
     V1_TRUST_PROXY_HOPS: '1',
     V1_STORE_DRIVER: 'postgres',
-    V1_POSTGRES_RESOURCE_ID: `//sqladmin.googleapis.com/projects/${PROJECT}/instances/hkbuddy-pg/databases/hkbuddy_v1`,
+    V1_POSTGRES_RESOURCE_ID: `//sqladmin.googleapis.com/projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}/databases/${GCP_IDENTITY.database}`,
     V1_MEDIA_DRIVER: 'gcs',
     V1_GOOGLE_CLOUD_PROJECT: PROJECT,
-    V1_GCS_BUCKET: `${PROJECT}-media`,
-    V1_GCS_RESOURCE_ID: `//storage.googleapis.com/projects/_/buckets/${PROJECT}-media`,
+    V1_GCS_BUCKET: MEDIA_BUCKET,
+    V1_GCS_RESOURCE_ID: `//storage.googleapis.com/projects/_/buckets/${MEDIA_BUCKET}`,
     V1_LLM_PROVIDER: 'vertex-ai',
     V1_VERTEX_LOCATION: 'global',
     V1_VERTEX_MODEL: 'gemini-2.5-flash',
-    V1_LLM_CREDENTIAL_VERSION: 'hkbuddy-runtime-v1',
+    V1_LLM_CREDENTIAL_VERSION: 'hkbuddy-v1-runtime-v1',
     V1_ASR_PROVIDER: 'google-stt-v2',
     V1_TTS_PROVIDER: 'google-tts',
     V1_GOOGLE_STT_LOCATION: 'asia-southeast1',
@@ -424,7 +426,7 @@ function environmentFor({ releaseSha, serviceOrigin, candidateOrigin, evidence }
     V1_GOOGLE_TTS_VOICE_EN: 'en-US-Chirp3-HD-Achernar',
     V1_GOOGLE_TTS_VOICE_YUE: 'yue-HK-Chirp3-HD-Achernar',
     V1_GOOGLE_TTS_VOICE_CMN: 'cmn-CN-Chirp3-HD-Achernar',
-    V1_GOOGLE_CREDENTIAL_VERSION: 'hkbuddy-runtime-v1',
+    V1_GOOGLE_CREDENTIAL_VERSION: 'hkbuddy-v1-runtime-v1',
     V1_RELEASE_COMMIT_SHA: releaseSha,
     V1_RELEASE_MANIFEST_FILE: '/app/release-manifest.json',
     V1_LEGACY_RESOURCE_INVENTORY_APPROVED: 'true',
@@ -442,8 +444,8 @@ function environmentFor({ releaseSha, serviceOrigin, candidateOrigin, evidence }
 
 function secretBindings(databaseSecretVersions, evidence) {
   const environment = Object.freeze({
-    V1_DATABASE_URL: Object.freeze({ secret: 'hkbuddy-db-app-url', version: databaseSecretVersions.app }),
-    V1_SESSION_SECRET: Object.freeze({ secret: 'hkbuddy-session-secret', version: databaseSecretVersions.session }),
+    V1_DATABASE_URL: Object.freeze({ secret: GCP_IDENTITY.secrets.dbAppUrl, version: databaseSecretVersions.app }),
+    V1_SESSION_SECRET: Object.freeze({ secret: GCP_IDENTITY.secrets.session, version: databaseSecretVersions.session }),
   });
   const mounts = {};
   for (const [key, definition] of Object.entries(EVIDENCE_DEFINITIONS)) {
@@ -532,7 +534,7 @@ function candidateServiceSpec({
             'run.googleapis.com/startup-cpu-boost': 'true',
             'run.googleapis.com/execution-environment': 'gen2',
             'run.googleapis.com/network-interfaces': JSON.stringify([{
-              network: 'hkbuddy-prod-vpc', subnetwork: 'hkbuddy-ae2-run',
+              network: GCP_IDENTITY.network, subnetwork: GCP_IDENTITY.subnet,
             }]),
             'run.googleapis.com/vpc-access-egress': 'private-ranges-only',
           }),
@@ -624,6 +626,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     || !DIGEST.test(String(input.sourceArchiveSha256 ?? ''))
     || (!IMAGE_DIGEST.test(String(input.imageDigest ?? '')) && !unresolvedImage)
     || !PROJECT_NUMBER.test(String(input.projectNumber ?? ''))
+    || input.projectNumber !== GCP_IDENTITY.projectNumber
     || !isAbsoluteFile(input.sourceArchive)
     || !/\.(?:tar\.gz|tgz)$/i.test(input.sourceArchive)
     || (!unresolvedDatabase && (
@@ -652,14 +655,14 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
   const databaseSecretVersions = unresolvedDatabase
     ? Object.freeze({ app: '1', migrator: '1', session: '1' })
     : input.databaseSecretVersions;
-  const previousRevision = unresolvedPrevious ? 'hkbuddy-api-unresolved' : input.previousRevision;
+  const previousRevision = unresolvedPrevious ? `${SERVICE}-unresolved` : input.previousRevision;
   const releaseSha = input.releaseSha;
   const task8Evidence = assertTask8Evidence(input.task8Evidence);
   const acceptanceOutputs = unresolvedAcceptanceOutputs
     ? assertAcceptanceOutputs(Object.fromEntries(Object.entries(
       expectedAcceptanceObjects(releaseSha, input.acceptanceRunId),
     ).map(([key, object]) => [key, {
-      bucket: `${PROJECT}-media`, object, generation: '1', filePath: `/unresolved/${key}.json`,
+      bucket: MEDIA_BUCKET, object, generation: '1', filePath: `/unresolved/${key}.json`,
     }])), { releaseSha, runId: input.acceptanceRunId })
     : assertAcceptanceOutputs(input.acceptanceOutputs, {
       releaseSha, runId: input.acceptanceRunId,
@@ -689,8 +692,8 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
   const acceptanceGcsPrefix = `v1-accept/${acceptanceRunId}/`;
   const acceptanceOutputObjects = expectedAcceptanceObjects(releaseSha, acceptanceRunId);
   const dependencyEvidenceOutputObject = acceptanceOutputObjects.dependencyAcceptance;
-  const postgresResourceId = `//sqladmin.googleapis.com/projects/${PROJECT}/instances/hkbuddy-pg/databases/hkbuddy_v1`;
-  const gcsResourceId = `//storage.googleapis.com/projects/_/buckets/${PROJECT}-media`;
+  const postgresResourceId = `//sqladmin.googleapis.com/projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}/databases/${GCP_IDENTITY.database}`;
+  const gcsResourceId = `//storage.googleapis.com/projects/_/buckets/${MEDIA_BUCKET}`;
   const dependencyEnvironment = Object.freeze({
     V1_RELEASE_COMMIT_SHA: releaseSha,
     V1_RELEASE_MANIFEST_FILE: '/app/release-manifest.json',
@@ -702,8 +705,8 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     V1_POSTGRES_RESOURCE_ID: postgresResourceId,
     V1_ACCEPTANCE_GOOGLE_CLOUD_PROJECT: PROJECT,
     V1_GOOGLE_CLOUD_PROJECT: PROJECT,
-    V1_ACCEPTANCE_GCS_BUCKET: `${PROJECT}-media`,
-    V1_GCS_BUCKET: `${PROJECT}-media`,
+    V1_ACCEPTANCE_GCS_BUCKET: MEDIA_BUCKET,
+    V1_GCS_BUCKET: MEDIA_BUCKET,
     V1_ACCEPTANCE_GCS_RESOURCE_ID: gcsResourceId,
     V1_GCS_RESOURCE_ID: gcsResourceId,
     V1_MEDIA_DRIVER: 'gcs',
@@ -713,9 +716,9 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
   });
   const dependencySecrets = Object.freeze({
     environment: Object.freeze({
-      V1_DATABASE_URL: Object.freeze({ secret: 'hkbuddy-db-app-url', version: databaseSecretVersions.app }),
-      V1_ACCEPTANCE_DATABASE_URL: Object.freeze({ secret: 'hkbuddy-db-app-url', version: databaseSecretVersions.app }),
-      V1_ACCEPTANCE_MIGRATOR_DATABASE_URL: Object.freeze({ secret: 'hkbuddy-db-migrator-url', version: databaseSecretVersions.migrator }),
+      V1_DATABASE_URL: Object.freeze({ secret: GCP_IDENTITY.secrets.dbAppUrl, version: databaseSecretVersions.app }),
+      V1_ACCEPTANCE_DATABASE_URL: Object.freeze({ secret: GCP_IDENTITY.secrets.dbAppUrl, version: databaseSecretVersions.app }),
+      V1_ACCEPTANCE_MIGRATOR_DATABASE_URL: Object.freeze({ secret: GCP_IDENTITY.secrets.dbMigratorUrl, version: databaseSecretVersions.migrator }),
     }),
     mounts: Object.freeze({
       legacyInventory: Object.freeze({
@@ -735,7 +738,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     V1_LLM_PROVIDER: 'vertex-ai',
     V1_VERTEX_LOCATION: 'global',
     V1_VERTEX_MODEL: 'gemini-2.5-flash',
-    V1_LLM_CREDENTIAL_VERSION: 'hkbuddy-runtime-v1',
+    V1_LLM_CREDENTIAL_VERSION: 'hkbuddy-v1-runtime-v1',
     V1_ASR_PROVIDER: 'google-stt-v2',
     V1_GOOGLE_STT_LOCATION: 'asia-southeast1',
     V1_GOOGLE_STT_MODEL: 'chirp_2',
@@ -745,21 +748,21 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     V1_GOOGLE_TTS_VOICE_EN: 'en-US-Chirp3-HD-Achernar',
     V1_GOOGLE_TTS_VOICE_YUE: 'yue-HK-Chirp3-HD-Achernar',
     V1_GOOGLE_TTS_VOICE_CMN: 'cmn-CN-Chirp3-HD-Achernar',
-    V1_GOOGLE_CREDENTIAL_VERSION: 'hkbuddy-runtime-v1',
+    V1_GOOGLE_CREDENTIAL_VERSION: 'hkbuddy-v1-runtime-v1',
   });
   const llmSmokeEnvironment = Object.freeze({
     ...smokeEnvironment,
-    V1_LLM_SMOKE_OUTPUT_BUCKET: `${PROJECT}-media`,
+    V1_LLM_SMOKE_OUTPUT_BUCKET: MEDIA_BUCKET,
     V1_LLM_SMOKE_OUTPUT_OBJECT: acceptanceOutputObjects.llmSmoke,
   });
   const asrSmokeEnvironment = Object.freeze({
     ...smokeEnvironment,
-    V1_VOICE_SMOKE_OUTPUT_BUCKET: `${PROJECT}-media`,
+    V1_VOICE_SMOKE_OUTPUT_BUCKET: MEDIA_BUCKET,
     V1_VOICE_SMOKE_OUTPUT_OBJECT: acceptanceOutputObjects.asrSmoke,
   });
   const ttsSmokeEnvironment = Object.freeze({
     ...smokeEnvironment,
-    V1_VOICE_SMOKE_OUTPUT_BUCKET: `${PROJECT}-media`,
+    V1_VOICE_SMOKE_OUTPUT_BUCKET: MEDIA_BUCKET,
     V1_VOICE_SMOKE_OUTPUT_OBJECT: acceptanceOutputObjects.ttsSmoke,
   });
   const expectedJobs = Object.freeze({
@@ -775,8 +778,8 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       parallelism: 1,
       maxRetries: 0,
       timeoutSeconds: 3600,
-      network: 'hkbuddy-prod-vpc',
-      subnet: 'hkbuddy-ae2-run',
+      network: GCP_IDENTITY.network,
+      subnet: GCP_IDENTITY.subnet,
       vpcEgress: 'private-ranges-only',
       environment: dependencyEnvironment,
       secretEnvironment: dependencySecrets.environment,
@@ -789,7 +792,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       command: Object.freeze(['node']),
       args: Object.freeze(['scripts/provider-smoke.js', '--confirm-real-provider']),
       taskCount: 1, parallelism: 1, maxRetries: 0, timeoutSeconds: 600,
-      network: 'hkbuddy-prod-vpc', subnet: 'hkbuddy-ae2-run', vpcEgress: 'private-ranges-only',
+      network: GCP_IDENTITY.network, subnet: GCP_IDENTITY.subnet, vpcEgress: 'private-ranges-only',
       environment: llmSmokeEnvironment, secretEnvironment: Object.freeze({}), secretMounts: Object.freeze({}),
       labels: Object.freeze({ 'simplify-release-sha': releaseSha }),
     }),
@@ -803,7 +806,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
         '--confirm-asr-audio-nonsensitive',
       ]),
       taskCount: 1, parallelism: 1, maxRetries: 0, timeoutSeconds: 900,
-      network: 'hkbuddy-prod-vpc', subnet: 'hkbuddy-ae2-run', vpcEgress: 'private-ranges-only',
+      network: GCP_IDENTITY.network, subnet: GCP_IDENTITY.subnet, vpcEgress: 'private-ranges-only',
       environment: asrSmokeEnvironment, secretEnvironment: Object.freeze({}), secretMounts: Object.freeze({}),
       labels: Object.freeze({ 'simplify-release-sha': releaseSha }),
     }),
@@ -813,7 +816,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       command: Object.freeze(['node']),
       args: Object.freeze(['scripts/voice-provider-smoke.js', '--capability', 'tts', '--confirm-real-voice-provider']),
       taskCount: 1, parallelism: 1, maxRetries: 0, timeoutSeconds: 900,
-      network: 'hkbuddy-prod-vpc', subnet: 'hkbuddy-ae2-run', vpcEgress: 'private-ranges-only',
+      network: GCP_IDENTITY.network, subnet: GCP_IDENTITY.subnet, vpcEgress: 'private-ranges-only',
       environment: ttsSmokeEnvironment, secretEnvironment: Object.freeze({}), secretMounts: Object.freeze({}),
       labels: Object.freeze({ 'simplify-release-sha': releaseSha }),
     }),
@@ -830,13 +833,13 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     parallelism: 1,
     maxRetries: 0,
     timeoutSeconds: 600,
-    network: 'hkbuddy-prod-vpc',
-    subnet: 'hkbuddy-ae2-run',
+    network: GCP_IDENTITY.network,
+    subnet: GCP_IDENTITY.subnet,
     vpcEgress: 'private-ranges-only',
     environment: Object.freeze({}),
     secretEnvironment: Object.freeze({
       V1_DATABASE_URL: Object.freeze({
-        secret: 'hkbuddy-db-migrator-url', version: databaseSecretVersions.migrator,
+        secret: GCP_IDENTITY.secrets.dbMigratorUrl, version: databaseSecretVersions.migrator,
       }),
     }),
     secretMounts: Object.freeze({}),
@@ -906,10 +909,10 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       'run', 'jobs', 'deploy', MIGRATION_JOB, `--project=${PROJECT}`, `--region=${REGION}`,
       `--image=${image}`, `--service-account=${MIGRATOR_SERVICE_ACCOUNT}`,
       '--command=node', '--args=scripts/run-migrations.js', '--tasks=1', '--parallelism=1',
-      '--max-retries=0', '--task-timeout=600s', '--network=hkbuddy-prod-vpc',
-      '--subnet=hkbuddy-ae2-run', '--vpc-egress=private-ranges-only',
+      '--max-retries=0', '--task-timeout=600s', `--network=${GCP_IDENTITY.network}`,
+      `--subnet=${GCP_IDENTITY.subnet}`, '--vpc-egress=private-ranges-only',
       `--labels=simplify-release-sha=${releaseSha}`,
-      `--set-secrets=V1_DATABASE_URL=hkbuddy-db-migrator-url:${databaseSecretVersions.migrator}`,
+      `--set-secrets=V1_DATABASE_URL=${GCP_IDENTITY.secrets.dbMigratorUrl}:${databaseSecretVersions.migrator}`,
       '--format=json',
     ]),
     operation('migration', 'migration-readback', [
@@ -976,7 +979,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
   }
   operations.push(operation('evidence', 'evidence-output-zero-readback', [
     'storage', 'objects', 'list',
-    `gs://${PROJECT}-media/release-evidence/${releaseSha}/**`,
+    `gs://${MEDIA_BUCKET}/release-evidence/${releaseSha}/**`,
     `--project=${PROJECT}`, '--format=json',
   ]));
   operations.push(
@@ -1085,8 +1088,8 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     cpuThrottling: false,
     startupCpuBoost: true,
     timeoutSeconds: 60,
-    network: 'hkbuddy-prod-vpc',
-    subnet: 'hkbuddy-ae2-run',
+    network: GCP_IDENTITY.network,
+    subnet: GCP_IDENTITY.subnet,
     vpcEgress: 'private-ranges-only',
     environment,
     secretEnvironment: bindings.environment,
@@ -1118,7 +1121,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     task8Evidence,
     acceptanceOutputs,
     acceptanceEvidenceOutput: Object.freeze({
-      bucket: `${PROJECT}-media`,
+      bucket: MEDIA_BUCKET,
       object: dependencyEvidenceOutputObject,
     }),
     evidence,
@@ -2653,7 +2656,7 @@ function parseArguments(argv, releaseSha) {
 function workloadLoggingReadArgv(attestation) {
   const userAgent = `hkbuddy-v1-acceptance/${attestation.acceptanceWindowId}`;
   const filter = [
-    'logName="projects/hkbuddy-prod-v1-20260826/logs/run.googleapis.com%2Frequests"',
+    `logName="projects/${PROJECT}/logs/run.googleapis.com%2Frequests"`,
     'resource.type="cloud_run_revision"',
     `resource.labels.project_id="${PROJECT}"`,
     `resource.labels.location="${REGION}"`,
