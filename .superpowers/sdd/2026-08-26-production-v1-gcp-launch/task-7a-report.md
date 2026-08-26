@@ -240,10 +240,11 @@ Promotion requires one canonical, predecessor-hashed receipt chain through
 build, migration, inventory, acceptance, collection, evidence, zero-traffic
 candidate, readiness, workload, and 390x844 mobile acceptance. The three Task 8
 artifact files are re-read and revalidated before any promotion control-plane
-call. The candidate is publicly invokable only through its exact zero-traffic
-tag for real browser acceptance; candidate failure after that grant triggers
-compensating IAM removal and private readback, and an explicit cleanup phase is
-available for an abandoned candidate. Stable traffic changes to the reviewed
+call. The zero-traffic tagged candidate remains private during QA. Mobile
+acceptance binds an authenticated Google identity-token path to the exact tagged
+URL, stable service audience, and hashed subject without persisting the token.
+Only promotion can add public invocation, after all evidence and fresh private
+candidate readbacks have passed. Stable traffic changes to the reviewed
 revision only after a fresh public-IAM, tag-to-revision, zero-traffic,
 revision-configuration, and artifact-digest reread.
 
@@ -271,6 +272,63 @@ exit 0
 git diff --check
 exit 0 (line-ending warnings only)
 ```
+
+### Second independent-review follow-up
+
+The second review exposed real Cloud Run v1 semantics and two lifecycle gaps.
+The focused suite was deliberately turned RED before the fixes:
+
+```text
+node --test tests/release-contract.test.js
+31 tests: 22 pass, 9 fail, 0 skip, exit 1
+- candidate and candidate-cleanup still contained a service-wide allUsers mutation
+- mobile evidence did not bind an authenticated tagged access path
+- safe pre-existing private IAM bindings were rejected
+- promotion did not snapshot or restore IAM when the grant landed but its response failed
+- public IAM was not freshly read back before the traffic mutation
+```
+
+The final contract keeps candidate and cleanup phases free of public-IAM
+mutations. Candidate and mobile receipts require `authenticated: true`, the
+exact zero-traffic tagged URL, the stable service URL as identity-token
+audience, and a SHA-256 subject binding; exact-key checks reject a persisted
+token. Promotion snapshots the complete private policy bindings, version, and
+etag before attempting the public grant. The mutation is marked attempted
+before the call. If that or any later promotion step fails, the orchestrator
+freshly reads the policy, accepts only the exact pre-state or the exact expected
+post-grant state, writes an etag-fenced restore policy, applies it, and requires
+a final exact private-policy readback. Existing user/group/conditional bindings
+are preserved.
+
+Cloud Run v1 fixtures now additionally prove that Service
+`timeoutSeconds` is the integer `60`, terminal Job execution relies on real v1
+conditions/counters rather than a nonexistent `reconciling` field, dependency
+secret mount directories are joined with the one numeric secret item path, and
+rollback removes the candidate tag before accepting the restored stable route.
+The 200-turn workload gate independently validates its complete schema, counts,
+metrics, thresholds, invariants, observations, release binding, and freshness.
+
+Fresh second-follow-up focused verification:
+
+```text
+node --test tests/release-contract.test.js
+31 tests: 31 pass, 0 fail, 0 skip, exit 0
+
+npm.cmd test
+1446 tests: 1445 pass, 0 fail, 1 approved real-PostgreSQL skip, exit 0
+
+npm.cmd run check
+exit 0
+
+npm.cmd run security:dependencies
+DEPENDENCY_SECURITY_EXCEPTION_REVIEWED, exit 0
+
+git diff --check
+exit 0 (line-ending warnings only)
+```
+
+No GCP mutation, build submission, Job execution, deployment, IAM change, or
+traffic change was performed during this second follow-up.
 
 No GCP mutation, build submission, Job execution, deployment, IAM change, or
 traffic change was performed during this remediation.

@@ -11,7 +11,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createDefaultGcloudExecutor } from './gcp-provision.js';
 import { finalizeReleaseEvidenceRecord } from '../src/services/release-evidence.js';
 import { finalizeEvidenceRecord } from '../src/services/voice-evidence.js';
-import { finalizeLatencyAcceptanceRecord } from './production-latency-workload.js';
+import {
+  LATENCY_ACCEPTANCE_CONTRACT,
+  finalizeLatencyAcceptanceRecord,
+} from './production-latency-workload.js';
 
 const PROJECT = 'hkbuddy-prod-v1-20260826';
 const REGION = 'asia-east2';
@@ -523,7 +526,7 @@ function candidateServiceSpec({
         spec: Object.freeze({
           serviceAccountName: RUNTIME_SERVICE_ACCOUNT,
           containerConcurrency: 40,
-          timeoutSeconds: '60s',
+          timeoutSeconds: 60,
           containers: Object.freeze([Object.freeze({
             image,
             ports: Object.freeze([Object.freeze({ name: 'http1', containerPort: 8080 })]),
@@ -558,6 +561,21 @@ async function writeCandidateServiceSpecFile(plan) {
     await writeFile(plan.candidateServiceSpecPath, contents, { encoding: 'utf8', flag: 'wx' });
   }
   return true;
+}
+
+async function writePromotionIamRestorePolicyFile(plan, policy) {
+  const contents = `${JSON.stringify(policy, null, 2)}\n`;
+  try {
+    const metadata = await lstat(plan.promotionIamRestorePolicyPath);
+    if (!metadata.isFile() || metadata.isSymbolicLink()
+      || !Buffer.from(await readFile(plan.promotionIamRestorePolicyPath)).equals(Buffer.from(contents))) {
+      throw new Error('promotion IAM restore policy drift');
+    }
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+    await writeFile(plan.promotionIamRestorePolicyPath, contents, { encoding: 'utf8', flag: 'wx' });
+  }
+  return plan.promotionIamRestorePolicyPath;
 }
 
 export function buildReleasePlan(input = {}, { phase = null } = {}) {
@@ -629,6 +647,12 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
   const candidateTag = `candidate-${candidateSuffix}`;
   const serviceOrigin = `https://${SERVICE}-${input.projectNumber}.${REGION}.run.app`;
   const candidateOrigin = `https://${candidateTag}---${SERVICE}-${input.projectNumber}.${REGION}.run.app`;
+  const candidateAccess = Object.freeze({
+    authenticated: true,
+    audience: serviceOrigin,
+    subjectSha256: createHash('sha256').update(PROMOTION_AUTHORITY).digest('hex'),
+    taggedUrl: candidateOrigin,
+  });
   const effectiveImageDigest = input.imageDigest ?? `sha256:${'0'.repeat(64)}`;
   const image = `asia-east2-docker.pkg.dev/${PROJECT}/${REPOSITORY}/${SERVICE}@${effectiveImageDigest}`;
   const environment = environmentFor({ releaseSha, serviceOrigin, candidateOrigin, evidence });
@@ -806,6 +830,9 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     }),
   });
   const candidateServiceSpecPath = join(dirname(input.sourceArchive), `${candidateRevision}.service.yaml`);
+  const promotionIamRestorePolicyPath = join(
+    dirname(input.sourceArchive), `${candidateRevision}.iam-restore.json`,
+  );
   const controlledCandidateServiceSpec = candidateServiceSpec({
     candidateRevision, candidateTag, previousRevision, releaseSha,
     image, environment, bindings, probes,
@@ -957,22 +984,6 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       'artifacts', 'docker', 'images', 'describe', image,
       `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
     ]),
-    operation('candidate', 'candidate-public-service', [
-      'run', 'services', 'add-iam-policy-binding', SERVICE, '--member=allUsers',
-      '--role=roles/run.invoker', `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-    ]),
-    operation('candidate', 'candidate-iam-readback', [
-      'run', 'services', 'get-iam-policy', SERVICE,
-      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-    ]),
-    operation('candidate', 'candidate-public-service-readback', [
-      'run', 'services', 'describe', SERVICE, `--project=${PROJECT}`, `--region=${REGION}`,
-      '--format=json',
-    ]),
-    operation('candidate-cleanup', 'candidate-cleanup-public-service', [
-      'run', 'services', 'remove-iam-policy-binding', SERVICE, '--member=allUsers',
-      '--role=roles/run.invoker', `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-    ]),
     operation('candidate-cleanup', 'candidate-cleanup-traffic', [
       'run', 'services', 'update-traffic', SERVICE,
       `--remove-tags=${candidateTag}`, `--to-revisions=${previousRevision}=100`,
@@ -1005,6 +1016,14 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       'artifacts', 'docker', 'images', 'describe', image,
       `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
     ]),
+    operation('promote', 'promote-public-service', [
+      'run', 'services', 'add-iam-policy-binding', SERVICE, '--member=allUsers',
+      '--role=roles/run.invoker', `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ]),
+    operation('promote', 'promote-public-iam-readback', [
+      'run', 'services', 'get-iam-policy', SERVICE,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ]),
     operation('promote', 'promote-traffic', [
       'run', 'services', 'update-traffic', SERVICE, `--to-revisions=${candidateRevision}=100`,
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
@@ -1014,7 +1033,8 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       '--format=json',
     ]),
     operation('rollback', 'rollback-traffic', [
-      'run', 'services', 'update-traffic', SERVICE, `--to-revisions=${previousRevision}=100`,
+      'run', 'services', 'update-traffic', SERVICE,
+      `--remove-tags=${candidateTag}`, `--to-revisions=${previousRevision}=100`,
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
     operation('rollback', 'rollback-readback', [
@@ -1048,7 +1068,8 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     secretMounts: bindings.mounts,
     probes,
     traffic: Object.freeze([Object.freeze({ revision: candidateRevision, tag: candidateTag, percent: 0 })]),
-    iam: Object.freeze([Object.freeze({ role: 'roles/run.invoker', members: Object.freeze(['allUsers']) })]),
+    access: candidateAccess,
+    iam: Object.freeze({ publicInvoker: false }),
   });
   return Object.freeze({
     project: PROJECT,
@@ -1062,8 +1083,10 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     candidateTag,
     serviceOrigin,
     candidateOrigin,
+    candidateAccess,
     candidateServiceSpecPath,
     candidateServiceSpec: controlledCandidateServiceSpec,
+    promotionIamRestorePolicyPath,
     acceptanceRunId,
     releaseIdentitySha256,
     releaseReceiptDirectory,
@@ -1247,7 +1270,7 @@ function normalizeCandidateRevision(value, expected) {
     maxInstances: positiveOrZeroInteger(annotations['autoscaling.knative.dev/maxScale']),
     cpuThrottling: annotations['run.googleapis.com/cpu-throttling'] === 'true',
     startupCpuBoost: annotations['run.googleapis.com/startup-cpu-boost'] === 'true',
-    timeoutSeconds: positiveOrZeroInteger(String(spec.timeoutSeconds ?? '').replace(/s$/u, '')),
+    timeoutSeconds: nonnegativeInteger(spec.timeoutSeconds),
     network: network?.network,
     subnet: network?.subnetwork,
     vpcEgress: annotations['run.googleapis.com/vpc-access-egress'],
@@ -1260,6 +1283,24 @@ function normalizeCandidateRevision(value, expected) {
       readiness: normalizeProbe(container.readinessProbe),
     },
   };
+}
+
+function validateCandidateServiceSpecDryRun(value, plan) {
+  const template = value?.spec?.template;
+  const normalizedService = normalizeCandidateService(value);
+  if (value?.apiVersion !== 'serving.knative.dev/v1' || value?.kind !== 'Service'
+    || !template || normalizedService?.service !== SERVICE
+    || !exact(normalizedService.traffic, [
+      { revision: plan.previousRevision, tag: null, percent: 100 },
+      { revision: plan.candidateRevision, tag: plan.candidateTag, percent: 0 },
+    ])
+    || !exact(
+      normalizeCandidateRevision({ metadata: template.metadata, spec: template.spec }, plan.expectedCandidate),
+      candidateRevisionContract(plan.expectedCandidate),
+    )) {
+    throw new Error('Cloud Run candidate Service dry-run is invalid');
+  }
+  return true;
 }
 
 function normalizeCandidateService(value) {
@@ -1324,7 +1365,7 @@ function validateCandidateArtifact(value, expectedImage) {
   return true;
 }
 
-export function validateCandidateControlPlaneReadbacks(value, plan, { publicInvoker = true } = {}) {
+export function validateCandidateControlPlaneReadbacks(value, plan, { publicInvoker = false } = {}) {
   if (!exactKeys(value, ['artifact', 'iam', 'revision', 'service']) || !plan?.expectedCandidate) {
     throw new Error('Cloud Run candidate control-plane readback is invalid');
   }
@@ -1338,22 +1379,90 @@ export function validateCandidateControlPlaneReadbacks(value, plan, { publicInvo
   return true;
 }
 
-export function validateServiceIamReceipt(value, { publicInvoker } = {}) {
-  const bindings = value?.bindings ?? [];
-  if (!Array.isArray(bindings) || ![true, false].includes(publicInvoker)) {
+function normalizeServiceIamPolicy(value, { requireEtag = false } = {}) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).some((key) => !['bindings', 'etag', 'version'].includes(key))) {
     throw new Error('Cloud Run service IAM readback is invalid');
   }
-  const normalized = bindings.map(({ condition, members, role } = {}) => {
-    if (condition !== undefined || typeof role !== 'string' || !Array.isArray(members)
-      || members.some((member) => typeof member !== 'string')) {
+  const bindings = value?.bindings ?? [];
+  if (!Array.isArray(bindings)) {
+    throw new Error('Cloud Run service IAM readback is invalid');
+  }
+  const normalizedBindings = bindings.map((binding = {}) => {
+    const allowedKeys = binding.condition === undefined
+      ? ['members', 'role'] : ['condition', 'members', 'role'];
+    const { condition, members, role } = binding;
+    const conditionValid = condition === undefined || (
+      condition && typeof condition === 'object' && !Array.isArray(condition)
+      && Object.keys(condition).length > 0
+      && Object.keys(condition).every((key) => ['description', 'expression', 'title'].includes(key))
+      && Object.values(condition).every((member) => typeof member === 'string' && member.length > 0)
+    );
+    if (!exactKeys(binding, allowedKeys) || typeof role !== 'string' || role.length === 0
+      || !Array.isArray(members) || members.length === 0
+      || members.some((member) => typeof member !== 'string' || member.length === 0)
+      || new Set(members).size !== members.length || !conditionValid) {
       throw new Error('Cloud Run service IAM readback is invalid');
     }
-    return { role, members: [...members].sort() };
-  }).sort((left, right) => left.role.localeCompare(right.role));
-  const expected = publicInvoker
-    ? [{ role: 'roles/run.invoker', members: ['allUsers'] }]
-    : [];
-  if (!exact(normalized, expected)) throw new Error('Cloud Run service IAM readback is invalid');
+    return {
+      role,
+      members: [...members].sort(),
+      ...(condition === undefined ? {} : { condition: canonical(condition) }),
+    };
+  }).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  if (new Set(normalizedBindings.map((binding) => JSON.stringify(binding))).size !== normalizedBindings.length) {
+    throw new Error('Cloud Run service IAM readback is invalid');
+  }
+  const etag = value.etag ?? null;
+  const version = value.version ?? null;
+  if ((etag !== null && (typeof etag !== 'string' || etag.length === 0 || etag.length > 512))
+    || (requireEtag && etag === null)
+    || (version !== null && (!Number.isSafeInteger(version) || version < 0 || version > 3))) {
+    throw new Error('Cloud Run service IAM readback is invalid');
+  }
+  return Object.freeze({ bindings: Object.freeze(normalizedBindings), etag, version });
+}
+
+function iamPolicyState(value) {
+  const normalized = value?.bindings ? value : normalizeServiceIamPolicy(value);
+  return { bindings: normalized.bindings, version: normalized.version };
+}
+
+function publicIamPolicyState(privatePolicy) {
+  const state = structuredClone(iamPolicyState(privatePolicy));
+  let invoker = state.bindings.find((binding) => (
+    binding.role === 'roles/run.invoker' && binding.condition === undefined
+  ));
+  if (!invoker) {
+    invoker = { role: 'roles/run.invoker', members: [] };
+    state.bindings.push(invoker);
+  }
+  invoker.members = [...invoker.members, 'allUsers'].sort();
+  state.bindings.sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  return state;
+}
+
+function validateIamPolicyState(value, expected, { requireEtag = true } = {}) {
+  const normalized = normalizeServiceIamPolicy(value, { requireEtag });
+  if (!exact(iamPolicyState(normalized), expected)) {
+    throw new Error('Cloud Run service IAM readback is invalid');
+  }
+  return normalized;
+}
+
+export function validateServiceIamReceipt(value, { publicInvoker, requireEtag = false } = {}) {
+  if (![true, false].includes(publicInvoker)) {
+    throw new Error('Cloud Run service IAM readback is invalid');
+  }
+  const normalized = normalizeServiceIamPolicy(value, { requireEtag });
+  const publicMembers = normalized.bindings.flatMap((binding) => binding.members.map((member) => ({
+    member, role: binding.role, conditioned: binding.condition !== undefined,
+  }))).filter(({ member }) => member === 'allUsers' || member === 'allAuthenticatedUsers');
+  const valid = publicInvoker
+    ? publicMembers.length === 1 && publicMembers[0].member === 'allUsers'
+      && publicMembers[0].role === 'roles/run.invoker' && publicMembers[0].conditioned === false
+    : publicMembers.length === 0;
+  if (!valid) throw new Error('Cloud Run service IAM readback is invalid');
   return true;
 }
 
@@ -1375,6 +1484,10 @@ export function validateTrafficReceipt(value, { revision } = {}) {
 function positiveOrZeroInteger(value) {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function nonnegativeInteger(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 function normalizeV1JobReadback(value) {
@@ -1399,11 +1512,15 @@ function normalizeV1JobReadback(value) {
   const secretMounts = {};
   for (const mount of container.volumeMounts ?? []) {
     const volume = (taskSpec.volumes ?? []).find(({ name } = {}) => name === mount?.name);
-    const item = volume?.secret?.items?.[0];
-    if (!volume?.secret?.secretName || !item?.key || typeof mount?.mountPath !== 'string') return null;
-    const key = mount.mountPath.endsWith('/legacy-inventory.json') ? 'legacyInventory' : mount.name;
+    const items = volume?.secret?.items;
+    if (!volume?.secret?.secretName || !Array.isArray(items) || items.length !== 1
+      || !items[0]?.key || typeof items[0]?.path !== 'string'
+      || typeof mount?.mountPath !== 'string') return null;
+    const item = items[0];
+    const path = join(mount.mountPath, item.path).replaceAll('\\', '/');
+    const key = path.endsWith('/legacy-inventory.json') ? 'legacyInventory' : mount.name;
     secretMounts[key] = {
-      path: mount.mountPath,
+      path,
       secret: volume.secret.secretName,
       version: String(item.key),
       readOnly: mount.readOnly !== false,
@@ -1446,29 +1563,25 @@ export function validateReleaseJobReadback(value, expected) {
 }
 
 export function validateMigrationExecutionReceipt(value, { releaseSha } = {}) {
-  const name = value?.name ?? value?.metadata?.name;
-  const job = value?.job ?? value?.metadata?.labels?.['run.googleapis.com/job'];
-  const status = value?.status ?? value;
-  const taskCount = positiveOrZeroInteger(value?.taskCount ?? value?.spec?.taskCount);
-  const parallelism = positiveOrZeroInteger(value?.parallelism ?? value?.spec?.parallelism);
-  const completed = value?.terminalCondition ?? (status?.conditions ?? []).find(({ type } = {}) => type === 'Completed');
-  const completionTime = value?.completionTime ?? status?.completionTime;
-  const expectedFullJob = `projects/${PROJECT}/locations/${REGION}/jobs/${MIGRATION_JOB}`;
-  const validName = typeof name === 'string' && (
-    new RegExp(`^${expectedFullJob}/executions/[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`).test(name)
-    || (job === MIGRATION_JOB && new RegExp(`^${MIGRATION_JOB}-[a-z0-9](?:[a-z0-9-]{0,48}[a-z0-9])?$`).test(name))
-  );
-  const validJob = job === MIGRATION_JOB || job === expectedFullJob;
-  const completedTrue = (completed?.type === 'Completed'
-    && (completed?.status === 'True' || completed?.state === 'CONDITION_SUCCEEDED'));
-  if (!RELEASE_SHA.test(String(releaseSha ?? '')) || !validName || !validJob
-    || taskCount !== 1 || parallelism !== 1
-    || positiveOrZeroInteger(status?.succeededCount) !== 1
-    || positiveOrZeroInteger(status?.failedCount ?? 0) !== 0
-    || positiveOrZeroInteger(status?.cancelledCount ?? 0) !== 0
-    || positiveOrZeroInteger(status?.retriedCount ?? 0) !== 0
-    || positiveOrZeroInteger(status?.runningCount ?? 0) !== 0
-    || status?.reconciling !== false || !completedTrue
+  const name = value?.metadata?.name;
+  const job = value?.metadata?.labels?.['run.googleapis.com/job'];
+  const status = value?.status;
+  const taskCount = nonnegativeInteger(value?.spec?.taskCount);
+  const parallelism = nonnegativeInteger(value?.spec?.parallelism);
+  const completed = Array.isArray(status?.conditions)
+    ? status.conditions.filter(({ type } = {}) => type === 'Completed') : [];
+  const completionTime = status?.completionTime;
+  const validName = job === MIGRATION_JOB && typeof name === 'string'
+    && new RegExp(`^${MIGRATION_JOB}-[a-z0-9](?:[a-z0-9-]{0,48}[a-z0-9])?$`).test(name);
+  if (!RELEASE_SHA.test(String(releaseSha ?? ''))
+    || value?.apiVersion !== 'run.googleapis.com/v1' || value?.kind !== 'Execution'
+    || !validName || taskCount !== 1 || parallelism !== 1
+    || nonnegativeInteger(status?.succeededCount) !== 1
+    || nonnegativeInteger(status?.failedCount) !== 0
+    || nonnegativeInteger(status?.cancelledCount) !== 0
+    || nonnegativeInteger(status?.retriedCount) !== 0
+    || nonnegativeInteger(status?.runningCount) !== 0
+    || completed.length !== 1 || completed[0]?.status !== 'True'
     || typeof completionTime !== 'string' || !Number.isFinite(Date.parse(completionTime))) {
     throw new Error('Cloud Run migration execution receipt is invalid');
   }
@@ -1611,6 +1724,118 @@ function recentEvidenceTime(value, now, maximumAgeMs = 24 * 60 * 60_000) {
     && observed <= current + 5 * 60_000 && current - observed <= maximumAgeMs;
 }
 
+function validateLatencyMetric(value, expected) {
+  const hasP50 = expected.p50ThresholdMs !== undefined;
+  const keys = hasP50
+    ? ['p50Ms', 'p50ThresholdMs', 'p95Ms', 'p95ThresholdMs', 'pass', 'sampleCount']
+    : ['p95Ms', 'p95ThresholdMs', 'pass', 'sampleCount'];
+  return exactKeys(value, keys)
+    && value.sampleCount === expected.sampleCount
+    && value.p95ThresholdMs === expected.p95ThresholdMs
+    && Number.isFinite(value.p95Ms) && value.p95Ms >= 0
+    && value.p95Ms <= value.p95ThresholdMs
+    && value.pass === true
+    && (!hasP50 || (
+      value.p50ThresholdMs === expected.p50ThresholdMs
+      && Number.isFinite(value.p50Ms) && value.p50Ms >= 0
+      && value.p50Ms <= value.p95Ms && value.p50Ms <= value.p50ThresholdMs
+    ));
+}
+
+function validateLatencyObservation(value, expectedSampleCount) {
+  return exactKeys(value, ['available', 'p50Ms', 'p95Ms', 'sampleCount'])
+    && value.available === true && value.sampleCount === expectedSampleCount
+    && Number.isFinite(value.p50Ms) && value.p50Ms >= 0
+    && Number.isFinite(value.p95Ms) && value.p95Ms >= value.p50Ms;
+}
+
+function validateLatencyAcceptanceRecord(record, plan, now) {
+  const expectedMetrics = {
+    sendAck: { sampleCount: 200, p95ThresholdMs: 300 },
+    processingVisible: { sampleCount: 200, p95ThresholdMs: 500 },
+    groundedResponse: { sampleCount: 80, p50ThresholdMs: 2_500, p95ThresholdMs: 6_000 },
+    asr10: { sampleCount: 10, p50ThresholdMs: 2_500, p95ThresholdMs: 4_000 },
+    asr30: { sampleCount: 10, p95ThresholdMs: 6_000 },
+    asr55: { sampleCount: 10, p95ThresholdMs: 6_000 },
+    ttsReady: { sampleCount: 30, p50ThresholdMs: 2_500, p95ThresholdMs: 5_000 },
+  };
+  const expectedCounts = {
+    sessionsCreated: 20,
+    textTurnsAttempted: 200,
+    textTurnsAcknowledged: 200,
+    textTurnsDelivered: 200,
+    asrRequestsAttempted: 30,
+    asrReady: 30,
+    ttsRequestsAttempted: 31,
+    ttsReady: 30,
+    ttsControlledProviderFailures: 1,
+  };
+  const expectedInvariants = {
+    acknowledgedMessageLossCount: 0,
+    duplicateAssistantReplyCount: 0,
+    unsupportedVerifiedClaimCount: 0,
+    ttsFailureTextLossCount: 0,
+    ttsMediaValidationFailureCount: 0,
+    ttsMessageBindingMismatchCount: 0,
+    controlledTtsProviderFailureMismatchCount: 0,
+  };
+  const expectedPairs = {
+    text: {
+      available: true,
+      expectedServerCount: 200,
+      serverBoundCount: 200,
+      expectedProviderCount: 80,
+      providerPairedCount: 80,
+    },
+    asr: { available: true, expectedCount: 30, pairedCount: 30 },
+    tts: {
+      available: true,
+      expectedSuccessCount: 30,
+      successPairedCount: 30,
+      expectedFailureCount: 1,
+      failurePairedCount: 1,
+    },
+  };
+  const observations = record?.observations;
+  const queryDigests = observations?.queryDigests;
+  const digestValues = queryDigests?.values;
+  const exactQueryDigests = Array.isArray(digestValues) && digestValues.length === 20
+    && digestValues.every((value) => DIGEST.test(String(value ?? '')))
+    && new Set(digestValues).size === 20
+    && exact(digestValues, [...digestValues].sort());
+  const exactObservationLayers = ['provider', 'server'].every((layer) => (
+    exactKeys(observations?.[layer], ['asr', 'text', 'tts'])
+    && validateLatencyObservation(observations[layer].text, layer === 'provider' ? 80 : 200)
+    && validateLatencyObservation(observations[layer].asr, 30)
+    && validateLatencyObservation(observations[layer].tts, 30)
+  ));
+  const expectedRevision = `${SERVICE}-${plan.releaseSha.slice(0, 12)}`;
+  const expectedOrigin = plan.serviceOrigin.replace('https://', `https://${plan.candidateTag}---`);
+  if (!exactKeys(record, [
+    'artifactSha256', 'candidateOrigin', 'commitSha', 'counts', 'fixtureSetSha256',
+    'invariants', 'metrics', 'observations', 'occurredAt', 'result', 'schemaVersion', 'workload',
+  ]) || record.schemaVersion !== 3 || record.commitSha !== plan.releaseSha
+    || record.candidateOrigin !== plan.candidateOrigin || plan.candidateOrigin !== expectedOrigin
+    || plan.candidateRevision !== expectedRevision || !IMAGE_DIGEST.test(String(plan.imageDigest ?? ''))
+    || !DIGEST.test(String(record.fixtureSetSha256 ?? ''))
+    || !exact(record.workload, LATENCY_ACCEPTANCE_CONTRACT)
+    || !exact(record.counts, expectedCounts) || !exact(record.invariants, expectedInvariants)
+    || !exactKeys(record.metrics, Object.keys(expectedMetrics))
+    || !Object.entries(expectedMetrics).every(([key, expected]) => (
+      validateLatencyMetric(record.metrics[key], expected)
+    ))
+    || !exactKeys(observations, ['pairs', 'provider', 'queryDigests', 'releaseCommitSha', 'server'])
+    || observations.releaseCommitSha !== plan.releaseSha
+    || !exactKeys(queryDigests, ['pass', 'sampleCount', 'values'])
+    || queryDigests.sampleCount !== 20 || queryDigests.pass !== true || !exactQueryDigests
+    || !exactObservationLayers || !exact(observations.pairs, expectedPairs)
+    || record.result !== true || !recentEvidenceTime(record.occurredAt, now)
+    || finalizeLatencyAcceptanceRecord(record).artifactSha256 !== record.artifactSha256) {
+    throw new Error('Task 8 workload evidence is invalid');
+  }
+  return true;
+}
+
 async function readExactJsonArtifact(entry, errorMessage) {
   let metadata;
   let bytes;
@@ -1664,10 +1889,7 @@ async function validateTask8EvidenceArtifact(entry, phase, plan, { now }) {
   const { record } = await readExactJsonArtifact(entry, errorMessage);
   if (record?.artifactSha256 !== entry.artifactSha256) throw new Error(errorMessage);
   if (phase === 'workload') {
-    if (record.schemaVersion !== 3 || record.commitSha !== plan.releaseSha
-      || record.candidateOrigin !== plan.candidateOrigin || record.result !== true
-      || finalizeLatencyAcceptanceRecord(record).artifactSha256 !== record.artifactSha256
-      || !recentEvidenceTime(record.occurredAt, now)) throw new Error(errorMessage);
+    try { validateLatencyAcceptanceRecord(record, plan, now); } catch { throw new Error(errorMessage); }
     return true;
   }
   if (finalizeReleaseEvidenceRecord(record).artifactSha256 !== record.artifactSha256
@@ -1692,10 +1914,11 @@ async function validateTask8EvidenceArtifact(entry, phase, plan, { now }) {
     return true;
   }
   if (phase !== 'mobile' || !exactKeys(record, [
-    'artifactSha256', 'candidateOrigin', 'candidateRevision', 'candidateTag', 'commitSha',
+    'access', 'artifactSha256', 'candidateOrigin', 'candidateRevision', 'candidateTag', 'commitSha',
     'finalNavigationUrl', 'gate', 'imageDigest', 'occurredAt', 'result', 'schemaVersion',
     'screenshots', 'sourceArchiveSha256', 'trace', 'trafficPercent', 'viewport',
   ]) || record.schemaVersion !== 1 || record.gate !== 'mobile'
+    || !exact(record.access, plan.candidateAccess)
     || record.finalNavigationUrl !== plan.candidateOrigin
     || !exact(record.viewport, { width: 390, height: 844 })
     || !Array.isArray(record.screenshots) || record.screenshots.length !== MOBILE_SCREENSHOT_IDS.length) {
@@ -1703,9 +1926,10 @@ async function validateTask8EvidenceArtifact(entry, phase, plan, { now }) {
   }
   const trace = await validateBoundFile(record.trace, { json: true });
   if (!exactKeys(trace, [
-    'candidateOrigin', 'events', 'finalNavigationUrl', 'observedReleaseSha',
+    'access', 'candidateOrigin', 'events', 'finalNavigationUrl', 'observedReleaseSha',
     'schemaVersion', 'source', 'trafficPercent', 'viewport',
   ]) || trace.schemaVersion !== 1 || trace.source !== 'codex-in-app-browser'
+    || !exact(trace.access, plan.candidateAccess)
     || trace.candidateOrigin !== plan.candidateOrigin || trace.finalNavigationUrl !== plan.candidateOrigin
     || trace.observedReleaseSha !== plan.releaseSha || trace.trafficPercent !== 0
     || !exact(trace.viewport, { width: 390, height: 844 })
@@ -1803,25 +2027,27 @@ function validateReceiptOutputs(phase, outputs, plan) {
     }
   } else if (phase === 'candidate') {
     if (!exactKeys(outputs, [
-      'candidateContractSha256', 'imageDigest', 'origin', 'publicInvoker',
+      'access', 'candidateContractSha256', 'imageDigest', 'origin', 'publicInvoker',
       'revision', 'tag', 'trafficPercent',
     ])
+      || !exact(outputs.access, plan.candidateAccess)
       || outputs.candidateContractSha256 !== canonicalSha256(plan.expectedCandidate)
       || outputs.imageDigest !== plan.imageDigest || outputs.origin !== plan.candidateOrigin
       || outputs.revision !== plan.candidateRevision || outputs.tag !== plan.candidateTag
-      || outputs.trafficPercent !== 0 || outputs.publicInvoker !== true) {
+      || outputs.trafficPercent !== 0 || outputs.publicInvoker !== false) {
       throw new Error('Release candidate receipt outputs are invalid');
     }
   } else if (['readiness', 'workload', 'mobile'].includes(phase)) {
     const expected = plan.task8Evidence[phase];
     const baseKeys = ['artifactSha256', 'candidateOrigin', 'candidateRevision', 'imageDigest', 'objectSha256'];
-    const expectedKeys = phase === 'mobile' ? [...baseKeys, 'viewport'] : baseKeys;
+    const expectedKeys = phase === 'mobile' ? [...baseKeys, 'access', 'viewport'] : baseKeys;
     if (!exactKeys(outputs, expectedKeys)
       || outputs.artifactSha256 !== expected.artifactSha256
       || outputs.objectSha256 !== expected.objectSha256
       || outputs.candidateOrigin !== plan.candidateOrigin
       || outputs.candidateRevision !== plan.candidateRevision
       || outputs.imageDigest !== plan.imageDigest
+      || (phase === 'mobile' && !exact(outputs.access, plan.candidateAccess))
       || (phase === 'mobile' && !exact(outputs.viewport, { width: 390, height: 844 }))) {
       throw new Error('Task 8 release receipt outputs are invalid');
     }
@@ -1926,10 +2152,11 @@ function releasePhaseReceiptOutputs(phase, plan, context) {
     evidenceSecretVersions: expectedEvidenceVersions(plan), outputResidueCount: 0,
   });
   if (phase === 'candidate') return Object.freeze({
+    access: plan.candidateAccess,
     candidateContractSha256: canonicalSha256(plan.expectedCandidate),
     imageDigest: plan.imageDigest,
     origin: plan.candidateOrigin,
-    publicInvoker: true,
+    publicInvoker: false,
     revision: plan.candidateRevision,
     tag: plan.candidateTag,
     trafficPercent: 0,
@@ -1941,7 +2168,10 @@ function releasePhaseReceiptOutputs(phase, plan, context) {
       candidateOrigin: plan.candidateOrigin,
       candidateRevision: plan.candidateRevision,
       imageDigest: plan.imageDigest,
-      ...(phase === 'mobile' ? { viewport: Object.freeze({ width: 390, height: 844 }) } : {}),
+      ...(phase === 'mobile' ? {
+        access: plan.candidateAccess,
+        viewport: Object.freeze({ width: 390, height: 844 }),
+      } : {}),
     });
   }
   throw new Error('Release receipt phase is invalid');
@@ -1984,7 +2214,7 @@ function operationMayMutate(id) {
     || id.endsWith('-deploy') || id.endsWith('-execute')
     || id.startsWith('evidence-collect-copy:') || id.startsWith('evidence-output-delete:')
     || id === 'candidate-deploy'
-    || id === 'candidate-public-service' || id.startsWith('candidate-cleanup-')
+    || id === 'promote-public-service' || id.startsWith('candidate-cleanup-')
     || id === 'promote-traffic' || id === 'rollback-traffic';
 }
 
@@ -2018,6 +2248,7 @@ export async function runGcpRelease({
   verifySourceArchive = verifyReleaseArchiveBytes,
   verifyTask8Evidence = validateTask8EvidenceArtifact,
   writeCandidateSpec = writeCandidateServiceSpecFile,
+  writeIamRestorePolicy = writePromotionIamRestorePolicyFile,
   loadReceipts = loadReleaseReceiptFiles,
   persistReceipt = persistReleaseReceipt,
   now = () => new Date(),
@@ -2119,7 +2350,8 @@ export async function runGcpRelease({
   let buildReceipt = null;
   let migrationExecutionReceipt = null;
   let mutationAttempted = false;
-  let candidatePublicGranted = false;
+  let promotionIamBaseline = null;
+  let promotionIamMutationAttempted = false;
   try {
     if (selection.phase === 'collect') {
       await assertCollectionDestinationsAbsent(plan.acceptanceOutputs);
@@ -2132,6 +2364,7 @@ export async function runGcpRelease({
     }
     for (const member of selected) {
       if (operationMayMutate(member.id)) mutationAttempted = true;
+      if (member.id === 'promote-public-service') promotionIamMutationAttempted = true;
       const receipt = await executor(member.argv);
       if (member.id === 'build-submit') {
         buildReceipt = validateBuildReceipt(receipt, {
@@ -2170,9 +2403,26 @@ export async function runGcpRelease({
         promotionReadbacks.revision = receipt;
       } else if (member.id === 'promote-candidate-iam-readback') {
         promotionReadbacks.iam = receipt;
+        validateServiceIamReceipt(receipt, { publicInvoker: false, requireEtag: true });
+        promotionIamBaseline = normalizeServiceIamPolicy(receipt, { requireEtag: true });
       } else if (member.id === 'promote-candidate-artifact-readback') {
         promotionReadbacks.artifact = receipt;
-        validateCandidateControlPlaneReadbacks(promotionReadbacks, plan);
+        validateCandidateControlPlaneReadbacks(promotionReadbacks, plan, { publicInvoker: false });
+      } else if (member.id === 'promote-public-service') {
+        if (!promotionIamBaseline) throw new Error('Promotion IAM baseline is unavailable');
+        const normalized = validateIamPolicyState(
+          receipt, publicIamPolicyState(promotionIamBaseline), { requireEtag: true },
+        );
+        if (normalized.etag === promotionIamBaseline.etag) {
+          throw new Error('Promotion IAM mutation has no new etag');
+        }
+        validateServiceIamReceipt(receipt, { publicInvoker: true, requireEtag: true });
+      } else if (member.id === 'promote-public-iam-readback') {
+        if (!promotionIamBaseline) throw new Error('Promotion IAM baseline is unavailable');
+        validateIamPolicyState(
+          receipt, publicIamPolicyState(promotionIamBaseline), { requireEtag: true },
+        );
+        validateServiceIamReceipt(receipt, { publicInvoker: true, requireEtag: true });
       } else if (member.id === 'candidate-stable-readback') {
         validateStableService(receipt, plan);
         if (typeof writeCandidateSpec !== 'function'
@@ -2180,15 +2430,10 @@ export async function runGcpRelease({
           throw new Error('Candidate Service YAML is unavailable');
         }
       } else if (member.id === 'candidate-spec-dry-run') {
-        if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) {
-          throw new Error('Candidate Service YAML dry-run is invalid');
-        }
+        validateCandidateServiceSpecDryRun(receipt, plan);
       } else if (member.id === 'candidate-private-iam-readback') {
         candidateReadbacks.iam = receipt;
         validateServiceIamReceipt(receipt, { publicInvoker: false });
-      } else if (member.id === 'candidate-iam-readback') {
-        candidateReadbacks.iam = receipt;
-        validateServiceIamReceipt(receipt, { publicInvoker: true });
       } else if (member.id === 'candidate-service-readback') {
         candidateReadbacks.service = receipt;
       } else if (member.id === 'candidate-revision-readback') {
@@ -2196,14 +2441,7 @@ export async function runGcpRelease({
       } else if (member.id === 'candidate-readback') {
         candidateReadbacks.artifact = receipt;
         validateCandidateControlPlaneReadbacks(candidateReadbacks, plan, { publicInvoker: false });
-      } else if (member.id === 'candidate-public-service') {
-        validateServiceIamReceipt(receipt, { publicInvoker: true });
-        candidatePublicGranted = true;
-      } else if (member.id === 'candidate-public-service-readback') {
-        candidateReadbacks.service = receipt;
-        validateCandidateService(receipt, plan.expectedCandidate);
-      } else if (member.id === 'candidate-cleanup-public-service'
-        || member.id === 'candidate-cleanup-iam-readback') {
+      } else if (member.id === 'candidate-cleanup-iam-readback') {
         validateServiceIamReceipt(receipt, { publicInvoker: false });
       } else if (member.id === 'candidate-cleanup-traffic') {
         validateTrafficReceipt(receipt, { revision: plan.previousRevision });
@@ -2212,7 +2450,7 @@ export async function runGcpRelease({
       } else if (member.id === 'promote-traffic' || member.id === 'promote-readback') {
         validateTrafficReceipt(receipt, { revision: plan.candidateRevision });
       } else if (member.id === 'rollback-traffic' || member.id === 'rollback-readback') {
-        validateTrafficReceipt(receipt, { revision: plan.previousRevision });
+        validateCandidateCleanupService(receipt, plan);
       } else if (selection.phase === 'acceptance' && member.id.endsWith('-readback')) {
         const key = member.id.slice(0, -'-readback'.length);
         validateReleaseJobReadback(receipt, plan.expectedJobs[key]);
@@ -2261,26 +2499,55 @@ export async function runGcpRelease({
     }
   } catch {
     let cleanupFailed = false;
-    if (selection.phase === 'candidate' && candidatePublicGranted) {
+    let promotionIamRestored = null;
+    if (selection.phase === 'promote' && promotionIamMutationAttempted && promotionIamBaseline) {
       try {
-        const removeReceipt = await executor([
-          'run', 'services', 'remove-iam-policy-binding', SERVICE, '--member=allUsers',
-          '--role=roles/run.invoker', `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-        ]);
-        validateServiceIamReceipt(removeReceipt, { publicInvoker: false });
-        const iamReceipt = await executor([
+        const currentReceipt = await executor([
           'run', 'services', 'get-iam-policy', SERVICE,
           `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
         ]);
-        validateServiceIamReceipt(iamReceipt, { publicInvoker: false });
-      } catch { cleanupFailed = true; }
+        const current = normalizeServiceIamPolicy(currentReceipt, { requireEtag: true });
+        const privateState = iamPolicyState(promotionIamBaseline);
+        if (!exact(iamPolicyState(current), privateState)) {
+          if (!exact(iamPolicyState(current), publicIamPolicyState(promotionIamBaseline))) {
+            throw new Error('Promotion IAM state changed outside the release mutation');
+          }
+          const restorePolicy = {
+            bindings: structuredClone(promotionIamBaseline.bindings),
+            etag: current.etag,
+            ...(promotionIamBaseline.version === null
+              ? {} : { version: promotionIamBaseline.version }),
+          };
+          const restorePath = typeof writeIamRestorePolicy === 'function'
+            ? await writeIamRestorePolicy(plan, restorePolicy) : null;
+          if (restorePath !== plan.promotionIamRestorePolicyPath) {
+            throw new Error('Promotion IAM restore policy is unavailable');
+          }
+          const restoreReceipt = await executor([
+            'run', 'services', 'set-iam-policy', SERVICE, restorePath,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+          validateIamPolicyState(restoreReceipt, privateState, { requireEtag: true });
+          validateServiceIamReceipt(restoreReceipt, { publicInvoker: false, requireEtag: true });
+          const freshReceipt = await executor([
+            'run', 'services', 'get-iam-policy', SERVICE,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+          validateIamPolicyState(freshReceipt, privateState, { requireEtag: true });
+          validateServiceIamReceipt(freshReceipt, { publicInvoker: false, requireEtag: true });
+        }
+        promotionIamRestored = true;
+      } catch {
+        cleanupFailed = true;
+        promotionIamRestored = false;
+      }
     }
     return publish(writeOutput, 1, {
-      status: 'failed', code: cleanupFailed ? 'CANDIDATE_CLEANUP_FAILED' : 'RELEASE_PHASE_FAILED',
+      status: 'failed', code: cleanupFailed ? 'PROMOTION_IAM_RESTORE_FAILED' : 'RELEASE_PHASE_FAILED',
       mutationPerformed: mutationAttempted,
       releaseSha: plan.releaseSha, phase: selection.phase, completed,
       resumeBoundary: selected[completed.length]?.id ?? null,
-      ...(selection.phase === 'candidate' && candidatePublicGranted ? { candidatePublicCleanup: !cleanupFailed } : {}),
+      ...(promotionIamRestored === null ? {} : { promotionIamRestored }),
     });
   }
   const publicReport = {
