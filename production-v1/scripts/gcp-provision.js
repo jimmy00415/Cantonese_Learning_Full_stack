@@ -746,12 +746,12 @@ function managedIamScopes(contract) {
 }
 
 function assertManagedIamPolicies({
-  contract, projectNumber, policiesByScope, scopes, requireExpected, enabledApis = null,
+  contract, projectNumber, policiesByScope, scopes, requireExpected, requireProtectedBaseline = false, enabledApis = null,
 }) {
   if (!contract || !/^\d{6,20}$/.test(String(projectNumber ?? ''))
     || (!policiesByScope || typeof policiesByScope !== 'object')
     || !Array.isArray(scopes) || scopes.length === 0
-    || typeof requireExpected !== 'boolean'
+    || typeof requireExpected !== 'boolean' || typeof requireProtectedBaseline !== 'boolean'
     || (enabledApis !== null && !(enabledApis instanceof Set))) {
     throw commandError('IAM_ALLOWLIST_MISMATCH');
   }
@@ -834,12 +834,15 @@ function assertManagedIamPolicies({
   if (requireExpected && required.some((binding) => !actualKeys.has(canonicalJson(binding)))) {
     throw commandError('IAM_ALLOWLIST_MISMATCH');
   }
+  if (requireProtectedBaseline && baseline.some((binding) => !actualKeys.has(canonicalJson(binding)))) {
+    throw commandError('IAM_ALLOWLIST_MISMATCH');
+  }
   return true;
 }
 
-export function assertManagedIamPoliciesSubset({ contract, projectNumber, policiesByScope, scopes, enabledApis = null }) {
+export function assertManagedIamPoliciesSubset({ contract, projectNumber, policiesByScope, scopes, requireProtectedBaseline = false, enabledApis = null }) {
   return assertManagedIamPolicies({
-    contract, projectNumber, policiesByScope, scopes, requireExpected: false, enabledApis,
+    contract, projectNumber, policiesByScope, scopes, requireExpected: false, requireProtectedBaseline, enabledApis,
   });
 }
 
@@ -907,6 +910,28 @@ function assertProjectWideCidrAvailability({ subnets, routes, addresses }) {
   for (const network of allNetworks) {
     assertCidrAvailable({ desired: '10.24.0.0/26', network, kind: 'subnet', ...inventory });
     assertCidrAvailable({ desired: '10.25.0.0/16', network, kind: 'psa', ...inventory });
+  }
+}
+
+function apiForProvisionStep(id) {
+  if (id === 'artifact-registry') return 'artifactregistry.googleapis.com';
+  if (id.startsWith('service-account:') || id.startsWith('custom-role:') || id.startsWith('iam:')) return 'iam.googleapis.com';
+  if (['vpc', 'subnet', 'psa-range'].includes(id)) return 'compute.googleapis.com';
+  if (id === 'psa-connection') return 'servicenetworking.googleapis.com';
+  if (['cloud-sql-instance', 'database'].includes(id) || id.startsWith('db-user:')) return 'sqladmin.googleapis.com';
+  if (id === 'bucket') return 'storage.googleapis.com';
+  if (id.startsWith('secret-')) return 'secretmanager.googleapis.com';
+  if (id === 'notification-channel' || id.startsWith('monitoring-policy:')) return 'monitoring.googleapis.com';
+  if (id === 'budget') return 'billingbudgets.googleapis.com';
+  return null;
+}
+
+function assertNoForeignManagedIdentity(items, expected, prefix = 'hkbuddy-v1-') {
+  const permitted = new Set(expected);
+  for (const item of requireObjectList(items)) {
+    const raw = String(item?.email ?? item?.name ?? '');
+    const name = raw.split('/').at(-1).split('@')[0];
+    if (name.startsWith(prefix) && !permitted.has(name)) throw commandError('RESOURCE_COLLISION');
   }
 }
 
@@ -1279,8 +1304,9 @@ export class GcpControlPlane {
     return assertNoUserManagedServiceAccountKeys({ contract: this.contract, gcloud: this.gcloud });
   }
 
-  async auditManagedIamPolicies({ projectOnly = false, enabledApis = null } = {}) {
-    if (typeof projectOnly !== 'boolean' || (enabledApis !== null && !(enabledApis instanceof Set))) {
+  async auditManagedIamPolicies({ projectOnly = false, enabledApis = null, requireProtectedBaseline = projectOnly } = {}) {
+    if (typeof projectOnly !== 'boolean' || typeof requireProtectedBaseline !== 'boolean'
+      || (enabledApis !== null && !(enabledApis instanceof Set))) {
       throw commandError('IAM_ALLOWLIST_MISMATCH');
     }
     const scopes = projectOnly ? ['project'] : managedIamScopes(this.contract);
@@ -1291,7 +1317,7 @@ export class GcpControlPlane {
       contract: this.contract,
       projectNumber: this.#projectNumber(),
       policiesByScope: new Map(policyEntries),
-      scopes, enabledApis,
+      scopes, enabledApis, requireProtectedBaseline,
     });
     if (!projectOnly) await this.#auditCustomRoles();
     return true;
@@ -1310,27 +1336,37 @@ export class GcpControlPlane {
     const enabledApis = new Set(enabled.map(({ config, name }) => config?.name ?? name));
     this.cache.set('apis', enabled);
     await this.auditManagedIamPolicies({ projectOnly: true, enabledApis });
+    await this.#auditManagedIdentityInventory(enabledApis);
 
-    const [networks, subnets, routes, addresses, peerings] = await Promise.all([
-      this.#gcloud(['compute', 'networks', 'list', `--project=${PROJECT}`, '--format=json']),
-      this.#gcloud(['compute', 'networks', 'subnets', 'list', `--project=${PROJECT}`, '--format=json']),
-      this.#gcloud(['compute', 'routes', 'list', `--project=${PROJECT}`, '--format=json']),
-      this.#gcloud(['compute', 'addresses', 'list', '--global', `--project=${PROJECT}`, '--format=json']),
-      this.#gcloud(['services', 'vpc-peerings', 'list', `--project=${PROJECT}`, '--format=json']),
-    ]);
-    requireObjectList(networks);
-    const peeringInventory = requireObjectList(peerings);
-    const targetNetwork = `projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`;
-    if (peeringInventory.some((peering) => (
-      Array.isArray(peering?.reservedPeeringRanges)
-      && peering.reservedPeeringRanges.includes(GCP_IDENTITY.psaRange)
-      && !sameNetwork(peering.network, targetNetwork)
-    ))) throw commandError('RESOURCE_COLLISION');
-    assertProjectWideCidrAvailability({ subnets, routes, addresses });
+    if (enabledApis.has('compute.googleapis.com')) {
+      const [networks, subnets, routes, addresses] = await Promise.all([
+        this.#gcloud(['compute', 'networks', 'list', `--project=${PROJECT}`, '--format=json']),
+        this.#gcloud(['compute', 'networks', 'subnets', 'list', `--project=${PROJECT}`, '--format=json']),
+        this.#gcloud(['compute', 'routes', 'list', `--project=${PROJECT}`, '--format=json']),
+        this.#gcloud(['compute', 'addresses', 'list', '--global', `--project=${PROJECT}`, '--format=json']),
+      ]);
+      const networkInventory = requireObjectList(networks);
+      assertProjectWideCidrAvailability({ subnets, routes, addresses });
+      if (enabledApis.has('servicenetworking.googleapis.com')) {
+        const peeringLists = await Promise.all(networkInventory.map(({ name }) => this.#gcloud([
+          'services', 'vpc-peerings', 'list', `--network=${name}`, '--service=servicenetworking.googleapis.com',
+          `--project=${PROJECT}`, '--format=json',
+        ])));
+        const targetNetwork = `projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`;
+        if (peeringLists.flatMap(requireObjectList).some((peering) => (
+          Array.isArray(peering?.reservedPeeringRanges)
+          && peering.reservedPeeringRanges.includes(GCP_IDENTITY.psaRange)
+          && !sameNetwork(peering.network, targetNetwork)
+        ))) throw commandError('RESOURCE_COLLISION');
+      }
+    }
 
     const context = { notificationChannel, secretVersions: {} };
     for (const id of STATIC_EXPECTED_STEPS) {
       if (['project', 'billing', 'apis'].includes(id) || id.startsWith('iam:')) continue;
+      if (id === 'notification-channel' && !notificationChannel) continue;
+      const api = apiForProvisionStep(id);
+      if (api && !enabledApis.has(api)) continue;
       const current = await this.read(id, context);
       if (id === 'notification-channel' && current?.status !== 'present') {
         throw commandError('ALERT_CHANNEL_REQUIRED');
@@ -1433,6 +1469,35 @@ export class GcpControlPlane {
       'iam', 'roles', 'list', `--project=${PROJECT}`, '--format=json',
     ]));
     return assertExactCustomRoleDefinitions({ contract: this.contract, roles });
+  }
+
+  async #auditManagedIdentityInventory(enabledApis) {
+    if (enabledApis.has('iam.googleapis.com')) {
+      const [serviceAccounts, roles] = await Promise.all([
+        this.#gcloud(['iam', 'service-accounts', 'list', `--project=${PROJECT}`, '--format=json']),
+        this.#gcloud(['iam', 'roles', 'list', `--project=${PROJECT}`, '--format=json']),
+      ]);
+      assertNoForeignManagedIdentity(serviceAccounts, this.contract.resources.serviceAccounts.map(({ id }) => id));
+      assertNoForeignManagedIdentity(roles, this.contract.resources.customRoles.map(({ id }) => id), 'hkbuddyV1');
+    }
+    if (enabledApis.has('artifactregistry.googleapis.com')) {
+      const repositories = await this.#gcloud([
+        'artifacts', 'repositories', 'list', '--location=asia-east2', `--project=${PROJECT}`, '--format=json',
+      ]);
+      assertNoForeignManagedIdentity(repositories, [GCP_IDENTITY.repository]);
+    }
+    if (enabledApis.has('sqladmin.googleapis.com')) {
+      const instances = await this.#gcloud(['sql', 'instances', 'list', `--project=${PROJECT}`, '--format=json']);
+      assertNoForeignManagedIdentity(instances, [GCP_IDENTITY.cloudSqlInstance]);
+    }
+    if (enabledApis.has('secretmanager.googleapis.com')) {
+      const secrets = await this.#gcloud(['secrets', 'list', `--project=${PROJECT}`, '--format=json']);
+      assertNoForeignManagedIdentity(secrets, this.contract.resources.secrets.map(({ id }) => id));
+    }
+    if (enabledApis.has('storage.googleapis.com')) {
+      const buckets = await this.#gcloud(['storage', 'buckets', 'list', `--project=${PROJECT}`, '--format=json']);
+      assertNoForeignManagedIdentity(buckets, [GCP_IDENTITY.bucket]);
+    }
   }
 
   async #read(id, context) {

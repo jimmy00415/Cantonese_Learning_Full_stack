@@ -3,9 +3,9 @@ import { pathToFileURL } from 'node:url';
 
 import {
   assertResourceContract,
-  assertCidrAvailable,
   createDefaultGcloudAuthenticatedRequest,
   createDefaultGcloudExecutor,
+  GcpControlPlane,
   loadResourceContract,
   REQUIRED_OPERATOR_ACCOUNT,
 } from './gcp-provision.js';
@@ -172,43 +172,21 @@ export async function runGcpPreflight({
   )))) return publish(writeOutput, 1, safeFailure('SHARED_PROJECT_BASELINE_INVALID', { projectState }));
 
   try {
-    await runCommand([
-      'compute', 'networks', 'describe', 'default', `--project=${PROJECT}`, '--format=json',
-    ]);
-  } catch {
-    return publish(writeOutput, 1, safeFailure('SHARED_PROJECT_BASELINE_INVALID', { projectState }));
-  }
-
-  let inventory;
-  try {
-    inventory = await Promise.all([
-      runCommand(['compute', 'networks', 'list', `--project=${PROJECT}`, '--format=json']),
-      runCommand(['compute', 'networks', 'subnets', 'list', `--project=${PROJECT}`, '--format=json']),
-      runCommand(['compute', 'routes', 'list', `--project=${PROJECT}`, '--format=json']),
-      runCommand(['compute', 'addresses', 'list', '--global', `--project=${PROJECT}`, '--format=json']),
-      runCommand(['services', 'vpc-peerings', 'list', `--project=${PROJECT}`, '--format=json']),
-      runCommand(['iam', 'service-accounts', 'list', `--project=${PROJECT}`, '--format=json']),
-      runCommand(['iam', 'roles', 'list', `--project=${PROJECT}`, '--format=json']),
-    ]);
-    if (inventory.some((value) => !Array.isArray(value))) throw new Error('inventory response invalid');
-    const [networks, subnets, routes, addresses, peerings] = inventory;
-    for (const network of networks) {
-      const name = network?.selfLink ?? network?.name;
-      if (typeof name !== 'string') throw new Error('network identity invalid');
-      assertCidrAvailable({ desired: '10.24.0.0/26', network: name, subnets, routes, addresses });
-      assertCidrAvailable({ desired: '10.25.0.0/16', network: name, subnets, routes, addresses, kind: 'psa' });
-    }
-    const targetNetwork = `projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`;
-    if (peerings.some((peering) => (
-      Array.isArray(peering?.reservedPeeringRanges)
-      && peering.reservedPeeringRanges.includes(GCP_IDENTITY.psaRange)
-      && peering.network !== targetNetwork
-    ))) throw new Error('managed PSA collision');
+    const auditPlane = new GcpControlPlane({
+      contract: selectedContract, notificationChannel: selection.notificationChannel,
+      gcloud: runCommand, request: authenticatedRequest,
+    });
+    await auditPlane.auditPreMutationState({ notificationChannel: selection.notificationChannel });
   } catch (error) {
-    return publish(writeOutput, 1, safeFailure(error?.code === 'CIDR_OVERLAP'
-      ? 'CIDR_OVERLAP' : 'PREFLIGHT_INVENTORY_INVALID', { projectState }));
+    const code = [
+      'IAM_ALLOWLIST_MISMATCH', 'CIDR_OVERLAP', 'RESOURCE_COLLISION',
+      'SHARED_PROJECT_BASELINE_INVALID', 'ALERT_CHANNEL_REQUIRED',
+    ].includes(error?.code) ? error.code : 'PREFLIGHT_INVENTORY_INVALID';
+    return publish(writeOutput, 1, safeFailure(code, { projectState }));
   }
 
+  // This is the single inventory gate shared with the mutating provisioner.
+  // Disabled service APIs are explicitly deferred to the API-only first stage.
   let alertChannel = 'not-supplied';
   if (selection.notificationChannel) {
     {

@@ -1380,6 +1380,9 @@ function preflightGcloud({
     if (args[0] === 'billing' && args[1] === 'projects') return {
       billingEnabled: true, billingAccountName: 'billingAccounts/01F9FD-24EA9B-A9232C',
     };
+    if (args[0] === 'services' && args[1] === 'list') return [
+      { config: { name: 'iam.googleapis.com' } }, { config: { name: 'serviceusage.googleapis.com' } },
+    ];
     if (args[0] === 'compute' && args[1] === 'networks' && args.includes('list')) return [{
       name: 'default', selfLink: `projects/${PROJECT}/global/networks/default`,
     }];
@@ -1407,7 +1410,9 @@ function preflightGcloud({
       error.code = 'NOT_FOUND';
       throw error;
     }
-    throw new Error(`unexpected command ${args.join(' ')}`);
+    const error = new Error(`not found ${args.join(' ')}`);
+    error.code = 'NOT_FOUND';
+    throw error;
   };
   return { calls, gcloud };
 }
@@ -1428,10 +1433,94 @@ test('preflight is read-only, project-explicit, and requires the existing shared
     projectNumber: PROJECT_NUMBER, projectState: 'present',
     alertChannel: 'not-supplied', mutationPerformed: false,
   });
-  assert.equal(fixture.calls.length, 14);
+  assert.equal(fixture.calls.some((args) => args[0] === 'services' && args[1] === 'list'), true);
   assert.equal(fixture.calls.every((args) => args.includes(`--project=${PROJECT}`)), true);
   assert.equal(fixture.calls.some((args) => args.includes('create') || args.includes('enable') || args.includes('link')), false);
   assert.deepEqual(output, [`${JSON.stringify(result.publicReport)}\n`]);
+});
+
+test('real control plane rejects each missing protected baseline binding before any mutation', async (t) => {
+  const contract = await contractFixture();
+  for (const missing of contract.project.protectedBindings) {
+    await t.test(`${missing.role} ${missing.member}`, async () => {
+      const gcloudCalls = [];
+      const restCalls = [];
+      const plane = new GcpControlPlane({
+        contract, notificationChannel: CHANNEL,
+        gcloud: async (args) => {
+          gcloudCalls.push(args);
+          if (args[0] === 'projects' && args[1] === 'describe') return {
+            projectId: PROJECT, projectNumber: PROJECT_NUMBER,
+            parent: { id: GCP_IDENTITY.organizationId }, name: 'Motion Expert HK LTD Webpage',
+            labels: {}, lifecycleState: 'ACTIVE',
+          };
+          if (args[0] === 'billing' && args[1] === 'projects') return {
+            billingEnabled: true, billingAccountName: `billingAccounts/${GCP_IDENTITY.billingAccountId}`,
+          };
+          if (args[0] === 'services' && args[1] === 'list') return [
+            { config: { name: 'iam.googleapis.com' } }, { config: { name: 'serviceusage.googleapis.com' } },
+          ];
+          if (args[0] === 'projects' && args[1] === 'get-iam-policy') return {
+            bindings: contract.project.protectedBindings.filter((binding) => binding !== missing).map(({ role, member }) => ({ role, members: [member] })),
+          };
+          throw new Error(`unexpected gcloud ${args.join(' ')}`);
+        },
+        request: async (input) => { restCalls.push(input); throw new Error('REST must not run'); },
+      });
+      const result = await runGcpProvision({
+        argv: [`--confirm-project=${PROJECT}`, `--notification-channel=${CHANNEL}`],
+        contract, controlPlane: plane, writeOutput: () => undefined,
+      });
+      assert.equal(result.exitCode, 1);
+      assert.equal(result.publicReport.code, 'IAM_ALLOWLIST_MISMATCH');
+      assert.equal(result.publicReport.mutationPerformed, false);
+      assert.equal(gcloudCalls.some((args) => args.includes('enable') || args.includes('create') || args.includes('add-iam-policy-binding')), false);
+      assert.deepEqual(restCalls, []);
+    });
+  }
+});
+
+test('real control plane completes the no-channel discovery stage with only API enablement', async () => {
+  const contract = await contractFixture();
+  const calls = [];
+  const enabledBefore = ['iam.googleapis.com', 'serviceusage.googleapis.com'];
+  const allApis = [
+    'cloudresourcemanager.googleapis.com', 'serviceusage.googleapis.com', 'cloudbilling.googleapis.com',
+    'billingbudgets.googleapis.com', 'iam.googleapis.com', 'artifactregistry.googleapis.com',
+    'cloudbuild.googleapis.com', 'run.googleapis.com', 'compute.googleapis.com', 'servicenetworking.googleapis.com',
+    'sqladmin.googleapis.com', 'storage.googleapis.com', 'secretmanager.googleapis.com', 'aiplatform.googleapis.com',
+    'speech.googleapis.com', 'texttospeech.googleapis.com', 'monitoring.googleapis.com', 'logging.googleapis.com',
+  ];
+  let apisEnabled = false;
+  const notFound = () => Object.assign(new Error('not found'), { code: 'NOT_FOUND' });
+  const plane = new GcpControlPlane({
+    contract, notificationChannel: null,
+    gcloud: async (args) => {
+      calls.push(args);
+      if (args[0] === 'projects' && args[1] === 'describe') return {
+        projectId: PROJECT, projectNumber: PROJECT_NUMBER, parent: { id: GCP_IDENTITY.organizationId },
+        name: 'Motion Expert HK LTD Webpage', labels: {}, lifecycleState: 'ACTIVE',
+      };
+      if (args[0] === 'billing' && args[1] === 'projects') return {
+        billingEnabled: true, billingAccountName: `billingAccounts/${GCP_IDENTITY.billingAccountId}`,
+      };
+      if (args[0] === 'projects' && args[1] === 'get-iam-policy') return {
+        bindings: contract.project.protectedBindings.map(({ role, member }) => ({ role, members: [member] })),
+      };
+      if (args[0] === 'iam' && args.includes('list')) return [];
+      if (args[0] === 'services' && args[1] === 'list') return (apisEnabled ? allApis : enabledBefore).map((name) => ({ config: { name } }));
+      if (args[0] === 'services' && args[1] === 'enable') { apisEnabled = true; return {}; }
+      throw notFound();
+    },
+    request: async () => { throw new Error('REST must not run before channel'); },
+  });
+  const result = await runGcpProvision({
+    argv: [`--confirm-project=${PROJECT}`], contract, controlPlane: plane, writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.publicReport.code, 'ALERT_CHANNEL_REQUIRED');
+  assert.deepEqual(calls.filter((args) => args.includes('enable')).map((args) => args.slice(0, 2)), [['services', 'enable']]);
+  assert.equal(calls.some((args) => args.includes('create') || args.includes('add-iam-policy-binding')), false);
 });
 
 test('preflight verifies an enabled target-project Monitoring channel and fails closed on 403 or unverified status', async (t) => {
