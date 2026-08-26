@@ -125,8 +125,12 @@ export async function runGcpPreflight({
   } catch {
     return publish(writeOutput, 1, safeFailure('BILLING_STATE_UNKNOWN'));
   }
-  if (!isExactBillingAccountResource(billing) || billing?.open !== true) {
-    return publish(writeOutput, 1, safeFailure('BILLING_ACCOUNT_INACTIVE'));
+  if (!isExactBillingAccountResource(billing)) {
+    const inactive = billing?.name !== `billingAccounts/${BILLING_ACCOUNT}`
+      || billing?.open !== true;
+    return publish(writeOutput, 1, safeFailure(
+      inactive ? 'BILLING_ACCOUNT_INACTIVE' : 'BUDGET_CURRENCY_MISMATCH',
+    ));
   }
   if (billing.currencyCode !== selectedContract.resources.budget.currency) {
     return publish(writeOutput, 1, safeFailure('BUDGET_CURRENCY_MISMATCH'));

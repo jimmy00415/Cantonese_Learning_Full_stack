@@ -168,12 +168,14 @@ function requireExact(value, expected) {
 
 export function isExactOrganizationResource(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value)
-    && value.name === `organizations/${ORGANIZATION}`);
+    && value.name === `organizations/${ORGANIZATION}`
+    && value.lifecycleState === 'ACTIVE');
 }
 
 export function isExactBillingAccountResource(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value)
-    && value.name === `billingAccounts/${BILLING_ACCOUNT}`);
+    && value.name === `billingAccounts/${BILLING_ACCOUNT}`
+    && value.open === true && value.currencyCode === 'HKD');
 }
 
 export function isExactProjectParent(parent) {
@@ -402,7 +404,14 @@ function requireObjectList(value) {
   return value;
 }
 
-function classifyTransportError(error) {
+function isCanonicalCloudRunServiceDescribe(argv) {
+  return exact(argv, [
+    'run', 'services', 'describe', GCP_IDENTITY.service,
+    `--project=${PROJECT}`, `--region=${GCP_IDENTITY.region}`, '--format=json',
+  ]);
+}
+
+function classifyTransportError(error, argv = null) {
   if (['NOT_FOUND', 'FORBIDDEN', 'ALREADY_EXISTS'].includes(error?.code)) return error.code;
   const status = Number(error?.response?.status ?? error?.status ?? error?.statusCode);
   if (status === 403) return 'FORBIDDEN';
@@ -410,7 +419,10 @@ function classifyTransportError(error) {
   if (status === 409) return 'ALREADY_EXISTS';
   const stderr = String(error?.stderr ?? error?.message ?? '');
   if (/PERMISSION_DENIED|permission denied|does not have permission|\b403\b|forbidden/i.test(stderr)) return 'FORBIDDEN';
-  if (/NOT_FOUND|was not found|\b404\b/i.test(stderr)) return 'NOT_FOUND';
+  if (isCanonicalCloudRunServiceDescribe(argv)
+    && stderr.trim() === `ERROR: (gcloud.run.services.describe) Service [${GCP_IDENTITY.service}] could not be found.`) {
+    return 'CLOUD_RUN_SERVICE_NOT_FOUND';
+  }
   if (/ALREADY_EXISTS|already exists|\b409\b/i.test(stderr)) return 'ALREADY_EXISTS';
   return 'TRANSPORT_AMBIGUOUS';
 }
@@ -444,7 +456,7 @@ export function createGcloudExecutor({ executable, prefixArgs = [], execFile = e
         encoding: 'utf8', maxBuffer, windowsHide: true,
       });
     } catch (cause) {
-      const error = commandError(classifyTransportError(cause));
+      const error = commandError(classifyTransportError(cause, argv));
       throw error;
     }
     const stdout = String(result?.stdout ?? '').trim();
@@ -1711,6 +1723,23 @@ export class GcpControlPlane {
     const billing = await this.read('billing');
     if (project?.status !== 'present' || !this.compare('project', project.value)
       || billing?.status !== 'present' || !this.compare('billing', billing.value)) {
+      throw commandError('SHARED_PROJECT_BASELINE_INVALID');
+    }
+    let organization;
+    let billingAccount;
+    try {
+      organization = await this.#gcloud([
+        'organizations', 'describe', ORGANIZATION, `--project=${PROJECT}`, '--format=json',
+      ]);
+      billingAccount = await this.#gcloud([
+        'billing', 'accounts', 'describe', BILLING_ACCOUNT,
+        `--project=${PROJECT}`, '--format=json',
+      ]);
+    } catch {
+      throw commandError('SHARED_PROJECT_BASELINE_INVALID');
+    }
+    if (!isExactOrganizationResource(organization)
+      || !isExactBillingAccountResource(billingAccount)) {
       throw commandError('SHARED_PROJECT_BASELINE_INVALID');
     }
     await this.#auditCloudAssetInventory();

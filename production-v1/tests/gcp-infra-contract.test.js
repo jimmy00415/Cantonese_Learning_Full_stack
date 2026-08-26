@@ -103,7 +103,8 @@ function notFound() {
 
 function assetAuditControlPlane({
   contract, assets, enabledApis = ['iam.googleapis.com', 'serviceusage.googleapis.com'],
-  gcloudRows = {}, restRows = {}, projectResponse, billingLinkResponse,
+  gcloudRows = {}, restRows = {}, organizationResponse, billingAccountResponse,
+  projectResponse, billingLinkResponse,
 }) {
   const gcloudCalls = [];
   const restCalls = [];
@@ -118,6 +119,24 @@ function assetAuditControlPlane({
         name: 'Motion Expert HK LTD Webpage', labels: {}, lifecycleState: 'ACTIVE',
         ...projectResponse,
       };
+      if (args[0] === 'organizations' && args[1] === 'describe') {
+        if (organizationResponse === null || Array.isArray(organizationResponse)) {
+          return organizationResponse;
+        }
+        return {
+          name: `organizations/${GCP_IDENTITY.organizationId}`, lifecycleState: 'ACTIVE',
+          ...organizationResponse,
+        };
+      }
+      if (args[0] === 'billing' && args[1] === 'accounts') {
+        if (billingAccountResponse === null || Array.isArray(billingAccountResponse)) {
+          return billingAccountResponse;
+        }
+        return {
+          name: `billingAccounts/${GCP_IDENTITY.billingAccountId}`, open: true, currencyCode: 'HKD',
+          ...billingAccountResponse,
+        };
+      }
       if (args[0] === 'billing' && args[1] === 'projects') return {
         billingEnabled: true, billingAccountName: `billingAccounts/${GCP_IDENTITY.billingAccountId}`,
         ...billingLinkResponse,
@@ -522,6 +541,44 @@ test('gcloud execution is argv-only and rejects values that could disclose a sec
     () => permissionExecutor(['projects', 'describe', PROJECT, `--project=${PROJECT}`, '--format=json']),
     (error) => error.code === 'FORBIDDEN',
   );
+});
+
+test('gcloud classifies absence only for the exact canonical Cloud Run service describe operation', async (t) => {
+  const serviceDescribe = [
+    'run', 'services', 'describe', GCP_IDENTITY.service,
+    `--project=${PROJECT}`, `--region=${GCP_IDENTITY.region}`, '--format=json',
+  ];
+  const executorFor = (stderr) => createGcloudExecutor({
+    executable: 'python.exe', prefixArgs: ['C:/gcloud/lib/gcloud.py'],
+    execFile: async () => {
+      const error = new Error('gcloud failed');
+      error.stderr = stderr;
+      throw error;
+    },
+  });
+
+  await assert.rejects(
+    () => executorFor(
+      `ERROR: (gcloud.run.services.describe) Service [${GCP_IDENTITY.service}] could not be found.\n`,
+    )(serviceDescribe),
+    (error) => error.code === 'CLOUD_RUN_SERVICE_NOT_FOUND',
+  );
+
+  for (const [name, argv, stderr] of [
+    ['proxy 404', serviceDescribe, 'proxy returned 404 while discovering the endpoint'],
+    ['auth NOT_FOUND', serviceDescribe, 'NOT_FOUND: credential discovery document was not found'],
+    ['API path was not found', serviceDescribe, 'The requested API path was not found'],
+    ['wrong service', serviceDescribe.with(3, 'hkbuddy-v1-foreign'), `ERROR: (gcloud.run.services.describe) Service [${GCP_IDENTITY.service}] could not be found.\n`],
+    ['wrong project', serviceDescribe.with(4, '--project=foreign-project'), `ERROR: (gcloud.run.services.describe) Service [${GCP_IDENTITY.service}] could not be found.\n`],
+    ['wrong region', serviceDescribe.with(5, '--region=us-central1'), `ERROR: (gcloud.run.services.describe) Service [${GCP_IDENTITY.service}] could not be found.\n`],
+  ]) {
+    await t.test(name, async () => {
+      await assert.rejects(
+        () => executorFor(stderr)(argv),
+        (error) => error.code === 'TRANSPORT_AMBIGUOUS',
+      );
+    });
+  }
 });
 
 test('exhaustive inventory gets a bounded invocation-specific output capacity and overflow fails closed', async () => {
@@ -1761,7 +1818,9 @@ function preflightGcloud({
       throw error;
     }
     if (args[0] === 'auth') return [{ account: activeAccount, status: 'ACTIVE' }];
-    if (args[0] === 'organizations') return organizationResponse ?? { name: 'organizations/797368190621', displayName: 'motionexp.com' };
+    if (args[0] === 'organizations') return organizationResponse ?? {
+      name: 'organizations/797368190621', displayName: 'motionexp.com', lifecycleState: 'ACTIVE',
+    };
     if (args[0] === 'billing' && args[1] === 'accounts') return {
       name: 'billingAccounts/01F9FD-24EA9B-A9232C', open: true, currencyCode: billingCurrency,
       ...billingAccountResponse,
@@ -1875,6 +1934,58 @@ test('preflight and real control plane reject every noncanonical authority shape
   }
 });
 
+test('real control plane independently validates canonical organization and billing account before Cloud Asset', async (t) => {
+  const contract = await contractFixture();
+  const unavailable = Object.assign(new Error('authority unavailable'), { code: 'TRANSPORT_AMBIGUOUS' });
+  const cases = [
+    ['organization malformed', { organizationResponse: { name: 'organizations/not-canonical' } }],
+    ['organization inactive', { organizationResponse: { lifecycleState: 'DELETE_REQUESTED' } }],
+    ['organization ambiguous', { organizationResponse: [] }],
+    ['organization unavailable', { organizationResponse: unavailable }],
+    ['billing malformed', { billingAccountResponse: { name: 'billingAccounts/not-canonical' } }],
+    ['billing closed', { billingAccountResponse: { open: false } }],
+    ['billing wrong currency', { billingAccountResponse: { currencyCode: 'USD' } }],
+    ['billing ambiguous', { billingAccountResponse: [] }],
+    ['billing unavailable', { billingAccountResponse: unavailable }],
+  ];
+
+  for (const [name, overrides] of cases) {
+    await t.test(name, async () => {
+      const fixture = assetAuditControlPlane({ contract, assets: [], ...overrides });
+      const originalGcloud = fixture.plane.gcloud;
+      fixture.plane.gcloud = async (args, options) => {
+        if (args[0] === 'organizations' && overrides.organizationResponse instanceof Error) {
+          throw overrides.organizationResponse;
+        }
+        if (args[0] === 'billing' && args[1] === 'accounts'
+          && overrides.billingAccountResponse instanceof Error) {
+          throw overrides.billingAccountResponse;
+        }
+        return originalGcloud(args, options);
+      };
+      await assert.rejects(
+        () => fixture.plane.auditPreMutationState(),
+        (error) => error.code === 'SHARED_PROJECT_BASELINE_INVALID',
+      );
+      assert.equal(fixture.gcloudCalls.some((args) => args[0] === 'asset'
+        || args.includes('enable') || args.includes('create')
+        || args.includes('add-iam-policy-binding')), false);
+      assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+    });
+  }
+
+  const exact = assetAuditControlPlane({ contract, assets: [] });
+  await exact.plane.auditPreMutationState();
+  assert.deepEqual(exact.gcloudCalls.slice(0, 4).map((args) => args.slice(0, 3)), [
+    ['projects', 'describe', PROJECT],
+    ['billing', 'projects', 'describe'],
+    ['organizations', 'describe', GCP_IDENTITY.organizationId],
+    ['billing', 'accounts', 'describe'],
+  ]);
+  const assetIndex = exact.gcloudCalls.findIndex((args) => args[0] === 'asset');
+  assert.equal(assetIndex > 3, true);
+});
+
 test('real control plane rejects each missing protected baseline binding before any mutation', async (t) => {
   const contract = await contractFixture();
   for (const missing of contract.project.protectedBindings) {
@@ -1889,6 +2000,12 @@ test('real control plane rejects each missing protected baseline binding before 
             projectId: PROJECT, projectNumber: PROJECT_NUMBER,
             parent: { type: 'organization', id: GCP_IDENTITY.organizationId }, name: 'Motion Expert HK LTD Webpage',
             labels: {}, lifecycleState: 'ACTIVE',
+          };
+          if (args[0] === 'organizations' && args[1] === 'describe') return {
+            name: `organizations/${GCP_IDENTITY.organizationId}`, lifecycleState: 'ACTIVE',
+          };
+          if (args[0] === 'billing' && args[1] === 'accounts') return {
+            name: `billingAccounts/${GCP_IDENTITY.billingAccountId}`, open: true, currencyCode: 'HKD',
           };
           if (args[0] === 'billing' && args[1] === 'projects') return {
             billingEnabled: true, billingAccountName: `billingAccounts/${GCP_IDENTITY.billingAccountId}`,
@@ -1941,6 +2058,12 @@ test('real control plane completes the no-channel discovery stage with only API 
         parent: { type: 'organization', id: GCP_IDENTITY.organizationId },
         name: 'Motion Expert HK LTD Webpage', labels: {}, lifecycleState: 'ACTIVE',
       };
+      if (args[0] === 'organizations' && args[1] === 'describe') return {
+        name: `organizations/${GCP_IDENTITY.organizationId}`, lifecycleState: 'ACTIVE',
+      };
+      if (args[0] === 'billing' && args[1] === 'accounts') return {
+        name: `billingAccounts/${GCP_IDENTITY.billingAccountId}`, open: true, currencyCode: 'HKD',
+      };
       if (args[0] === 'billing' && args[1] === 'projects') return {
         billingEnabled: true, billingAccountName: `billingAccounts/${GCP_IDENTITY.billingAccountId}`,
       };
@@ -1978,6 +2101,12 @@ test('real Cloud Asset audit fails closed before host mutation for disabled-serv
       projectId: PROJECT, projectNumber: PROJECT_NUMBER,
       parent: { type: 'organization', id: GCP_IDENTITY.organizationId },
       name: 'Motion Expert HK LTD Webpage', labels: {}, lifecycleState: 'ACTIVE',
+    };
+    if (args[0] === 'organizations' && args[1] === 'describe') return {
+      name: `organizations/${GCP_IDENTITY.organizationId}`, lifecycleState: 'ACTIVE',
+    };
+    if (args[0] === 'billing' && args[1] === 'accounts') return {
+      name: `billingAccounts/${GCP_IDENTITY.billingAccountId}`, open: true, currencyCode: 'HKD',
     };
     if (args[0] === 'billing' && args[1] === 'projects') return {
       billingEnabled: true, billingAccountName: `billingAccounts/${GCP_IDENTITY.billingAccountId}`,

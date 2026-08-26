@@ -1465,6 +1465,16 @@ function validatePromotionCompensationSource(value, plan) {
     || normalized.traffic.length > 2) {
     throw new Error('Cloud Run promotion compensation source is invalid');
   }
+  if (plan.previousRevision === null) {
+    if (!exact(normalized.traffic, [{
+      revision: plan.candidateRevision,
+      tag: normalized.traffic[0]?.percent === 0 ? plan.candidateTag : null,
+      percent: normalized.traffic[0]?.percent,
+    }]) || ![0, 100].includes(normalized.traffic[0]?.percent)) {
+      throw new Error('Cloud Run promotion compensation source is invalid');
+    }
+    return true;
+  }
   const seenRevisions = new Set();
   let routedRevision = null;
   for (const member of normalized.traffic) {
@@ -1482,6 +1492,24 @@ function validatePromotionCompensationSource(value, plan) {
   }
   if (![plan.previousRevision, plan.candidateRevision].includes(routedRevision)) {
     throw new Error('Cloud Run promotion compensation source is invalid');
+  }
+  return true;
+}
+
+function validateBootstrapCandidateService(value, plan) {
+  const normalized = normalizeCandidateService(value);
+  if (!normalized || normalized.service !== SERVICE || !exact(normalized.traffic, [{
+    revision: plan.candidateRevision, tag: plan.candidateTag, percent: 0,
+  }])) {
+    throw new Error('Cloud Run bootstrap candidate service readback is invalid');
+  }
+  return true;
+}
+
+function validateCandidateRevisionReadback(value, plan) {
+  if (!exact(normalizeCandidateRevision(value, plan.expectedCandidate),
+    candidateRevisionContract(plan.expectedCandidate))) {
+    throw new Error('Cloud Run candidate revision readback is invalid');
   }
   return true;
 }
@@ -3228,7 +3256,8 @@ export async function runGcpRelease({
       try {
         receipt = await executor(member.argv);
       } catch (error) {
-        if (member.id !== 'candidate-stable-readback' || error?.code !== 'NOT_FOUND'
+        if (member.id !== 'candidate-stable-readback'
+          || error?.code !== 'CLOUD_RUN_SERVICE_NOT_FOUND'
           || plan.previousRevision !== null || plan.previousImageDigest !== null) throw error;
         receipt = null;
       }
@@ -3426,21 +3455,68 @@ export async function runGcpRelease({
           'run', 'services', 'describe', SERVICE,
           `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
         ]);
-        try {
-          validateCandidateCleanupService(currentService, plan);
-        } catch {
+        if (plan.previousRevision === null) {
           validatePromotionCompensationSource(currentService, plan);
-          const restoreReceipt = await executor([
-            'run', 'services', 'update-traffic', SERVICE,
-            `--remove-tags=${plan.candidateTag}`, `--to-revisions=${plan.previousRevision}=100`,
+          if (typeof verifyEvidence !== 'function'
+            || await verifyEvidence(plan.evidence, { releaseSha: plan.releaseSha }) !== true) {
+            throw new Error('Promotion compensation evidence is invalid');
+          }
+          const candidateRevision = await executor([
+            'run', 'revisions', 'describe', plan.candidateRevision,
             `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
           ]);
-          validateCandidateCleanupService(restoreReceipt, plan);
+          validateCandidateRevisionReadback(candidateRevision, plan);
+          const candidateArtifact = await executor([
+            'artifacts', 'docker', 'images', 'describe', plan.expectedCandidate.image,
+            `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
+          ]);
+          validateCandidateArtifact(candidateArtifact, plan.expectedCandidate.image);
+          if (typeof writeCandidateSpec !== 'function'
+            || await writeCandidateSpec(plan) !== true) {
+            throw new Error('Candidate Service YAML is unavailable');
+          }
+          const dryRun = await executor([
+            'run', 'services', 'replace', plan.candidateServiceSpecPath,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--dry-run', '--format=json',
+          ]);
+          validateCandidateServiceSpecDryRun(dryRun, plan);
+          const restoreReceipt = await executor([
+            'run', 'services', 'replace', plan.candidateServiceSpecPath,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+          validateBootstrapCandidateService(restoreReceipt, plan);
           const freshService = await executor([
             'run', 'services', 'describe', SERVICE,
             `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
           ]);
-          validateCandidateCleanupService(freshService, plan);
+          validateBootstrapCandidateService(freshService, plan);
+          const freshRevision = await executor([
+            'run', 'revisions', 'describe', plan.candidateRevision,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+          validateCandidateRevisionReadback(freshRevision, plan);
+          const freshArtifact = await executor([
+            'artifacts', 'docker', 'images', 'describe', plan.expectedCandidate.image,
+            `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
+          ]);
+          validateCandidateArtifact(freshArtifact, plan.expectedCandidate.image);
+        } else {
+          try {
+            validateCandidateCleanupService(currentService, plan);
+          } catch {
+            validatePromotionCompensationSource(currentService, plan);
+            const restoreReceipt = await executor([
+              'run', 'services', 'update-traffic', SERVICE,
+              `--remove-tags=${plan.candidateTag}`, `--to-revisions=${plan.previousRevision}=100`,
+              `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+            ]);
+            validateCandidateCleanupService(restoreReceipt, plan);
+            const freshService = await executor([
+              'run', 'services', 'describe', SERVICE,
+              `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+            ]);
+            validateCandidateCleanupService(freshService, plan);
+          }
         }
         promotionTrafficRestored = true;
       } catch {
@@ -3503,6 +3579,41 @@ export async function runGcpRelease({
             promotionIamRestored = false;
           }
         }
+      }
+    }
+    if (selection.phase === 'promote' && plan.previousRevision === null
+      && promotionTrafficMutationAttempted
+      && promotionTrafficRestored === true && promotionIamRestored === true) {
+      try {
+        if (typeof verifyEvidence !== 'function'
+          || await verifyEvidence(plan.evidence, { releaseSha: plan.releaseSha }) !== true) {
+          throw new Error('Promotion compensation evidence is invalid');
+        }
+        const service = await executor([
+          'run', 'services', 'describe', SERVICE,
+          `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+        ]);
+        validateBootstrapCandidateService(service, plan);
+        const revision = await executor([
+          'run', 'revisions', 'describe', plan.candidateRevision,
+          `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+        ]);
+        validateCandidateRevisionReadback(revision, plan);
+        const artifact = await executor([
+          'artifacts', 'docker', 'images', 'describe', plan.expectedCandidate.image,
+          `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
+        ]);
+        validateCandidateArtifact(artifact, plan.expectedCandidate.image);
+        const iam = await executor([
+          'run', 'services', 'get-iam-policy', SERVICE,
+          `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+        ]);
+        validateIamPolicyState(iam, iamPolicyState(promotionIamBaseline), { requireEtag: true });
+        validateServiceIamReceipt(iam, { publicInvoker: false, requireEtag: true });
+      } catch {
+        cleanupFailed = true;
+        promotionTrafficRestored = false;
+        promotionIamRestored = false;
       }
     }
     return publish(writeOutput, 1, {

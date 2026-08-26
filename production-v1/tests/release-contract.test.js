@@ -1969,7 +1969,9 @@ test('empty-host bootstrap is allowed only on canonical NOT_FOUND and creates a 
       calls.push(argv);
       if (argv[1] === 'services' && argv[2] === 'describe') {
         serviceDescribeCount += 1;
-        if (serviceDescribeCount === 1) throw Object.assign(new Error('not found'), { code: 'NOT_FOUND' });
+        if (serviceDescribeCount === 1) {
+          throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+        }
         return { service: 'hkbuddy-v1-api', traffic: [
           { revision: REVISION, tag: CANDIDATE_TAG, percent: 0 },
         ] };
@@ -1991,6 +1993,7 @@ test('empty-host bootstrap is allowed only on canonical NOT_FOUND and creates a 
 
   for (const error of [
     Object.assign(new Error('forbidden'), { code: 'FORBIDDEN' }),
+    Object.assign(new Error('generic absence is ambiguous'), { code: 'NOT_FOUND' }),
     new Error('not found text without canonical code'),
   ]) {
     const rejectedCalls = [];
@@ -2003,6 +2006,194 @@ test('empty-host bootstrap is allowed only on canonical NOT_FOUND and creates a 
     assert.equal(rejected.exitCode, 1);
     assert.equal(rejected.publicReport.mutationPerformed, false);
     assert.equal(rejectedCalls.length, 1);
+  }
+});
+
+test('first-release failed promotion restores the exact private tagged zero-traffic candidate', async (t) => {
+  const input = releaseInput({ previousRevision: null, previousImageDigest: null });
+  const plan = buildReleasePlan(input);
+  for (const mode of ['mutation-landed', 'response-lost', 'readback-failed']) {
+    await t.test(mode, async () => {
+      const calls = [];
+      const evidenceChecks = [];
+      const privatePolicy = {
+        bindings: [{ role: 'roles/run.invoker', members: ['user:qa@motionexp.com'] }],
+        etag: `Bw-private-${mode}=`, version: 1,
+      };
+      let currentPolicy = structuredClone(privatePolicy);
+      let currentService = {
+        service: GCP_IDENTITY.service,
+        traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 0 }],
+      };
+      let plannedReadbackMustFail = mode === 'readback-failed';
+      const attemptId = '55555555-5555-4555-8555-555555555555';
+      const restorePath = join(
+        dirname(plan.sourceArchive), `${REVISION}.iam-restore.${attemptId}.json`,
+      );
+      const result = await runGcpRelease({
+        argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`], input,
+        randomUUID: () => attemptId,
+        verifyEvidence: async (value, options) => {
+          evidenceChecks.push({ value, options });
+          return true;
+        },
+        writeCandidateSpec: async (releasePlan) => {
+          assert.deepEqual(releasePlan.candidateServiceSpec.spec.traffic, [{
+            revisionName: REVISION, tag: CANDIDATE_TAG, percent: 0,
+          }]);
+          return true;
+        },
+        writeIamRestorePolicy: async () => restorePath,
+        removeIamRestorePolicy: async () => true,
+        execute: async (argv) => {
+          calls.push(argv);
+          if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
+          if (argv[0] === 'artifacts') return { image: plan.expectedCandidate.image };
+          if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
+          if (argv.includes('get-iam-policy')) return structuredClone(currentPolicy);
+          if (argv.includes('add-iam-policy-binding')) {
+            currentPolicy = {
+              bindings: [{
+                role: 'roles/run.invoker', members: ['allUsers', 'user:qa@motionexp.com'],
+              }],
+              etag: `Bw-public-${mode}=`, version: 1,
+            };
+            return structuredClone(currentPolicy);
+          }
+          if (argv.includes('set-iam-policy')) {
+            currentPolicy = { ...structuredClone(privatePolicy), etag: `Bw-restored-${mode}=` };
+            return structuredClone(currentPolicy);
+          }
+          if (argv.includes('update-traffic')) {
+            currentService = {
+              service: GCP_IDENTITY.service,
+              traffic: [{ revision: REVISION, percent: 100 }],
+            };
+            if (mode === 'response-lost') throw new Error('promotion traffic response was lost');
+            if (mode === 'mutation-landed') return { service: GCP_IDENTITY.service, traffic: [] };
+            return structuredClone(currentService);
+          }
+          if (argv[1] === 'services' && argv[2] === 'replace') {
+            if (argv.includes('--dry-run')) return structuredClone(plan.candidateServiceSpec);
+            currentService = {
+              service: GCP_IDENTITY.service,
+              traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 0 }],
+            };
+            return structuredClone(currentService);
+          }
+          if (argv[1] === 'services' && argv[2] === 'describe') {
+            if (plannedReadbackMustFail && currentService.traffic[0]?.percent === 100) {
+              plannedReadbackMustFail = false;
+              throw new Error('post-promotion readback unavailable');
+            }
+            return structuredClone(currentService);
+          }
+          throw new Error(`unexpected operation: ${argv.join(' ')}`);
+        },
+        writeOutput: () => undefined,
+      });
+
+      assert.equal(result.exitCode, 1);
+      assert.equal(result.publicReport.code, 'RELEASE_PHASE_FAILED', `${JSON.stringify(result.publicReport)} calls=${JSON.stringify(calls)}`);
+      assert.equal(result.publicReport.promotionTrafficRestored, true);
+      assert.equal(result.publicReport.promotionIamRestored, true);
+      assert.deepEqual(currentService.traffic, [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 0 }]);
+      assert.equal(JSON.stringify(currentPolicy).includes('allUsers'), false);
+      assert.equal(evidenceChecks.length >= 1, true);
+      assert.equal(calls.flat().some((value) => String(value).includes('null')), false);
+      assert.equal(calls.some((argv) => argv.some((value) => value === '--to-revisions=null=100')), false);
+
+      const compensationStart = calls.findIndex((argv) => (
+        argv[1] === 'services' && argv[2] === 'replace' && argv.includes('--dry-run')
+      ));
+      assert.equal(compensationStart >= 0, true);
+      assert.deepEqual(calls[compensationStart].slice(0, 4), [
+        'run', 'services', 'replace', plan.candidateServiceSpecPath,
+      ]);
+      assert.equal(calls.slice(compensationStart).some((argv) => (
+        argv[1] === 'services' && argv[2] === 'replace' && !argv.includes('--dry-run')
+      )), true);
+      const finalReads = calls.slice(compensationStart).map((argv) => argv.slice(0, 3).join(' '));
+      assert.equal(finalReads.filter((value) => value === 'run services describe').length >= 1, true);
+      assert.equal(finalReads.filter((value) => value === 'run revisions describe').length >= 2, true);
+      assert.equal(finalReads.filter((value) => value === 'artifacts docker images').length >= 2, true);
+      assert.equal(finalReads.filter((value) => value === 'run services get-iam-policy').length >= 2, true);
+    });
+  }
+});
+
+test('first-release promotion compensation fails closed on drift or Service replacement failure', async (t) => {
+  const input = releaseInput({ previousRevision: null, previousImageDigest: null });
+  const plan = buildReleasePlan(input);
+  for (const drift of [
+    'service', 'revision', 'artifact', 'evidence', 'iam', 'replacement-failure',
+  ]) {
+    await t.test(drift, async () => {
+      const calls = [];
+      let promoted = false;
+      let iamReadsAfterPromotion = 0;
+      const privatePolicy = { bindings: [], etag: 'Bw-private=', version: 1 };
+      let currentPolicy = structuredClone(privatePolicy);
+      const result = await runGcpRelease({
+        argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`], input,
+        randomUUID: () => '66666666-6666-4666-8666-666666666666',
+        verifyEvidence: async () => drift !== 'evidence' || promoted === false,
+        writeCandidateSpec: async () => true,
+        writeIamRestorePolicy: async () => join(dirname(plan.sourceArchive), `${REVISION}.iam-restore.66666666-6666-4666-8666-666666666666.json`),
+        removeIamRestorePolicy: async () => true,
+        execute: async (argv) => {
+          calls.push(argv);
+          if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
+          if (argv.includes('get-iam-policy')) {
+            if (promoted) iamReadsAfterPromotion += 1;
+            if (drift === 'iam' && iamReadsAfterPromotion >= 3) {
+              return {
+                bindings: [{ role: 'roles/run.invoker', members: ['user:foreign@example.invalid'] }],
+                etag: 'Bw-drift=', version: 1,
+              };
+            }
+            return structuredClone(currentPolicy);
+          }
+          if (argv.includes('add-iam-policy-binding')) {
+            currentPolicy = { bindings: [{ role: 'roles/run.invoker', members: ['allUsers'] }], etag: 'Bw-public=', version: 1 };
+            return structuredClone(currentPolicy);
+          }
+          if (argv.includes('set-iam-policy')) {
+            currentPolicy = { ...structuredClone(privatePolicy), etag: 'Bw-restored=' };
+            return structuredClone(currentPolicy);
+          }
+          if (argv.includes('update-traffic')) {
+            promoted = true;
+            throw new Error('response lost');
+          }
+          if (argv[1] === 'services' && argv[2] === 'describe') return drift === 'service' && promoted
+            ? { service: GCP_IDENTITY.service, traffic: [{ revision: 'hkbuddy-v1-api-eeeeeeeeeeee', percent: 100 }] }
+            : { service: GCP_IDENTITY.service, traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 0 }] };
+          if (argv[1] === 'revisions') return drift === 'revision' && promoted
+            ? { ...structuredClone(plan.expectedCandidate), image: `${plan.expectedCandidate.image.slice(0, -1)}e` }
+            : structuredClone(plan.expectedCandidate);
+          if (argv[0] === 'artifacts') return drift === 'artifact' && promoted
+            ? { image: `${plan.expectedCandidate.image.slice(0, -1)}e` }
+            : { image: plan.expectedCandidate.image };
+          if (argv[1] === 'services' && argv[2] === 'replace') {
+            throw new Error(drift === 'replacement-failure'
+              ? 'controlled Service replacement failed'
+              : 'replacement must remain inert on drift');
+          }
+          throw new Error(`unexpected operation: ${argv.join(' ')}`);
+        },
+        writeOutput: () => undefined,
+      });
+      assert.equal(result.exitCode, 1);
+      assert.equal(result.publicReport.code, 'PROMOTION_COMPENSATION_FAILED');
+      assert.equal(result.publicReport.promotionTrafficRestored, false);
+      assert.equal(
+        calls.some((argv) => argv[1] === 'services' && argv[2] === 'replace'),
+        ['iam', 'replacement-failure'].includes(drift),
+      );
+      assert.equal(JSON.stringify(currentPolicy).includes('allUsers'), false);
+      assert.equal(calls.flat().some((value) => String(value).includes('null')), false);
+    });
   }
 });
 
