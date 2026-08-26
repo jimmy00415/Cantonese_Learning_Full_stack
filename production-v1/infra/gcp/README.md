@@ -19,6 +19,21 @@ island and never adopts, updates, or deletes a non-V1 resource.
 - Cloud SQL transport: `sslmode=require`, with instance-side
   `ENCRYPTED_ONLY`
 
+### Read-only Cloud Asset inventory consumer
+
+The host does not enable Cloud Asset API. Before any provisioning write, the
+control plane therefore performs one bounded JSON inventory read of the host
+using `tech-demo-433408` strictly as the Cloud Asset quota consumer:
+
+```text
+gcloud asset search-all-resources --scope=projects/motion-expert-hk-ltd-webpage --billing-project=tech-demo-433408 --project=motion-expert-hk-ltd-webpage --limit=1000 --format=json
+```
+
+`tech-demo-433408` is never a deployment host and is never the target of API
+enablement, resource, billing, IAM, or REST mutation. Malformed, unavailable,
+wrong-project, or foreign managed-namespace inventory fails closed before a
+host mutation.
+
 The complete identities, APIs, IAM bindings, probes, backup controls, alert
 policies, and budget thresholds live in `resource-contract.json`. The contract
 is deliberately exact. Changing an identity or weakening a control makes the

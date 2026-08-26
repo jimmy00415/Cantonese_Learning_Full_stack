@@ -5,6 +5,7 @@ const serviceAccount = (id) => `${id}@${projectId}.iam.gserviceaccount.com`;
 export const GCP_IDENTITY = Object.freeze({
   projectId,
   projectNumber,
+  assetInventoryConsumerProjectId: 'tech-demo-433408',
   organizationId: '797368190621',
   billingAccountId: '01F9FD-24EA9B-A9232C',
   region: 'asia-east2',

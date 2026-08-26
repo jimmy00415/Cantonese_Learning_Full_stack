@@ -177,6 +177,12 @@ export function assertResourceContract(contract) {
     organizationId: ORGANIZATION,
     billingAccountId: BILLING_ACCOUNT,
     mode: 'existing-billed-shared',
+    assetInventory: {
+      consumerProjectId: GCP_IDENTITY.assetInventoryConsumerProjectId,
+      mode: 'read-only-cloud-asset-quota-consumer',
+      scope: `projects/${PROJECT}`,
+      limit: 1000,
+    },
     protectedBindings: [
       { member: 'user:admin@motionexp.com', role: 'roles/owner' },
       { member: `serviceAccount:service-${PROJECT_NUMBER}@compute-system.iam.gserviceaccount.com`, role: 'roles/compute.serviceAgent' },
@@ -892,9 +898,7 @@ export function assertCidrAvailable({
     ));
   const allocatedConflict = [...targetSubnets, ...targetAddresses]
     .filter(Boolean).some((candidate) => cidrOverlap(desired, candidate));
-  const routeConflict = targetRoutes.filter(Boolean).some((candidate) => (
-    kind === 'psa' ? cidrContainedBy(candidate, desired) : cidrOverlap(desired, candidate)
-  ));
+  const routeConflict = targetRoutes.filter(Boolean).some((candidate) => cidrOverlap(desired, candidate));
   if (allocatedConflict || routeConflict) {
     throw commandError('CIDR_OVERLAP');
   }
@@ -933,6 +937,38 @@ function assertNoForeignManagedIdentity(items, expected, prefix = 'hkbuddy-v1-')
     const name = raw.split('/').at(-1).split('@')[0];
     if (name.startsWith(prefix) && !permitted.has(name)) throw commandError('RESOURCE_COLLISION');
   }
+}
+
+function assertCloudAssetInventory(assets) {
+  if (!Array.isArray(assets) || assets.length > 1000 || assets.some((asset) => (
+    !asset || typeof asset !== 'object' || Array.isArray(asset)
+      || typeof asset.name !== 'string' || typeof asset.assetType !== 'string'
+  ))) throw commandError('CLOUD_ASSET_INVENTORY_AMBIGUOUS');
+  if (assets.some((asset) => asset.project !== `projects/${PROJECT}`)) {
+    throw commandError('CLOUD_ASSET_INVENTORY_WRONG_PROJECT');
+  }
+  const permitted = new Set([
+    GCP_IDENTITY.service, GCP_IDENTITY.repository, GCP_IDENTITY.bucket,
+    GCP_IDENTITY.cloudSqlInstance, GCP_IDENTITY.database, GCP_IDENTITY.network,
+    GCP_IDENTITY.subnet, GCP_IDENTITY.psaRange,
+    ...Object.values(GCP_IDENTITY.serviceAccounts).map((email) => email.split('@')[0]),
+    ...Object.values(GCP_IDENTITY.secrets), ...Object.values(GCP_IDENTITY.jobs),
+    ...REQUIRED_CUSTOM_ROLES.map(({ id }) => id),
+  ]);
+  for (const asset of assets) {
+    const text = [asset.name, asset.displayName, asset.description, asset.location]
+      .filter((value) => typeof value === 'string').join(' ');
+    for (const identity of text.match(/hkbuddy-v1-[a-z0-9-]+/gi) ?? []) {
+      if (!permitted.has(identity)) throw commandError('RESOURCE_COLLISION');
+    }
+    for (const identity of text.match(/hkbuddyV1[A-Za-z0-9]+/g) ?? []) {
+      if (!permitted.has(identity)) throw commandError('RESOURCE_COLLISION');
+    }
+    if (/hkbuddy-(?:prod|pilot|api|pg|runtime|build|migrator|deployer|acceptance)(?:[-_a-z0-9]*)?/i.test(text)) {
+      throw commandError('RESOURCE_COLLISION');
+    }
+  }
+  return assets;
 }
 
 function iamStepIds(contract) {
@@ -1330,6 +1366,7 @@ export class GcpControlPlane {
       || billing?.status !== 'present' || !this.compare('billing', billing.value)) {
       throw commandError('SHARED_PROJECT_BASELINE_INVALID');
     }
+    await this.#auditCloudAssetInventory();
     const enabled = requireObjectList(await this.#gcloud([
       'services', 'list', '--enabled', `--project=${PROJECT}`, '--format=json',
     ]));
@@ -1498,6 +1535,52 @@ export class GcpControlPlane {
       const buckets = await this.#gcloud(['storage', 'buckets', 'list', `--project=${PROJECT}`, '--format=json']);
       assertNoForeignManagedIdentity(buckets, [GCP_IDENTITY.bucket]);
     }
+    if (enabledApis.has('compute.googleapis.com')) {
+      const [networks, subnets, addresses] = await Promise.all([
+        this.#gcloud(['compute', 'networks', 'list', `--project=${PROJECT}`, '--format=json']),
+        this.#gcloud(['compute', 'networks', 'subnets', 'list', `--project=${PROJECT}`, '--format=json']),
+        this.#gcloud(['compute', 'addresses', 'list', '--global', `--project=${PROJECT}`, '--format=json']),
+      ]);
+      assertNoForeignManagedIdentity(networks, [GCP_IDENTITY.network]);
+      assertNoForeignManagedIdentity(subnets, [GCP_IDENTITY.subnet]);
+      assertNoForeignManagedIdentity(addresses, [GCP_IDENTITY.psaRange]);
+    }
+    if (enabledApis.has('run.googleapis.com')) {
+      const [services, jobs] = await Promise.all([
+        this.#gcloud(['run', 'services', 'list', '--region=asia-east2', `--project=${PROJECT}`, '--format=json']),
+        this.#gcloud(['run', 'jobs', 'list', '--region=asia-east2', `--project=${PROJECT}`, '--format=json']),
+      ]);
+      assertNoForeignManagedIdentity(services, [GCP_IDENTITY.service]);
+      assertNoForeignManagedIdentity(jobs, Object.values(GCP_IDENTITY.jobs));
+    }
+    if (enabledApis.has('monitoring.googleapis.com')) {
+      const [policies, channels] = await Promise.all([
+        this.#listAll({ url: `https://monitoring.googleapis.com/v3/projects/${PROJECT}/alertPolicies?pageSize=1000`, itemKey: 'alertPolicies' }),
+        this.#listAll({ url: `https://monitoring.googleapis.com/v3/projects/${PROJECT}/notificationChannels?pageSize=1000`, itemKey: 'notificationChannels' }),
+      ]);
+      assertNoForeignManagedIdentity(policies, this.contract.resources.monitoring.policies.map(({ id }) => id));
+      assertNoForeignManagedIdentity(channels, []);
+    }
+    if (enabledApis.has('billingbudgets.googleapis.com')) {
+      const budgets = await this.#listAll({
+        url: `https://billingbudgets.googleapis.com/v1/billingAccounts/${BILLING_ACCOUNT}/budgets?pageSize=100`, itemKey: 'budgets',
+      });
+      assertNoForeignManagedIdentity(budgets, [this.contract.resources.budget.displayName]);
+    }
+  }
+
+  async #auditCloudAssetInventory() {
+    let assets;
+    try {
+      assets = await this.#gcloud([
+        'asset', 'search-all-resources', `--scope=projects/${PROJECT}`,
+        `--billing-project=${GCP_IDENTITY.assetInventoryConsumerProjectId}`,
+        `--project=${PROJECT}`, '--limit=1000', '--format=json',
+      ]);
+    } catch (error) {
+      throw commandError('CLOUD_ASSET_INVENTORY_UNAVAILABLE');
+    }
+    return assertCloudAssetInventory(assets);
   }
 
   async #read(id, context) {

@@ -88,6 +88,18 @@ the default Compute service account.
 
 ## Shared-project safety contract
 
+### Cloud Asset disabled-service inventory amendment
+
+The host's disabled Cloud Asset API is not a reason to skip its pre-mutation
+inventory. The immutable contract names `tech-demo-433408` as a read-only
+Cloud Asset quota consumer. The sole cross-project exception is the bounded
+host request `asset search-all-resources --scope=projects/motion-expert-hk-ltd-webpage
+--billing-project=tech-demo-433408 --project=motion-expert-hk-ltd-webpage
+--limit=1000 --format=json`; it authorizes no consumer-project mutation. The
+control plane runs it before API enablement, creates, REST POSTs, or IAM writes
+and rejects unavailable, malformed, wrong-project, foreign namespace, or
+legacy executable-alias inventory.
+
 Before the first write, the control plane must prove all of the following in one
 fresh preflight:
 

@@ -6,6 +6,12 @@
     "organizationId": "797368190621",
     "billingAccountId": "01F9FD-24EA9B-A9232C",
     "mode": "existing-billed-shared",
+    "assetInventory": {
+      "consumerProjectId": "tech-demo-433408",
+      "mode": "read-only-cloud-asset-quota-consumer",
+      "scope": "projects/motion-expert-hk-ltd-webpage",
+      "limit": 1000
+    },
     "protectedBindings": [
       {
         "member": "user:admin@motionexp.com",
