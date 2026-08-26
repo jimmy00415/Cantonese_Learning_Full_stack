@@ -732,6 +732,20 @@ function realV1JobReadback(expected) {
   };
 }
 
+function realV1ExecutionReadback(expected, name = `${expected.job}-release-001`) {
+  return {
+    apiVersion: 'run.googleapis.com/v1',
+    kind: 'Execution',
+    metadata: { name, labels: { 'run.googleapis.com/job': expected.job } },
+    spec: { taskCount: expected.taskCount, parallelism: expected.parallelism },
+    status: {
+      conditions: [{ type: 'Completed', status: 'True' }],
+      completionTime: '2026-08-26T08:00:00.000Z',
+      succeededCount: expected.taskCount,
+    },
+  };
+}
+
 function fixtureReceiptOutputs(plan, phase) {
   if (phase === 'build') return {
     buildConfigSha256: plan.buildConfigSha256,
@@ -890,6 +904,7 @@ function createTestStateStore({ attemptId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa
 
 async function appendTestMutationCheckpoint(store, {
   operationId, mutationOrdinal, reconcileKind, outcome = 'applied', plan,
+  safeResult = { kind: 'none' },
 }) {
   const intent = await appendTestMutationIntent(store, {
     operationId, mutationOrdinal, reconcileKind, plan,
@@ -899,7 +914,7 @@ async function appendTestMutationCheckpoint(store, {
     classification: 'after',
     outcome,
     observationSha256: intent.payload.afterSha256,
-    safeResult: { kind: 'none' },
+    safeResult,
   });
   return intent;
 }
@@ -2334,6 +2349,418 @@ test('all-checkpoint build restart reconstructs a missing receipt by exact descr
   assert.equal(result.publicReport.mutationPerformed, false);
   assert.equal(calls.length, 1);
   assert.equal(persisted.phase, 'build');
+  assert.equal(store.records.at(-1).recordType, 'terminal');
+});
+
+test('all-checkpoint migration restart reconstructs exact Job and execution outputs without mutation', async () => {
+  const input = releaseInput();
+  const plan = buildReleasePlan(input, { phase: 'migration' });
+  const job = realV1JobReadback(plan.expectedMigrationJob);
+  const execution = realV1ExecutionReadback(
+    plan.expectedMigrationJob, 'hkbuddy-v1-migrate-release-001',
+  );
+  const store = createTestStateStore();
+  await appendTestMutationCheckpoint(store, {
+    operationId: 'migration-deploy',
+    mutationOrdinal: 1,
+    reconcileKind: 'cloud-run-job-replace',
+    plan,
+    safeResult: {
+      kind: 'resource',
+      state: 'present',
+      identitySha256: releaseMutationPlanIdentity(
+        plan, plan.operations.find(({ id }) => id === 'migration-deploy'),
+      ).specSha256,
+      valueSha256: createHash('sha256').update(JSON.stringify(canonicalFixture(job))).digest('hex'),
+    },
+  });
+  await appendTestMutationCheckpoint(store, {
+    operationId: 'migration-execute',
+    mutationOrdinal: 2,
+    reconcileKind: 'cloud-run-job-execute',
+    plan,
+    safeResult: {
+      kind: 'execution', name: execution.metadata.name, status: 'SUCCEEDED',
+    },
+  });
+  const calls = [];
+  let persisted = null;
+  const result = await runGcpRelease({
+    argv: ['--phase=migration', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    openStateStore: async () => store,
+    loadPhaseReceipt: async () => null,
+    persistReceipt: async (_releasePlan, receipt) => {
+      persisted = structuredClone(receipt);
+      return true;
+    },
+    execute: async (argv) => {
+      calls.push(argv);
+      if (argv[1] === 'jobs' && argv[2] === 'describe') return structuredClone(job);
+      if (argv[2] === 'executions' && argv[3] === 'describe') return structuredClone(execution);
+      throw new Error(`recovery attempted a mutation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  assert.equal(result.publicReport.mutationPerformed, false);
+  assert.deepEqual(calls.map((argv) => argv.slice(0, 5)), [
+    ['run', 'jobs', 'describe', 'hkbuddy-v1-migrate', `--project=${PROJECT}`],
+    ['run', 'jobs', 'executions', 'describe', execution.metadata.name],
+  ]);
+  assert.equal(persisted.outputs.executionName, execution.metadata.name);
+  assert.equal(store.records.at(-1).recordType, 'terminal');
+});
+
+test('all-checkpoint acceptance restart reconstructs every exact Job execution without mutation', async () => {
+  const input = releaseInput();
+  const plan = buildReleasePlan(input, { phase: 'acceptance' });
+  const store = createTestStateStore();
+  const readbacks = new Map();
+  let mutationOrdinal = 0;
+  for (const [key, expected] of Object.entries(plan.expectedJobs)) {
+    const job = realV1JobReadback(expected);
+    const execution = realV1ExecutionReadback(expected);
+    readbacks.set(expected.job, { execution, job, key });
+    mutationOrdinal += 1;
+    await appendTestMutationCheckpoint(store, {
+      operationId: `${key}-deploy`,
+      mutationOrdinal,
+      reconcileKind: 'cloud-run-job-replace',
+      plan,
+      safeResult: {
+        kind: 'resource',
+        state: 'present',
+        identitySha256: releaseMutationPlanIdentity(
+          plan, plan.operations.find(({ id }) => id === `${key}-deploy`),
+        ).specSha256,
+        valueSha256: createHash('sha256')
+          .update(JSON.stringify(canonicalFixture(job))).digest('hex'),
+      },
+    });
+    mutationOrdinal += 1;
+    await appendTestMutationCheckpoint(store, {
+      operationId: `${key}-execute`,
+      mutationOrdinal,
+      reconcileKind: 'cloud-run-job-execute',
+      plan,
+      safeResult: {
+        kind: 'execution', name: execution.metadata.name, status: 'SUCCEEDED',
+      },
+    });
+  }
+  const calls = [];
+  let persisted = null;
+  const result = await runGcpRelease({
+    argv: ['--phase=acceptance', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    openStateStore: async () => store,
+    loadPhaseReceipt: async () => null,
+    persistReceipt: async (_releasePlan, receipt) => {
+      persisted = structuredClone(receipt);
+      return true;
+    },
+    execute: async (argv) => {
+      calls.push(argv);
+      if (argv[1] === 'jobs' && argv[2] === 'describe') {
+        return structuredClone(readbacks.get(argv[3]).job);
+      }
+      if (argv[2] === 'executions' && argv[3] === 'describe') {
+        const match = [...readbacks.values()].find(({ execution }) => (
+          execution.metadata.name === argv[4]
+        ));
+        return structuredClone(match.execution);
+      }
+      throw new Error(`recovery attempted a mutation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  assert.equal(result.publicReport.mutationPerformed, false);
+  assert.equal(calls.length, Object.keys(plan.expectedJobs).length * 2);
+  assert.equal(calls.every((argv) => argv[2] === 'describe'
+    || (argv[2] === 'executions' && argv[3] === 'describe')), true);
+  assert.deepEqual(Object.keys(persisted.outputs.executions), Object.keys(plan.expectedJobs));
+  assert.equal(store.records.at(-1).recordType, 'terminal');
+});
+
+test('all-checkpoint inventory restart reconstructs the exact Secret version without adding one', async () => {
+  const input = releaseInput();
+  const plan = buildReleasePlan(input, { phase: 'inventory' });
+  const expected = plan.evidence.legacyInventory;
+  const store = createTestStateStore();
+  await appendTestMutationCheckpoint(store, {
+    operationId: 'inventory-publish:legacyInventory',
+    mutationOrdinal: 1,
+    reconcileKind: 'secret-version-add',
+    plan,
+    safeResult: {
+      kind: 'secret-version',
+      name: `projects/${PROJECT}/secrets/${expected.secret}`,
+      version: expected.secretVersion,
+    },
+  });
+  const calls = [];
+  let persisted = null;
+  const result = await runGcpRelease({
+    argv: ['--phase=inventory', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    openStateStore: async () => store,
+    loadPhaseReceipt: async () => null,
+    persistReceipt: async (_releasePlan, receipt) => {
+      persisted = structuredClone(receipt);
+      return true;
+    },
+    execute: async (argv) => {
+      calls.push(argv);
+      assert.deepEqual(argv.slice(0, 4), [
+        'secrets', 'versions', 'describe', expected.secretVersion,
+      ]);
+      return {
+        name: `projects/${PROJECT}/secrets/${expected.secret}/versions/${expected.secretVersion}`,
+        state: 'ENABLED',
+      };
+    },
+    writeOutput: () => undefined,
+  });
+
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  assert.equal(result.publicReport.mutationPerformed, false);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(persisted.outputs.evidenceSecretVersions, {
+    legacyInventory: expected.secretVersion,
+  });
+  assert.equal(store.records.at(-1).recordType, 'terminal');
+});
+
+test('all-checkpoint evidence restart reconstructs exact Secret versions and deleted object truth', async () => {
+  const input = releaseInput();
+  const plan = buildReleasePlan(input, { phase: 'evidence' });
+  const store = createTestStateStore();
+  let mutationOrdinal = 0;
+  for (const [key, expected] of Object.entries(plan.evidence)) {
+    if (key === 'legacyInventory') continue;
+    mutationOrdinal += 1;
+    await appendTestMutationCheckpoint(store, {
+      operationId: `evidence-publish:${key}`,
+      mutationOrdinal,
+      reconcileKind: 'secret-version-add',
+      plan,
+      safeResult: {
+        kind: 'secret-version',
+        name: `projects/${PROJECT}/secrets/${expected.secret}`,
+        version: expected.secretVersion,
+      },
+    });
+  }
+  for (const key of Object.keys(plan.acceptanceOutputs)) {
+    const operationId = `evidence-output-delete:${key}`;
+    const member = plan.operations.find(({ id }) => id === operationId);
+    mutationOrdinal += 1;
+    await appendTestMutationCheckpoint(store, {
+      operationId,
+      mutationOrdinal,
+      reconcileKind: 'gcs-object-delete',
+      plan,
+      safeResult: {
+        kind: 'resource',
+        state: 'absent',
+        identitySha256: releaseMutationPlanIdentity(plan, member).specSha256,
+        valueSha256: createHash('sha256')
+          .update(JSON.stringify(canonicalFixture({ state: 'absent' }))).digest('hex'),
+      },
+    });
+  }
+  const calls = [];
+  let persisted = null;
+  const result = await runGcpRelease({
+    argv: ['--phase=evidence', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    openStateStore: async () => store,
+    loadPhaseReceipt: async () => null,
+    persistReceipt: async (_releasePlan, receipt) => {
+      persisted = structuredClone(receipt);
+      return true;
+    },
+    execute: async (argv) => {
+      calls.push(argv);
+      if (argv[0] === 'secrets' && argv[2] === 'describe') {
+        const secret = argv.find((value) => value.startsWith('--secret=')).slice('--secret='.length);
+        return {
+          name: `projects/${PROJECT}/secrets/${secret}/versions/${argv[3]}`,
+          state: 'ENABLED',
+        };
+      }
+      if (argv[0] === 'storage' && argv[1] === 'objects' && argv[2] === 'list') return [];
+      throw new Error(`recovery attempted a mutation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  assert.equal(result.publicReport.mutationPerformed, false);
+  assert.equal(calls.every((argv) => argv[2] === 'describe' || argv[2] === 'list'), true);
+  assert.equal(calls.filter((argv) => argv[0] === 'storage').length,
+    Object.keys(plan.acceptanceOutputs).length + 1);
+  assert.equal(persisted.outputs.outputResidueCount, 0);
+  assert.deepEqual(persisted.outputs.evidenceSecretVersions,
+    Object.fromEntries(Object.entries(plan.evidence).map(([key, value]) => [
+      key, value.secretVersion,
+    ])));
+  assert.equal(store.records.at(-1).recordType, 'terminal');
+});
+
+test('all-checkpoint collect restart reconstructs generation-bound local evidence without copying', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'hkbuddy-collect-receipt-recovery-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const outputs = Object.fromEntries(Object.entries(ACCEPTANCE_OUTPUTS).map(([key, value]) => [
+    key, { ...value, filePath: join(directory, `${key}.json`) },
+  ]));
+  const inspected = {};
+  for (const [key, output] of Object.entries(outputs)) {
+    const contents = `controlled-${key}`;
+    await writeFile(output.filePath, contents, { flag: 'wx' });
+    inspected[key] = {
+      artifactSha256: createHash('sha256').update(`artifact:${key}`).digest('hex'),
+      objectSha256: createHash('sha256').update(contents).digest('hex'),
+      byteLength: Buffer.byteLength(contents),
+    };
+  }
+  const input = releaseInput({
+    acceptanceOutputs: outputs,
+    databaseSecretVersions: null,
+    evidence: null,
+    previousRevision: null,
+    previousImageDigest: null,
+  });
+  const plan = buildReleasePlan(input, { phase: 'collect' });
+  const store = createTestStateStore();
+  let mutationOrdinal = 0;
+  for (const [key, output] of Object.entries(plan.acceptanceOutputs)) {
+    mutationOrdinal += 1;
+    await appendTestMutationCheckpoint(store, {
+      operationId: `evidence-collect-copy:${key}`,
+      mutationOrdinal,
+      reconcileKind: 'gcs-object-write',
+      plan,
+      safeResult: {
+        kind: 'object',
+        bucketSha256: createHash('sha256')
+          .update(JSON.stringify(canonicalFixture(output.bucket))).digest('hex'),
+        objectSha256: createHash('sha256')
+          .update(JSON.stringify(canonicalFixture(output.object))).digest('hex'),
+        generation: output.generation,
+        valueSha256: createHash('sha256')
+          .update(JSON.stringify(canonicalFixture(inspected[key]))).digest('hex'),
+      },
+    });
+  }
+  const calls = [];
+  let persisted = null;
+  const result = await runGcpRelease({
+    argv: ['--phase=collect', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    openStateStore: async () => store,
+    loadPhaseReceipt: async () => null,
+    inspectCollected: async (filePath) => {
+      const key = Object.keys(outputs).find((candidate) => outputs[candidate].filePath === filePath);
+      return structuredClone(inspected[key]);
+    },
+    persistReceipt: async (_releasePlan, receipt) => {
+      persisted = structuredClone(receipt);
+      return true;
+    },
+    execute: async (argv) => {
+      calls.push(argv);
+      if (argv[1] !== 'objects' || argv[2] !== 'describe') {
+        throw new Error(`recovery attempted a mutation: ${argv.join(' ')}`);
+      }
+      const [key, output] = Object.entries(outputs).find(([, value]) => (
+        argv[3] === `gs://${value.bucket}/${value.object}#${value.generation}`
+      ));
+      return {
+        bucket: output.bucket,
+        name: output.object,
+        generation: output.generation,
+        size: String(inspected[key].byteLength),
+        contentType: 'application/json',
+      };
+    },
+    writeOutput: () => undefined,
+  });
+
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  assert.equal(result.publicReport.mutationPerformed, false);
+  assert.equal(calls.length, Object.keys(outputs).length);
+  assert.equal(calls.some((argv) => argv[1] === 'cp'), false);
+  assert.deepEqual(persisted.outputs.evidence,
+    Object.fromEntries(Object.entries(inspected).map(([key, value]) => [key, {
+      artifactSha256: value.artifactSha256,
+      objectSha256: value.objectSha256,
+    }])));
+  assert.equal(store.records.at(-1).recordType, 'terminal');
+});
+
+test('all-checkpoint candidate restart reconstructs exact private Service and IAM without mutation', async () => {
+  const input = releaseInput();
+  const plan = buildReleasePlan(input, { phase: 'candidate' });
+  const service = candidateServiceReadback(plan);
+  const iam = candidatePrivateIam();
+  const store = createTestStateStore();
+  for (const [index, [operationId, reconcileKind, observed]] of [
+    ['candidate-deploy', 'cloud-run-service-replace', service],
+    ['candidate-private-iam-grant', 'cloud-run-service-iam', iam],
+  ].entries()) {
+    const member = plan.operations.find(({ id }) => id === operationId);
+    await appendTestMutationCheckpoint(store, {
+      operationId,
+      mutationOrdinal: index + 1,
+      reconcileKind,
+      plan,
+      safeResult: {
+        kind: 'resource',
+        state: 'present',
+        identitySha256: releaseMutationPlanIdentity(plan, member).specSha256,
+        valueSha256: createHash('sha256')
+          .update(JSON.stringify(canonicalFixture(observed))).digest('hex'),
+      },
+    });
+  }
+  const calls = [];
+  let persisted = null;
+  const result = await runGcpRelease({
+    argv: ['--phase=candidate', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    openStateStore: async () => store,
+    loadPhaseReceipt: async () => null,
+    persistReceipt: async (_releasePlan, receipt) => {
+      persisted = structuredClone(receipt);
+      return true;
+    },
+    execute: async (argv) => {
+      calls.push(argv);
+      if (argv.includes('replace') || argv.includes('add-iam-policy-binding')) {
+        throw new Error(`recovery attempted a mutation: ${argv.join(' ')}`);
+      }
+      if (argv[1] === 'services' && argv[2] === 'describe') return structuredClone(service);
+      if (argv[1] === 'revisions' && argv[2] === 'describe') {
+        return structuredClone(plan.expectedCandidate);
+      }
+      if (argv.includes('get-iam-policy')) return structuredClone(iam);
+      if (argv[0] === 'artifacts') return { image: plan.image };
+      throw new Error(`unexpected recovery read: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  assert.equal(result.publicReport.mutationPerformed, false);
+  assert.equal(calls.some((argv) => argv.includes('replace')
+    || argv.includes('add-iam-policy-binding')), false);
+  assert.equal(calls.length, 4);
+  assert.equal(persisted.outputs.candidateService, CANDIDATE_SERVICE);
   assert.equal(store.records.at(-1).recordType, 'terminal');
 });
 

@@ -3911,6 +3911,129 @@ function createReleaseMutationAdapter(plan, member, context) {
   });
 }
 
+function checkpointSafeResult(records, attemptId, operationId) {
+  const checkpoints = records.filter((record) => (
+    record.attemptId === attemptId
+    && record.recordType === 'checkpoint'
+    && record.operationId === operationId
+  ));
+  if (checkpoints.length !== 1 || checkpoints[0].payload?.classification !== 'after'
+    || !checkpoints[0].payload.safeResult
+    || typeof checkpoints[0].payload.safeResult !== 'object'
+    || Array.isArray(checkpoints[0].payload.safeResult)) {
+    throw new Error('Checkpointed release operation has no exact safe result');
+  }
+  return checkpoints[0].payload.safeResult;
+}
+
+function validateResourceSafeResult(plan, member, safeResult, observed) {
+  const identity = releaseMutationPlanIdentity(plan, member);
+  if (!exactKeys(safeResult, [
+    'identitySha256', 'kind', 'state', 'valueSha256',
+  ]) || safeResult.kind !== 'resource' || safeResult.state !== 'present'
+    || safeResult.identitySha256 !== identity.specSha256
+    || safeResult.valueSha256 !== canonicalSha256(observed)) {
+    throw new Error('Checkpointed resource differs from its authoritative readback');
+  }
+  return true;
+}
+
+function validateExecutionSafeResult(safeResult, { job }) {
+  if (!exactKeys(safeResult, ['kind', 'name', 'status'])
+    || safeResult.kind !== 'execution' || safeResult.status !== 'SUCCEEDED'
+    || validateCloudRunExecutionIdentity({
+      apiVersion: 'run.googleapis.com/v1',
+      kind: 'Execution',
+      metadata: {
+        name: safeResult.name,
+        labels: { 'run.googleapis.com/job': job },
+      },
+    }, { job }) !== safeResult.name) {
+    throw new Error('Checkpointed execution identity is invalid');
+  }
+  return true;
+}
+
+function validateSecretVersionSafeResult(safeResult, expected) {
+  if (!exactKeys(safeResult, ['kind', 'name', 'version'])
+    || safeResult.kind !== 'secret-version'
+    || safeResult.name !== `projects/${PROJECT}/secrets/${expected.secret}`
+    || safeResult.version !== expected.secretVersion) {
+    throw new Error('Checkpointed Secret version identity is invalid');
+  }
+  return true;
+}
+
+function validateAbsentResourceSafeResult(plan, member, safeResult) {
+  const identity = releaseMutationPlanIdentity(plan, member);
+  if (!exactKeys(safeResult, [
+    'identitySha256', 'kind', 'state', 'valueSha256',
+  ]) || safeResult.kind !== 'resource' || safeResult.state !== 'absent'
+    || safeResult.identitySha256 !== identity.specSha256
+    || safeResult.valueSha256 !== canonicalSha256({ state: 'absent' })) {
+    throw new Error('Checkpointed resource absence is invalid');
+  }
+  return true;
+}
+
+function validateObjectSafeResult(safeResult, output, observed) {
+  if (!exactKeys(safeResult, [
+    'bucketSha256', 'generation', 'kind', 'objectSha256', 'valueSha256',
+  ]) || safeResult.kind !== 'object'
+    || safeResult.bucketSha256 !== canonicalSha256(output.bucket)
+    || safeResult.objectSha256 !== canonicalSha256(output.object)
+    || safeResult.generation !== output.generation
+    || safeResult.valueSha256 !== canonicalSha256(observed)) {
+    throw new Error('Checkpointed collected object differs from its authoritative evidence');
+  }
+  return true;
+}
+
+async function reconstructCheckpointedEvidenceVersion({
+  executor, plan, records, attemptId, key, phase,
+}) {
+  const operationId = `${phase}-publish:${key}`;
+  const expected = plan.evidence[key];
+  const readback = plan.operations.find(({ id }) => id === `${phase}-readback:${key}`);
+  if (!expected || !readback) throw new Error('Checkpointed Secret version is unavailable');
+  validateSecretVersionSafeResult(
+    checkpointSafeResult(records, attemptId, operationId), expected,
+  );
+  const receipt = await executor([...readback.argv]);
+  validateEvidenceVersionReceipt(receipt, expected);
+  return expected.secretVersion;
+}
+
+async function reconstructCheckpointedJobExecution({
+  executor, plan, records, attemptId, deployOperationId, executeOperationId,
+  expectedJob, validateExecution,
+}) {
+  const deployMember = plan.operations.find(({ id }) => id === deployOperationId);
+  if (!deployMember) throw new Error('Checkpointed Job deployment is unavailable');
+  const rawJob = await executor([
+    'run', 'jobs', 'describe', expectedJob.job,
+    `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+  ]);
+  validateReleaseJobReadback(rawJob, expectedJob);
+  validateResourceSafeResult(
+    plan,
+    deployMember,
+    checkpointSafeResult(records, attemptId, deployOperationId),
+    rawJob,
+  );
+  const executionSafeResult = checkpointSafeResult(records, attemptId, executeOperationId);
+  validateExecutionSafeResult(executionSafeResult, expectedJob);
+  const rawExecution = await executor([
+    'run', 'jobs', 'executions', 'describe', executionSafeResult.name,
+    `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+  ]);
+  const execution = validateExecution(rawExecution);
+  if (execution.name !== executionSafeResult.name) {
+    throw new Error('Checkpointed execution differs from its authoritative readback');
+  }
+  return execution;
+}
+
 function journalCheckpointBoundary(operationId) {
   if (operationId === 'build-submit') return 'build-readback';
   if (operationId === 'candidate-deploy') return 'candidate-private-iam-baseline-readback';
@@ -4731,10 +4854,8 @@ export async function runGcpRelease({
         if (checkpoint?.recordType !== 'checkpoint') {
           throw new Error('Checkpointed action phase cannot reconstruct its outcome sidecar');
         }
-      } else if (selection.phase !== 'build' || checkpoint?.recordType !== 'checkpoint'
-        || checkpoint.payload?.safeResult?.kind !== 'build') {
-        throw new Error('Checkpointed release phase cannot reconstruct its receipt');
-      } else {
+      } else if (selection.phase === 'build' && checkpoint?.recordType === 'checkpoint'
+        && checkpoint.payload?.safeResult?.kind === 'build') {
         const rawBuild = await executor([
           'builds', 'describe', checkpoint.payload.safeResult.buildId,
           `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
@@ -4744,6 +4865,127 @@ export async function runGcpRelease({
           || buildReceipt.buildReceiptSha256 !== checkpoint.payload.safeResult.receiptSha256) {
           throw new Error('Checkpointed build receipt differs from the authoritative build');
         }
+      } else if (selection.phase === 'migration' && checkpoint?.recordType === 'checkpoint') {
+        migrationExecutionReceipt = await reconstructCheckpointedJobExecution({
+          executor,
+          plan,
+          records: openJournalRecords,
+          attemptId: stateStore.attemptId,
+          deployOperationId: 'migration-deploy',
+          executeOperationId: 'migration-execute',
+          expectedJob: plan.expectedMigrationJob,
+          validateExecution: (raw) => validateMigrationExecutionReceipt(raw, {
+            releaseSha: plan.releaseSha,
+          }),
+        });
+      } else if (selection.phase === 'acceptance' && checkpoint?.recordType === 'checkpoint') {
+        for (const [key, expectedJob] of Object.entries(plan.expectedJobs)) {
+          acceptanceExecutionReceipts[key] = await reconstructCheckpointedJobExecution({
+            executor,
+            plan,
+            records: openJournalRecords,
+            attemptId: stateStore.attemptId,
+            deployOperationId: `${key}-deploy`,
+            executeOperationId: `${key}-execute`,
+            expectedJob,
+            validateExecution: (raw) => validateReleaseJobExecutionReceipt(raw, expectedJob),
+          });
+        }
+      } else if (selection.phase === 'inventory' && checkpoint?.recordType === 'checkpoint') {
+        evidenceSecretVersions.legacyInventory = await reconstructCheckpointedEvidenceVersion({
+          executor,
+          plan,
+          records: openJournalRecords,
+          attemptId: stateStore.attemptId,
+          key: 'legacyInventory',
+          phase: 'inventory',
+        });
+      } else if (selection.phase === 'evidence' && checkpoint?.recordType === 'checkpoint') {
+        for (const key of Object.keys(plan.evidence)) {
+          if (key === 'legacyInventory') continue;
+          evidenceSecretVersions[key] = await reconstructCheckpointedEvidenceVersion({
+            executor,
+            plan,
+            records: openJournalRecords,
+            attemptId: stateStore.attemptId,
+            key,
+            phase: 'evidence',
+          });
+        }
+        for (const key of Object.keys(plan.acceptanceOutputs)) {
+          const operationId = `evidence-output-delete:${key}`;
+          const member = plan.operations.find(({ id }) => id === operationId);
+          const readback = plan.operations.find(
+            ({ id }) => id === `evidence-output-delete-readback:${key}`,
+          );
+          if (!member || !readback) {
+            throw new Error('Checkpointed evidence deletion is unavailable');
+          }
+          validateAbsentResourceSafeResult(
+            plan,
+            member,
+            checkpointSafeResult(openJournalRecords, stateStore.attemptId, operationId),
+          );
+          const residue = await executor([...readback.argv]);
+          if (!Array.isArray(residue) || residue.length !== 0) {
+            throw new Error('Checkpointed evidence output is no longer absent');
+          }
+        }
+        const zeroReadback = plan.operations.find(
+          ({ id }) => id === 'evidence-output-zero-readback',
+        );
+        if (!zeroReadback) throw new Error('Evidence residue readback is unavailable');
+        const residue = await executor([...zeroReadback.argv]);
+        if (!Array.isArray(residue) || residue.length !== 0) {
+          throw new Error('Checkpointed evidence output residue remains');
+        }
+      } else if (selection.phase === 'collect' && checkpoint?.recordType === 'checkpoint') {
+        if (typeof inspectCollected !== 'function') {
+          throw new Error('Collected evidence inspector is unavailable');
+        }
+        for (const [key, output] of Object.entries(plan.acceptanceOutputs)) {
+          const operationId = `evidence-collect-copy:${key}`;
+          const readback = plan.operations.find(
+            ({ id }) => id === `evidence-collect-describe:${key}`,
+          );
+          if (!readback) throw new Error('Collected object readback is unavailable');
+          const objectReceipt = validateAcceptanceObjectReceipt(
+            await executor([...readback.argv]), output,
+          );
+          const inspected = await inspectCollected(
+            output.filePath, { releaseSha: plan.releaseSha, kind: key },
+          );
+          if (inspected.byteLength !== objectReceipt.size) {
+            throw new Error('Checkpointed collected evidence bytes differ from the object');
+          }
+          validateObjectSafeResult(
+            checkpointSafeResult(openJournalRecords, stateStore.attemptId, operationId),
+            output,
+            inspected,
+          );
+          collectedEvidence[key] = Object.freeze({
+            artifactSha256: inspected.artifactSha256,
+            objectSha256: inspected.objectSha256,
+            byteLength: inspected.byteLength,
+          });
+        }
+      } else if (selection.phase === 'candidate' && checkpoint?.recordType === 'checkpoint') {
+        Object.assign(candidateReadbacks, await readCandidateControlPlaneState(executor, plan));
+        for (const [operationId, observed] of [
+          ['candidate-deploy', candidateReadbacks.service],
+          ['candidate-private-iam-grant', candidateReadbacks.iam],
+        ]) {
+          const member = plan.operations.find(({ id }) => id === operationId);
+          if (!member) throw new Error('Checkpointed candidate mutation is unavailable');
+          validateResourceSafeResult(
+            plan,
+            member,
+            checkpointSafeResult(openJournalRecords, stateStore.attemptId, operationId),
+            observed,
+          );
+        }
+      } else {
+        throw new Error('Checkpointed release phase cannot reconstruct its receipt');
       }
     }
     if (selection.phase === 'candidate'
