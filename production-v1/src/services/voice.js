@@ -223,6 +223,9 @@ export async function* withIngressDeadlines(source, {
     while (true) {
       const remaining = deadlineAt - now();
       if (remaining <= 0) throw workError('VOICE_UPLOAD_TIMEOUT', 408, true);
+      if (signal?.aborted) {
+        throw signal.reason ?? workError('VOICE_UPLOAD_ABORTED', 408, true);
+      }
       const waitMs = Math.min(idleMs, remaining);
       let timer;
       const timed = new Promise((resolve, reject) => {
@@ -242,12 +245,22 @@ export async function* withIngressDeadlines(source, {
         });
       let result;
       try {
-        result = await Promise.race([iterator.next(), timed, aborted]);
-      } catch (error) {
-        if (signal?.aborted) {
-          throw signal.reason ?? workError('VOICE_UPLOAD_ABORTED', 408, true);
-        }
-        throw error;
+        const outcome = await Promise.race([
+          Promise.resolve(iterator.next()).then(
+            (value) => ({ source: 'iterator', value }),
+            (error) => ({ source: 'iterator', error }),
+          ),
+          timed.then(
+            (value) => ({ source: 'timeout', value }),
+            (error) => ({ source: 'timeout', error }),
+          ),
+          aborted.then(
+            (value) => ({ source: 'abort', value }),
+            (error) => ({ source: 'abort', error }),
+          ),
+        ]);
+        if ('error' in outcome) throw outcome.error;
+        result = outcome.value;
       } finally {
         clearTimeout(timer);
         removeAbortListener();

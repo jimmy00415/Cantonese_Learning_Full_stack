@@ -2456,6 +2456,39 @@ test('voice ingress gives an observed upload abort precedence over a simultaneou
   assert.equal(released, true);
 });
 
+test('voice ingress preserves a read failure that settles before a later upload abort', async () => {
+  const { withIngressDeadlines } = await import('../src/services/voice.js');
+  const readFailure = Object.assign(new Error('disk read failed'), { code: 'EIO' });
+  const abortReason = Object.assign(new Error('upload disconnected'), {
+    code: 'VOICE_UPLOAD_ABORTED', status: 408, retryable: true,
+  });
+  const controller = new AbortController();
+  let rejectRead;
+  let released = false;
+  const source = {
+    [Symbol.asyncIterator]() {
+      return {
+        next: () => new Promise((resolve, reject) => {
+          void resolve;
+          rejectRead = reject;
+        }),
+        return: async () => { released = true; return { done: true }; },
+      };
+    },
+  };
+  const bounded = withIngressDeadlines(source, {
+    idleMs: 100,
+    absoluteMs: 1_000,
+    signal: controller.signal,
+  });
+  const pending = bounded.next();
+  rejectRead(readFailure);
+  queueMicrotask(() => controller.abort(abortReason));
+
+  await assert.rejects(pending, (error) => error === readFailure);
+  assert.equal(released, true);
+});
+
 test('active ingress is spooled under its own idle and absolute clocks before the media-write deadline starts', async (t) => {
   const { createVoiceService } = await import('../src/services/voice.js');
   const { directory, store } = await createStore(t, 'hb-v1-ingress-spool-');
