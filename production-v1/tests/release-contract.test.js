@@ -46,6 +46,7 @@ const REGION = 'asia-east2';
 const RELEASE_SHA = 'a'.repeat(40);
 const SOURCE_SHA = 'b'.repeat(64);
 const IMAGE_DIGEST = `sha256:${'c'.repeat(64)}`;
+const PREVIOUS_IMAGE_DIGEST = `sha256:${'d'.repeat(64)}`;
 const PROJECT_NUMBER = '582852715831';
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const BUILD_SA = `projects/${PROJECT}/serviceAccounts/hkbuddy-v1-build@${PROJECT}.iam.gserviceaccount.com`;
@@ -142,7 +143,8 @@ function releaseInput(overrides = {}) {
     },
     legacyInventory: EVIDENCE.legacyInventory,
     evidence: EVIDENCE,
-    previousRevision: 'hkbuddy-v1-api-stable123456',
+    previousRevision: 'hkbuddy-v1-api-111111111111',
+    previousImageDigest: PREVIOUS_IMAGE_DIGEST,
     ...overrides,
   };
 }
@@ -188,6 +190,66 @@ test('release plan rejects old and foreign project numbers before producing comm
   for (const projectNumber of ['93662314720', '999999999999']) {
     assert.throws(() => buildReleasePlan(releaseInput({ projectNumber })), /release contract/i);
   }
+});
+
+test('Cloud Build is pinned to the governed source staging bucket and receipt prefix', () => {
+  const plan = buildReleasePlan(releaseInput());
+  const submit = plan.operations.find(({ id }) => id === 'build-submit');
+  assert.equal(submit.argv.includes(
+    '--gcs-source-staging-dir=gs://hkbuddy-v1-582852715831-build-source/source',
+  ), true);
+
+  const sourceHash = Buffer.from(SOURCE_SHA, 'hex').toString('base64');
+  const receipt = {
+    id: '12345678-1234-4234-8234-123456789abc', status: 'SUCCESS', serviceAccount: BUILD_SA,
+    substitutions: { _RELEASE_SHA: RELEASE_SHA, _SOURCE_SHA256: SOURCE_SHA },
+    options: { requestedVerifyOption: 'VERIFIED', sourceProvenanceHash: ['SHA256'] },
+    steps: ['validate-release-sha', 'dependency-security-gate', 'build', 'verify-image-contract',
+      'verify-oci-labels'].map((id) => ({ id, status: 'SUCCESS' })),
+    sourceProvenance: {
+      resolvedStorageSource: {
+        bucket: 'hkbuddy-v1-582852715831-build-source', object: 'source/source.tgz', generation: '123',
+      },
+      fileHashes: {
+        'gs://hkbuddy-v1-582852715831-build-source/source/source.tgz#123': {
+          fileHash: [{ type: 'SHA256', value: sourceHash }],
+        },
+      },
+    },
+    results: { images: [{
+      name: `asia-east2-docker.pkg.dev/${PROJECT}/hkbuddy-v1/hkbuddy-v1-api:${RELEASE_SHA}`,
+      digest: IMAGE_DIGEST,
+    }] },
+  };
+  assert.doesNotThrow(() => validateBuildReceipt(receipt, {
+    releaseSha: RELEASE_SHA, sourceArchiveSha256: SOURCE_SHA,
+  }));
+  for (const [bucket, object] of [
+    ['foreign-build-source', 'source/source.tgz'],
+    ['hkbuddy-v1-582852715831-build-source', 'other/source.tgz'],
+  ]) {
+    const drift = structuredClone(receipt);
+    const oldUri = Object.keys(drift.sourceProvenance.fileHashes)[0];
+    const newUri = `gs://${bucket}/${object}#123`;
+    drift.sourceProvenance.resolvedStorageSource = { bucket, object, generation: '123' };
+    drift.sourceProvenance.fileHashes[newUri] = drift.sourceProvenance.fileHashes[oldUri];
+    delete drift.sourceProvenance.fileHashes[oldUri];
+    assert.throws(() => validateBuildReceipt(drift, {
+      releaseSha: RELEASE_SHA, sourceArchiveSha256: SOURCE_SHA,
+    }), /Cloud Build receipt/i);
+  }
+});
+
+test('rollback identity accepts only controller-generated revision grammar and paired image digest', () => {
+  for (const input of [
+    releaseInput({ previousRevision: 'hkbuddy-v1-api-stable123456' }),
+    releaseInput({ previousRevision: 'hkbuddy-v1-api-ABCDEF123456' }),
+    releaseInput({ previousRevision: 'hkbuddy-v1-api-12345678901' }),
+    releaseInput({ previousImageDigest: null }),
+  ]) assert.throws(() => buildReleasePlan(input), /release contract/i);
+  assert.doesNotThrow(() => buildReleasePlan(releaseInput({
+    previousRevision: null, previousImageDigest: null,
+  }), { phase: 'candidate' }));
 });
 
 function validWorkloadAcceptanceRecord() {
@@ -549,7 +611,10 @@ function fixtureReceiptOutputs(plan, phase) {
     buildId: '12345678-1234-4234-8234-123456789abc',
     imageDigest: plan.imageDigest,
     sourceArchiveSha256: plan.sourceArchiveSha256,
-    sourceProvenance: { uri: 'gs://source/source.tgz#123', sha256: plan.sourceArchiveSha256 },
+    sourceProvenance: {
+      uri: 'gs://hkbuddy-v1-582852715831-build-source/source/source.tgz#123',
+      sha256: plan.sourceArchiveSha256,
+    },
     ociLabels: {
       'com.simplify.source-archive-sha256': plan.sourceArchiveSha256,
       'org.opencontainers.image.revision': plan.releaseSha,
@@ -589,6 +654,11 @@ function fixtureReceiptOutputs(plan, phase) {
     imageDigest: plan.imageDigest,
     origin: plan.candidateOrigin,
     publicInvoker: false,
+    priorRelease: plan.previousRevision === null ? null : {
+      image: plan.previousImage,
+      imageDigest: plan.previousImageDigest,
+      revision: plan.previousRevision,
+    },
     revision: plan.candidateRevision,
     tag: plan.candidateTag,
     trafficPercent: 0,
@@ -640,6 +710,7 @@ function runGcpRelease(options) {
   return runGcpReleaseImpl({
     loadReceipts: async (plan, { through }) => fixtureReceiptChain(plan, through),
     persistReceipt: async () => true,
+    verifyEvidence: async () => true,
     verifyTask8Evidence: async () => true,
     ...options,
   });
@@ -844,7 +915,7 @@ test('release plan is archive-bound, digest-pinned, evidence-first, probe-exact,
   assert.equal(new Set(mountPaths).size, mountPaths.length,
     'Cloud Run v1 rejects multiple secret volumes mounted at one directory');
   assert.deepEqual(serviceSpec.spec.traffic, [
-    { revisionName: 'hkbuddy-v1-api-stable123456', percent: 100 },
+    { revisionName: 'hkbuddy-v1-api-111111111111', percent: 100 },
     { revisionName: REVISION, tag: CANDIDATE_TAG, percent: 0 },
   ]);
   const specEnv = Object.fromEntries(serviceSpec.spec.template.spec.containers[0].env
@@ -870,7 +941,7 @@ test('release plan is archive-bound, digest-pinned, evidence-first, probe-exact,
   ]);
   assert.equal(publicAuth.argv.includes('--role=roles/run.invoker'), true);
   const rollback = plan.operations.find(({ id }) => id === 'rollback-traffic');
-  assert.equal(rollback.argv.includes('--to-revisions=hkbuddy-v1-api-stable123456=100'), true);
+  assert.equal(rollback.argv.includes('--to-revisions=hkbuddy-v1-api-111111111111=100'), true);
 
   const serialized = JSON.stringify(plan);
   assert.equal(serialized.includes(':latest'), false);
@@ -894,6 +965,12 @@ test('candidate deploy is fenced by the canonical gcloud Service v1 dry-run resu
           service: 'hkbuddy-v1-api',
           traffic: [{ revision: input.previousRevision, percent: 100 }],
         };
+      }
+      if (argv[1] === 'revisions' && argv[3] === input.previousRevision) {
+        return { revision: input.previousRevision, image: plan.previousImage };
+      }
+      if (argv[0] === 'artifacts' && argv.includes(plan.previousImage)) {
+        return { image: plan.previousImage };
       }
       if (argv.includes('--dry-run')) {
         const drift = structuredClone(plan.candidateServiceSpec);
@@ -951,11 +1028,16 @@ test('candidate phase feeds raw Service JSON through gcloud 553-compatible secre
           ],
         };
       }
+      if (argv[1] === 'revisions' && argv[3] === input.previousRevision) {
+        return { revision: input.previousRevision, image: plan.previousImage };
+      }
       if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
       if (argv.includes('get-iam-policy')) return {
         bindings: [{ role: 'roles/run.invoker', members: ['user:qa@motionexp.com'] }],
       };
-      if (argv[0] === 'artifacts') return { image: plan.expectedCandidate.image };
+      if (argv[0] === 'artifacts') return {
+        image: argv.includes(plan.previousImage) ? plan.previousImage : plan.expectedCandidate.image,
+      };
       throw new Error(`unexpected operation: ${argv.join(' ')}`);
     },
     writeOutput: () => undefined,
@@ -1025,7 +1107,9 @@ test('preboot acceptance jobs are digest-pinned, identity-exact, and produce evi
 });
 
 test('acceptance execution reads back each exact Job identity before running it', async () => {
-  const input = releaseInput({ acceptanceOutputs: null, evidence: null, previousRevision: null });
+  const input = releaseInput({
+    acceptanceOutputs: null, evidence: null, previousRevision: null, previousImageDigest: null,
+  });
   const plan = buildReleasePlan(input, { phase: 'acceptance' });
   const expectedByJob = Object.fromEntries(Object.values(plan.expectedJobs).map((value) => (
     [value.job, value]
@@ -1053,7 +1137,9 @@ test('acceptance execution reads back each exact Job identity before running it'
 
 test('dependency acceptance accepts the real v1 directory mount plus secret item filename', () => {
   const plan = buildReleasePlan(
-    releaseInput({ acceptanceOutputs: null, evidence: null, previousRevision: null }),
+    releaseInput({
+      acceptanceOutputs: null, evidence: null, previousRevision: null, previousImageDigest: null,
+    }),
     { phase: 'acceptance' },
   );
   const expected = plan.expectedJobs['dependency-acceptance'];
@@ -1149,6 +1235,7 @@ test('generation-bound private evidence collection derives exact safe digests fr
       databaseSecretVersions: null,
       evidence: null,
       previousRevision: null,
+      previousImageDigest: null,
     }),
     execute: async (argv) => {
       if (argv[1] === 'objects') {
@@ -1207,6 +1294,7 @@ test('generation-bound private evidence collection derives exact safe digests fr
       databaseSecretVersions: null,
       evidence: null,
       previousRevision: null,
+      previousImageDigest: null,
     }),
     execute: async () => { throw new Error('must stop before GCP readback'); },
     writeOutput: () => undefined,
@@ -1249,6 +1337,7 @@ test('evidence publication accepts and reads back only the planned numeric versi
       evidence: null,
       acceptanceOutputs: null,
       previousRevision: null,
+      previousImageDigest: null,
     }),
     execute: executor,
     verifyEvidence: async (value) => { inventoryVerified = value; },
@@ -1302,9 +1391,11 @@ test('build receipt captures one successful verified build, source hash, and fin
       { id: 'verify-oci-labels', status: 'SUCCESS' },
     ],
     sourceProvenance: {
-      resolvedStorageSource: { bucket: 'source', object: 'source.tgz', generation: '123' },
+      resolvedStorageSource: {
+        bucket: 'hkbuddy-v1-582852715831-build-source', object: 'source/source.tgz', generation: '123',
+      },
       fileHashes: {
-        'gs://source/source.tgz#123': {
+        'gs://hkbuddy-v1-582852715831-build-source/source/source.tgz#123': {
           fileHash: [{ type: 'SHA256', value: Buffer.from(SOURCE_SHA, 'hex').toString('base64') }],
         },
       },
@@ -1339,7 +1430,9 @@ test('build receipt captures one successful verified build, source hash, and fin
     buildId: '12345678-1234-4234-8234-123456789abc',
     releaseSha: RELEASE_SHA,
     sourceArchiveSha256: SOURCE_SHA,
-    sourceProvenance: { uri: 'gs://source/source.tgz#123', sha256: SOURCE_SHA },
+    sourceProvenance: {
+      uri: 'gs://hkbuddy-v1-582852715831-build-source/source/source.tgz#123', sha256: SOURCE_SHA,
+    },
     imageDigest: IMAGE_DIGEST,
     provenance: 'VERIFIED',
     ociLabels: {
@@ -1359,6 +1452,7 @@ test('build receipt captures one successful verified build, source hash, and fin
       databaseSecretVersions: null,
       evidence: null,
       previousRevision: null,
+      previousImageDigest: null,
     }),
     execute: async (argv) => (argv[1] === 'submit' ? build : [build]),
     verifySourceArchive: async () => true,
@@ -1423,14 +1517,18 @@ test('confirmed candidate fails closed unless every control-plane readback match
   const createExecutor = ({ artifact = readbacks.artifact } = {}) => {
     let serviceDescribeCount = 0;
     return async (argv) => {
-    if (argv[0] === 'artifacts') return structuredClone(artifact);
+    if (argv[0] === 'artifacts') return argv.includes(plan.previousImage)
+      ? { image: plan.previousImage } : structuredClone(artifact);
     if (argv.includes('--dry-run')) return structuredClone(plan.candidateServiceSpec);
     if (argv.includes('get-iam-policy')) return structuredClone(readbacks.iam);
+    if (argv[1] === 'revisions' && argv[3] === input.previousRevision) {
+      return { revision: input.previousRevision, image: plan.previousImage };
+    }
     if (argv[1] === 'revisions') return structuredClone(readbacks.revision);
     if (argv[1] === 'services' && argv[2] === 'describe') {
       serviceDescribeCount += 1;
       return serviceDescribeCount === 1
-        ? { service: 'hkbuddy-v1-api', traffic: [{ revision: 'hkbuddy-v1-api-stable123456', percent: 100 }] }
+        ? { service: 'hkbuddy-v1-api', traffic: [{ revision: 'hkbuddy-v1-api-111111111111', percent: 100 }] }
         : structuredClone(readbacks.service);
     }
     return { deployed: true };
@@ -1466,11 +1564,26 @@ test('release orchestrator is dry-run first and executes only one exactly confir
   assert.equal(dryRun.publicReport.status, 'dry-run');
   assert.equal(calls.length, 0);
 
+  const plan = buildReleasePlan(input);
+  let rolledBack = false;
   const result = await runGcpRelease({
     argv: ['--phase=rollback', `--confirm-release=${RELEASE_SHA}`], input,
     execute: async (argv) => {
       calls.push(argv);
-      return { service: 'hkbuddy-v1-api', traffic: [{ revision: input.previousRevision, percent: 100 }] };
+      if (argv[1] === 'services' && argv[2] === 'describe') return rolledBack
+        ? { service: 'hkbuddy-v1-api', traffic: [{ revision: input.previousRevision, percent: 100 }] }
+        : { service: 'hkbuddy-v1-api', traffic: [{ revision: REVISION, percent: 100 }] };
+      if (argv[1] === 'revisions') return argv[3] === input.previousRevision
+        ? { revision: input.previousRevision, image: plan.previousImage }
+        : structuredClone(plan.expectedCandidate);
+      if (argv[0] === 'artifacts') return {
+        image: argv.includes(plan.previousImage) ? plan.previousImage : plan.image,
+      };
+      if (argv.includes('update-traffic')) {
+        rolledBack = true;
+        return { service: 'hkbuddy-v1-api', traffic: [{ revision: input.previousRevision, percent: 100 }] };
+      }
+      throw new Error(`unexpected operation: ${argv.join(' ')}`);
     },
     writeOutput: () => undefined,
   });
@@ -1490,7 +1603,7 @@ test('rollback removes the candidate tag before restoring the prior revision', (
   const plan = buildReleasePlan(releaseInput());
   const rollback = plan.operations.find(({ id }) => id === 'rollback-traffic');
   assert.equal(rollback.argv.includes(`--remove-tags=${CANDIDATE_TAG}`), true);
-  assert.equal(rollback.argv.includes('--to-revisions=hkbuddy-v1-api-stable123456=100'), true);
+  assert.equal(rollback.argv.includes('--to-revisions=hkbuddy-v1-api-111111111111=100'), true);
 });
 
 test('rollback rejects a zero-percent candidate tag that remains reachable', async () => {
@@ -1841,6 +1954,144 @@ test('candidate deployment uses a controlled Service YAML and never the unsuppor
   assert.equal(plan.operations.some(({ id }) => id === 'candidate-cleanup-public-service'), false);
 });
 
+test('empty-host bootstrap is allowed only on canonical NOT_FOUND and creates a private tagged zero-traffic candidate', async () => {
+  const input = releaseInput({ previousRevision: null, previousImageDigest: null });
+  const plan = buildReleasePlan(input, { phase: 'candidate' });
+  assert.deepEqual(plan.candidateServiceSpec.spec.traffic, [{
+    revisionName: REVISION, tag: CANDIDATE_TAG, percent: 0,
+  }]);
+  let serviceDescribeCount = 0;
+  const calls = [];
+  const result = await runGcpRelease({
+    argv: ['--phase=candidate', `--confirm-release=${RELEASE_SHA}`], input,
+    writeCandidateSpec: async () => true,
+    execute: async (argv) => {
+      calls.push(argv);
+      if (argv[1] === 'services' && argv[2] === 'describe') {
+        serviceDescribeCount += 1;
+        if (serviceDescribeCount === 1) throw Object.assign(new Error('not found'), { code: 'NOT_FOUND' });
+        return { service: 'hkbuddy-v1-api', traffic: [
+          { revision: REVISION, tag: CANDIDATE_TAG, percent: 0 },
+        ] };
+      }
+      if (argv.includes('--dry-run')) return structuredClone(plan.candidateServiceSpec);
+      if (argv[1] === 'services' && argv[2] === 'replace') return { deployed: true };
+      if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
+      if (argv.includes('get-iam-policy')) return {
+        bindings: [{ role: 'roles/run.invoker', members: ['user:qa@motionexp.com'] }],
+      };
+      if (argv[0] === 'artifacts') return { image: plan.expectedCandidate.image };
+      throw new Error(`unexpected operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  assert.equal(calls.some((argv) => argv.includes('--member=allUsers')), false);
+  assert.equal(calls.some((argv) => argv.includes('update-traffic')), false);
+
+  for (const error of [
+    Object.assign(new Error('forbidden'), { code: 'FORBIDDEN' }),
+    new Error('not found text without canonical code'),
+  ]) {
+    const rejectedCalls = [];
+    const rejected = await runGcpRelease({
+      argv: ['--phase=candidate', `--confirm-release=${RELEASE_SHA}`], input,
+      writeCandidateSpec: async () => true,
+      execute: async (argv) => { rejectedCalls.push(argv); throw error; },
+      writeOutput: () => undefined,
+    });
+    assert.equal(rejected.exitCode, 1);
+    assert.equal(rejected.publicReport.mutationPerformed, false);
+    assert.equal(rejectedCalls.length, 1);
+  }
+});
+
+test('first-release rollback and candidate cleanup fail closed without any control-plane mutation', async () => {
+  const input = releaseInput({ previousRevision: null, previousImageDigest: null });
+  for (const phase of ['rollback', 'candidate-cleanup']) {
+    const calls = [];
+    const preview = await runGcpRelease({
+      argv: [`--phase=${phase}`], input,
+      execute: async (argv) => { calls.push(argv); throw new Error('must remain inert'); },
+      writeOutput: () => undefined,
+    });
+    assert.equal(preview.exitCode, 1);
+    assert.equal(preview.publicReport.code, 'ROLLBACK_UNAVAILABLE_NO_PRIOR_RELEASE');
+    const result = await runGcpRelease({
+      argv: [`--phase=${phase}`, `--confirm-release=${RELEASE_SHA}`], input,
+      execute: async (argv) => { calls.push(argv); throw new Error('must remain inert'); },
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.publicReport.code, 'ROLLBACK_UNAVAILABLE_NO_PRIOR_RELEASE');
+    assert.equal(result.publicReport.mutationPerformed, false);
+    assert.deepEqual(calls, []);
+  }
+});
+
+test('later rollback validates immutable receipts and fresh revision/image/service/evidence before traffic mutation', async () => {
+  const input = releaseInput();
+  const plan = buildReleasePlan(input);
+  const forged = fixtureReceiptChain(plan, 'mobile').map((value) => structuredClone(value));
+  forged.find(({ phase }) => phase === 'candidate').outputs.priorRelease.imageDigest
+    = `sha256:${'e'.repeat(64)}`;
+  const forgedCalls = [];
+  const forgedResult = await runGcpRelease({
+    argv: ['--phase=rollback', `--confirm-release=${RELEASE_SHA}`], input,
+    loadReceipts: async () => forged,
+    execute: async (argv) => { forgedCalls.push(argv); throw new Error('must remain inert'); },
+    writeOutput: () => undefined,
+  });
+  assert.equal(forgedResult.exitCode, 1);
+  assert.equal(forgedResult.publicReport.code, 'RELEASE_RECEIPT_CHAIN_INVALID');
+  assert.deepEqual(forgedCalls, []);
+
+  const calls = [];
+  const driftResult = await runGcpRelease({
+    argv: ['--phase=rollback', `--confirm-release=${RELEASE_SHA}`], input,
+    execute: async (argv) => {
+      calls.push(argv);
+      if (argv[1] === 'services' && argv[2] === 'describe') {
+        return { service: 'hkbuddy-v1-api', traffic: [{ revision: REVISION, percent: 100 }] };
+      }
+      if (argv[1] === 'revisions' && argv[3] === REVISION) {
+        return structuredClone(plan.expectedCandidate);
+      }
+      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv[1] === 'revisions' && argv[3] === input.previousRevision) {
+        return { revision: 'hkbuddy-v1-api-222222222222', image: plan.previousImage };
+      }
+      throw new Error(`unexpected operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(driftResult.exitCode, 1);
+  assert.equal(driftResult.publicReport.mutationPerformed, false);
+  assert.equal(calls.some((argv) => argv.includes('update-traffic')), false);
+
+  const staleImageCalls = [];
+  const staleImageResult = await runGcpRelease({
+    argv: ['--phase=rollback', `--confirm-release=${RELEASE_SHA}`], input,
+    execute: async (argv) => {
+      staleImageCalls.push(argv);
+      if (argv[1] === 'services' && argv[2] === 'describe') {
+        return { service: 'hkbuddy-v1-api', traffic: [{ revision: REVISION, percent: 100 }] };
+      }
+      if (argv[1] === 'revisions') return argv[3] === input.previousRevision
+        ? { revision: input.previousRevision, image: plan.previousImage }
+        : structuredClone(plan.expectedCandidate);
+      if (argv[0] === 'artifacts') return argv.includes(plan.previousImage)
+        ? { image: `${plan.previousImage.slice(0, -64)}${'f'.repeat(64)}` }
+        : { image: plan.image };
+      throw new Error(`unexpected operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(staleImageResult.exitCode, 1);
+  assert.equal(staleImageResult.publicReport.mutationPerformed, false);
+  assert.equal(staleImageCalls.some((argv) => argv.includes('update-traffic')), false);
+});
+
 test('changed release archive bytes are rejected before the first Cloud Build mutation', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'hkbuddy-release-build-input-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -1858,6 +2109,7 @@ test('changed release archive bytes are rejected before the first Cloud Build mu
       databaseSecretVersions: null,
       evidence: null,
       previousRevision: null,
+      previousImageDigest: null,
     }),
     execute: async (argv) => { calls.push(argv); throw new Error('must remain inert'); },
     writeOutput: () => undefined,
@@ -1880,9 +2132,11 @@ test('Cloud Build receipt requires the exact generation-bound SHA256 source prov
       'verify-image-contract', 'verify-oci-labels',
     ].map((id) => ({ id, status: 'SUCCESS' })),
     sourceProvenance: {
-      resolvedStorageSource: { bucket: 'hkbuddy-build-source', object: 'source.tar.gz', generation: '123' },
+      resolvedStorageSource: {
+        bucket: 'hkbuddy-v1-582852715831-build-source', object: 'source/source.tar.gz', generation: '123',
+      },
       fileHashes: {
-        'gs://hkbuddy-build-source/source.tar.gz#123': {
+        'gs://hkbuddy-v1-582852715831-build-source/source/source.tar.gz#123': {
           fileHash: [{ type: 'SHA256', value: sourceHash }],
         },
       },
@@ -1903,7 +2157,7 @@ test('Cloud Build receipt requires the exact generation-bound SHA256 source prov
     {
       ...build.sourceProvenance,
       fileHashes: {
-        'gs://hkbuddy-build-source/source.tar.gz#123': {
+        'gs://hkbuddy-v1-582852715831-build-source/source/source.tar.gz#123': {
           fileHash: [{ type: 'SHA256', value: Buffer.from('f'.repeat(64), 'hex').toString('base64') }],
         },
       },
@@ -1911,7 +2165,7 @@ test('Cloud Build receipt requires the exact generation-bound SHA256 source prov
     {
       ...build.sourceProvenance,
       fileHashes: {
-        'gs://hkbuddy-build-source/source.tar.gz': {
+        'gs://hkbuddy-v1-582852715831-build-source/source/source.tar.gz': {
           fileHash: [{ type: 'SHA256', value: sourceHash }],
         },
       },
@@ -1963,7 +2217,9 @@ test('migration refuses execution when the exact deployed Job readback drifts', 
   const calls = [];
   const result = await runGcpRelease({
     argv: ['--phase=migration', `--confirm-release=${RELEASE_SHA}`],
-    input: releaseInput({ evidence: null, acceptanceOutputs: null, previousRevision: null }),
+    input: releaseInput({
+      evidence: null, acceptanceOutputs: null, previousRevision: null, previousImageDigest: null,
+    }),
     execute: async (argv) => {
       calls.push(argv);
       if (argv[2] === 'describe') return { serviceAccount: 'unexpected@example.invalid' };
@@ -2028,7 +2284,9 @@ test('migration execution accepts the real Cloud Run Jobs v1 terminal success sh
 });
 
 test('migration phase persists the canonical short v1 execution identity with omitted zero counters', async () => {
-  const input = releaseInput({ evidence: null, acceptanceOutputs: null, previousRevision: null });
+  const input = releaseInput({
+    evidence: null, acceptanceOutputs: null, previousRevision: null, previousImageDigest: null,
+  });
   const plan = buildReleasePlan(input, { phase: 'migration' });
   let persisted = null;
   const result = await runGcpRelease({
@@ -2643,4 +2901,24 @@ test('Cloud Build and infrastructure contracts pin the reviewed build identity a
   }
   assert.equal(JSON.stringify(contract).includes('roles/run.admin'), true);
   assert.equal(contract.iam.bindings.some(({ role }) => role === 'roles/run.admin'), false);
+});
+
+test('operator docs require the complete receipt sequence and manifest refresh boundaries', async () => {
+  const [operator, readme] = await Promise.all([
+    readFile(new URL('../infra/gcp/README.md', import.meta.url), 'utf8'),
+    readFile(new URL('../README.md', import.meta.url), 'utf8'),
+  ]);
+  for (const phase of [
+    'build', 'migration', 'inventory', 'acceptance', 'collect', 'evidence', 'candidate',
+    'readiness', 'workload', 'mobile', 'promote',
+  ]) assert.equal([...operator.matchAll(new RegExp(`--phase=${phase}(?:\\s|$)`, 'g'))].length >= 2, true, phase);
+  for (const phase of ['candidate-cleanup', 'rollback']) {
+    assert.equal([...operator.matchAll(new RegExp(`--phase=${phase}(?:\\s|$)`, 'g'))].length >= 2, true, phase);
+  }
+  for (const text of [
+    'previousImageDigest', 'ROLLBACK_UNAVAILABLE_NO_PRIOR_RELEASE',
+    'canonical service describe returns `NOT_FOUND`', 'manifest is deliberately refreshed',
+  ]) assert.equal(operator.includes(text), true, text);
+  assert.match(readme, /candidate -> readiness -> workload -> mobile -> promote/);
+  assert.match(readme, /fresh service, candidate\/prior revision/);
 });

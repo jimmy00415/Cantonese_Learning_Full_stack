@@ -328,6 +328,15 @@ promotion, and rollback to `hkbuddy-v1-api`. Keep create-only evidence,
 one-frozen-workload, no-token persistence, zero-traffic candidate, and
 fresh-promotion-validation controls unchanged.
 
+Cloud Build submit must use exact staging directory
+`gs://hkbuddy-v1-582852715831-build-source/source`, and provenance must match its
+bucket/prefix and frozen source digest. Empty-host candidate bootstrap is valid
+only on canonical service `NOT_FOUND`, creates a private tagged 0% candidate,
+and writes an explicit no-prior receipt. Later cleanup/rollback accepts only the
+exact 12-hex controller revision plus paired immutable prior image in the
+receipt chain, and performs fresh service/revision/image/evidence validation
+before traffic mutation. First-release rollback is unavailable with zero calls.
+
 - [ ] **Step 4: Run release/acceptance tests and verify green**
 
 Run the exact Step 2 command followed by `cd production-v1 && npm run check`.
@@ -452,7 +461,9 @@ without printing values. Re-running produces only `unchanged` results.
 
 - [ ] **Step 3: Build, migrate, and deploy the zero-traffic candidate**
 
-Run the release controller from the clean 40-hex commit. Require successful
+Run the release controller from the clean 40-hex commit using the complete
+manifest-refresh sequence: build, migration, inventory, acceptance, collect,
+evidence, candidate, readiness, workload, mobile, then promote. Require successful
 dependency security receipt, provenance, image labels, immutable digest,
 digest-pinned migration job, legacy inventory, dependency acceptance, real LLM,
 ASR, and TTS smoke receipts, and candidate traffic `0`.

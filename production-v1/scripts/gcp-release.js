@@ -40,7 +40,8 @@ const DIGEST = /^[0-9a-f]{64}$/;
 const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/;
 const NUMERIC_VERSION = /^[1-9]\d*$/;
 const PROJECT_NUMBER = /^\d{6,20}$/;
-const REVISION = /^hkbuddy-v1-api-[a-z0-9](?:[a-z0-9-]{0,44}[a-z0-9])?$/;
+const REVISION = /^hkbuddy-v1-api-[0-9a-f]{12}$/;
+const BUILD_SOURCE_PREFIX = 'source/';
 const BUILD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ACCEPTANCE_RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -557,7 +558,8 @@ function candidateServiceSpec({
         }),
       }),
       traffic: Object.freeze([
-        Object.freeze({ revisionName: previousRevision, percent: 100 }),
+        ...(previousRevision === null
+          ? [] : [Object.freeze({ revisionName: previousRevision, percent: 100 })]),
         Object.freeze({ revisionName: candidateRevision, tag: candidateTag, percent: 0 }),
       ]),
     }),
@@ -615,11 +617,9 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     && input.evidence === null;
   const unresolvedAcceptanceOutputs = ['build', 'migration', 'inventory', 'acceptance', 'rollback'].includes(phase)
     && input.acceptanceOutputs === null;
-  const unresolvedPrevious = phase !== null && phase !== 'rollback'
-    && input.previousRevision === null;
   if (!exactKeys(input, [
     'acceptanceOutputs', 'acceptanceRunId', 'databaseSecretVersions', 'evidence', 'imageDigest', 'legacyInventory', 'previousRevision',
-    'projectNumber', 'releaseSha', 'sourceArchive', 'sourceArchiveSha256', 'task8Evidence',
+    'previousImageDigest', 'projectNumber', 'releaseSha', 'sourceArchive', 'sourceArchiveSha256', 'task8Evidence',
   ])
     || !RELEASE_SHA.test(String(input.releaseSha ?? ''))
     || !ACCEPTANCE_RUN_ID.test(String(input.acceptanceRunId ?? ''))
@@ -633,7 +633,9 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       !exactKeys(input.databaseSecretVersions, ['app', 'migrator', 'session'])
       || Object.values(input.databaseSecretVersions).some((value) => !NUMERIC_VERSION.test(String(value ?? '')))
     ))
-    || (!unresolvedPrevious && !REVISION.test(String(input.previousRevision ?? '')))
+    || !((input.previousRevision === null && input.previousImageDigest === null)
+      || (REVISION.test(String(input.previousRevision ?? ''))
+        && IMAGE_DIGEST.test(String(input.previousImageDigest ?? ''))))
     || (!unresolvedEvidence && (input.evidence === null || input.evidence === undefined))) {
     throw releaseContractError();
   }
@@ -655,7 +657,8 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
   const databaseSecretVersions = unresolvedDatabase
     ? Object.freeze({ app: '1', migrator: '1', session: '1' })
     : input.databaseSecretVersions;
-  const previousRevision = unresolvedPrevious ? `${SERVICE}-unresolved` : input.previousRevision;
+  const previousRevision = input.previousRevision;
+  const previousImageDigest = input.previousImageDigest;
   const releaseSha = input.releaseSha;
   const task8Evidence = assertTask8Evidence(input.task8Evidence);
   const acceptanceOutputs = unresolvedAcceptanceOutputs
@@ -685,6 +688,8 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
   });
   const effectiveImageDigest = input.imageDigest ?? `sha256:${'0'.repeat(64)}`;
   const image = `asia-east2-docker.pkg.dev/${PROJECT}/${REPOSITORY}/${SERVICE}@${effectiveImageDigest}`;
+  const previousImage = previousImageDigest === null ? null
+    : `asia-east2-docker.pkg.dev/${PROJECT}/${REPOSITORY}/${SERVICE}@${previousImageDigest}`;
   const environment = environmentFor({ releaseSha, serviceOrigin, candidateOrigin, evidence });
   const bindings = secretBindings(databaseSecretVersions, evidence);
   const acceptanceRunId = input.acceptanceRunId;
@@ -897,6 +902,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       'builds', 'submit', `--config=${CLOUD_BUILD_CONFIG}`,
       `--project=${PROJECT}`, `--region=${REGION}`,
       `--service-account=${BUILD_SERVICE_ACCOUNT}`,
+      `--gcs-source-staging-dir=gs://${GCP_IDENTITY.buildSourceBucket}/source`,
       `--substitutions=_RELEASE_SHA=${releaseSha},_SOURCE_SHA256=${input.sourceArchiveSha256}`,
       '--format=json', input.sourceArchive,
     ]),
@@ -987,6 +993,16 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       'run', 'services', 'describe', SERVICE, `--project=${PROJECT}`, `--region=${REGION}`,
       '--format=json',
     ]),
+    ...(previousRevision === null ? [] : [
+      operation('candidate', 'candidate-prior-revision-readback', [
+        'run', 'revisions', 'describe', previousRevision,
+        `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+      ]),
+      operation('candidate', 'candidate-prior-artifact-readback', [
+        'artifacts', 'docker', 'images', 'describe', previousImage,
+        `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
+      ]),
+    ]),
     operation('candidate', 'candidate-spec-dry-run', [
       'run', 'services', 'replace', candidateServiceSpecPath,
       `--project=${PROJECT}`, `--region=${REGION}`, '--dry-run', '--format=json',
@@ -1011,6 +1027,27 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       'artifacts', 'docker', 'images', 'describe', image,
       `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
     ]),
+    ...(previousRevision === null ? [] : [
+    operation('candidate-cleanup', 'candidate-cleanup-service-precheck', [
+      'run', 'services', 'describe', SERVICE, `--project=${PROJECT}`, `--region=${REGION}`,
+      '--format=json',
+    ]),
+    operation('candidate-cleanup', 'candidate-cleanup-candidate-revision-readback', [
+      'run', 'revisions', 'describe', candidateRevision,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ]),
+    operation('candidate-cleanup', 'candidate-cleanup-candidate-artifact-readback', [
+      'artifacts', 'docker', 'images', 'describe', image,
+      `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
+    ]),
+    operation('candidate-cleanup', 'candidate-cleanup-prior-revision-readback', [
+      'run', 'revisions', 'describe', previousRevision,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ]),
+    operation('candidate-cleanup', 'candidate-cleanup-prior-artifact-readback', [
+      'artifacts', 'docker', 'images', 'describe', previousImage,
+      `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
+    ]),
     operation('candidate-cleanup', 'candidate-cleanup-traffic', [
       'run', 'services', 'update-traffic', SERVICE,
       `--remove-tags=${candidateTag}`, `--to-revisions=${previousRevision}=100`,
@@ -1023,6 +1060,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     operation('candidate-cleanup', 'candidate-cleanup-service-readback', [
       'run', 'services', 'describe', SERVICE, `--project=${PROJECT}`, `--region=${REGION}`,
       '--format=json',
+    ]),
     ]),
     operation('promote', 'promote-authority-readback', [
       'auth', 'list', '--filter=status:ACTIVE', '--format=json',
@@ -1060,6 +1098,27 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       'run', 'services', 'describe', SERVICE, `--project=${PROJECT}`, `--region=${REGION}`,
       '--format=json',
     ]),
+    ...(previousRevision === null ? [] : [
+    operation('rollback', 'rollback-service-precheck', [
+      'run', 'services', 'describe', SERVICE, `--project=${PROJECT}`, `--region=${REGION}`,
+      '--format=json',
+    ]),
+    operation('rollback', 'rollback-candidate-revision-readback', [
+      'run', 'revisions', 'describe', candidateRevision,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ]),
+    operation('rollback', 'rollback-candidate-artifact-readback', [
+      'artifacts', 'docker', 'images', 'describe', image,
+      `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
+    ]),
+    operation('rollback', 'rollback-prior-revision-readback', [
+      'run', 'revisions', 'describe', previousRevision,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ]),
+    operation('rollback', 'rollback-prior-artifact-readback', [
+      'artifacts', 'docker', 'images', 'describe', previousImage,
+      `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
+    ]),
     operation('rollback', 'rollback-traffic', [
       'run', 'services', 'update-traffic', SERVICE,
       `--remove-tags=${candidateTag}`, `--to-revisions=${previousRevision}=100`,
@@ -1068,6 +1127,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     operation('rollback', 'rollback-readback', [
       'run', 'services', 'describe', SERVICE, `--project=${PROJECT}`, `--region=${REGION}`,
       '--format=json',
+    ]),
     ]),
   );
 
@@ -1107,6 +1167,8 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     sourceArchiveSha256: input.sourceArchiveSha256,
     imageDigest: input.imageDigest,
     previousRevision,
+    previousImageDigest,
+    previousImage,
     candidateRevision,
     candidateTag,
     serviceOrigin,
@@ -1137,8 +1199,9 @@ export function validateBuildReceipt(value, { releaseSha, sourceArchiveSha256 } 
   const image = value?.results?.images;
   const source = value?.sourceProvenance?.resolvedStorageSource;
   const sourceUri = exactKeys(source, ['bucket', 'generation', 'object'])
-    && typeof source.bucket === 'string' && source.bucket.length > 0
-    && typeof source.object === 'string' && source.object.length > 0
+    && source.bucket === GCP_IDENTITY.buildSourceBucket
+    && typeof source.object === 'string' && source.object.startsWith(BUILD_SOURCE_PREFIX)
+    && source.object.length > BUILD_SOURCE_PREFIX.length
     && NUMERIC_VERSION.test(String(source.generation ?? ''))
     ? `gs://${source.bucket}/${source.object}#${source.generation}`
     : null;
@@ -1318,7 +1381,8 @@ function validateCandidateServiceSpecDryRun(value, plan) {
   if (value?.apiVersion !== 'serving.knative.dev/v1' || value?.kind !== 'Service'
     || !template || normalizedService?.service !== SERVICE
     || !exact(normalizedService.traffic, [
-      { revision: plan.previousRevision, tag: null, percent: 100 },
+      ...(plan.previousRevision === null
+        ? [] : [{ revision: plan.previousRevision, tag: null, percent: 100 }]),
       { revision: plan.candidateRevision, tag: plan.candidateTag, percent: 0 },
     ])
     || !exact(
@@ -1430,6 +1494,30 @@ function validateCandidateArtifact(value, expectedImage) {
     throw new Error('Artifact Registry image readback is invalid');
   }
   return true;
+}
+
+function validatePriorRevisionReadback(value, plan) {
+  const revision = value?.revision ?? value?.metadata?.name;
+  const image = value?.image ?? value?.spec?.containers?.[0]?.image;
+  if (plan.previousRevision === null || plan.previousImage === null
+    || !REVISION.test(String(revision ?? ''))
+    || revision !== plan.previousRevision || image !== plan.previousImage) {
+    throw new Error('Cloud Run prior revision readback is invalid');
+  }
+  return true;
+}
+
+function validateRecoveryPrecheck(value, plan, phase) {
+  if (phase === 'candidate-cleanup') {
+    const normalized = normalizeCandidateService(value);
+    if (!normalized || normalized.service !== SERVICE || !exact(normalized.traffic, [
+      { revision: plan.previousRevision, tag: null, percent: 100 },
+      { revision: plan.candidateRevision, tag: plan.candidateTag, percent: 0 },
+    ])) throw new Error('Cloud Run candidate cleanup precheck is invalid');
+    return true;
+  }
+  if (phase === 'rollback') return validatePromotedService(value, plan);
+  throw new Error('Cloud Run recovery precheck is invalid');
 }
 
 export function validateCandidateControlPlaneReadbacks(value, plan, { publicInvoker = false } = {}) {
@@ -2387,7 +2475,8 @@ function validateReceiptOutputs(phase, outputs, plan) {
       || !exact(outputs.ociLabels, expectedLabels)
       || !exactKeys(outputs.sourceProvenance, ['sha256', 'uri'])
       || outputs.sourceProvenance.sha256 !== plan.sourceArchiveSha256
-      || !/^gs:\/\/[^/#]+\/[^#]+#[1-9]\d*$/.test(String(outputs.sourceProvenance.uri ?? ''))) {
+      || !new RegExp(`^gs://${GCP_IDENTITY.buildSourceBucket}/${BUILD_SOURCE_PREFIX}[^#]+#[1-9]\\d*$`)
+        .test(String(outputs.sourceProvenance.uri ?? ''))) {
       throw new Error('Release build receipt outputs are invalid');
     }
   } else if (phase === 'migration') {
@@ -2427,13 +2516,18 @@ function validateReceiptOutputs(phase, outputs, plan) {
   } else if (phase === 'candidate') {
     if (!exactKeys(outputs, [
       'access', 'candidateContractSha256', 'imageDigest', 'origin', 'publicInvoker',
-      'revision', 'tag', 'trafficPercent',
+      'priorRelease', 'revision', 'tag', 'trafficPercent',
     ])
       || !exact(outputs.access, plan.candidateAccess)
       || outputs.candidateContractSha256 !== canonicalSha256(plan.expectedCandidate)
       || outputs.imageDigest !== plan.imageDigest || outputs.origin !== plan.candidateOrigin
       || outputs.revision !== plan.candidateRevision || outputs.tag !== plan.candidateTag
-      || outputs.trafficPercent !== 0 || outputs.publicInvoker !== false) {
+      || outputs.trafficPercent !== 0 || outputs.publicInvoker !== false
+      || !exact(outputs.priorRelease, plan.previousRevision === null ? null : {
+        image: plan.previousImage,
+        imageDigest: plan.previousImageDigest,
+        revision: plan.previousRevision,
+      })) {
       throw new Error('Release candidate receipt outputs are invalid');
     }
   } else if (['readiness', 'workload', 'mobile'].includes(phase)) {
@@ -2573,6 +2667,11 @@ function releasePhaseReceiptOutputs(phase, plan, context) {
     imageDigest: plan.imageDigest,
     origin: plan.candidateOrigin,
     publicInvoker: false,
+    priorRelease: plan.previousRevision === null ? null : Object.freeze({
+      image: plan.previousImage,
+      imageDigest: plan.previousImageDigest,
+      revision: plan.previousRevision,
+    }),
     revision: plan.candidateRevision,
     tag: plan.candidateTag,
     trafficPercent: 0,
@@ -2633,7 +2732,7 @@ function operationMayMutate(id) {
     || id.endsWith('-deploy') || id.endsWith('-execute')
     || id.startsWith('evidence-collect-copy:') || id.startsWith('evidence-output-delete:')
     || id === 'candidate-deploy'
-    || id === 'promote-public-service' || id.startsWith('candidate-cleanup-')
+    || id === 'promote-public-service' || id === 'candidate-cleanup-traffic'
     || id === 'promote-traffic' || id === 'rollback-traffic';
 }
 
@@ -2935,6 +3034,13 @@ export async function runGcpRelease({
     });
   }
   const selected = plan.operations.filter(({ phase }) => phase === selection.phase);
+  if (['candidate-cleanup', 'rollback'].includes(selection.phase)
+    && (plan.previousRevision === null || plan.previousImageDigest === null)) {
+    return publish(writeOutput, 1, {
+      status: 'failed', code: 'ROLLBACK_UNAVAILABLE_NO_PRIOR_RELEASE', mutationPerformed: false,
+      releaseSha: plan.releaseSha, phase: selection.phase, completed: [],
+    });
+  }
   if (!selection.confirmed) {
     return publish(writeOutput, 0, {
       status: 'dry-run', code: 'GCP_RELEASE_DRY_RUN', mutationPerformed: false,
@@ -2964,6 +3070,11 @@ export async function runGcpRelease({
       if (typeof loadReceipts !== 'function') throw new Error('receipt loader unavailable');
       priorReceipts = await loadReceipts(plan, { through: 'mobile' });
       validateReleaseReceiptChain(priorReceipts, plan, { through: 'mobile' });
+    } else if (['candidate-cleanup', 'rollback'].includes(selection.phase)) {
+      if (typeof loadReceipts !== 'function') throw new Error('receipt loader unavailable');
+      const through = selection.phase === 'rollback' ? 'mobile' : 'candidate';
+      priorReceipts = await loadReceipts(plan, { through });
+      validateReleaseReceiptChain(priorReceipts, plan, { through });
     } else if (receiptPhaseIndex > 0) {
       if (typeof loadReceipts !== 'function') throw new Error('receipt loader unavailable');
       const through = RECEIPT_PHASES[receiptPhaseIndex - 1];
@@ -2997,7 +3108,7 @@ export async function runGcpRelease({
     }
   }
   try {
-    const task8Phases = selection.phase === 'promote'
+    const task8Phases = ['promote', 'rollback'].includes(selection.phase)
       ? ['readiness', 'workload', 'mobile']
       : (['readiness', 'mobile'].includes(selection.phase) ? [selection.phase] : []);
     for (const phase of task8Phases) {
@@ -3039,7 +3150,9 @@ export async function runGcpRelease({
   const collectedEvidence = {};
   const collectedObjectReceipts = new Map();
   const candidateReadbacks = {};
+  const candidatePriorReadbacks = {};
   const promotionReadbacks = {};
+  const recoveryReadbacks = {};
   let buildReceipt = null;
   let migrationExecutionReceipt = null;
   let mutationAttempted = false;
@@ -3103,12 +3216,22 @@ export async function runGcpRelease({
     } else if (selection.phase === 'evidence') {
       if (typeof verifyEvidence !== 'function') throw new Error('Evidence verifier is unavailable');
       await verifyEvidence(plan.evidence, { releaseSha: plan.releaseSha });
+    } else if (['candidate-cleanup', 'rollback'].includes(selection.phase)) {
+      if (typeof verifyEvidence !== 'function') throw new Error('Evidence verifier is unavailable');
+      await verifyEvidence(plan.evidence, { releaseSha: plan.releaseSha });
     }
     for (const member of selected) {
       if (operationMayMutate(member.id)) mutationAttempted = true;
       if (member.id === 'promote-public-service') promotionIamMutationAttempted = true;
       if (member.id === 'promote-traffic') promotionTrafficMutationAttempted = true;
-      const receipt = await executor(member.argv);
+      let receipt;
+      try {
+        receipt = await executor(member.argv);
+      } catch (error) {
+        if (member.id !== 'candidate-stable-readback' || error?.code !== 'NOT_FOUND'
+          || plan.previousRevision !== null || plan.previousImageDigest !== null) throw error;
+        receipt = null;
+      }
       if (member.id === 'build-submit') {
         buildReceipt = validateBuildReceipt(receipt, {
           releaseSha: plan.releaseSha,
@@ -3167,13 +3290,28 @@ export async function runGcpRelease({
         );
         validateServiceIamReceipt(receipt, { publicInvoker: true, requireEtag: true });
       } else if (member.id === 'candidate-stable-readback') {
-        validateStableService(receipt, plan);
+        if (receipt === null) {
+          if (plan.previousRevision !== null || plan.previousImageDigest !== null) {
+            throw new Error('Cloud Run bootstrap state is invalid');
+          }
+        } else {
+          if (plan.previousRevision === null || plan.previousImageDigest === null) {
+            throw new Error('Cloud Run bootstrap state is ambiguous');
+          }
+          validateStableService(receipt, plan);
+        }
         if (typeof writeCandidateSpec !== 'function'
           || await writeCandidateSpec(plan) !== true) {
           throw new Error('Candidate Service YAML is unavailable');
         }
       } else if (member.id === 'candidate-spec-dry-run') {
         validateCandidateServiceSpecDryRun(receipt, plan);
+      } else if (member.id === 'candidate-prior-revision-readback') {
+        validatePriorRevisionReadback(receipt, plan);
+        candidatePriorReadbacks.revision = receipt;
+      } else if (member.id === 'candidate-prior-artifact-readback') {
+        validateCandidateArtifact(receipt, plan.previousImage);
+        candidatePriorReadbacks.artifact = receipt;
       } else if (member.id === 'candidate-private-iam-readback') {
         candidateReadbacks.iam = receipt;
         validateServiceIamReceipt(receipt, { publicInvoker: false });
@@ -3186,12 +3324,50 @@ export async function runGcpRelease({
         validateCandidateControlPlaneReadbacks(candidateReadbacks, plan, { publicInvoker: false });
       } else if (member.id === 'candidate-cleanup-iam-readback') {
         validateServiceIamReceipt(receipt, { publicInvoker: false });
+      } else if (member.id === 'candidate-cleanup-service-precheck') {
+        validateRecoveryPrecheck(receipt, plan, 'candidate-cleanup');
+        recoveryReadbacks.service = receipt;
+      } else if (member.id === 'candidate-cleanup-candidate-revision-readback') {
+        validateCandidateControlPlaneReadbacks({
+          service: recoveryReadbacks.service,
+          revision: receipt,
+          iam: { bindings: [] },
+          artifact: { image: plan.image },
+        }, plan);
+        recoveryReadbacks.candidateRevision = receipt;
+      } else if (member.id === 'candidate-cleanup-candidate-artifact-readback') {
+        validateCandidateArtifact(receipt, plan.image);
+        recoveryReadbacks.candidateArtifact = receipt;
+      } else if (member.id === 'candidate-cleanup-prior-revision-readback') {
+        validatePriorRevisionReadback(receipt, plan);
+        recoveryReadbacks.priorRevision = receipt;
+      } else if (member.id === 'candidate-cleanup-prior-artifact-readback') {
+        validateCandidateArtifact(receipt, plan.previousImage);
+        recoveryReadbacks.priorArtifact = receipt;
       } else if (member.id === 'candidate-cleanup-traffic') {
         validateTrafficReceipt(receipt, { revision: plan.previousRevision });
       } else if (member.id === 'candidate-cleanup-service-readback') {
         validateCandidateCleanupService(receipt, plan);
       } else if (member.id === 'promote-traffic' || member.id === 'promote-readback') {
         validatePromotedService(receipt, plan);
+      } else if (member.id === 'rollback-service-precheck') {
+        validateRecoveryPrecheck(receipt, plan, 'rollback');
+        recoveryReadbacks.service = receipt;
+      } else if (member.id === 'rollback-candidate-revision-readback') {
+        if (!exact(normalizeCandidateRevision(receipt, plan.expectedCandidate),
+          candidateRevisionContract(plan.expectedCandidate))) {
+          throw new Error('Cloud Run candidate revision readback is invalid');
+        }
+        recoveryReadbacks.candidateRevision = receipt;
+      } else if (member.id === 'rollback-candidate-artifact-readback') {
+        validateCandidateArtifact(receipt, plan.image);
+        recoveryReadbacks.candidateArtifact = receipt;
+      } else if (member.id === 'rollback-prior-revision-readback') {
+        validatePriorRevisionReadback(receipt, plan);
+        recoveryReadbacks.priorRevision = receipt;
+      } else if (member.id === 'rollback-prior-artifact-readback') {
+        validateCandidateArtifact(receipt, plan.previousImage);
+        recoveryReadbacks.priorArtifact = receipt;
       } else if (member.id === 'rollback-traffic' || member.id === 'rollback-readback') {
         validateCandidateCleanupService(receipt, plan);
       } else if (selection.phase === 'acceptance' && member.id.endsWith('-readback')) {

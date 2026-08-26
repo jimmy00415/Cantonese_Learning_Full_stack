@@ -199,7 +199,11 @@ its local absolute JSON path, semantic artifact SHA-256, exact object-byte
 SHA-256, fixed Secret ID, and expected numeric Secret version. The release
 runner verifies the file bytes, embedded commit/artifact binding, size, and
 basic secret-safety before its first Secret Manager mutation. It must not
-contain credentials. The first `build` invocation alone accepts
+contain credentials. `previousRevision` and `previousImageDigest` are one
+fail-closed pair: both are `null` only for an evidenced empty-host first
+release; every later release supplies the exact controller revision
+`hkbuddy-v1-api-<12-lowercase-hex>` and its immutable `sha256:` image digest.
+The first `build` invocation alone accepts
 `imageDigest: null`; its verified receipt returns the digest that must replace
 that null before any later phase is accepted. One phase is selected at a time:
 
@@ -208,9 +212,12 @@ node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=bu
 node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=build --confirm-release=40_HEX_SHA
 ```
 
-The guarded order is `build`, `migration`, `inventory`, `acceptance`, `collect`,
-`evidence`, `candidate`, then `promote`; `rollback` is the separately confirmed
-recovery phase. Build
+The complete guarded order is `build`, `migration`, `inventory`, `acceptance`,
+`collect`, `evidence`, `candidate`, `readiness`, `workload`, `mobile`, then
+`promote`. `candidate-cleanup` is the pre-promotion recovery phase and
+`rollback` is the separately confirmed post-promotion recovery phase. Every
+phase is first inspected without confirmation and then repeated with the exact
+`--confirm-release=40_HEX_SHA`; no phase may be skipped. Build
 completion requires the custom build identity; a fresh production-only install;
 an exact `DEPENDENCY_SECURITY_EXCEPTION_REVIEWED` gate receipt before the image
 step; verified provenance; successful image/corpus and OCI-label checks; one
@@ -244,8 +251,49 @@ be changed only after the active account reads back as the reviewed owner
 The manifest is deliberately refreshed between boundaries: `build` supplies
 the immutable image digest; successful Jobs supply numeric GCS generations;
 `collect` supplies the four semantic/object digest pairs; and Secret Manager
-supplies numeric versions. A value from stdout is never accepted on its own:
+supplies numeric versions. Before `readiness`, `workload`, and `mobile`, refresh
+the matching `task8Evidence` absolute path and exact artifact/object hashes.
+The controlled `workload` phase alone may begin with its two hashes as 64 zeroes;
+after it creates and validates the create-only artifact, refresh those hashes
+before `mobile` or `promote`. A value from stdout is never accepted on its own:
 the next phase requires the corresponding exact control-plane or file readback.
+
+The operator command sequence, after each required manifest refresh, is:
+
+```text
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=build
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=build --confirm-release=40_HEX_SHA
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=migration
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=migration --confirm-release=40_HEX_SHA
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=inventory
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=inventory --confirm-release=40_HEX_SHA
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=acceptance
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=acceptance --confirm-release=40_HEX_SHA
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=collect
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=collect --confirm-release=40_HEX_SHA
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=evidence
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=evidence --confirm-release=40_HEX_SHA
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=candidate
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=candidate --confirm-release=40_HEX_SHA
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=readiness
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=readiness --confirm-release=40_HEX_SHA
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=workload
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=workload --confirm-release=40_HEX_SHA
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=mobile
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=mobile --confirm-release=40_HEX_SHA
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=promote
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=promote --confirm-release=40_HEX_SHA
+```
+
+Use only the recovery phase appropriate to the observed state, again previewing
+before exact confirmation:
+
+```text
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=candidate-cleanup
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=candidate-cleanup --confirm-release=40_HEX_SHA
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=rollback
+node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=rollback --confirm-release=40_HEX_SHA
+```
 
 Every built image contains `/app/release-manifest.json` with exactly the schema
 version, frozen release SHA, source-archive SHA-256, and
@@ -420,9 +468,14 @@ The stable service origin is exactly
 `<40-lowercase-hex>` produces revision `hkbuddy-v1-api-<first-12-hex>`, tag
 `candidate-<first-12-hex>`, and private tagged origin
 `https://candidate-<first-12-hex>---hkbuddy-v1-api-582852715831.asia-east2.run.app`.
-Candidate deployment preserves the previous evidenced revision at 100% stable
-traffic, assigns the candidate 0% stable traffic, and does not add a public
-invoker binding.
+On an existing service, candidate deployment preserves the previous evidenced
+revision at 100% stable traffic, assigns the candidate 0% stable traffic, and
+does not add a public invoker binding. On the first release, bootstrap is
+allowed only when the canonical service describe returns `NOT_FOUND` and both
+prior fields are null; the service is created with only the private candidate
+tag at 0% and no stable traffic. A permission error, ambiguous error text, an
+existing service with null prior fields, or a missing service with non-null
+prior fields fails closed.
 
 The manifest-driven release phases are dry-run unless the exact frozen SHA is
 confirmed:
@@ -437,8 +490,14 @@ node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=ro
 Promotion freshly validates the candidate service/revision/IAM/image, immutable
 readiness/workload/mobile artifacts, and 200 production traces before it can add
 the reviewed public invoker and route the candidate to 100%. Rollback is a
-separate recovery phase that routes the exact `previousRevision` from the
-manifest back to 100%, removes the candidate tag, and verifies readback. Neither
+separate recovery phase that first loads the complete mobile receipt chain,
+revalidates the candidate receipt's exact prior revision/image binding, rereads
+service, both revisions, both immutable images, and all evidence, then routes
+the exact `previousRevision` from the manifest back to 100%, removes the
+candidate tag, and verifies readback. Candidate cleanup applies the same gate
+through the candidate receipt before removing an unpromoted tag. For a first
+release, both recovery phases return `ROLLBACK_UNAVAILABLE_NO_PRIOR_RELEASE`
+without a control-plane call. Neither
 phase deletes the candidate, database, media, evidence, protected baseline, or
 any unrelated service. A failed candidate remains unpromoted; if candidate
 deployment partially changed service state, the controller restores the exact

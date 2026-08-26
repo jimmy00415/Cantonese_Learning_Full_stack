@@ -155,12 +155,27 @@ The identity migration is a contract change, not a textual replacement:
 ## Deployment and acceptance boundary
 
 Provision APIs and the resource island in dependency order. Build from the
-frozen clean commit, run the digest-pinned database migration, and deploy the
-candidate with zero stable traffic. The public invoker binding and stable
-traffic remain promotion actions, not provisioning shortcuts.
+frozen clean commit through exact staging directory
+`gs://hkbuddy-v1-582852715831-build-source/source`; accept provenance only from
+that bucket/prefix with the frozen source digest. Run the digest-pinned database
+migration and deploy the candidate with zero stable traffic. Existing services
+require a receipt-bound exact prior controller revision and immutable image
+digest. An empty host may bootstrap only after canonical service `NOT_FOUND`,
+with an explicit no-prior candidate receipt, private candidate tag, and no
+stable traffic. The public invoker binding and stable traffic remain promotion
+actions, not provisioning shortcuts.
 
 Promotion requires the existing production acceptance contract: real Vertex
 LLM, Cantonese/English/Mandarin ASR and TTS, governed HKBU answers and citations,
 200-turn workload, latency SLOs, mobile 390x844 interaction, privacy/security
 checks, immutable evidence, and verified rollback. Failure leaves the candidate
 unpromoted and preserves every pre-existing resource.
+
+The mandatory receipt order is build, migration, inventory, acceptance,
+collection, evidence publication, candidate, readiness, controlled workload,
+mobile acceptance, then promotion, with the release manifest refreshed at each
+producer/consumer boundary. Candidate cleanup loads through the candidate
+receipt; later rollback loads the complete mobile chain. Both revalidate local
+evidence and fresh service, candidate/prior revision, and candidate/prior image
+readbacks before tag or traffic mutation. First-release rollback is unavailable
+and performs no control-plane call because no genuine prior V1 exists.

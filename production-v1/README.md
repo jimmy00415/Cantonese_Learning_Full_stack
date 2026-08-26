@@ -301,19 +301,31 @@ The build rejects a noncanonical SHA and publishes only through
 Run `npm.cmd run migrate` as a separate one-shot job; it is never part of
 `CMD` or application startup.
 
-Deploy only the digest-pinned revision `hkbuddy-v1-api-<12-lowercase-hex>` under
-the SHA-bound `candidate-<12-lowercase-hex>` tag. Candidate deployment keeps the
-existing stable revision at 100%, gives the candidate 0% stable traffic, and
-keeps public invocation unchanged. Promote only after privacy, real provider,
-iOS voice, dependency, retention, readiness, mobile, and latency gates all pass
-for the same frozen commit and the controller freshly revalidates their
+Follow the infrastructure operator guide's manifest refresh points and complete
+`build -> migration -> inventory -> acceptance -> collect -> evidence ->
+candidate -> readiness -> workload -> mobile -> promote`; a local pass or a
+partial receipt chain is not deployment readiness. Deploy only the digest-pinned
+revision `hkbuddy-v1-api-<12-lowercase-hex>` under the SHA-bound
+`candidate-<12-lowercase-hex>` tag. Existing services require an exact paired
+`previousRevision` and `previousImageDigest`. Empty-host bootstrap requires both
+fields to be null and the canonical service describe to return `NOT_FOUND`; it
+creates only the private candidate tag at 0% with no stable traffic. Permission
+errors and ambiguous absence fail closed. Promote only after privacy, real
+provider, iOS voice, dependency, retention, readiness, mobile, and latency gates
+all pass for the same frozen commit and the controller freshly revalidates their
 immutable receipts. Promotion adds the reviewed public invoker binding and
 routes `hkbuddy-v1-api` to the accepted candidate at 100%; it also removes the
 candidate tag.
 
-Rollback is separately confirmed and routes `hkbuddy-v1-api` back to the exact
-previous evidenced V1 revision at 100%, removes the candidate tag, and verifies
-the stable readback. It does not delete data or resources and never edits,
+Rollback is separately confirmed. Before traffic mutation it validates the
+complete mobile receipt chain, the candidate receipt's prior revision/image
+binding, all local evidence, and fresh service, candidate/prior revision, and
+candidate/prior immutable-image readbacks. Candidate cleanup uses the same gate
+through the candidate receipt. A first release has no prior target, so both
+operations return `ROLLBACK_UNAVAILABLE_NO_PRIOR_RELEASE` without a control-plane
+call. A later rollback routes `hkbuddy-v1-api` back to the exact previous
+evidenced V1 revision at 100%, removes the candidate tag, and verifies the stable
+readback. It does not delete data or resources and never edits,
 restarts, redeploys, migrates, or repoints `hkbuddy-pilot-0630`. No legacy app,
 protected shared-project state, or unrelated service is changed by candidate,
 promotion, or rollback.
