@@ -299,7 +299,7 @@ function productionOriginAllowlist(publicOrigin, candidateOrigin, commitSha) {
   const stableUrl = new URL(stable);
   const match = STABLE_CLOUD_RUN_HOST.exec(stableUrl.hostname);
   if (!match) return null;
-  const expectedCandidate = `https://candidate-${commitSha.slice(0, 12)}---${GCP_IDENTITY.service}-${GCP_IDENTITY.projectNumber}.${GCP_IDENTITY.region}.run.app`;
+  const expectedCandidate = `https://candidate-${commitSha.slice(0, 12)}---${GCP_IDENTITY.candidateService}-${GCP_IDENTITY.projectNumber}.${GCP_IDENTITY.region}.run.app`;
   return candidate === expectedCandidate ? Object.freeze([stable, candidate]) : null;
 }
 

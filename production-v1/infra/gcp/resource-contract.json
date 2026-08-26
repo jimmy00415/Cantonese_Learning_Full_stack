@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "project": {
     "id": "motion-expert-hk-ltd-webpage",
     "displayName": "Motion Expert HK LTD Webpage",
@@ -231,7 +231,8 @@
       }
     ],
     "cloudRun": {
-      "service": "hkbuddy-v1-api",
+      "stableService": "hkbuddy-v1-api",
+      "candidateService": "hkbuddy-v1-api-candidate",
       "executionEnvironment": "gen2",
       "cpu": 2,
       "memory": "1Gi",
@@ -241,11 +242,12 @@
       "cpuThrottling": false,
       "startupCpuBoost": true,
       "timeoutSeconds": 60,
-      "firstReleaseTrafficState": "private-bootstrap-100",
-      "firstReleaseTrafficPercent": 100,
-      "laterReleaseTrafficState": "prior-stable-100/candidate-0",
-      "laterReleasePriorTrafficPercent": 100,
-      "laterReleaseCandidateTrafficPercent": 0,
+      "candidateTrafficState": "candidate-service-private-100",
+      "candidateTrafficPercent": 100,
+      "firstPromotionInitialStableState": "stable-absent",
+      "firstPromotionPrivateTrafficState": "accepted-stable-private-100",
+      "laterPromotionInitialStableState": "stable-prior-100",
+      "laterPromotionStagedTrafficState": "stable-prior-100/accepted-stable-0",
       "directVpc": true,
       "egress": "private-ranges-only",
       "startupProbe": {

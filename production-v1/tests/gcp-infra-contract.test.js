@@ -371,12 +371,15 @@ test('the executable contract fixes the isolated GCP topology and least-privileg
     retentionPolicy: null,
   });
   assert.deepEqual(contract.resources.cloudRun, {
-    service: GCP_IDENTITY.service, executionEnvironment: 'gen2', cpu: 2, memory: '1Gi',
+    stableService: GCP_IDENTITY.service, candidateService: GCP_IDENTITY.candidateService,
+    executionEnvironment: 'gen2', cpu: 2, memory: '1Gi',
     concurrency: 40, minInstances: 1, maxInstances: 1, cpuThrottling: false,
     startupCpuBoost: true, timeoutSeconds: 60,
-    firstReleaseTrafficState: 'private-bootstrap-100', firstReleaseTrafficPercent: 100,
-    laterReleaseTrafficState: 'prior-stable-100/candidate-0',
-    laterReleasePriorTrafficPercent: 100, laterReleaseCandidateTrafficPercent: 0,
+    candidateTrafficState: 'candidate-service-private-100', candidateTrafficPercent: 100,
+    firstPromotionInitialStableState: 'stable-absent',
+    firstPromotionPrivateTrafficState: 'accepted-stable-private-100',
+    laterPromotionInitialStableState: 'stable-prior-100',
+    laterPromotionStagedTrafficState: 'stable-prior-100/accepted-stable-0',
     directVpc: true, egress: 'private-ranges-only',
     startupProbe: { path: '/api/health/ready', port: 8080, initialDelaySeconds: 0, timeoutSeconds: 5, periodSeconds: 10, failureThreshold: 12 },
     livenessProbe: { path: '/api/health/live', port: 8080, initialDelaySeconds: 30, timeoutSeconds: 5, periodSeconds: 30, failureThreshold: 3 },
@@ -2672,9 +2675,9 @@ test('every internal RESERVED address family is canonical and participates in pr
       addressType: 'INTERNAL', status: 'RESERVED', region,
       subnetwork: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/regions/asia-east2/subnetworks/default`,
     }, 'CIDR_OVERLAP'],
-    ['PRIVATE_SERVICE_CONNECT prefixed overlap', {
-      name: 'foreign-psc', purpose: 'PRIVATE_SERVICE_CONNECT', address: '10.25.0.0',
-      prefixLength: 24, addressType: 'INTERNAL', status: 'RESERVED', region, network,
+    ['PRIVATE_SERVICE_CONNECT global single address overlap', {
+      name: 'foreign-psc', purpose: 'PRIVATE_SERVICE_CONNECT', address: '10.25.0.1',
+      addressType: 'INTERNAL', status: 'RESERVED', network,
     }, 'CIDR_OVERLAP'],
     ['unsupported internal purpose', {
       name: 'foreign-unknown', purpose: 'UNSUPPORTED_FAMILY', address: '192.168.0.1',

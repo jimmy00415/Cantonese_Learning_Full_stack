@@ -1150,7 +1150,7 @@ test('voice release evidence is artifact/config/commit bound and expires dynamic
   const baseEnvironment = {
     NODE_ENV: 'production',
     V1_PUBLIC_ORIGIN: `https://hkbuddy-v1-api-${projectNumber}.asia-east2.run.app`,
-    V1_CANDIDATE_ORIGIN: `https://candidate-${commitSha.slice(0, 12)}---hkbuddy-v1-api-${projectNumber}.asia-east2.run.app`,
+    V1_CANDIDATE_ORIGIN: `https://candidate-${commitSha.slice(0, 12)}---hkbuddy-v1-api-candidate-${projectNumber}.asia-east2.run.app`,
     V1_RUNTIME_SERVICE_ACCOUNT: 'hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com',
     V1_SESSION_SECRET: 's'.repeat(32),
     V1_TRUST_PROXY_HOPS: '1', V1_STORE_DRIVER: 'postgres', V1_DATABASE_URL: databaseUrl,

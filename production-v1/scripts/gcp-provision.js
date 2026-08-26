@@ -210,7 +210,7 @@ export function assertResourceContract(contract) {
     resources: contract.resources,
     iam: contract.iam,
   });
-  requireExact(contract.schemaVersion, 2);
+  requireExact(contract.schemaVersion, 3);
   requireExact(contract.project, {
     id: PROJECT,
     displayName: 'Motion Expert HK LTD Webpage',
@@ -299,12 +299,15 @@ export function assertResourceContract(contract) {
     { id: GCP_IDENTITY.secrets.ios, purpose: 'immutable iOS voice acceptance evidence', versionPolicy: 'numeric-only', baseProvisioningVersion: false },
   ]);
   requireExact(resources?.cloudRun, {
-    service: GCP_IDENTITY.service, executionEnvironment: 'gen2', cpu: 2, memory: '1Gi',
+    stableService: GCP_IDENTITY.service, candidateService: GCP_IDENTITY.candidateService,
+    executionEnvironment: 'gen2', cpu: 2, memory: '1Gi',
     concurrency: 40, minInstances: 1, maxInstances: 1, cpuThrottling: false,
     startupCpuBoost: true, timeoutSeconds: 60,
-    firstReleaseTrafficState: 'private-bootstrap-100', firstReleaseTrafficPercent: 100,
-    laterReleaseTrafficState: 'prior-stable-100/candidate-0',
-    laterReleasePriorTrafficPercent: 100, laterReleaseCandidateTrafficPercent: 0,
+    candidateTrafficState: 'candidate-service-private-100', candidateTrafficPercent: 100,
+    firstPromotionInitialStableState: 'stable-absent',
+    firstPromotionPrivateTrafficState: 'accepted-stable-private-100',
+    laterPromotionInitialStableState: 'stable-prior-100',
+    laterPromotionStagedTrafficState: 'stable-prior-100/accepted-stable-0',
     directVpc: true, egress: 'private-ranges-only',
     startupProbe: {
       path: '/api/health/ready', port: 8080, initialDelaySeconds: 0,
@@ -407,11 +410,9 @@ function requireObjectList(value) {
   return value;
 }
 
-function isCanonicalCloudRunServiceDescribe(argv) {
-  return exact(argv, [
-    'run', 'services', 'describe', GCP_IDENTITY.service,
-    `--project=${PROJECT}`, `--region=${GCP_IDENTITY.region}`, '--format=json',
-  ]);
+function normalizeTransportStderr(value) {
+  const normalized = String(value ?? '').replace(/\r\n|\r/g, '\n');
+  return normalized.endsWith('\n') ? normalized.slice(0, -1) : normalized;
 }
 
 function canonicalDescribeAbsence(argv, stderr) {
@@ -469,17 +470,22 @@ function classifyTransportError(error, argv = null) {
   if (['NOT_FOUND', 'FORBIDDEN', 'ALREADY_EXISTS'].includes(error?.code)) return error.code;
   const status = Number(error?.response?.status ?? error?.status ?? error?.statusCode);
   if (status === 403) return 'FORBIDDEN';
-  if (status === 404 && canonicalDescribeAbsence(argv, String(error?.stderr ?? error?.message ?? '').trim())) {
+  const canonicalStderr = normalizeTransportStderr(error?.stderr ?? error?.message ?? '');
+  if (status === 404 && canonicalDescribeAbsence(argv, canonicalStderr)) {
     return 'NOT_FOUND';
   }
   if (status === 409) return 'ALREADY_EXISTS';
   const stderr = String(error?.stderr ?? error?.message ?? '');
   if (/PERMISSION_DENIED|permission denied|does not have permission|\b403\b|forbidden/i.test(stderr)) return 'FORBIDDEN';
-  if (isCanonicalCloudRunServiceDescribe(argv)
-    && stderr.trim() === `ERROR: (gcloud.run.services.describe) Service [${GCP_IDENTITY.service}] could not be found.`) {
+  const describedService = [GCP_IDENTITY.service, GCP_IDENTITY.candidateService].find((service) => exact(argv, [
+    'run', 'services', 'describe', service,
+    `--project=${PROJECT}`, `--region=${GCP_IDENTITY.region}`, '--format=json',
+  ]));
+  if (describedService
+    && canonicalStderr === `ERROR: (gcloud.run.services.describe) Service [${describedService}] could not be found.`) {
     return 'CLOUD_RUN_SERVICE_NOT_FOUND';
   }
-  if (canonicalDescribeAbsence(argv, stderr.trim())) return 'NOT_FOUND';
+  if (canonicalDescribeAbsence(argv, canonicalStderr)) return 'NOT_FOUND';
   if (/ALREADY_EXISTS|already exists|\b409\b/i.test(stderr)) return 'ALREADY_EXISTS';
   return 'TRANSPORT_AMBIGUOUS';
 }
@@ -995,12 +1001,14 @@ const COMPUTE_NAME = /^[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?$/;
 const COMPUTE_NETWORK_PREFIX = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/`;
 const COMPUTE_REGION = new RegExp(`^https://www\\.googleapis\\.com/compute/v1/projects/${PROJECT}/regions/[a-z]+(?:-[a-z]+)+[1-9]\\d*$`);
 const COMPUTE_DEFAULT_GATEWAY = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/gateways/default-internet-gateway`;
-const INTERNAL_RESERVED_SINGLE_ADDRESS_PURPOSES = new Set([
-  'DNS_RESOLVER', 'GCE_ENDPOINT', 'PRIVATE_SERVICE_CONNECT', 'SHARED_LOADBALANCER_VIP',
+const INTERNAL_REGIONAL_SUBNETWORK_SINGLES = new Set([
+  'DNS_RESOLVER', 'GCE_ENDPOINT', 'SHARED_LOADBALANCER_VIP',
 ]);
-const INTERNAL_RESERVED_RANGE_PURPOSES = new Set([
-  'CROSS_SITE_NETWORK', 'IPSEC_INTERCONNECT', 'NAT_AUTO', 'PRIVATE_NAT', 'VPC_PEERING',
-]);
+const INTERNAL_REGIONAL_NETWORK_RANGES = new Set(['IPSEC_INTERCONNECT']);
+const INTERNAL_GLOBAL_NETWORK_SINGLES = new Set(['PRIVATE_SERVICE_CONNECT']);
+const INTERNAL_REGIONAL_SELECTOR_FREE_RANGES = new Set(['SERVERLESS']);
+const INTERNAL_GLOBAL_NETWORK_RANGES = new Set(['VPC_PEERING']);
+const INTERNAL_ADDRESS_STATUSES = new Set(['RESERVED', 'IN_USE']);
 
 function canonicalIpv4(value) {
   const parts = String(value).split('.');
@@ -1018,38 +1026,40 @@ function canonicalCidr(value) {
   return bounds !== null && bounds[0] === ipv4Number(parts[0]);
 }
 
-function internalReservedCidr(item, networkLinks) {
-  if (item.addressType !== 'INTERNAL' || item.status !== 'RESERVED') return null;
-  if (!INTERNAL_RESERVED_SINGLE_ADDRESS_PURPOSES.has(item.purpose)
-    && !INTERNAL_RESERVED_RANGE_PURPOSES.has(item.purpose)) {
+function internalAddressCidr(item, networkLinks) {
+  if (item.addressType !== 'INTERNAL' || !INTERNAL_ADDRESS_STATUSES.has(item.status)) {
     throw commandError('CIDR_AUDIT_INVALID');
   }
+  const regionalSubnetworkSingle = INTERNAL_REGIONAL_SUBNETWORK_SINGLES.has(item.purpose);
+  const regionalNetworkRange = INTERNAL_REGIONAL_NETWORK_RANGES.has(item.purpose);
+  const globalNetworkSingle = INTERNAL_GLOBAL_NETWORK_SINGLES.has(item.purpose);
+  const regionalSelectorFreeRange = INTERNAL_REGIONAL_SELECTOR_FREE_RANGES.has(item.purpose);
+  const globalNetworkRange = INTERNAL_GLOBAL_NETWORK_RANGES.has(item.purpose);
+  const single = regionalSubnetworkSingle || globalNetworkSingle;
+  const range = regionalNetworkRange || regionalSelectorFreeRange || globalNetworkRange;
+  if (!single && !range) throw commandError('CIDR_AUDIT_INVALID');
   if (!canonicalIpv4(item.address)) throw commandError('CIDR_AUDIT_INVALID');
-  let prefixLength = item.prefixLength;
-  if (prefixLength === undefined) {
-    if (!INTERNAL_RESERVED_SINGLE_ADDRESS_PURPOSES.has(item.purpose)) {
-      throw commandError('CIDR_AUDIT_INVALID');
-    }
-    prefixLength = 32;
-  }
-  if (!Number.isInteger(prefixLength) || prefixLength < 0 || prefixLength > 32
+  if (single && Object.hasOwn(item, 'prefixLength')) throw commandError('CIDR_AUDIT_INVALID');
+  const prefixLength = single ? 32 : item.prefixLength;
+  if (!Number.isInteger(prefixLength) || (range && (prefixLength < 8 || prefixLength > 30))
     || !canonicalCidr(`${item.address}/${prefixLength}`)) {
     throw commandError('CIDR_AUDIT_INVALID');
   }
-  if (item.purpose === 'VPC_PEERING') {
-    if (!networkLinks.has(item.network) || Object.hasOwn(item, 'region')
-      || Object.hasOwn(item, 'subnetwork')) throw commandError('CIDR_AUDIT_INVALID');
-  } else {
-    if (typeof item.region !== 'string' || !COMPUTE_REGION.test(item.region)) {
-      throw commandError('CIDR_AUDIT_INVALID');
-    }
-    const hasNetwork = Object.hasOwn(item, 'network');
-    const hasSubnetwork = Object.hasOwn(item, 'subnetwork');
-    if (hasNetwork === hasSubnetwork) throw commandError('CIDR_AUDIT_INVALID');
-    if (hasNetwork && !networkLinks.has(item.network)) throw commandError('CIDR_AUDIT_INVALID');
-    if (hasSubnetwork && !new RegExp(
+  const hasRegion = Object.hasOwn(item, 'region');
+  const hasNetwork = Object.hasOwn(item, 'network');
+  const hasSubnetwork = Object.hasOwn(item, 'subnetwork');
+  const regional = regionalSubnetworkSingle || regionalNetworkRange || regionalSelectorFreeRange;
+  if (regional !== hasRegion || (hasRegion && (
+    typeof item.region !== 'string' || !COMPUTE_REGION.test(item.region)
+  ))) throw commandError('CIDR_AUDIT_INVALID');
+  if (regionalSubnetworkSingle) {
+    if (hasNetwork || !hasSubnetwork || !new RegExp(
       `^https://www\\.googleapis\\.com/compute/v1/projects/${PROJECT}/regions/[a-z]+(?:-[a-z]+)+[1-9]\\d*/subnetworks/[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?$`,
     ).test(item.subnetwork)) throw commandError('CIDR_AUDIT_INVALID');
+  } else if (regionalSelectorFreeRange) {
+    if (hasNetwork || hasSubnetwork) throw commandError('CIDR_AUDIT_INVALID');
+  } else if (!hasNetwork || hasSubnetwork || !networkLinks.has(item.network)) {
+    throw commandError('CIDR_AUDIT_INVALID');
   }
   return `${item.address}/${prefixLength}`;
 }
@@ -1104,10 +1114,11 @@ function validateComputeInventory({ networks, subnets, routes, addresses }) {
     if (!item || typeof item !== 'object' || Array.isArray(item)
       || typeof item.name !== 'string' || !COMPUTE_NAME.test(item.name)
       || typeof item.addressType !== 'string' || typeof item.status !== 'string') return true;
-    if (item.addressType === 'INTERNAL' && item.status === 'RESERVED') {
-      internalReservedCidr(item, networkLinks);
+    if (item.addressType === 'INTERNAL') {
+      internalAddressCidr(item, networkLinks);
       return false;
     }
+    if (item.addressType !== 'EXTERNAL') return true;
     return Object.hasOwn(item, 'region') && (
       typeof item.region !== 'string' || !COMPUTE_REGION.test(item.region)
     );
@@ -1126,7 +1137,7 @@ function assertCidrNoOverlap({ desired, network, subnets, routes, addresses }) {
     ))
     .map(({ destRange }) => destRange);
   const targetAddresses = addresses
-    .filter(({ addressType, status }) => addressType === 'INTERNAL' && status === 'RESERVED')
+    .filter(({ addressType, status }) => addressType === 'INTERNAL' && INTERNAL_ADDRESS_STATUSES.has(status))
     .map(({ address, prefixLength }) => `${address}/${prefixLength ?? 32}`);
   if ([...targetSubnets, ...targetAddresses].some((candidate) => cidrOverlap(desired, candidate))
     || targetRoutes.some((candidate) => cidrOverlap(desired, candidate))) {
@@ -1300,7 +1311,9 @@ function exactTopLevelManagedAsset(asset) {
   ]));
   const secrets = new Set(Object.values(GCP_IDENTITY.secrets).map((id) => `//secretmanager.googleapis.com/projects/${PROJECT}/secrets/${id}`));
   const jobs = new Set(Object.values(GCP_IDENTITY.jobs).map((id) => `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/jobs/${id}`));
-  if (exactAsset({ asset, assetType: 'run.googleapis.com/Service', name: `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/services/${GCP_IDENTITY.service}`, location: 'asia-east2' })) return asset.displayName === undefined || asset.displayName === GCP_IDENTITY.service;
+  for (const service of [GCP_IDENTITY.service, GCP_IDENTITY.candidateService]) {
+    if (exactAsset({ asset, assetType: 'run.googleapis.com/Service', name: `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/services/${service}`, location: 'asia-east2' })) return asset.displayName === undefined || asset.displayName === service;
+  }
   if (exactAsset({ asset, assetType: 'artifactregistry.googleapis.com/Repository', name: `//artifactregistry.googleapis.com/projects/${PROJECT}/locations/asia-east2/repositories/${GCP_IDENTITY.repository}`, location: 'asia-east2' })) return asset.displayName === undefined || asset.displayName === GCP_IDENTITY.repository;
   if (exactAsset({ asset, assetType: 'storage.googleapis.com/Bucket', name: `//storage.googleapis.com/${GCP_IDENTITY.bucket}`, location: 'asia-east2' })) return true;
   if (exactAsset({ asset, assetType: 'storage.googleapis.com/Bucket', name: `//storage.googleapis.com/${GCP_IDENTITY.buildSourceBucket}`, location: 'asia-east2' })) return true;
@@ -1316,13 +1329,15 @@ function exactTopLevelManagedAsset(asset) {
 }
 
 function exactManagedDescendantAsset(asset) {
-  const service = `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/services/${GCP_IDENTITY.service}`;
   const repository = `//artifactregistry.googleapis.com/projects/${PROJECT}/locations/asia-east2/repositories/${GCP_IDENTITY.repository}`;
   if (asset.assetType === 'run.googleapis.com/Revision') {
-    const prefix = `${service}/revisions/${GCP_IDENTITY.service}-`;
-    return asset.name.startsWith(prefix) && /^[0-9a-f]{12}$/.test(asset.name.slice(prefix.length))
-      && asset.location === 'asia-east2' && asset.parentFullResourceName === service
-      && asset.parentAssetType === 'run.googleapis.com/Service';
+    return [GCP_IDENTITY.service, GCP_IDENTITY.candidateService].some((serviceName) => {
+      const service = `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/services/${serviceName}`;
+      const prefix = `${service}/revisions/${serviceName}-`;
+      return asset.name.startsWith(prefix) && /^[0-9a-f]{12}$/.test(asset.name.slice(prefix.length))
+        && asset.location === 'asia-east2' && asset.parentFullResourceName === service
+        && asset.parentAssetType === 'run.googleapis.com/Service';
+    });
   }
   if (asset.assetType === 'artifactregistry.googleapis.com/DockerImage') {
     const prefix = `${repository}/dockerImages/${GCP_IDENTITY.service}@sha256:`;
@@ -1375,8 +1390,10 @@ function assertCloudAssetInventory(assets) {
     }
     const managedDescendantParent = asset.parentFullResourceName
       === `//artifactregistry.googleapis.com/projects/${PROJECT}/locations/asia-east2/repositories/${GCP_IDENTITY.repository}`
-      || asset.parentFullResourceName
-      === `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/services/${GCP_IDENTITY.service}`;
+      || [GCP_IDENTITY.service, GCP_IDENTITY.candidateService].some((service) => (
+        asset.parentFullResourceName
+        === `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/services/${service}`
+      ));
     if ((assetHasManagedMarker(asset) || managedDescendantParent) && !exactTopLevelManagedAsset(asset)
       && !exactManagedDescendantAsset(asset) && !exactManagedGeneratedAsset(asset)) {
       throw commandError('RESOURCE_COLLISION');
@@ -2011,7 +2028,10 @@ export class GcpControlPlane {
         this.#gcloud(['run', 'services', 'list', '--region=asia-east2', `--project=${PROJECT}`, '--format=json']),
         this.#gcloud(['run', 'jobs', 'list', '--region=asia-east2', `--project=${PROJECT}`, '--format=json']),
       ]);
-      assertManagedIdentityInventory(services, [GCP_IDENTITY.service], (item) => item.metadata?.name ?? item.name);
+      assertManagedIdentityInventory(
+        services, [GCP_IDENTITY.service, GCP_IDENTITY.candidateService],
+        (item) => item.metadata?.name ?? item.name,
+      );
       assertManagedIdentityInventory(jobs, Object.values(GCP_IDENTITY.jobs), (item) => item.metadata?.name ?? item.name);
     }
     if (enabledApis.has('monitoring.googleapis.com')) {
@@ -2318,7 +2338,8 @@ export class GcpControlPlane {
       return REQUIRED_APIS.every((api) => enabled.has(api));
     }
     if (id === 'artifact-registry') {
-      return value.format === 'DOCKER' && String(value.name ?? '').endsWith(`/repositories/${GCP_IDENTITY.repository}`)
+      return value.format === 'DOCKER'
+        && value.name === `projects/${PROJECT}/locations/asia-east2/repositories/${GCP_IDENTITY.repository}`
         && value.mode === 'STANDARD_REPOSITORY'
         && (value.location ?? String(value.name).split('/locations/')[1]?.split('/')[0]) === 'asia-east2'
         && value.description === 'Hong Kong Buddy production containers';
@@ -2349,13 +2370,20 @@ export class GcpControlPlane {
       });
     }
     if (id === 'vpc') return value.name === GCP_IDENTITY.network
+      && value.selfLink === `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`
       && value.autoCreateSubnetworks === false && String(value.routingConfig?.routingMode ?? '').toUpperCase() === 'REGIONAL';
     if (id === 'subnet') return value.name === GCP_IDENTITY.subnet
-      && value.region?.endsWith('/asia-east2') && value.ipCidrRange === '10.24.0.0/26'
-      && value.privateIpGoogleAccess === true && value.network?.endsWith(`/networks/${GCP_IDENTITY.network}`);
+      && value.selfLink === `https://www.googleapis.com/compute/v1/projects/${PROJECT}/regions/asia-east2/subnetworks/${GCP_IDENTITY.subnet}`
+      && value.region === `https://www.googleapis.com/compute/v1/projects/${PROJECT}/regions/asia-east2`
+      && value.ipCidrRange === '10.24.0.0/26'
+      && value.privateIpGoogleAccess === true
+      && value.network === `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`;
     if (id === 'psa-range') return value.name === GCP_IDENTITY.psaRange
+      && value.selfLink === `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/addresses/${GCP_IDENTITY.psaRange}`
       && value.address === '10.25.0.0' && Number(value.prefixLength) === 16
-      && value.purpose === 'VPC_PEERING' && value.network?.endsWith(`/networks/${GCP_IDENTITY.network}`);
+      && value.addressType === 'INTERNAL' && value.status === 'RESERVED'
+      && value.purpose === 'VPC_PEERING' && !Object.hasOwn(value, 'region')
+      && value.network === `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`;
     if (id === 'psa-connection') {
       const ranges = value.reservedPeeringRanges ?? value.reservedPeeringRange ?? [];
       return value.service === 'servicenetworking.googleapis.com'

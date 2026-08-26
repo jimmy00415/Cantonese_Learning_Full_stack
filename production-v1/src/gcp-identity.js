@@ -23,6 +23,7 @@ export const GCP_IDENTITY = Object.freeze({
   region: 'asia-east2',
   speechRegion: 'asia-southeast1',
   service: 'hkbuddy-v1-api',
+  candidateService: 'hkbuddy-v1-api-candidate',
   repository: 'hkbuddy-v1',
   bucket: 'hkbuddy-v1-582852715831-media',
   buildSourceBucket: 'hkbuddy-v1-582852715831-build-source',

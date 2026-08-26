@@ -34,7 +34,7 @@ const GCS_RESOURCE_ID = '//storage.googleapis.com/projects/_/buckets/hkbuddy-v1-
 const GCS_IDENTITY = 'b60bf7854808438017272bc274128d73be1efeec544e520be76c13474c7bbd38';
 const CLOUD_RUN_PROJECT_NUMBER = '582852715831';
 const PUBLIC_ORIGIN = `https://hkbuddy-v1-api-${CLOUD_RUN_PROJECT_NUMBER}.asia-east2.run.app`;
-const CANDIDATE_ORIGIN = `https://candidate-${COMMIT.slice(0, 12)}---hkbuddy-v1-api-${CLOUD_RUN_PROJECT_NUMBER}.asia-east2.run.app`;
+const CANDIDATE_ORIGIN = `https://candidate-${COMMIT.slice(0, 12)}---hkbuddy-v1-api-candidate-${CLOUD_RUN_PROJECT_NUMBER}.asia-east2.run.app`;
 const RUNTIME_SERVICE_ACCOUNT = 'hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com';
 
 function inventoryPayload(overrides = {}) {

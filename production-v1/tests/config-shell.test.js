@@ -24,7 +24,7 @@ const TEST_GCS_RESOURCE_ID = '//storage.googleapis.com/projects/_/buckets/hkbudd
 const TEST_LLM_CREDENTIAL_VERSION = 'llm-credential-v1';
 const TEST_PROJECT_NUMBER = '582852715831';
 const TEST_STABLE_ORIGIN = `https://hkbuddy-v1-api-${TEST_PROJECT_NUMBER}.asia-east2.run.app`;
-const TEST_CANDIDATE_ORIGIN = `https://candidate-${TEST_RELEASE_COMMIT.slice(0, 12)}---hkbuddy-v1-api-${TEST_PROJECT_NUMBER}.asia-east2.run.app`;
+const TEST_CANDIDATE_ORIGIN = `https://candidate-${TEST_RELEASE_COMMIT.slice(0, 12)}---hkbuddy-v1-api-candidate-${TEST_PROJECT_NUMBER}.asia-east2.run.app`;
 const TEST_RUNTIME_SERVICE_ACCOUNT = 'hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com';
 const TEST_LLM_CONFIG = {
   provider: 'hkbu',
@@ -285,8 +285,8 @@ test('production origin allowlist is exactly stable plus the SHA-bound candidate
   assert.equal(config.runtimeServiceAccount, TEST_RUNTIME_SERVICE_ACCOUNT);
   for (const overrides of [
     { V1_CANDIDATE_ORIGIN: `https://other---hkbuddy-v1-api-${TEST_PROJECT_NUMBER}.asia-east2.run.app` },
-    { V1_CANDIDATE_ORIGIN: `https://candidate-${'b'.repeat(12)}---hkbuddy-v1-api-${TEST_PROJECT_NUMBER}.asia-east2.run.app` },
-    { V1_CANDIDATE_ORIGIN: `https://candidate-${TEST_RELEASE_COMMIT.slice(0, 12)}---hkbuddy-v1-api-999999999999.asia-east2.run.app` },
+    { V1_CANDIDATE_ORIGIN: `https://candidate-${'b'.repeat(12)}---hkbuddy-v1-api-candidate-${TEST_PROJECT_NUMBER}.asia-east2.run.app` },
+    { V1_CANDIDATE_ORIGIN: `https://candidate-${TEST_RELEASE_COMMIT.slice(0, 12)}---hkbuddy-v1-api-candidate-999999999999.asia-east2.run.app` },
     { V1_PUBLIC_ORIGIN: `https://hkbuddy-api-${TEST_PROJECT_NUMBER}.asia-east2.run.app` },
     { V1_PUBLIC_ORIGIN: 'https://hkbuddy-pilot-0630.azurewebsites.net' },
     { V1_TRUST_PROXY_HOPS: '2' },

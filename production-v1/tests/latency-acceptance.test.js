@@ -22,19 +22,22 @@ import { acceptanceTimingQueryDigest } from '../src/telemetry/acceptance-timings
 
 const COMMIT = '1'.repeat(40);
 const PROJECT_NUMBER = '582852715831';
+const STABLE_SERVICE = 'hkbuddy-v1-api';
+const CANDIDATE_SERVICE = 'hkbuddy-v1-api-candidate';
 const STABLE_ORIGIN = `https://hkbuddy-v1-api-${PROJECT_NUMBER}.asia-east2.run.app`;
-const ORIGIN = `https://candidate-${COMMIT.slice(0, 12)}---hkbuddy-v1-api-${PROJECT_NUMBER}.asia-east2.run.app`;
+const ORIGIN = `https://candidate-${COMMIT.slice(0, 12)}---hkbuddy-v1-api-candidate-${PROJECT_NUMBER}.asia-east2.run.app`;
+const CANDIDATE_ROOT = `https://${CANDIDATE_SERVICE}-${PROJECT_NUMBER}.asia-east2.run.app`;
 const MANIFEST_PATH = resolve('latency-asr-fixtures.json');
 const CWD = resolve('..');
 const NOW = new Date('2026-08-25T12:00:00.000Z');
 const SOURCE_ARCHIVE_SHA256 = '2'.repeat(64);
 const CANDIDATE_IMAGE_DIGEST = `sha256:${'3'.repeat(64)}`;
-const CANDIDATE_REVISION = `hkbuddy-v1-api-${COMMIT.slice(0, 12)}`;
+const CANDIDATE_REVISION = `${CANDIDATE_SERVICE}-${COMMIT.slice(0, 12)}`;
 const TEST_ID_TOKEN = [
   Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url'),
   Buffer.from(JSON.stringify({
     iss: 'https://accounts.google.com',
-    aud: STABLE_ORIGIN,
+    aud: CANDIDATE_ROOT,
     sub: '1234567890',
     email: 'admin@motionexp.com',
     iat: Math.floor(NOW.getTime() / 1000) - 30,
@@ -109,7 +112,12 @@ function createHarness({
     V1_SOURCE_ARCHIVE_SHA256: SOURCE_ARCHIVE_SHA256,
     V1_CANDIDATE_IMAGE_DIGEST: CANDIDATE_IMAGE_DIGEST,
     V1_CANDIDATE_REVISION: CANDIDATE_REVISION,
-    V1_CANDIDATE_TRAFFIC_PERCENT: '0',
+    V1_CANDIDATE_TRAFFIC_PERCENT: '100',
+    V1_CANDIDATE_AUDIENCE: CANDIDATE_ROOT,
+    V1_CANDIDATE_SERVICE: CANDIDATE_SERVICE,
+    V1_STABLE_SERVICE: STABLE_SERVICE,
+    V1_CANDIDATE_TRAFFIC_STATE: 'candidate-service-private-100',
+    V1_STABLE_TRAFFIC_STATE: 'stable-prior-100',
   },
   argv = exactArgv(),
   gitState = { head: COMMIT, clean: true },
@@ -278,7 +286,7 @@ function createHarness({
           type: 'cloud_run_revision',
           labels: {
             project_id: 'motion-expert-hk-ltd-webpage', location: 'asia-east2',
-            service_name: 'hkbuddy-v1-api', revision_name: `hkbuddy-v1-api-${COMMIT.slice(0, 12)}`,
+            service_name: CANDIDATE_SERVICE, revision_name: CANDIDATE_REVISION,
           },
         },
         httpRequest: {
@@ -303,7 +311,7 @@ test('nearest-rank percentiles are deterministic and the acceptance contract fix
   assert.throws(() => nearestRankP95([1, Number.NaN]), /finite/i);
 
   assert.deepEqual(LATENCY_ACCEPTANCE_CONTRACT, {
-    schemaVersion: 4,
+    schemaVersion: 5,
     text: {
       sessions: 20,
       turns: 200,
@@ -338,7 +346,7 @@ test('nearest-rank percentiles are deterministic and the acceptance contract fix
 test('private candidate authentication mints the exact audience-bound gcloud ID token in memory', async () => {
   const calls = [];
   const token = await mintGcloudIdentityToken({
-    audience: STABLE_ORIGIN,
+    audience: CANDIDATE_ROOT,
     executeFile: async (file, argv, options) => {
       calls.push({ file, argv, options });
       return { stdout: `${TEST_ID_TOKEN}\n`, stderr: '' };
@@ -350,7 +358,7 @@ test('private candidate authentication mints the exact audience-bound gcloud ID 
     'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\platform\\bundledpython\\python.exe');
   assert.deepEqual(calls[0].argv, [
     'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\lib\\gcloud.py',
-    'auth', 'print-identity-token', `--audiences=${STABLE_ORIGIN}`,
+    'auth', 'print-identity-token', `--audiences=${CANDIDATE_ROOT}`,
     '--account=admin@motionexp.com', '--quiet',
   ]);
   assert.equal(calls[0].options.windowsHide, true);
@@ -401,8 +409,8 @@ test('command is inert unless exact arguments, explicit load confirmation, froze
     ['known legacy target', { argv: exactArgv('https://hkbuddy-pilot-0630.azurewebsites.net') }, 'CANDIDATE_ORIGIN_INVALID'],
     ['unrelated Cloud Run tag', { argv: exactArgv(`https://other---hkbuddy-v1-api-${PROJECT_NUMBER}.asia-east2.run.app`) }, 'CANDIDATE_ORIGIN_INVALID'],
     ['old service identity', { argv: exactArgv(`https://candidate-${COMMIT.slice(0, 12)}---hkbuddy-api-${PROJECT_NUMBER}.asia-east2.run.app`) }, 'CANDIDATE_ORIGIN_INVALID'],
-    ['old project number', { argv: exactArgv(`https://candidate-${COMMIT.slice(0, 12)}---hkbuddy-v1-api-93662314720.asia-east2.run.app`) }, 'CANDIDATE_ORIGIN_INVALID'],
-    ['foreign project number', { argv: exactArgv(`https://candidate-${COMMIT.slice(0, 12)}---hkbuddy-v1-api-999999999999.asia-east2.run.app`) }, 'CANDIDATE_ORIGIN_INVALID'],
+    ['old project number', { argv: exactArgv(`https://candidate-${COMMIT.slice(0, 12)}---hkbuddy-v1-api-candidate-93662314720.asia-east2.run.app`) }, 'CANDIDATE_ORIGIN_INVALID'],
+    ['foreign project number', { argv: exactArgv(`https://candidate-${COMMIT.slice(0, 12)}---hkbuddy-v1-api-candidate-999999999999.asia-east2.run.app`) }, 'CANDIDATE_ORIGIN_INVALID'],
     ['configured candidate mismatch', { environment: { V1_LOAD_TEST_CONFIRM: 'true', V1_RELEASE_COMMIT_SHA: COMMIT, V1_PUBLIC_ORIGIN: STABLE_ORIGIN, V1_CANDIDATE_ORIGIN: 'https://example.com' } }, 'CANDIDATE_ORIGIN_INVALID'],
   ];
 
@@ -551,7 +559,7 @@ test('passing run executes the exact workload at concurrency five and writes one
   assert.equal(fixture.maximum.tts, 5);
 
   const { filePath, record, contents } = fixture.artifacts[0];
-  assert.equal(record.schemaVersion, 4);
+  assert.equal(record.schemaVersion, 5);
   assert.equal(record.rawReceipts.textTurns.length, 200);
   assert.equal(record.rawReceipts.asrRequests.length, 30);
   assert.equal(record.rawReceipts.ttsRequests.length, 31);
@@ -559,7 +567,7 @@ test('passing run executes the exact workload at concurrency five and writes one
   assert.equal(record.rawReceipts.controlPlaneRequests.length, 200);
   assert.deepEqual(record.access, {
     authenticated: true,
-    audience: STABLE_ORIGIN,
+    audience: CANDIDATE_ROOT,
     issuer: 'https://accounts.google.com',
     subjectSha256: createHash('sha256').update('admin@motionexp.com').digest('hex'),
     taggedUrl: ORIGIN,
@@ -1082,7 +1090,12 @@ test('total latency command deadline is not downgraded to a Git-state error when
       V1_SOURCE_ARCHIVE_SHA256: SOURCE_ARCHIVE_SHA256,
       V1_CANDIDATE_IMAGE_DIGEST: CANDIDATE_IMAGE_DIGEST,
       V1_CANDIDATE_REVISION: CANDIDATE_REVISION,
-      V1_CANDIDATE_TRAFFIC_PERCENT: '0',
+      V1_CANDIDATE_TRAFFIC_PERCENT: '100',
+      V1_CANDIDATE_AUDIENCE: CANDIDATE_ROOT,
+      V1_CANDIDATE_SERVICE: CANDIDATE_SERVICE,
+      V1_STABLE_SERVICE: STABLE_SERVICE,
+      V1_CANDIDATE_TRAFFIC_STATE: 'candidate-service-private-100',
+      V1_STABLE_TRAFFIC_STATE: 'stable-prior-100',
     },
     cwd: CWD,
     artifactDirectory: resolve('reports', 'latency-test'),

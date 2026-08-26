@@ -294,7 +294,8 @@ Binding resource identities:
   `hkbuddy-v1-runtime`, `hkbuddy-v1-build`, `hkbuddy-v1-migrator`,
   `hkbuddy-v1-deployer`, and `hkbuddy-v1-acceptance` in the selected project;
 - Artifact Registry repository: `hkbuddy-v1` in `asia-east2`;
-- Cloud Run service: `hkbuddy-v1-api` in `asia-east2`;
+- Cloud Run services: public stable `hkbuddy-v1-api` and private acceptance
+  scratch service `hkbuddy-v1-api-candidate`, both in `asia-east2`;
 - Cloud SQL instance: `hkbuddy-v1-pg` in `asia-east2`;
 - database/user: `hkbuddy_v1` / `hkbuddy_app`;
 - media bucket: `hkbuddy-v1-582852715831-media`;
@@ -411,31 +412,43 @@ Singapore STT, and TTS latency are measured rather than assumed.
    only those verified generations and prove zero release-output residue.
    Artifact SHA-256 values remain separate from Secret version numbers.
 7. Only after those evidence versions exist, boot digest-pinned revision
-   `hkbuddy-v1-api-<12 lowercase hex>` behind the SHA-bound private
-   `candidate-<12 lowercase hex>` tag, with the evidence mounted as read-only
-   files. A later release keeps the previous evidenced revision at 100% and the
-   candidate at 0%. A first release has no prior target, so its sole candidate
-   is 100% while IAM remains private and authenticated acceptance uses the tagged
-   origin. The candidate receipt records the exact traffic state.
+   `hkbuddy-v1-api-candidate-<12 lowercase hex>` on the separate
+   `hkbuddy-v1-api-candidate` service at private 100% traffic behind its
+   SHA-bound `candidate-<12 lowercase hex>` tag, with the evidence mounted as
+   read-only files. The tag exists only on that private service. Authentication
+   mints an in-memory ID token for the untagged candidate-service root while the
+   request targets the tagged URL. Exact candidate IAM contains only the
+   reviewed private invoker and no public principal. The receipt records
+   `trafficState=candidate-service-private-100`, both service identities, and
+   stable absent or genuine-prior-stable-at-100 state. The public stable service
+   is unchanged during acceptance.
 8. Run candidate-specific mobile, retention, readiness, and latency acceptance
    against the same resource identities, image digest, and frozen commit.
-9. Promote only after fresh candidate/service/IAM/image and immutable
-   readiness/workload/mobile/trace validation. Then add the reviewed public
-   invoker binding, route the candidate to stable 100%, remove its tag, and read
-   back the stable service. Ambiguous first-release IAM or traffic results must
-   restore and verify private IAM, tagged bootstrap traffic, revision, image,
-   and evidence before the attempt may be reported as safely compensated.
+9. Promote only after fresh candidate service/revision/IAM/image/config and
+   immutable readiness/workload/mobile/trace validation. On a later release,
+   keep the genuine prior stable revision at 100%, stage the accepted stable
+   revision untagged at 0%, verify exact image/config and a tag-free stable
+   service, then atomically switch the accepted stable revision to 100%; stable
+   public IAM is read-only. On the first release, create stable privately at
+   100%, verify its service/revision/image/config and private IAM, then add
+   `allUsers:roles/run.invoker` as the final mutation, followed only by IAM
+   readback. Response-loss compensation restores the exact prior stable state
+   on a later release or the accepted private stable state and private IAM on a
+   first release. It never makes an unaccepted candidate public.
 10. Return the exact stable origin
     `https://hkbuddy-v1-api-582852715831.asia-east2.run.app` and generate a
     decode-verified QR code from that URL outside tracked source.
 
-Rollback is separately confirmed and moves `hkbuddy-v1-api` traffic to the
-exact previous evidenced V1 revision at 100%, removes the candidate tag, and
-verifies stable readback. It does not delete the candidate, production data,
-resource island, protected shared-project state, or unrelated services, and it
-does not mutate the legacy Azure app, database, Blob container, workflow,
-hostname, or settings. Database migration 1 is additive; rollback never drops
-production data.
+Rollback is separately confirmed and moves only `hkbuddy-v1-api` traffic to the
+exact previous evidenced V1 revision at 100%, then verifies stable readback and
+unchanged public IAM. It neither depends on nor mutates the private candidate
+service. Receipt-bound candidate cleanup is a separate operation: it validates
+the exact candidate service/revision/tag/image/private IAM, deletes only
+`hkbuddy-v1-api-candidate`, and verifies candidate-specific canonical absence.
+Neither operation deletes production data, the resource island, protected
+shared-project state, or unrelated services, and neither mutates the legacy
+Azure app, database, Blob container, workflow, hostname, or settings. Database
+migration 1 is additive; rollback never drops production data.
 
 ## Explicitly deferred
 

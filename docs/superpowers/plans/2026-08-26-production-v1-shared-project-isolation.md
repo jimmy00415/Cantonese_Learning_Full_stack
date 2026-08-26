@@ -20,7 +20,9 @@
   `asset search-all-resources --scope=projects/motion-expert-hk-ltd-webpage --billing-project=tech-demo-433408 --project=motion-expert-hk-ltd-webpage --page-size=500 --read-mask=name,assetType,project,displayName,description,location,labels,parentFullResourceName,parentAssetType,state --order-by=assetType,name --format=json` must auto-page to completion before host mutation and never authorizes a consumer-project write.
 - The selected project shares billing, quota, API enablement, audit logs, and project IAM; runtime data, network, identity, secrets, images, jobs, evidence, and release state remain dedicated.
 - All implementation follows red-green-refactor TDD. Cloud mutation is forbidden until focused tests, full tests, checks, security gate, diff check, clean commit, and two independent reviews pass.
-- Candidate deploys at zero stable traffic. Public invocation and stable traffic are promotion actions after real production acceptance.
+- Every release candidate deploys at private 100% traffic on the separate
+  `hkbuddy-v1-api-candidate` service. Public `hkbuddy-v1-api` remains unchanged
+  until receipt-bound promotion after real production acceptance.
 
 ---
 
@@ -248,7 +250,7 @@ git commit -m "fix(production-v1): protect shared project baseline"
 
 Use stable origin
 `https://hkbuddy-v1-api-582852715831.asia-east2.run.app`, candidate tag origin
-`https://candidate-111111111111---hkbuddy-v1-api-582852715831.asia-east2.run.app`
+`https://candidate-111111111111---hkbuddy-v1-api-candidate-582852715831.asia-east2.run.app`
 with test commit `1111111111111111111111111111111111111111`, runtime identity
 `hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com`, and
 bucket `hkbuddy-v1-582852715831-media`. Add negative cases for old-project,
@@ -262,8 +264,10 @@ Expected: FAIL at the old hard-coded production identities.
 
 - [ ] **Step 3: Replace duplicated runtime identities with `GCP_IDENTITY`**
 
-Update stable-host and candidate-tag regular expressions for
-`hkbuddy-v1-api`; use the central project, bucket, runtime account, and provider
+Update stable-host and candidate-tag regular expressions for the distinct
+`hkbuddy-v1-api` and `hkbuddy-v1-api-candidate` services; the untagged candidate
+root is the token audience and only the tagged candidate-service URL is the QA
+request target. Use the central project, bucket, runtime account, and provider
 project values. Preserve exact runtime production validation and reject every
 old or foreign identity. Update evidence digests only through the existing
 canonical serialization paths; do not weaken a schema or accept multiple
@@ -299,13 +303,14 @@ git commit -m "refactor(production-v1): migrate runtime cloud identity"
 **Interfaces:**
 - Consumes: `GCP_IDENTITY`, resource contract, and protected provisioning from Tasks 1-2.
 - Produces: build image `asia-east2-docker.pkg.dev/motion-expert-hk-ltd-webpage/hkbuddy-v1/hkbuddy-v1-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` in contract fixtures and the observed immutable digest in production.
-- Produces: namespaced migration/smoke jobs and candidate/stable release receipts bound to project number `582852715831`.
+- Produces: namespaced migration/smoke jobs and two-service candidate/stable release receipts bound to project number `582852715831`.
 
 - [ ] **Step 1: Write failing release and acceptance identity tests**
 
 Assert exact build service account
 `projects/motion-expert-hk-ltd-webpage/serviceAccounts/hkbuddy-v1-build@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com`,
-service `hkbuddy-v1-api`, repository `hkbuddy-v1`, jobs
+stable service `hkbuddy-v1-api`, private candidate service
+`hkbuddy-v1-api-candidate`, repository `hkbuddy-v1`, jobs
 `hkbuddy-v1-migrate`, `hkbuddy-v1-dependency-acceptance`,
 `hkbuddy-v1-llm-smoke`, `hkbuddy-v1-asr-smoke`, and
 `hkbuddy-v1-tts-smoke`. Assert logs, traces, evidence object paths, rollout
@@ -324,24 +329,31 @@ Import central identities into Node scripts. Update Cloud Build repository,
 image, build service account, labels, and receipt validation. Rename all release
 jobs/secrets/service accounts. Update revision regex, Cloud Run tag origin,
 logging filters, trace resource labels, digest checks, candidate cleanup,
-promotion, and rollback to `hkbuddy-v1-api`. Keep create-only evidence,
+promotion, and rollback to the exact two-service model. Keep create-only evidence,
 one-frozen-workload, no-token persistence, private candidate, and
-fresh-promotion-validation controls unchanged. Later releases preserve the
-prior revision at 100% and candidate at 0%; the first release uses the sole
-private tagged candidate at 100% so Cloud Run has a supported serving target.
+fresh-promotion-validation controls unchanged. Every release deploys revision
+`hkbuddy-v1-api-candidate-<12 lowercase hex>` to
+`hkbuddy-v1-api-candidate` at private 100% traffic with the SHA tag only on that
+service. Candidate IAM is limited to the exact reviewed private invoker; the
+untagged candidate root is the ID-token audience, and candidate receipts bind
+`trafficState=candidate-service-private-100`, both service names, and exact
+stable absent or genuine-prior-stable-at-100 state.
 
 Cloud Build submit must use exact staging directory
 `gs://hkbuddy-v1-582852715831-build-source/source`, and provenance must match its
-bucket/prefix and frozen source digest. Empty-host candidate bootstrap is valid
-only on the exact service-describe `CLOUD_RUN_SERVICE_NOT_FOUND`, creates a
-private tagged 100% candidate with no `allUsers`, and writes explicit
-`private-bootstrap-100` plus no-prior receipt state. Every other create-or-readback
-family treats absence only when the exact describe command, project/location,
-resource identity, and canonical error agree; generic stderr remains ambiguous.
-Later cleanup/rollback accepts only the
-exact 12-hex controller revision plus paired immutable prior image in the
-receipt chain, and performs fresh service/revision/image/evidence validation
-before traffic mutation. First-release rollback is unavailable with zero calls.
+bucket/prefix and frozen source digest. Candidate service absence is valid only
+on the exact service-describe `CLOUD_RUN_SERVICE_NOT_FOUND`; every other
+create-or-readback family treats absence only when the exact describe command,
+project/location, resource identity, and canonical error agree, while generic
+stderr remains ambiguous. Promotion copies only the accepted image/config into
+stable: a later release preserves the genuine prior stable revision at 100%,
+stages the accepted stable revision untagged at 0%, verifies it is tag-free, and
+then switches it to 100%; a first release creates stable privately at 100% and
+makes `allUsers:roles/run.invoker` the final mutation after exact verification.
+Receipt-bound cleanup validates and deletes only the candidate service. Later
+rollback accepts only the exact prior stable revision plus paired immutable
+image and mutates only stable traffic; first-release rollback is unavailable
+with zero calls.
 
 - [ ] **Step 4: Run release/acceptance tests and verify green**
 
@@ -435,7 +447,10 @@ repeats the complete verification ladder.
 
 **Interfaces:**
 - Consumes: clean reviewed commit, isolated Cloud SDK config, exact monitoring notification channel, and selected host project.
-- Produces: verified `hkbuddy-v1-*` GCP resource island, private candidate (`private-bootstrap-100` on first release or prior-100/candidate-0 later), immutable acceptance receipts, promoted stable service, rollback receipt, public URL, and QR code.
+- Produces: verified `hkbuddy-v1-*` GCP resource island, separate private
+  candidate service in `candidate-service-private-100`, immutable named
+  two-service acceptance receipts, promoted stable service, rollback receipt,
+  public URL, and QR code.
 
 - [ ] **Step 1: Run fresh read-only preflight**
 
@@ -472,9 +487,11 @@ manifest-refresh sequence: build, migration, inventory, acceptance, collect,
 evidence, candidate, readiness, workload, mobile, then promote. Require successful
 dependency security receipt, provenance, image labels, immutable digest,
 digest-pinned migration job, legacy inventory, dependency acceptance, real LLM,
-ASR, and TTS smoke receipts. Require receipt-bound candidate traffic: the sole
-private tagged candidate is `100` for the first release; later releases retain
-the prior evidenced revision at `100` and the candidate at `0`.
+ASR, and TTS smoke receipts. Require `hkbuddy-v1-api-candidate` at private 100%
+for every release, the SHA tag on that service only, exact private invoker IAM,
+untagged-root audience, and `trafficState=candidate-service-private-100` bound
+with both service identities. Keep public `hkbuddy-v1-api` unchanged throughout
+candidate acceptance.
 
 - [ ] **Step 4: Run complete production acceptance**
 
@@ -488,13 +505,20 @@ on TTS failure.
 
 - [ ] **Step 5: Promote, verify rollback, and deliver**
 
-Freshly revalidate the acceptance artifact and 200 production traces, add the
-public invoker binding, promote the candidate to stable 100% (removing its tag), and verify stable health,
-readiness, text, voice, sources, mobile safe area, and no autoplay. Execute the
-non-destructive rollback drill required by the release contract and return to
-the accepted revision. On any ambiguous first-release IAM/traffic/readback,
-restore private IAM and the tagged 100% bootstrap state, then freshly verify
-service, revision, image, evidence, and IAM before reporting compensation.
+Freshly revalidate the private candidate service/revision/IAM/image/config,
+acceptance artifact, Task 8 bindings, and 200 production traces. On a later
+release, preserve the genuine prior stable revision at 100%, stage the accepted
+stable revision untagged at 0%, verify exact image/config and no stable tag, then
+atomically switch it to 100% without changing public IAM. On the first release,
+create stable privately at 100%, verify service/revision/image/config and
+private IAM, then add `allUsers:roles/run.invoker` as the final mutation and
+perform only IAM readback afterward. Verify stable health, readiness, text,
+voice, sources, mobile safe area, and no autoplay. Execute the non-destructive
+stable-only rollback drill required by the release contract and return to the
+accepted revision. On any ambiguous first-release IAM/service/readback, restore
+the accepted private stable state and exact private IAM before reporting
+compensation. Candidate cleanup separately validates its receipt, deletes only
+`hkbuddy-v1-api-candidate`, and verifies canonical absence.
 Generate a QR code for the final stable HTTPS URL and
 report exact deployed revision, image digest, release commit, acceptance result,
 known shared-project boundary, URL, and QR artifact.

@@ -37,7 +37,7 @@ import {
 const COMMIT = '1'.repeat(40);
 const PROJECT_NUMBER = '582852715831';
 const STABLE_ORIGIN = `https://hkbuddy-v1-api-${PROJECT_NUMBER}.asia-east2.run.app`;
-const CANDIDATE_ORIGIN = `https://candidate-${COMMIT.slice(0, 12)}---hkbuddy-v1-api-${PROJECT_NUMBER}.asia-east2.run.app`;
+const CANDIDATE_ORIGIN = `https://candidate-${COMMIT.slice(0, 12)}---hkbuddy-v1-api-candidate-${PROJECT_NUMBER}.asia-east2.run.app`;
 const executeFile = promisify(execFile);
 const IOS_NORMALIZER_ARGUMENTS = Object.freeze([
   '-nostdin', '-hide_banner', '-loglevel', 'error',
@@ -665,7 +665,7 @@ test('Google ASR smoke generates three pinned non-sensitive LINEAR16 fixtures be
 });
 
 test('candidate URL shape is SHA bound rather than an arbitrary HTTPS or run.app tag', () => {
-  assert.equal(CANDIDATE_ORIGIN, 'https://candidate-111111111111---hkbuddy-v1-api-582852715831.asia-east2.run.app');
+  assert.equal(CANDIDATE_ORIGIN, 'https://candidate-111111111111---hkbuddy-v1-api-candidate-582852715831.asia-east2.run.app');
   assert.equal(STABLE_ORIGIN, 'https://hkbuddy-v1-api-582852715831.asia-east2.run.app');
 });
 

@@ -16,12 +16,13 @@ const execFileAsync = promisify(execFile);
 const PROJECT = GCP_IDENTITY.projectId;
 const PROJECT_NUMBER = GCP_IDENTITY.projectNumber;
 const REGION = GCP_IDENTITY.region;
-const SERVICE = GCP_IDENTITY.service;
+const STABLE_SERVICE = GCP_IDENTITY.service;
+const CANDIDATE_SERVICE = GCP_IDENTITY.candidateService;
 const QA_PRINCIPAL = 'admin@motionexp.com';
 const RELEASE_SHA = /^[0-9a-f]{40}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/;
-const CANDIDATE_REVISION = /^hkbuddy-v1-api-[0-9a-f]{12}$/;
+const CANDIDATE_REVISION = /^hkbuddy-v1-api-candidate-[0-9a-f]{12}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SAMPLE_ID = /^[a-z0-9][a-z0-9._-]{0,79}$/;
 const REPLY_LANGUAGES = Object.freeze(['en', 'yue-Hant-HK', 'cmn-Hans-CN']);
@@ -37,7 +38,7 @@ const productionRoot = fileURLToPath(new URL('../', import.meta.url));
 const defaultArtifactDirectory = join(productionRoot, 'reports', 'latency');
 
 export const LATENCY_ACCEPTANCE_CONTRACT = Object.freeze({
-  schemaVersion: 4,
+  schemaVersion: 5,
   text: {
     sessions: 20,
     turns: 200,
@@ -226,7 +227,7 @@ export async function readGcloudControlPlaneReceipts({
     `logName="projects/${PROJECT}/logs/run.googleapis.com%2Frequests"`,
     `resource.labels.project_id="${PROJECT}"`,
     `resource.labels.location="${REGION}"`,
-    `resource.labels.service_name="${SERVICE}"`,
+    `resource.labels.service_name="${CANDIDATE_SERVICE}"`,
     `resource.labels.revision_name="${candidateRevision}"`,
     'httpRequest.requestMethod="POST"',
     `httpRequest.requestUrl="${candidateOrigin}/api/v1/messages"`,
@@ -261,7 +262,7 @@ export function normalizeControlPlaneTurnReceipts(entries, {
     const latencyMs = latency ? Number(latency[1]) * 1_000 : NaN;
     if (value?.resource?.type !== 'cloud_run_revision'
       || labels?.project_id !== PROJECT || labels?.location !== REGION
-      || labels?.service_name !== SERVICE || labels?.revision_name !== candidateRevision
+      || labels?.service_name !== CANDIDATE_SERVICE || labels?.revision_name !== candidateRevision
       || request?.requestMethod !== 'POST' || request?.requestUrl !== `${candidateOrigin}/api/v1/messages`
       || request?.userAgent !== userAgent || Number(request?.status) !== 202
       || typeof value?.insertId !== 'string' || value.insertId.length < 1 || value.insertId.length > 256
@@ -327,9 +328,9 @@ function safeCandidateOrigin(value, { commitSha, stableOrigin, configuredCandida
   try { url = new URL(value); } catch { return null; }
   let stable;
   try { stable = new URL(stableOrigin); } catch { return null; }
-  const expectedStable = `https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app`;
+  const expectedStable = `https://${STABLE_SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app`;
   if (stable.origin !== stableOrigin || stable.protocol !== 'https:' || stableOrigin !== expectedStable) return null;
-  const expected = `https://candidate-${String(commitSha).slice(0, 12)}---${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app`;
+  const expected = `https://candidate-${String(commitSha).slice(0, 12)}---${CANDIDATE_SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app`;
   if (url.protocol !== 'https:'
     || value !== url.origin
     || url.username || url.password || url.port
@@ -735,7 +736,7 @@ function correlatedTextTimings(samples, expected) {
 
 function buildRawReceipts({
   acceptanceWindowId, textOperational, asrResults, ttsResults, timingQueries,
-  controlPlaneRequests,
+  controlPlaneRequests, releaseBinding,
 }) {
   const textTurns = textOperational.map((item, index) => ({
     sequence: index + 1,
@@ -777,8 +778,12 @@ function buildRawReceipts({
     samples: item?.samples ?? [],
   }));
   const payload = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     acceptanceWindowId,
+    candidateService: releaseBinding.candidateService,
+    stableService: releaseBinding.stableService,
+    trafficState: releaseBinding.trafficState,
+    stableTrafficState: releaseBinding.stableTrafficState,
     textTurns,
     asrRequests,
     ttsRequests,
@@ -887,9 +892,13 @@ function acceptanceRecord({
     && observations.pairs.tts.available
     && ['provider', 'server'].every((layer) => Object.values(observations[layer]).every((item) => item.available));
   return finalizeLatencyAcceptanceRecord({
-    schemaVersion: 4,
+    schemaVersion: 5,
     commitSha,
     candidateOrigin,
+    candidateService: releaseBinding.candidateService,
+    stableService: releaseBinding.stableService,
+    trafficState: releaseBinding.trafficState,
+    stableTrafficState: releaseBinding.stableTrafficState,
     access,
     releaseBinding,
     fixtureSetSha256,
@@ -1408,11 +1417,21 @@ export async function runLatencyAcceptance({
   const imageDigest = environment?.V1_CANDIDATE_IMAGE_DIGEST;
   const candidateRevision = environment?.V1_CANDIDATE_REVISION;
   const candidateTrafficPercent = Number(environment?.V1_CANDIDATE_TRAFFIC_PERCENT);
+  const candidateAudience = environment?.V1_CANDIDATE_AUDIENCE;
+  const candidateService = environment?.V1_CANDIDATE_SERVICE;
+  const stableService = environment?.V1_STABLE_SERVICE;
+  const trafficState = environment?.V1_CANDIDATE_TRAFFIC_STATE;
+  const stableTrafficState = environment?.V1_STABLE_TRAFFIC_STATE;
   const candidateTag = `candidate-${commitSha.slice(0, 12)}`;
+  const expectedCandidateAudience = `https://${CANDIDATE_SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app`;
   if (!SHA256.test(String(sourceArchiveSha256 ?? ''))
     || !IMAGE_DIGEST.test(String(imageDigest ?? ''))
-    || candidateRevision !== `${SERVICE}-${commitSha.slice(0, 12)}`
-    || ![0, 100].includes(candidateTrafficPercent)) {
+    || candidateRevision !== `${CANDIDATE_SERVICE}-${commitSha.slice(0, 12)}`
+    || candidateTrafficPercent !== 100
+    || candidateAudience !== expectedCandidateAudience
+    || candidateService !== CANDIDATE_SERVICE || stableService !== STABLE_SERVICE
+    || trafficState !== 'candidate-service-private-100'
+    || !['stable-absent', 'stable-prior-100'].includes(stableTrafficState)) {
     return publish(writeOutput, 2, { status: 'not-run', code: 'RELEASE_BINDING_INVALID' });
   }
   operationDeadlineMs = deadlineValue(operationDeadlineMs, DEFAULT_OPERATION_DEADLINE_MS);
@@ -1482,12 +1501,12 @@ export async function runLatencyAcceptance({
   let access;
   try {
     identityToken = await commandOperation((signal) => mintIdentityToken({
-      audience: environment.V1_PUBLIC_ORIGIN,
+      audience: candidateAudience,
       taggedUrl: candidateOrigin,
       signal,
     }));
     access = authenticatedAccess(identityToken, {
-      audience: environment.V1_PUBLIC_ORIGIN,
+      audience: candidateAudience,
       taggedUrl: candidateOrigin,
       now: occurredAt,
     });
@@ -1692,18 +1711,11 @@ export async function runLatencyAcceptance({
     return publish(writeOutput, 1, { status: 'failed', code: 'CONTROL_PLANE_RECEIPTS_INVALID' });
   }
 
-  const rawReceipts = buildRawReceipts({
-    acceptanceWindowId,
-    textOperational,
-    asrResults,
-    ttsResults,
-    timingQueries,
-    controlPlaneRequests,
-  });
   const releaseBinding = Object.freeze({
     project: PROJECT,
     region: REGION,
-    service: SERVICE,
+    candidateService: CANDIDATE_SERVICE,
+    stableService: STABLE_SERVICE,
     releaseSha: commitSha,
     sourceArchiveSha256,
     imageDigest,
@@ -1711,7 +1723,19 @@ export async function runLatencyAcceptance({
     candidateTag,
     serviceOrigin: environment.V1_PUBLIC_ORIGIN,
     candidateOrigin,
+    candidateAudience,
     trafficPercent: candidateTrafficPercent,
+    trafficState,
+    stableTrafficState,
+  });
+  const rawReceipts = buildRawReceipts({
+    acceptanceWindowId,
+    textOperational,
+    asrResults,
+    ttsResults,
+    timingQueries,
+    controlPlaneRequests,
+    releaseBinding,
   });
 
   const record = acceptanceRecord({

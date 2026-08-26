@@ -98,9 +98,27 @@ unrelated IAM policy.
 Organization, billing account, project parent, and project billing link are
 accepted only in the explicitly enumerated canonical API shapes with exact
 case, delimiter, segment count, and required fields. The project-wide CIDR
-audit validates all supported `INTERNAL` + `RESERVED` Compute address purposes,
-normalizes canonical ranges (using `/32` only for unambiguous single-address
-families), and rejects unsupported or incomplete address shapes before a write.
+audit uses the following exhaustive `INTERNAL` address model, derived offline
+from the installed Cloud SDK 553 Compute v1 schema:
+
+| Purpose | Scope | Required selector | Address form |
+| --- | --- | --- | --- |
+| `DNS_RESOLVER` | regional | exact project/region subnetwork selfLink | one host address |
+| `GCE_ENDPOINT` | regional | exact project/region subnetwork selfLink | one host address |
+| `SHARED_LOADBALANCER_VIP` | regional | exact project/region subnetwork selfLink | one host address |
+| `IPSEC_INTERCONNECT` | regional | exact project network selfLink | IPv4 range |
+| `PRIVATE_SERVICE_CONNECT` | global | exact project network selfLink | one host address |
+| `SERVERLESS` | regional | no network or subnetwork selector | IPv4 range |
+| `VPC_PEERING` | global | exact project network selfLink | IPv4 range |
+
+Single-address rows must omit `prefixLength`; they are normalized to `/32` only
+for overlap calculation. Range rows require a canonical network-base IPv4
+prefix from 8 through 30. Global rows omit `region`; regional rows bind the
+exact `asia-east2` region. Both `RESERVED` and `IN_USE` rows are fully validated
+and included in overlap checks. `RESERVING`, unknown status, an incomplete or
+wrong-scope/selector shape, and unknown purposes fail closed. External
+`NAT_AUTO` is outside this INTERNAL model; INTERNAL `NAT_AUTO`,
+`CROSS_SITE_NETWORK`, and `PRIVATE_NAT` are rejected.
 
 The billing account must report `currencyCode=HKD`. Google requires a fixed
 budget amount to use the billing account's native currency, so the reviewed
@@ -240,11 +258,11 @@ SHA-256 values. Evidence publication then accepts only the planned numeric
 version returned and described by Secret Manager. Only after all versions read
 back does it delete those exact GCS generations and require zero SHA-scoped
 output residue. Neither workload identity can publish Secret versions; that
-  authority remains with the reviewed deployer. Candidate deployment is
-digest-pinned and private. Later releases keep the prior revision at 100% and
-the candidate at 0%; an exact empty-host first release assigns its sole
-candidate 100%. `/api/health/ready` is both the startup dependency gate and
-readiness probe, plus `/api/health/live` as the liveness probe. Public IAM can
+authority remains with the reviewed deployer. Candidate deployment is
+digest-pinned on the separate `hkbuddy-v1-api-candidate` service, always tagged
+and private at 100%; it never mutates `hkbuddy-v1-api`. `/api/health/ready` is
+both the startup dependency gate and readiness probe, plus `/api/health/live`
+as the liveness probe. Public IAM can
 be changed only after the active account reads back as the reviewed owner
 `admin@motionexp.com`; the deployer is deliberately not granted
 `roles/run.admin` or service-IAM administration.
@@ -464,30 +482,44 @@ inside the protected existing project. It does not build an image,
 run migration 001, create a Cloud Run candidate, or route traffic. Those actions
 belong to the frozen-release tasks after this contract and its independent
 review are green. The Cloud Run template in the JSON is the binding input for
-that later deployment: one instance, always-allocated CPU, Direct VPC, zero
-initial traffic, and separate live/ready probes. That later task also supplies
-the six accepted evidence versions; this base task deliberately leaves those
-containers versionless.
+that later two-service deployment: the private candidate is always 100% during
+acceptance; a later stable promotion stages the accepted untagged stable
+revision at 0% beside the prior stable revision at 100%; a first stable
+promotion creates the accepted stable revision privately at 100%. Both services
+use one instance, always-allocated CPU, Direct VPC, and separate live/ready
+probes. That later task also supplies the six accepted evidence versions; this
+base task deliberately leaves those containers versionless.
 
 ### Stable, candidate, promotion, and rollback safety
 
-The stable service origin is exactly
-`https://hkbuddy-v1-api-582852715831.asia-east2.run.app`. A frozen commit
-`<40-lowercase-hex>` produces revision `hkbuddy-v1-api-<first-12-hex>`, tag
-`candidate-<first-12-hex>`, and private tagged origin
-`https://candidate-<first-12-hex>---hkbuddy-v1-api-582852715831.asia-east2.run.app`.
-On an existing service, candidate deployment preserves the previous evidenced
-revision at 100% stable traffic, assigns the candidate 0% stable traffic, and
-does not add a public invoker binding. On the first release, bootstrap is
-allowed only when the exact service describe returns
-`CLOUD_RUN_SERVICE_NOT_FOUND` and both prior fields are null; the service is
-created with only the private candidate tag at 100%, no `allUsers`, and
-authenticated acceptance through the tagged origin. Its candidate receipt
-records `trafficState=private-bootstrap-100`, `trafficPercent=100`, and an
-explicit null prior release; later receipts record
-`prior-stable-100/candidate-0`. A permission error, ambiguous error text, an
-existing service with null prior fields, or a missing service with non-null
-prior fields fails closed.
+The public stable service is exactly `hkbuddy-v1-api`, with origin
+`https://hkbuddy-v1-api-582852715831.asia-east2.run.app`. The private candidate
+service is exactly `hkbuddy-v1-api-candidate`. A frozen commit
+`<40-lowercase-hex>` produces candidate revision
+`hkbuddy-v1-api-candidate-<first-12-hex>`, tag `candidate-<first-12-hex>`, and
+tagged QA origin
+`https://candidate-<first-12-hex>---hkbuddy-v1-api-candidate-582852715831.asia-east2.run.app`.
+Every candidate is routed at 100% on that private service, whose exact Invoker
+policy contains only `user:admin@motionexp.com`; `allUsers` and
+`allAuthenticatedUsers` are forbidden. Identity tokens use the untagged
+candidate-service root as audience while requests target the tagged QA origin.
+The stable service is not changed during candidate deployment or acceptance.
+Candidate, readiness, workload, mobile, trace, and phase receipts bind
+`candidateService`, `stableService`,
+`trafficState=candidate-service-private-100`, and `stableTrafficState` equal to
+`stable-absent` or `stable-prior-100`. Old percent-only and same-service states
+fail closed.
+
+On a later promotion, the evidenced prior stable revision stays untagged at
+100% while `hkbuddy-v1-api-<sha12>` is created untagged at 0%. Exact stable
+service/revision/image/config and pre-existing public IAM are read back before
+an atomic switch to the accepted stable revision at 100%; public IAM is never
+mutated. On a first promotion, exact stable-service absence and null prior
+fields are required. The accepted stable revision is created privately at 100%
+and fully verified; `allUsers:roles/run.invoker` is the final mutation and only
+its IAM readback may follow. Permission errors, ambiguous absence, an existing
+stable service with null prior fields, or a missing stable service with non-null
+prior fields fail closed.
 
 The manifest-driven release phases are dry-run unless the exact frozen SHA is
 confirmed:
@@ -499,21 +531,23 @@ node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=pr
 node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=rollback --confirm-release=40_HEX_SHA
 ```
 
-Promotion freshly validates the candidate service/revision/IAM/image, immutable
-readiness/workload/mobile artifacts, and 200 production traces before it can add
-the reviewed public invoker and convert the candidate to untagged stable 100%.
-If a first-release IAM, traffic, or readback is ambiguous, compensation restores
-private IAM and the tagged 100% candidate, then freshly verifies service,
-revision, immutable image, evidence, and IAM. Rollback is a
-separate recovery phase that first loads the complete mobile receipt chain,
-revalidates the candidate receipt's exact prior revision/image binding, rereads
-service, both revisions, both immutable images, and all evidence, then routes
-the exact `previousRevision` from the manifest back to 100%, removes the
-candidate tag, and verifies readback. Candidate cleanup applies the same gate
-through the candidate receipt before removing an unpromoted tag. For a first
-release, both recovery phases return `ROLLBACK_UNAVAILABLE_NO_PRIOR_RELEASE`
-without a control-plane call. Neither
-phase deletes the candidate, database, media, evidence, protected baseline, or
-any unrelated service. A failed candidate remains unpromoted; if candidate
-deployment partially changed service state, the controller restores the exact
-prior IAM and stable traffic or fails closed with the recovery boundary visible.
+Promotion freshly validates candidate service/revision/private IAM/image,
+immutable readiness/workload/mobile artifacts, the complete receipt chain, and
+200 candidate-service production traces before stable mutation. Every lost
+mutation response is followed by an exact fresh readback and an explicit
+`responseLossRecoveries` result. A failed later promotion restores and verifies
+the exact prior stable revision/image/config at 100% while preserving its exact
+public IAM. A first-promotion IAM ambiguity restores and verifies the accepted
+private stable service and empty private IAM before reporting failure.
+
+Rollback loads the complete mobile receipt chain and operates only on a genuine
+receipt-proven prior stable revision; it never depends on candidate existence or
+changes candidate IAM. With no genuine prior stable target it returns
+`ROLLBACK_UNAVAILABLE_NO_PRIOR_RELEASE` before any control-plane call. Candidate
+cleanup is separately receipt-bound on both first and
+later releases: it validates the exact candidate service/revision/tag/image and
+private IAM, deletes only `hkbuddy-v1-api-candidate`, and verifies canonical
+candidate-specific absence. It never changes stable traffic or stable IAM.
+Neither recovery phase deletes database, media, evidence, protected baseline,
+or unrelated services. Drift or an unprovable response-loss state fails closed
+with the recovery boundary visible.

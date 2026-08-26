@@ -136,7 +136,7 @@ test('session api uses a 30-day secure production cookie without weakening produ
   assert.throws(() => loadConfig({
     NODE_ENV: 'production',
     V1_PUBLIC_ORIGIN: `https://hkbuddy-v1-api-${projectNumber}.asia-east2.run.app`,
-    V1_CANDIDATE_ORIGIN: `https://candidate-${releaseSha.slice(0, 12)}---hkbuddy-v1-api-${projectNumber}.asia-east2.run.app`,
+    V1_CANDIDATE_ORIGIN: `https://candidate-${releaseSha.slice(0, 12)}---hkbuddy-v1-api-candidate-${projectNumber}.asia-east2.run.app`,
     V1_RUNTIME_SERVICE_ACCOUNT: 'hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com',
     V1_RELEASE_COMMIT_SHA: releaseSha,
     V1_SESSION_SECRET: 'x'.repeat(32),

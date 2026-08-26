@@ -44,7 +44,7 @@ test('exact origin allowlist accepts stable and one candidate but rejects unrela
   const store = new AtomicFileStore({ filePath: join(directory, 'store.json') });
   await store.init();
   const stable = 'https://hkbuddy-v1-api-582852715831.asia-east2.run.app';
-  const candidate = 'https://candidate-aaaaaaaaaaaa---hkbuddy-v1-api-582852715831.asia-east2.run.app';
+  const candidate = 'https://candidate-aaaaaaaaaaaa---hkbuddy-v1-api-candidate-582852715831.asia-east2.run.app';
   const config = loadConfig({ NODE_ENV: 'test', V1_PUBLIC_ORIGIN: stable, V1_SESSION_SECRET: 's'.repeat(32) });
   config.allowedOrigins = [stable, candidate];
   const app = createApp({ config, store });
@@ -61,7 +61,7 @@ test('exact origin allowlist accepts stable and one candidate but rejects unrela
     [candidate, 201],
     ['https://other---hkbuddy-v1-api-582852715831.asia-east2.run.app', 403],
     ['https://candidate-aaaaaaaaaaaa---hkbuddy-api-582852715831.asia-east2.run.app', 403],
-    ['https://candidate-aaaaaaaaaaaa---hkbuddy-v1-api-93662314720.asia-east2.run.app', 403],
+    ['https://candidate-aaaaaaaaaaaa---hkbuddy-v1-api-candidate-93662314720.asia-east2.run.app', 403],
     ['https://hkbuddy-pilot-0630.azurewebsites.net', 403],
   ]) {
     const result = await json(`${baseUrl}/api/v1/session`, {

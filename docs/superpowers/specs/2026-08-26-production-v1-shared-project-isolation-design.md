@@ -68,7 +68,8 @@ The migrated fail-closed resource contract uses:
 
 - project: `motion-expert-hk-ltd-webpage` (`582852715831`);
 - Artifact Registry: `hkbuddy-v1` in `asia-east2`;
-- Cloud Run service: `hkbuddy-v1-api` in `asia-east2`;
+- Cloud Run services: public stable `hkbuddy-v1-api` and private acceptance
+  scratch service `hkbuddy-v1-api-candidate`, both in `asia-east2`;
 - Cloud SQL: `hkbuddy-v1-pg`, PostgreSQL 16, database `hkbuddy_v1`;
 - media bucket: `hkbuddy-v1-582852715831-media` in `asia-east2`;
 - Cloud Build source bucket: `hkbuddy-v1-582852715831-build-source` in
@@ -108,9 +109,11 @@ legacy executable-alias inventory.
 Cloud Asset acceptance is type-specific: canonical full name, asset type,
 numeric project authority, parent type/name, location, and metadata shape must
 agree. Only release-compatible Cloud Run revisions named
-`hkbuddy-v1-api-<12 lowercase hex>` beneath the exact service and Docker image
-digests for `hkbuddy-v1-api@sha256:<64 lowercase hex>` beneath the exact
-`hkbuddy-v1` repository are accepted descendants.
+`hkbuddy-v1-api-candidate-<12 lowercase hex>` beneath the exact private
+candidate service and `hkbuddy-v1-api-<12 lowercase hex>` beneath the exact
+stable service are accepted, together with Docker image digests for
+`hkbuddy-v1-api@sha256:<64 lowercase hex>` beneath the exact `hkbuddy-v1`
+repository.
 
 Before the first write, the control plane must prove all of the following in one
 fresh preflight:
@@ -158,17 +161,30 @@ Provision APIs and the resource island in dependency order. Build from the
 frozen clean commit through exact staging directory
 `gs://hkbuddy-v1-582852715831-build-source/source`; accept provenance only from
 that bucket/prefix with the frozen source digest. Run the digest-pinned database
-migration and deploy the candidate without changing public access. Existing
-services require a receipt-bound exact prior controller revision and immutable
-image digest; they keep that revision at 100% and the candidate at 0%. An empty
-host may bootstrap only after the command-, project-, region-, and
-service-specific canonical `CLOUD_RUN_SERVICE_NOT_FOUND`; it creates the sole
-candidate revision at 100%, keeps IAM private with no `allUsers`, runs acceptance
-through the authenticated tagged origin, and records explicit
-`private-bootstrap-100` plus no-prior receipt state. Only after the complete
-receipt chain is revalidated may promotion add public invocation and remove the
-candidate tag. Ambiguous promotion IAM or traffic results restore and freshly
-verify private IAM, service traffic/tag, revision, immutable image, and evidence.
+migration and deploy every candidate only to the separate
+`hkbuddy-v1-api-candidate` service. Its revision is
+`hkbuddy-v1-api-candidate-<12 lowercase hex>` at private 100% traffic with the
+SHA tag on that service only. The untagged candidate-service root is the
+in-memory ID-token audience and the tagged URL is the authenticated request
+target. Exact candidate IAM contains only the reviewed private invoker and no
+`allUsers` or `allAuthenticatedUsers`. Every candidate receipt records
+`trafficState=candidate-service-private-100` plus the exact stable service and
+whether stable is absent or retains its genuine prior revision at 100%. The
+public `hkbuddy-v1-api` service is unchanged during candidate acceptance.
+
+Promotion freshly revalidates the private candidate, immutable image/config,
+complete receipt chain, Task 8 artifacts, and production traces before copying
+the accepted image/config into stable. A later release preserves the genuine
+prior stable revision at 100%, stages the accepted stable revision untagged at
+0%, verifies exact image/config and absence of every stable tag, then atomically
+switches the accepted stable revision to 100%; public stable IAM is exact
+read-only state throughout. A first release creates stable privately at 100%,
+verifies service/revision/image/config and private IAM, then makes
+`allUsers:roles/run.invoker` the final mutation; only its IAM readback follows.
+Ambiguous candidate work restores or removes only a receipt-proven private
+candidate service. Later-promotion ambiguity restores the exact prior stable
+100% state without changing public IAM; first-promotion ambiguity restores the
+accepted stable service and exact private stable IAM.
 
 Promotion requires the existing production acceptance contract: real Vertex
 LLM, Cantonese/English/Mandarin ASR and TTS, governed HKBU answers and citations,
@@ -180,7 +196,10 @@ The mandatory receipt order is build, migration, inventory, acceptance,
 collection, evidence publication, candidate, readiness, controlled workload,
 mobile acceptance, then promotion, with the release manifest refreshed at each
 producer/consumer boundary. Candidate cleanup loads through the candidate
-receipt; later rollback loads the complete mobile chain. Both revalidate local
-evidence and fresh service, candidate/prior revision, and candidate/prior image
-readbacks before tag or traffic mutation. First-release rollback is unavailable
-and performs no control-plane call because no genuine prior V1 exists.
+receipt, revalidates its service/revision/tag/image/private IAM, deletes only
+`hkbuddy-v1-api-candidate`, and verifies candidate-specific canonical absence;
+it never changes stable traffic or IAM. Later rollback loads the complete mobile
+chain, revalidates the receipt-proven prior stable revision/image/service, and
+mutates only `hkbuddy-v1-api` traffic. It does not depend on the candidate
+service still existing. First-release rollback is unavailable and performs no
+control-plane call because no genuine prior V1 exists.

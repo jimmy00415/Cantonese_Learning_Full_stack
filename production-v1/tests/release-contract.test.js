@@ -53,10 +53,14 @@ const BUILD_SA = `projects/${PROJECT}/serviceAccounts/hkbuddy-v1-build@${PROJECT
 const RUNTIME_SA = `hkbuddy-v1-runtime@${PROJECT}.iam.gserviceaccount.com`;
 const ACCEPTANCE_SA = `hkbuddy-v1-acceptance@${PROJECT}.iam.gserviceaccount.com`;
 const ACCEPTANCE_RUN_ID = '123e4567-e89b-42d3-a456-426614174000';
+const STABLE_SERVICE = 'hkbuddy-v1-api';
+const CANDIDATE_SERVICE = 'hkbuddy-v1-api-candidate';
 const CANDIDATE_TAG = `candidate-${RELEASE_SHA.slice(0, 12)}`;
-const REVISION = `hkbuddy-v1-api-${RELEASE_SHA.slice(0, 12)}`;
-const STABLE_ORIGIN = `https://hkbuddy-v1-api-${PROJECT_NUMBER}.${REGION}.run.app`;
-const CANDIDATE_ORIGIN = `https://${CANDIDATE_TAG}---hkbuddy-v1-api-${PROJECT_NUMBER}.${REGION}.run.app`;
+const REVISION = `${CANDIDATE_SERVICE}-${RELEASE_SHA.slice(0, 12)}`;
+const STABLE_REVISION = `${STABLE_SERVICE}-${RELEASE_SHA.slice(0, 12)}`;
+const STABLE_ORIGIN = `https://${STABLE_SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app`;
+const CANDIDATE_ROOT = `https://${CANDIDATE_SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app`;
+const CANDIDATE_ORIGIN = `https://${CANDIDATE_TAG}---${CANDIDATE_SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app`;
 const QA_SUBJECT_SHA256 = createHash('sha256').update('admin@motionexp.com').digest('hex');
 const IMAGE_SCRIPTS = Object.freeze([
   'scripts/image-release-contract.js',
@@ -121,6 +125,9 @@ const ACCEPTANCE_OUTPUTS = Object.freeze({
 });
 
 function releaseInput(overrides = {}) {
+  const previousRevision = Object.hasOwn(overrides, 'previousRevision')
+    ? overrides.previousRevision : `${STABLE_SERVICE}-111111111111`;
+  const stableTrafficState = previousRevision === null ? 'stable-absent' : 'stable-prior-100';
   return {
     releaseSha: RELEASE_SHA,
     sourceArchive: 'C:\\release\\source.tar.gz',
@@ -132,18 +139,27 @@ function releaseInput(overrides = {}) {
     acceptanceOutputs: ACCEPTANCE_OUTPUTS,
     task8Evidence: {
       readiness: {
-        filePath: 'C:\\release\\readiness.json', artifactSha256: '7'.repeat(64), objectSha256: '7'.repeat(64),
+        schemaVersion: 2, filePath: 'C:\\release\\readiness.json',
+        artifactSha256: '7'.repeat(64), objectSha256: '7'.repeat(64),
+        candidateService: CANDIDATE_SERVICE, stableService: STABLE_SERVICE,
+        trafficState: 'candidate-service-private-100', stableTrafficState,
       },
       workload: {
-        filePath: 'C:\\release\\workload.json', artifactSha256: '8'.repeat(64), objectSha256: '8'.repeat(64),
+        schemaVersion: 2, filePath: 'C:\\release\\workload.json',
+        artifactSha256: '8'.repeat(64), objectSha256: '8'.repeat(64),
+        candidateService: CANDIDATE_SERVICE, stableService: STABLE_SERVICE,
+        trafficState: 'candidate-service-private-100', stableTrafficState,
       },
       mobile: {
-        filePath: 'C:\\release\\mobile.json', artifactSha256: '9'.repeat(64), objectSha256: '9'.repeat(64),
+        schemaVersion: 2, filePath: 'C:\\release\\mobile.json',
+        artifactSha256: '9'.repeat(64), objectSha256: '9'.repeat(64),
+        candidateService: CANDIDATE_SERVICE, stableService: STABLE_SERVICE,
+        trafficState: 'candidate-service-private-100', stableTrafficState,
       },
     },
     legacyInventory: EVIDENCE.legacyInventory,
     evidence: EVIDENCE,
-    previousRevision: 'hkbuddy-v1-api-111111111111',
+    previousRevision,
     previousImageDigest: PREVIOUS_IMAGE_DIGEST,
     ...overrides,
   };
@@ -387,8 +403,12 @@ function validWorkloadAcceptanceRecord() {
     trace: `projects/${PROJECT}/traces/${item.traceId}`,
   }));
   const rawPayload = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     acceptanceWindowId: createHash('sha256').update('acceptance-window').digest('hex'),
+    candidateService: CANDIDATE_SERVICE,
+    stableService: STABLE_SERVICE,
+    trafficState: 'candidate-service-private-100',
+    stableTrafficState: 'stable-prior-100',
     textTurns,
     asrRequests,
     ttsRequests,
@@ -400,12 +420,16 @@ function validWorkloadAcceptanceRecord() {
     receiptsSha256: createHash('sha256').update(JSON.stringify(canonicalFixture(rawPayload))).digest('hex'),
   };
   return finalizeLatencyAcceptanceRecord({
-    schemaVersion: 4,
+    schemaVersion: 5,
     commitSha: RELEASE_SHA,
     candidateOrigin: CANDIDATE_ORIGIN,
+    candidateService: CANDIDATE_SERVICE,
+    stableService: STABLE_SERVICE,
+    trafficState: 'candidate-service-private-100',
+    stableTrafficState: 'stable-prior-100',
     access: {
       authenticated: true,
-      audience: STABLE_ORIGIN,
+      audience: CANDIDATE_ROOT,
       issuer: 'https://accounts.google.com',
       subjectSha256: QA_SUBJECT_SHA256,
       taggedUrl: CANDIDATE_ORIGIN,
@@ -413,7 +437,8 @@ function validWorkloadAcceptanceRecord() {
     releaseBinding: {
       project: PROJECT,
       region: REGION,
-      service: 'hkbuddy-v1-api',
+      candidateService: CANDIDATE_SERVICE,
+      stableService: STABLE_SERVICE,
       releaseSha: RELEASE_SHA,
       sourceArchiveSha256: SOURCE_SHA,
       imageDigest: IMAGE_DIGEST,
@@ -421,7 +446,10 @@ function validWorkloadAcceptanceRecord() {
       candidateTag: CANDIDATE_TAG,
       serviceOrigin: STABLE_ORIGIN,
       candidateOrigin: CANDIDATE_ORIGIN,
-      trafficPercent: 0,
+      candidateAudience: CANDIDATE_ROOT,
+      trafficPercent: 100,
+      trafficState: 'candidate-service-private-100',
+      stableTrafficState: 'stable-prior-100',
     },
     fixtureSetSha256: 'd'.repeat(64),
     workload: LATENCY_ACCEPTANCE_CONTRACT,
@@ -502,7 +530,7 @@ function controlPlaneLogEntries(record) {
     resource: {
       type: 'cloud_run_revision',
       labels: {
-        project_id: PROJECT, location: REGION, service_name: 'hkbuddy-v1-api',
+        project_id: PROJECT, location: REGION, service_name: CANDIDATE_SERVICE,
         revision_name: REVISION,
       },
     },
@@ -651,6 +679,7 @@ function fixtureReceiptOutputs(plan, phase) {
     access: structuredClone(plan.candidateAccess),
     candidateContractSha256: createHash('sha256')
       .update(JSON.stringify(canonicalFixture(plan.expectedCandidate))).digest('hex'),
+    candidateService: CANDIDATE_SERVICE,
     imageDigest: plan.imageDigest,
     origin: plan.candidateOrigin,
     publicInvoker: false,
@@ -660,18 +689,22 @@ function fixtureReceiptOutputs(plan, phase) {
       revision: plan.previousRevision,
     },
     revision: plan.candidateRevision,
+    stableService: STABLE_SERVICE,
+    stableTrafficState: plan.expectedStable.initialTrafficState,
     tag: plan.candidateTag,
-    trafficPercent: plan.previousRevision === null ? 100 : 0,
-    trafficState: plan.previousRevision === null
-      ? 'private-bootstrap-100'
-      : 'prior-stable-100/candidate-0',
+    trafficPercent: 100,
+    trafficState: 'candidate-service-private-100',
   };
   const output = {
     artifactSha256: plan.task8Evidence[phase].artifactSha256,
     objectSha256: plan.task8Evidence[phase].objectSha256,
     candidateOrigin: plan.candidateOrigin,
     candidateRevision: plan.candidateRevision,
+    candidateService: CANDIDATE_SERVICE,
     imageDigest: plan.imageDigest,
+    stableService: STABLE_SERVICE,
+    stableTrafficState: plan.expectedStable.initialTrafficState,
+    trafficState: 'candidate-service-private-100',
   };
   if (phase === 'workload') {
     output.execution = {
@@ -694,11 +727,15 @@ function fixtureReceiptChain(plan, through) {
   const receipts = [];
   for (const [index, phase] of phases.entries()) {
     const receipt = finalizeReleasePhaseReceipt({
-      schemaVersion: 1,
+      schemaVersion: 2,
       phase,
       sequence: index + 1,
       releaseSha: plan.releaseSha,
       releaseIdentitySha256: plan.releaseIdentitySha256,
+      candidateService: CANDIDATE_SERVICE,
+      stableService: STABLE_SERVICE,
+      trafficState: 'candidate-service-private-100',
+      stableTrafficState: plan.expectedStable.initialTrafficState,
       previousReceiptSha256: receipts.at(-1)?.receiptSha256 ?? null,
       completed: plan.operations.filter((member) => member.phase === phase).map(({ id }) => id),
       outputs: fixtureReceiptOutputs(plan, phase),
@@ -717,6 +754,56 @@ function runGcpRelease(options) {
     verifyTask8Evidence: async () => true,
     ...options,
   });
+}
+
+function candidateServiceReadback(plan) {
+  return {
+    service: CANDIDATE_SERVICE,
+    traffic: [{
+      revision: plan.candidateRevision, tag: plan.candidateTag, percent: 100,
+    }],
+  };
+}
+
+function stablePriorReadback(plan) {
+  return {
+    service: STABLE_SERVICE,
+    traffic: [{ revision: plan.previousRevision, percent: 100 }],
+  };
+}
+
+function stableStagedReadback(plan) {
+  return {
+    service: STABLE_SERVICE,
+    traffic: plan.expectedStable.stagedTraffic.map(({ revision, percent }) => ({ revision, percent })),
+  };
+}
+
+function stablePromotedReadback(plan) {
+  return {
+    service: STABLE_SERVICE,
+    traffic: [{ revision: plan.stableRevision, percent: 100 }],
+  };
+}
+
+function candidatePrivateIam(etag = 'candidate-private') {
+  return {
+    bindings: [{ role: 'roles/run.invoker', members: ['user:admin@motionexp.com'] }],
+    etag,
+    version: 1,
+  };
+}
+
+function stablePrivateIam(etag = 'stable-private') {
+  return { bindings: [], etag, version: 1 };
+}
+
+function stablePublicIam(etag = 'stable-public') {
+  return {
+    bindings: [{ role: 'roles/run.invoker', members: ['allUsers'] }],
+    etag,
+    version: 1,
+  };
 }
 
 test('built image contract loads the governed corpus and rejects every unrelated data or report file', async (t) => {
@@ -892,7 +979,8 @@ test('release plan is archive-bound, digest-pinned, evidence-first, probe-exact,
     !plan.operations.find((operation) => operation.id === id).argv.includes('--member=allUsers')
   )), true);
   assert.equal(ids.includes('promote-authority-readback'), true);
-  assert.equal(ids.indexOf('promote-public-service') < ids.indexOf('promote-traffic'), true);
+  assert.equal(ids.indexOf('promote-stable-deploy') < ids.indexOf('promote-traffic'), true);
+  assert.equal(ids.indexOf('promote-traffic') < ids.indexOf('promote-public-iam-readback'), true);
   assert.equal(ids.indexOf('promote-traffic') < ids.indexOf('rollback-traffic'), true);
 
   const build = plan.operations.find(({ id }) => id === 'build-submit');
@@ -918,8 +1006,7 @@ test('release plan is archive-bound, digest-pinned, evidence-first, probe-exact,
   assert.equal(new Set(mountPaths).size, mountPaths.length,
     'Cloud Run v1 rejects multiple secret volumes mounted at one directory');
   assert.deepEqual(serviceSpec.spec.traffic, [
-    { revisionName: 'hkbuddy-v1-api-111111111111', percent: 100 },
-    { revisionName: REVISION, tag: CANDIDATE_TAG, percent: 0 },
+    { revisionName: REVISION, tag: CANDIDATE_TAG, percent: 100 },
   ]);
   const specEnv = Object.fromEntries(serviceSpec.spec.template.spec.containers[0].env
     .filter(({ value }) => value !== undefined).map(({ name, value }) => [name, value]));
@@ -933,12 +1020,17 @@ test('release plan is archive-bound, digest-pinned, evidence-first, probe-exact,
 
   assert.deepEqual(plan.candidateAccess, {
     authenticated: true,
-    audience: STABLE_ORIGIN,
+    audience: CANDIDATE_ROOT,
     issuer: 'https://accounts.google.com',
     subjectSha256: QA_SUBJECT_SHA256,
     taggedUrl: CANDIDATE_ORIGIN,
   });
-  const publicAuth = plan.operations.find(({ id }) => id === 'promote-public-service');
+  assert.equal(plan.operations.some(({ id }) => id === 'promote-public-service'), false,
+    'later promotions preserve stable public IAM read-only');
+  const firstReleasePlan = buildReleasePlan(releaseInput({
+    previousRevision: null, previousImageDigest: null,
+  }));
+  const publicAuth = firstReleasePlan.operations.find(({ id }) => id === 'promote-public-service');
   assert.deepEqual(publicAuth.argv.slice(0, 5), [
     'run', 'services', 'add-iam-policy-binding', 'hkbuddy-v1-api', '--member=allUsers',
   ]);
@@ -964,16 +1056,7 @@ test('candidate deploy is fenced by the canonical gcloud Service v1 dry-run resu
     execute: async (argv) => {
       calls.push(argv);
       if (argv[1] === 'services' && argv[2] === 'describe') {
-        return {
-          service: 'hkbuddy-v1-api',
-          traffic: [{ revision: input.previousRevision, percent: 100 }],
-        };
-      }
-      if (argv[1] === 'revisions' && argv[3] === input.previousRevision) {
-        return { revision: input.previousRevision, image: plan.previousImage };
-      }
-      if (argv[0] === 'artifacts' && argv.includes(plan.previousImage)) {
-        return { image: plan.previousImage };
+        throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
       }
       if (argv.includes('--dry-run')) {
         const drift = structuredClone(plan.candidateServiceSpec);
@@ -997,6 +1080,7 @@ test('candidate phase feeds raw Service JSON through gcloud 553-compatible secre
   const input = releaseInput({ sourceArchive: join(directory, 'source.tar.gz') });
   const plan = buildReleasePlan(input);
   let describeCount = 0;
+  let iamGranted = false;
   const dryRun = (service) => {
     const revisionSpec = service?.spec?.template?.spec;
     const container = revisionSpec?.containers?.[0];
@@ -1022,30 +1106,46 @@ test('candidate phase feeds raw Service JSON through gcloud 553-compatible secre
       }
       if (argv[1] === 'services' && argv[2] === 'describe') {
         describeCount += 1;
-        return describeCount === 1 ? {
-          service: 'hkbuddy-v1-api', traffic: [{ revision: input.previousRevision, percent: 100 }],
-        } : {
-          service: 'hkbuddy-v1-api', traffic: [
-            { revision: input.previousRevision, percent: 100 },
-            { revision: REVISION, tag: CANDIDATE_TAG, percent: 0 },
-          ],
+        if (describeCount === 1) {
+          throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+        }
+        return {
+          service: CANDIDATE_SERVICE,
+          traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 100 }],
         };
       }
-      if (argv[1] === 'revisions' && argv[3] === input.previousRevision) {
-        return { revision: input.previousRevision, image: plan.previousImage };
-      }
       if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
-      if (argv.includes('get-iam-policy')) return {
-        bindings: [{ role: 'roles/run.invoker', members: ['user:qa@motionexp.com'] }],
-      };
-      if (argv[0] === 'artifacts') return {
-        image: argv.includes(plan.previousImage) ? plan.previousImage : plan.expectedCandidate.image,
-      };
+      if (argv.includes('get-iam-policy')) return !iamGranted
+        ? { bindings: [], etag: 'candidate-private-baseline', version: 1 }
+        : {
+          bindings: [{ role: 'roles/run.invoker', members: ['user:admin@motionexp.com'] }],
+          etag: 'candidate-private-granted', version: 1,
+        };
+      if (argv.includes('add-iam-policy-binding')) {
+        iamGranted = true;
+        return {
+          bindings: [{ role: 'roles/run.invoker', members: ['user:admin@motionexp.com'] }],
+          etag: 'candidate-private-granted', version: 1,
+        };
+      }
+      if (argv[0] === 'artifacts') return { image: plan.expectedCandidate.image };
       throw new Error(`unexpected operation: ${argv.join(' ')}`);
     },
     writeOutput: () => undefined,
   });
-  assert.equal(result.exitCode, 0);
+  assert.doesNotThrow(() => validateCandidateControlPlaneReadbacks({
+    service: {
+      service: CANDIDATE_SERVICE,
+      traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 100 }],
+    },
+    revision: structuredClone(plan.expectedCandidate),
+    artifact: { image: plan.expectedCandidate.image },
+    iam: {
+      bindings: [{ role: 'roles/run.invoker', members: ['user:admin@motionexp.com'] }],
+      etag: 'candidate-private-granted', version: 1,
+    },
+  }, plan));
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
   const invalid = structuredClone(plan.candidateServiceSpec);
   invalid.spec.template.spec.containers[0].volumeMounts[1].mountPath
     = invalid.spec.template.spec.containers[0].volumeMounts[0].mountPath;
@@ -1128,7 +1228,7 @@ test('acceptance execution reads back each exact Job identity before running it'
     },
     writeOutput: () => undefined,
   });
-  assert.equal(result.exitCode, 0);
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
   assert.equal(calls.length, 12);
   for (const expected of Object.values(plan.expectedJobs)) {
     assert.equal(validateReleaseJobReadback(structuredClone(expected), expected), true);
@@ -1482,8 +1582,8 @@ test('candidate readback requires private authenticated tagged QA and the exact 
   for (const mutate of [
     (value) => { value.image = value.image.replace('@sha256:', ':latest'); },
     (value) => { value.probes.startup.path = '/api/health/live'; },
-    (value) => { value.traffic.at(-1).percent = 100; },
-    (value) => { value.iam.publicInvoker = true; },
+    (value) => { value.traffic.at(-1).percent = 0; },
+    (value) => { value.iam.policy = 'stable-public'; },
     (value) => { value.access.audience = value.access.taggedUrl; },
     (value) => { value.secretMounts.legacyInventory.version = 'latest'; },
   ]) {
@@ -1498,15 +1598,12 @@ test('confirmed candidate fails closed unless every control-plane readback match
   const plan = buildReleasePlan(input);
   const readbacks = {
     service: {
-      service: 'hkbuddy-v1-api',
-      traffic: [
-        { revision: input.previousRevision, percent: 100 },
-        { revision: REVISION, tag: CANDIDATE_TAG, percent: 0 },
-      ],
+      service: CANDIDATE_SERVICE,
+      traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 100 }],
     },
     revision: structuredClone(plan.expectedCandidate),
     iam: {
-      bindings: [{ role: 'roles/run.invoker', members: ['user:qa@motionexp.com'] }],
+      bindings: [{ role: 'roles/run.invoker', members: ['user:admin@motionexp.com'] }],
       etag: 'Bw-candidate=',
       version: 1,
     },
@@ -1522,20 +1619,28 @@ test('confirmed candidate fails closed unless every control-plane readback match
 
   const createExecutor = ({ artifact = readbacks.artifact } = {}) => {
     let serviceDescribeCount = 0;
+    let iamGranted = false;
     return async (argv) => {
     if (argv[0] === 'artifacts') return argv.includes(plan.previousImage)
       ? { image: plan.previousImage } : structuredClone(artifact);
     if (argv.includes('--dry-run')) return structuredClone(plan.candidateServiceSpec);
-    if (argv.includes('get-iam-policy')) return structuredClone(readbacks.iam);
+    if (argv.includes('get-iam-policy')) return iamGranted
+      ? structuredClone(readbacks.iam)
+      : { bindings: [], etag: 'Bw-private-baseline=', version: 1 };
+    if (argv.includes('add-iam-policy-binding')) {
+      iamGranted = true;
+      return structuredClone(readbacks.iam);
+    }
     if (argv[1] === 'revisions' && argv[3] === input.previousRevision) {
       return { revision: input.previousRevision, image: plan.previousImage };
     }
     if (argv[1] === 'revisions') return structuredClone(readbacks.revision);
     if (argv[1] === 'services' && argv[2] === 'describe') {
       serviceDescribeCount += 1;
-      return serviceDescribeCount === 1
-        ? { service: 'hkbuddy-v1-api', traffic: [{ revision: 'hkbuddy-v1-api-111111111111', percent: 100 }] }
-        : structuredClone(readbacks.service);
+      if (serviceDescribeCount === 1) {
+        throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+      }
+      return structuredClone(readbacks.service);
     }
     return { deployed: true };
     };
@@ -1578,10 +1683,10 @@ test('release orchestrator is dry-run first and executes only one exactly confir
       calls.push(argv);
       if (argv[1] === 'services' && argv[2] === 'describe') return rolledBack
         ? { service: 'hkbuddy-v1-api', traffic: [{ revision: input.previousRevision, percent: 100 }] }
-        : { service: 'hkbuddy-v1-api', traffic: [{ revision: REVISION, percent: 100 }] };
+        : { service: 'hkbuddy-v1-api', traffic: [{ revision: STABLE_REVISION, percent: 100 }] };
       if (argv[1] === 'revisions') return argv[3] === input.previousRevision
         ? { revision: input.previousRevision, image: plan.previousImage }
-        : structuredClone(plan.expectedCandidate);
+        : structuredClone(plan.expectedStable);
       if (argv[0] === 'artifacts') return {
         image: argv.includes(plan.previousImage) ? plan.previousImage : plan.image,
       };
@@ -1589,6 +1694,10 @@ test('release orchestrator is dry-run first and executes only one exactly confir
         rolledBack = true;
         return { service: 'hkbuddy-v1-api', traffic: [{ revision: input.previousRevision, percent: 100 }] };
       }
+      if (argv.includes('get-iam-policy')) return {
+        bindings: [{ role: 'roles/run.invoker', members: ['allUsers'] }],
+        etag: 'stable-public', version: 1,
+      };
       throw new Error(`unexpected operation: ${argv.join(' ')}`);
     },
     writeOutput: () => undefined,
@@ -1605,10 +1714,12 @@ test('release orchestrator is dry-run first and executes only one exactly confir
   assert.equal(invalid.publicReport.mutationPerformed, false);
 });
 
-test('rollback removes the candidate tag before restoring the prior revision', () => {
+test('rollback mutates only stable traffic and never references the candidate service or tag', () => {
   const plan = buildReleasePlan(releaseInput());
   const rollback = plan.operations.find(({ id }) => id === 'rollback-traffic');
-  assert.equal(rollback.argv.includes(`--remove-tags=${CANDIDATE_TAG}`), true);
+  assert.equal(rollback.argv.includes(`--remove-tags=${CANDIDATE_TAG}`), false);
+  assert.equal(rollback.argv.includes(CANDIDATE_SERVICE), false);
+  assert.equal(rollback.argv.includes(STABLE_SERVICE), true);
   assert.equal(rollback.argv.includes('--to-revisions=hkbuddy-v1-api-111111111111=100'), true);
 });
 
@@ -1630,314 +1741,188 @@ test('rollback rejects a zero-percent candidate tag that remains reachable', asy
   assert.equal(result.exitCode, 1);
 });
 
-test('public promotion requires the reviewed owner identity before its first mutation', async () => {
-  const input = releaseInput();
-  const plan = buildReleasePlan(input);
-  const candidateReadbacks = {
-    service: {
-      service: 'hkbuddy-v1-api',
-      traffic: [
-        { revision: input.previousRevision, percent: 100 },
-        { revision: REVISION, tag: CANDIDATE_TAG, percent: 0 },
-      ],
-    },
-    revision: structuredClone(plan.expectedCandidate),
-    iam: {
-      bindings: [{ role: 'roles/run.invoker', members: ['user:qa@motionexp.com'] }],
-      etag: 'Bw-private=',
-      version: 1,
-    },
-    artifact: { image: plan.expectedCandidate.image },
-  };
-  let promoted = false;
-  let promotedReadbackCount = 0;
-  let publicGranted = false;
-  const accepted = await runGcpRelease({
-    argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`], input,
-    execute: async (argv) => {
-      if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
-      if (argv[0] === 'artifacts') return structuredClone(candidateReadbacks.artifact);
-      if (argv.includes('get-iam-policy')) return publicGranted ? {
-        bindings: [{
-          role: 'roles/run.invoker', members: ['allUsers', 'user:qa@motionexp.com'],
-        }],
-        etag: 'Bw-public=',
-        version: 1,
-      } : structuredClone(candidateReadbacks.iam);
-      if (argv.includes('add-iam-policy-binding')) {
-        publicGranted = true;
-        return {
-          bindings: [{
-            role: 'roles/run.invoker', members: ['allUsers', 'user:qa@motionexp.com'],
-          }],
-          etag: 'Bw-public=',
-          version: 1,
-        };
-      }
-      if (argv[1] === 'revisions') return structuredClone(candidateReadbacks.revision);
-      if (argv.includes('update-traffic')) promoted = true;
-      if (argv[1] === 'services' && argv[2] === 'describe' && !promoted) {
-        return structuredClone(candidateReadbacks.service);
-      }
-      if (argv[1] === 'services' && argv[2] === 'describe' && promoted) promotedReadbackCount += 1;
-      return { service: 'hkbuddy-v1-api', traffic: [{ revision: REVISION, percent: 100 }] };
-    },
-    writeOutput: () => undefined,
-  });
-  assert.equal(accepted.exitCode, 0);
-  assert.equal(promotedReadbackCount, 1, 'promotion requires one fresh tag-free service readback');
-
+test('promotion requires the reviewed owner identity before its first mutation', async () => {
+  const calls = [];
   const rejected = await runGcpRelease({
-    argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`], input,
-    execute: async (argv) => (argv[0] === 'auth'
-      ? [{ account: 'hkbuddy-deployer@example.invalid', status: 'ACTIVE' }]
-      : (() => { throw new Error('promotion must remain inert'); })()),
+    argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`],
+    input: releaseInput(),
+    execute: async (argv) => {
+      calls.push(argv);
+      if (argv[0] === 'auth') {
+        return [{ account: 'hkbuddy-deployer@example.invalid', status: 'ACTIVE' }];
+      }
+      throw new Error('promotion must remain inert');
+    },
     writeOutput: () => undefined,
   });
   assert.equal(rejected.exitCode, 1);
   assert.equal(rejected.publicReport.mutationPerformed, false);
   assert.deepEqual(rejected.publicReport.completed, []);
-  assert.equal(validateServiceIamReceipt({
-    bindings: [{ role: 'roles/run.invoker', members: ['allUsers', 'user:qa@motionexp.com'] }],
-  }, { publicInvoker: true }), true);
+  assert.equal(calls.length, 1);
+  assert.equal(validateServiceIamReceipt(stablePublicIam(), { policy: 'stable-public' }), true);
   assert.throws(() => validateServiceIamReceipt({
     bindings: [{ role: 'roles/run.invoker', members: ['allAuthenticatedUsers'] }],
-  }, { publicInvoker: true }), /IAM readback/i);
-  assert.equal(validateTrafficReceipt({
-    status: { traffic: [{ revisionName: REVISION, percent: 100 }] },
-  }, { revision: REVISION }), true);
-  assert.throws(() => validateTrafficReceipt({
-    traffic: [{ revision: REVISION, percent: 99 }],
-  }, { revision: REVISION }), /traffic readback/i);
+  }, { policy: 'stable-public' }), /IAM readback/i);
+  assert.equal(validateTrafficReceipt(stablePromotedReadback(buildReleasePlan(releaseInput())), {
+    revision: STABLE_REVISION,
+  }), true);
 });
 
-test('promotion restores the exact private IAM snapshot when the public grant lands but its call fails', async () => {
+test('later promotion rejects every stable-service tag before its first stable mutation', async () => {
   const input = releaseInput();
   const plan = buildReleasePlan(input);
-  const privatePolicy = {
-    bindings: [{ role: 'roles/run.invoker', members: ['user:qa@motionexp.com'] }],
-    etag: 'Bw-private=',
-    version: 1,
-  };
-  const publicPolicy = {
-    bindings: [{
-      role: 'roles/run.invoker', members: ['allUsers', 'user:qa@motionexp.com'],
-    }],
-    etag: 'Bw-public=',
-    version: 1,
-  };
-  let currentPolicy = structuredClone(privatePolicy);
-  let restorePolicy = null;
-  let restorePolicyPath = null;
-  let restorePolicyRemoved = false;
-  const attemptId = '11111111-1111-4111-8111-111111111111';
   const calls = [];
-  const result = await runGcpRelease({
+  let stableMutationAttempted = false;
+  const taggedPrior = stablePriorReadback(plan);
+  taggedPrior.traffic[0].tag = 'foreign-direct-route';
+
+  const rejected = await runGcpRelease({
     argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`],
     input,
-    randomUUID: () => attemptId,
-    writeIamRestorePolicy: async (releasePlan, policy, options) => {
-      assert.equal(options.attemptId, attemptId);
-      restorePolicy = structuredClone(policy);
-      restorePolicyPath = join(
-        dirname(releasePlan.sourceArchive),
-        `${releasePlan.candidateRevision}.iam-restore.${attemptId}.json`,
-      );
-      return restorePolicyPath;
-    },
-    removeIamRestorePolicy: async (releasePlan, filePath) => {
-      assert.equal(releasePlan.candidateRevision, plan.candidateRevision);
-      assert.equal(filePath, restorePolicyPath);
-      restorePolicyRemoved = true;
-      return true;
-    },
+    writeStableSpec: async () => true,
     execute: async (argv) => {
       calls.push(argv);
       if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
-      if (argv[0] === 'artifacts') return { image: plan.expectedCandidate.image };
-      if (argv.includes('get-iam-policy')) return structuredClone(currentPolicy);
-      if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
+      if (argv[0] === 'artifacts') return {
+        image: argv.includes(plan.previousImage) ? plan.previousImage : plan.image,
+      };
+      if (argv.includes('get-iam-policy')) return argv[3] === CANDIDATE_SERVICE
+        ? candidatePrivateIam() : stablePublicIam();
+      if (argv[1] === 'revisions') {
+        if (argv[3] === plan.candidateRevision) return structuredClone(plan.expectedCandidate);
+        if (argv[3] === plan.previousRevision) {
+          return { revision: plan.previousRevision, image: plan.previousImage };
+        }
+      }
       if (argv[1] === 'services' && argv[2] === 'describe') {
-        return {
-          service: 'hkbuddy-v1-api',
-          traffic: [
-            { revision: input.previousRevision, percent: 100 },
-            { revision: REVISION, tag: CANDIDATE_TAG, percent: 0 },
-          ],
-        };
+        return argv[3] === CANDIDATE_SERVICE
+          ? candidateServiceReadback(plan) : structuredClone(taggedPrior);
       }
-      if (argv.includes('add-iam-policy-binding')) {
-        currentPolicy = structuredClone(publicPolicy);
-        throw new Error('response lost after server-side IAM mutation');
-      }
-      if (argv.includes('set-iam-policy')) {
-        assert.equal(restorePolicy.etag, publicPolicy.etag);
-        assert.deepEqual(restorePolicy.bindings, privatePolicy.bindings);
-        currentPolicy = { ...structuredClone(privatePolicy), etag: 'Bw-restored=' };
-        return structuredClone(currentPolicy);
+      if (argv[1] === 'services' && argv[2] === 'replace') {
+        if (argv.includes('--dry-run')) return structuredClone(plan.stableServiceSpec);
+        stableMutationAttempted = true;
+        throw new Error('stable mutation must remain unreachable');
       }
       throw new Error(`unexpected operation: ${argv.join(' ')}`);
     },
     writeOutput: () => undefined,
   });
-  assert.equal(result.exitCode, 1);
-  assert.equal(result.publicReport.mutationPerformed, true);
-  assert.equal(result.publicReport.promotionIamRestored, true);
-  assert.equal(restorePolicyRemoved, true);
-  assert.deepEqual(currentPolicy.bindings, privatePolicy.bindings);
-  const addIndex = calls.findIndex((argv) => argv.includes('add-iam-policy-binding'));
-  const setIndex = calls.findIndex((argv) => argv.includes('set-iam-policy'));
-  const finalReadIndex = calls.findLastIndex((argv) => argv.includes('get-iam-policy'));
-  assert.equal(addIndex >= 0 && addIndex < setIndex && setIndex < finalReadIndex, true);
+
+  assert.equal(rejected.exitCode, 1);
+  assert.equal(rejected.publicReport.code, 'RELEASE_PHASE_FAILED');
+  assert.equal(rejected.publicReport.mutationPerformed, false);
+  assert.equal(stableMutationAttempted, false);
+  assert.equal(calls.some((argv) => (
+    argv[1] === 'services' && argv[2] === 'replace' && !argv.includes('--dry-run')
+  )), false);
 });
 
-test('ambiguous promotion traffic is compensated before IAM and repeated retries leave no restore artifact', async () => {
+test('later promotion response loss restores exact prior stable traffic and preserves public IAM', async () => {
   const input = releaseInput();
   const plan = buildReleasePlan(input);
-  const restorePaths = new Set();
-  const attemptedIds = [
-    '22222222-2222-4222-8222-222222222222',
-    '33333333-3333-4333-8333-333333333333',
-  ];
+  const publicPolicy = stablePublicIam('public-baseline');
+  const priorRevision = { revision: plan.previousRevision, image: plan.previousImage };
+  const priorArtifact = { image: plan.previousImage };
+  const calls = [];
+  let stableState = stablePriorReadback(plan);
+  let trafficAttempted = false;
+  let postTrafficDescribeCount = 0;
 
-  for (const [attemptIndex, mutationLands] of [false, true].entries()) {
-    const calls = [];
-    const privatePolicy = {
-      bindings: [{ role: 'roles/run.invoker', members: ['user:qa@motionexp.com'] }],
-      etag: `Bw-private-${attemptIndex}=`,
-      version: 1,
-    };
-    let currentPolicy = structuredClone(privatePolicy);
-    let currentService = {
-      service: 'hkbuddy-v1-api',
-      traffic: [
-        { revision: input.previousRevision, percent: 100 },
-        { revision: REVISION, tag: CANDIDATE_TAG, percent: 0 },
-      ],
-    };
-    let restorePolicy = null;
-    let restorePath = null;
-    let residue = false;
-    const result = await runGcpRelease({
-      argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`],
-      input,
-      randomUUID: () => attemptedIds[attemptIndex],
-      writeIamRestorePolicy: async (releasePlan, policy, { attemptId }) => {
-        restorePolicy = structuredClone(policy);
-        restorePath = join(
-          dirname(releasePlan.sourceArchive),
-          `${releasePlan.candidateRevision}.iam-restore.${attemptId}.json`,
-        );
-        assert.equal(restorePaths.has(restorePath), false);
-        restorePaths.add(restorePath);
-        residue = true;
-        return restorePath;
-      },
-      removeIamRestorePolicy: async (_releasePlan, filePath) => {
-        assert.equal(filePath, restorePath);
-        residue = false;
-        return true;
-      },
-      execute: async (argv) => {
-        calls.push(argv);
-        if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
-        if (argv[0] === 'artifacts') return { image: plan.expectedCandidate.image };
-        if (argv.includes('get-iam-policy')) return structuredClone(currentPolicy);
-        if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
-        if (argv[1] === 'services' && argv[2] === 'describe') return structuredClone(currentService);
-        if (argv.includes('add-iam-policy-binding')) {
-          currentPolicy = {
-            bindings: [{
-              role: 'roles/run.invoker', members: ['allUsers', 'user:qa@motionexp.com'],
-            }],
-            etag: `Bw-public-${attemptIndex}=`,
-            version: 1,
-          };
-          return structuredClone(currentPolicy);
-        }
-        if (argv.includes('update-traffic') && argv.includes(`--to-revisions=${REVISION}=100`)) {
-          if (mutationLands) currentService = {
-            service: 'hkbuddy-v1-api', traffic: [{ revision: REVISION, percent: 100 }],
-          };
-          throw new Error('promotion traffic response was lost');
-        }
-        if (argv.includes('update-traffic')
-          && argv.includes(`--to-revisions=${input.previousRevision}=100`)) {
-          currentService = {
-            service: 'hkbuddy-v1-api', traffic: [{ revision: input.previousRevision, percent: 100 }],
-          };
-          return structuredClone(currentService);
-        }
-        if (argv.includes('set-iam-policy')) {
-          assert.equal(argv.includes(restorePath), true);
-          assert.equal(restorePolicy.etag, currentPolicy.etag);
-          currentPolicy = { ...structuredClone(privatePolicy), etag: `Bw-restored-${attemptIndex}=` };
-          return structuredClone(currentPolicy);
-        }
-        throw new Error(`unexpected operation: ${argv.join(' ')}`);
-      },
-      writeOutput: () => undefined,
-    });
-
-    assert.equal(result.exitCode, 1);
-    assert.equal(result.publicReport.code, 'RELEASE_PHASE_FAILED', JSON.stringify(result.publicReport));
-    assert.equal(result.publicReport.promotionTrafficRestored, true);
-    assert.equal(result.publicReport.promotionIamRestored, true);
-    assert.equal(residue, false);
-    assert.deepEqual(currentService.traffic, [{ revision: input.previousRevision, percent: 100 }]);
-    assert.deepEqual(currentPolicy.bindings, privatePolicy.bindings);
-    const trafficRestore = calls.findIndex((argv) => (
-      argv.includes('update-traffic') && argv.includes(`--to-revisions=${input.previousRevision}=100`)
-    ));
-    const iamRestore = calls.findIndex((argv) => argv.includes('set-iam-policy'));
-    assert.equal(trafficRestore >= 0 && trafficRestore < iamRestore, true);
-  }
-  assert.equal(restorePaths.size, 2);
-});
-
-test('a failed traffic compensation is explicit and blocks the promotion result', async () => {
-  const input = releaseInput();
-  const plan = buildReleasePlan(input);
-  const privatePolicy = {
-    bindings: [{ role: 'roles/run.invoker', members: ['user:qa@motionexp.com'] }],
-    etag: 'Bw-private=', version: 1,
-  };
-  let currentPolicy = structuredClone(privatePolicy);
-  const candidateService = {
-    service: 'hkbuddy-v1-api',
-    traffic: [
-      { revision: input.previousRevision, percent: 100 },
-      { revision: REVISION, tag: CANDIDATE_TAG, percent: 0 },
-    ],
-  };
-  const attemptId = '44444444-4444-4444-8444-444444444444';
-  const restorePath = join(
-    dirname(plan.sourceArchive), `${REVISION}.iam-restore.${attemptId}.json`,
-  );
   const result = await runGcpRelease({
-    argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`], input,
-    randomUUID: () => attemptId,
-    writeIamRestorePolicy: async () => restorePath,
-    removeIamRestorePolicy: async () => true,
+    argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    writeStableSpec: async () => true,
+    execute: async (argv) => {
+      calls.push(argv);
+      if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
+      if (argv[0] === 'artifacts') return structuredClone(
+        argv.includes(plan.previousImage) ? priorArtifact : { image: plan.image },
+      );
+      if (argv.includes('get-iam-policy')) return argv[3] === CANDIDATE_SERVICE
+        ? candidatePrivateIam() : structuredClone(publicPolicy);
+      if (argv[1] === 'revisions') {
+        if (argv[3] === plan.candidateRevision) return structuredClone(plan.expectedCandidate);
+        if (argv[3] === plan.stableRevision) return structuredClone(plan.expectedStable);
+        if (argv[3] === plan.previousRevision) return structuredClone(priorRevision);
+      }
+      if (argv[1] === 'services' && argv[2] === 'replace') {
+        if (argv.includes('--dry-run')) return structuredClone(plan.stableServiceSpec);
+        stableState = stableStagedReadback(plan);
+        return structuredClone(stableState);
+      }
+      if (argv.includes('update-traffic')
+        && argv.includes(`--to-revisions=${plan.stableRevision}=100`)) {
+        trafficAttempted = true;
+        stableState = stablePromotedReadback(plan);
+        throw new Error('promotion traffic response was lost');
+      }
+      if (argv.includes('update-traffic')
+        && argv.includes(`--to-revisions=${plan.previousRevision}=100`)) {
+        stableState = stablePriorReadback(plan);
+        return structuredClone(stableState);
+      }
+      if (argv[1] === 'services' && argv[2] === 'describe') {
+        if (argv[3] === CANDIDATE_SERVICE) return candidateServiceReadback(plan);
+        if (trafficAttempted) {
+          postTrafficDescribeCount += 1;
+          if (postTrafficDescribeCount === 2) throw new Error('fresh promotion readback unavailable');
+        }
+        return structuredClone(stableState);
+      }
+      throw new Error(`unexpected operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.publicReport.code, 'RELEASE_PHASE_FAILED', JSON.stringify(result.publicReport));
+  assert.equal(result.publicReport.promotionServiceRestored, true);
+  assert.equal(result.publicReport.promotionIamRestored, true);
+  assert.deepEqual(result.publicReport.responseLossRecoveries, ['promote-traffic']);
+  assert.deepEqual(stableState, stablePriorReadback(plan));
+  assert.equal(calls.some((argv) => argv.includes('set-iam-policy')), false);
+  const restoreIndex = calls.findIndex((argv) => (
+    argv.includes('update-traffic')
+    && argv.includes(`--to-revisions=${plan.previousRevision}=100`)
+  ));
+  const finalIamIndex = calls.findLastIndex((argv) => argv.includes('get-iam-policy')
+    && argv[3] === STABLE_SERVICE);
+  assert.equal(restoreIndex >= 0 && restoreIndex < finalIamIndex, true);
+});
+
+test('later promotion compensation fails closed when stable state drifts after deployment', async () => {
+  const input = releaseInput();
+  const plan = buildReleasePlan(input);
+  const priorRevision = { revision: plan.previousRevision, image: plan.previousImage };
+  let stableDeployed = false;
+  const result = await runGcpRelease({
+    argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    writeStableSpec: async () => true,
     execute: async (argv) => {
       if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
-      if (argv[0] === 'artifacts') return { image: plan.expectedCandidate.image };
-      if (argv.includes('get-iam-policy')) return structuredClone(currentPolicy);
-      if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
-      if (argv[1] === 'services' && argv[2] === 'describe') return structuredClone(candidateService);
-      if (argv.includes('add-iam-policy-binding')) {
-        currentPolicy = {
-          bindings: [{
-            role: 'roles/run.invoker', members: ['allUsers', 'user:qa@motionexp.com'],
-          }],
-          etag: 'Bw-public=', version: 1,
-        };
-        return structuredClone(currentPolicy);
+      if (argv[0] === 'artifacts') return {
+        image: argv.includes(plan.previousImage) ? plan.previousImage : plan.image,
+      };
+      if (argv.includes('get-iam-policy')) return argv[3] === CANDIDATE_SERVICE
+        ? candidatePrivateIam() : stablePublicIam();
+      if (argv[1] === 'revisions') {
+        if (argv[3] === plan.candidateRevision) return structuredClone(plan.expectedCandidate);
+        if (argv[3] === plan.stableRevision) return structuredClone(plan.expectedStable);
+        if (argv[3] === plan.previousRevision) return structuredClone(priorRevision);
       }
-      if (argv.includes('update-traffic')) throw new Error('traffic control plane unavailable');
-      if (argv.includes('set-iam-policy')) {
-        currentPolicy = { ...structuredClone(privatePolicy), etag: 'Bw-restored=' };
-        return structuredClone(currentPolicy);
+      if (argv[1] === 'services' && argv[2] === 'replace') {
+        if (argv.includes('--dry-run')) return structuredClone(plan.stableServiceSpec);
+        stableDeployed = true;
+        return stableStagedReadback(plan);
+      }
+      if (argv[1] === 'services' && argv[2] === 'describe') {
+        if (argv[3] === CANDIDATE_SERVICE) return candidateServiceReadback(plan);
+        if (!stableDeployed) return stablePriorReadback(plan);
+        return {
+          service: STABLE_SERVICE,
+          traffic: [{ revision: `${STABLE_SERVICE}-foreign000000`, percent: 100 }],
+        };
       }
       throw new Error(`unexpected operation: ${argv.join(' ')}`);
     },
@@ -1945,9 +1930,199 @@ test('a failed traffic compensation is explicit and blocks the promotion result'
   });
   assert.equal(result.exitCode, 1);
   assert.equal(result.publicReport.code, 'PROMOTION_COMPENSATION_FAILED');
-  assert.equal(result.publicReport.promotionTrafficRestored, false);
+  assert.equal(result.publicReport.promotionServiceRestored, false);
+  assert.equal(result.publicReport.promotionIamRestored, false);
+});
+
+test('first promotion IAM response loss is detected and restored to exact private stable state', async () => {
+  const input = releaseInput({ previousRevision: null, previousImageDigest: null });
+  const plan = buildReleasePlan(input);
+  const attemptId = '55555555-5555-4555-8555-555555555555';
+  const restorePath = join(
+    dirname(plan.sourceArchive), `${plan.stableRevision}.iam-restore.${attemptId}.json`,
+  );
+  let stableExists = false;
+  let stablePolicy = stablePrivateIam('stable-private-baseline');
+  let stablePublicReads = 0;
+  let restorePolicy = null;
+  let restoreRemoved = false;
+  const calls = [];
+
+  const result = await runGcpRelease({
+    argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    randomUUID: () => attemptId,
+    writeStableSpec: async () => true,
+    writeIamRestorePolicy: async (releasePlan, policy, options) => {
+      assert.equal(releasePlan.stableRevision, plan.stableRevision);
+      assert.equal(options.attemptId, attemptId);
+      restorePolicy = structuredClone(policy);
+      return restorePath;
+    },
+    removeIamRestorePolicy: async (releasePlan, filePath) => {
+      assert.equal(releasePlan.stableRevision, plan.stableRevision);
+      assert.equal(filePath, restorePath);
+      restoreRemoved = true;
+      return true;
+    },
+    execute: async (argv) => {
+      calls.push(argv);
+      if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
+      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv[1] === 'revisions') return argv[3] === plan.candidateRevision
+        ? structuredClone(plan.expectedCandidate) : structuredClone(plan.expectedStable);
+      if (argv.includes('get-iam-policy')) {
+        if (argv[3] === CANDIDATE_SERVICE) return candidatePrivateIam();
+        if (stablePolicy.bindings.length > 0) {
+          stablePublicReads += 1;
+          if (stablePublicReads === 2) throw new Error('fresh stable IAM readback unavailable');
+        }
+        return structuredClone(stablePolicy);
+      }
+      if (argv.includes('add-iam-policy-binding')) {
+        stablePolicy = stablePublicIam('stable-public-landed');
+        throw new Error('public IAM response was lost');
+      }
+      if (argv.includes('set-iam-policy')) {
+        assert.equal(argv[3], STABLE_SERVICE);
+        assert.equal(argv[4], restorePath);
+        assert.deepEqual(restorePolicy, {
+          bindings: [], etag: 'stable-public-landed', version: 1,
+        });
+        stablePolicy = stablePrivateIam('stable-private-restored');
+        return structuredClone(stablePolicy);
+      }
+      if (argv[1] === 'services' && argv[2] === 'replace') {
+        if (argv.includes('--dry-run')) return structuredClone(plan.stableServiceSpec);
+        stableExists = true;
+        return stableStagedReadback(plan);
+      }
+      if (argv[1] === 'services' && argv[2] === 'describe') {
+        if (argv[3] === CANDIDATE_SERVICE) return candidateServiceReadback(plan);
+        if (!stableExists) {
+          throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+        }
+        return stablePromotedReadback(plan);
+      }
+      throw new Error(`unexpected operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.publicReport.code, 'RELEASE_PHASE_FAILED', JSON.stringify(result.publicReport));
+  assert.equal(result.publicReport.promotionServiceRestored, true);
   assert.equal(result.publicReport.promotionIamRestored, true);
-  assert.deepEqual(currentPolicy.bindings, privatePolicy.bindings);
+  assert.deepEqual(result.publicReport.responseLossRecoveries, ['promote-public-service']);
+  assert.deepEqual(stablePolicy.bindings, []);
+  assert.equal(restoreRemoved, true);
+  const publicIndex = calls.findIndex((argv) => argv.includes('add-iam-policy-binding'));
+  const restoreIndex = calls.findIndex((argv) => argv.includes('set-iam-policy'));
+  const finalReadIndex = calls.findLastIndex((argv) => argv.includes('get-iam-policy')
+    && argv[3] === STABLE_SERVICE);
+  assert.equal(publicIndex >= 0 && publicIndex < restoreIndex && restoreIndex < finalReadIndex, true);
+});
+
+test('first promotion compensation fails closed on foreign stable state after deployment', async () => {
+  const input = releaseInput({ previousRevision: null, previousImageDigest: null });
+  const plan = buildReleasePlan(input);
+  let stableExists = false;
+  const result = await runGcpRelease({
+    argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    writeStableSpec: async () => true,
+    execute: async (argv) => {
+      if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
+      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv.includes('get-iam-policy')) return argv[3] === CANDIDATE_SERVICE
+        ? candidatePrivateIam() : stablePrivateIam();
+      if (argv[1] === 'revisions') return argv[3] === plan.candidateRevision
+        ? structuredClone(plan.expectedCandidate) : structuredClone(plan.expectedStable);
+      if (argv[1] === 'services' && argv[2] === 'replace') {
+        if (argv.includes('--dry-run')) return structuredClone(plan.stableServiceSpec);
+        stableExists = true;
+        return stableStagedReadback(plan);
+      }
+      if (argv[1] === 'services' && argv[2] === 'describe') {
+        if (argv[3] === CANDIDATE_SERVICE) return candidateServiceReadback(plan);
+        if (!stableExists) {
+          throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+        }
+        return {
+          service: STABLE_SERVICE,
+          traffic: [{ revision: `${STABLE_SERVICE}-foreign000000`, percent: 100 }],
+        };
+      }
+      throw new Error(`unexpected operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.publicReport.code, 'PROMOTION_COMPENSATION_FAILED');
+  assert.equal(result.publicReport.promotionServiceRestored, false);
+  assert.equal(result.publicReport.promotionIamRestored, false);
+});
+
+test('candidate cleanup is receipt-bound and recovers a lost delete response without stable mutation', async () => {
+  const input = releaseInput({ previousRevision: null, previousImageDigest: null });
+  const plan = buildReleasePlan(input);
+  let candidateExists = true;
+  const calls = [];
+  const result = await runGcpRelease({
+    argv: ['--phase=candidate-cleanup', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    execute: async (argv) => {
+      calls.push(argv);
+      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv.includes('get-iam-policy')) return candidatePrivateIam();
+      if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
+      if (argv[1] === 'services' && argv[2] === 'delete') {
+        candidateExists = false;
+        throw new Error('delete response was lost');
+      }
+      if (argv[1] === 'services' && argv[2] === 'describe') {
+        if (!candidateExists) {
+          throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+        }
+        return candidateServiceReadback(plan);
+      }
+      throw new Error(`unexpected operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  assert.deepEqual(result.publicReport.responseLossRecoveries, ['candidate-cleanup-delete']);
+  assert.equal(candidateExists, false);
+  assert.equal(calls.some((argv) => argv[1] === 'services' && argv[2] === 'delete'
+    && argv[3] === CANDIDATE_SERVICE), true);
+  assert.equal(calls.some((argv) => argv.includes(STABLE_SERVICE)), false);
+
+  let invalidReceiptCalls = 0;
+  const invalidReceipt = await runGcpRelease({
+    argv: ['--phase=candidate-cleanup', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    loadReceipts: async (releasePlan, { through }) => {
+      const chain = structuredClone(fixtureReceiptChain(releasePlan, through));
+      chain.at(-1).outputs.revision = `${CANDIDATE_SERVICE}-foreign000000`;
+      return chain;
+    },
+    execute: async () => { invalidReceiptCalls += 1; throw new Error('must remain inert'); },
+    writeOutput: () => undefined,
+  });
+  assert.equal(invalidReceipt.exitCode, 1);
+  assert.equal(invalidReceipt.publicReport.code, 'RELEASE_RECEIPT_CHAIN_INVALID');
+  assert.equal(invalidReceiptCalls, 0);
+
+  let rollbackCalls = 0;
+  const rollback = await runGcpRelease({
+    argv: ['--phase=rollback', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    execute: async () => { rollbackCalls += 1; throw new Error('must remain inert'); },
+    writeOutput: () => undefined,
+  });
+  assert.equal(rollback.exitCode, 1);
+  assert.equal(rollback.publicReport.code, 'ROLLBACK_UNAVAILABLE_NO_PRIOR_RELEASE');
+  assert.equal(rollbackCalls, 0);
 });
 
 test('candidate deployment uses a controlled Service YAML and never the unsupported deploy readiness flag', () => {
@@ -1962,7 +2137,11 @@ test('candidate deployment uses a controlled Service YAML and never the unsuppor
   assert.equal(plan.operations.some(({ phase, argv }) => (
     ['candidate', 'candidate-cleanup'].includes(phase) && argv.includes('--member=allUsers')
   )), false);
-  assert.equal(plan.operations.some(({ id }) => id === 'promote-public-service'), true);
+  assert.equal(plan.operations.some(({ id }) => id === 'promote-public-service'), false);
+  const firstReleasePlan = buildReleasePlan(releaseInput({
+    previousRevision: null, previousImageDigest: null,
+  }));
+  assert.equal(firstReleasePlan.operations.some(({ id }) => id === 'promote-public-service'), true);
   assert.equal(plan.operations.some(({ id }) => id === 'candidate-cleanup-public-service'), false);
 });
 
@@ -1977,12 +2156,13 @@ test('empty-host bootstrap is allowed only on canonical NOT_FOUND and creates a 
   }]);
   assert.deepEqual(plan.candidateAccess, {
     authenticated: true,
-    audience: STABLE_ORIGIN,
+    audience: CANDIDATE_ROOT,
     issuer: 'https://accounts.google.com',
     subjectSha256: QA_SUBJECT_SHA256,
     taggedUrl: CANDIDATE_ORIGIN,
   });
   let serviceDescribeCount = 0;
+  let iamGranted = false;
   const calls = [];
   const result = await runGcpRelease({
     argv: ['--phase=candidate', `--confirm-release=${RELEASE_SHA}`], input,
@@ -1994,16 +2174,20 @@ test('empty-host bootstrap is allowed only on canonical NOT_FOUND and creates a 
         if (serviceDescribeCount === 1) {
           throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
         }
-        return { service: 'hkbuddy-v1-api', traffic: [
+        return { service: CANDIDATE_SERVICE, traffic: [
           { revision: REVISION, tag: CANDIDATE_TAG, percent: 100 },
         ] };
       }
       if (argv.includes('--dry-run')) return structuredClone(plan.candidateServiceSpec);
       if (argv[1] === 'services' && argv[2] === 'replace') return { deployed: true };
       if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
-      if (argv.includes('get-iam-policy')) return {
-        bindings: [{ role: 'roles/run.invoker', members: ['user:qa@motionexp.com'] }],
-      };
+      if (argv.includes('get-iam-policy')) return iamGranted
+        ? candidatePrivateIam('candidate-private-granted')
+        : stablePrivateIam('candidate-private-baseline');
+      if (argv.includes('add-iam-policy-binding')) {
+        iamGranted = true;
+        return candidatePrivateIam('candidate-private-granted');
+      }
       if (argv[0] === 'artifacts') return { image: plan.expectedCandidate.image };
       throw new Error(`unexpected operation: ${argv.join(' ')}`);
     },
@@ -2012,7 +2196,7 @@ test('empty-host bootstrap is allowed only on canonical NOT_FOUND and creates a 
   assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
   assert.equal(calls.some((argv) => argv.includes('--member=allUsers')), false);
   assert.equal(calls.some((argv) => argv.includes('update-traffic')), false);
-  assert.equal(result.publicReport.phaseReceipt.outputs.trafficState, 'private-bootstrap-100');
+  assert.equal(result.publicReport.phaseReceipt.outputs.trafficState, 'candidate-service-private-100');
   assert.equal(result.publicReport.phaseReceipt.outputs.trafficPercent, 100);
   assert.equal(result.publicReport.phaseReceipt.outputs.priorRelease, null);
 
@@ -2038,308 +2222,22 @@ test('first-release Service API default traffic normalizes to the exact private 
   const plan = buildReleasePlan(releaseInput({ previousRevision: null, previousImageDigest: null }));
   assert.doesNotThrow(() => validateCandidateControlPlaneReadbacks({
     service: {
-      metadata: { name: GCP_IDENTITY.service },
+      metadata: { name: CANDIDATE_SERVICE },
       status: { traffic: [{ revisionName: REVISION, tag: CANDIDATE_TAG }] },
     },
     revision: structuredClone(plan.expectedCandidate),
-    iam: { bindings: [] },
+    iam: candidatePrivateIam(),
     artifact: { image: plan.expectedCandidate.image },
   }, plan));
   assert.throws(() => validateCandidateControlPlaneReadbacks({
     service: {
-      metadata: { name: GCP_IDENTITY.service },
+      metadata: { name: CANDIDATE_SERVICE },
       status: { traffic: [{ revisionName: REVISION, tag: CANDIDATE_TAG, percent: 0 }] },
     },
     revision: structuredClone(plan.expectedCandidate),
-    iam: { bindings: [] },
+    iam: candidatePrivateIam(),
     artifact: { image: plan.expectedCandidate.image },
   }, plan), /candidate service readback/i);
-});
-
-test('first-release failed promotion restores the exact private tagged 100-percent candidate', async (t) => {
-  const input = releaseInput({ previousRevision: null, previousImageDigest: null });
-  const plan = buildReleasePlan(input);
-  for (const mode of ['mutation-landed', 'response-lost', 'readback-failed']) {
-    await t.test(mode, async () => {
-      const calls = [];
-      const evidenceChecks = [];
-      const privatePolicy = {
-        bindings: [{ role: 'roles/run.invoker', members: ['user:qa@motionexp.com'] }],
-        etag: `Bw-private-${mode}=`, version: 1,
-      };
-      let currentPolicy = structuredClone(privatePolicy);
-      let currentService = {
-        service: GCP_IDENTITY.service,
-        traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 100 }],
-      };
-      let plannedReadbackMustFail = mode === 'readback-failed';
-      let trafficMutationAttempted = false;
-      const attemptId = '55555555-5555-4555-8555-555555555555';
-      const restorePath = join(
-        dirname(plan.sourceArchive), `${REVISION}.iam-restore.${attemptId}.json`,
-      );
-      const result = await runGcpRelease({
-        argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`], input,
-        randomUUID: () => attemptId,
-        verifyEvidence: async (value, options) => {
-          evidenceChecks.push({ value, options });
-          return true;
-        },
-        writeCandidateSpec: async (releasePlan) => {
-          assert.deepEqual(releasePlan.candidateServiceSpec.spec.traffic, [{
-            revisionName: REVISION, tag: CANDIDATE_TAG, percent: 100,
-          }]);
-          return true;
-        },
-        writeIamRestorePolicy: async () => restorePath,
-        removeIamRestorePolicy: async () => true,
-        execute: async (argv) => {
-          calls.push(argv);
-          if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
-          if (argv[0] === 'artifacts') return { image: plan.expectedCandidate.image };
-          if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
-          if (argv.includes('get-iam-policy')) return structuredClone(currentPolicy);
-          if (argv.includes('add-iam-policy-binding')) {
-            currentPolicy = {
-              bindings: [{
-                role: 'roles/run.invoker', members: ['allUsers', 'user:qa@motionexp.com'],
-              }],
-              etag: `Bw-public-${mode}=`, version: 1,
-            };
-            return structuredClone(currentPolicy);
-          }
-          if (argv.includes('set-iam-policy')) {
-            currentPolicy = { ...structuredClone(privatePolicy), etag: `Bw-restored-${mode}=` };
-            return structuredClone(currentPolicy);
-          }
-          if (argv.includes('update-traffic')) {
-            trafficMutationAttempted = true;
-            currentService = {
-              service: GCP_IDENTITY.service,
-              traffic: [{ revision: REVISION, percent: 100 }],
-            };
-            if (mode === 'response-lost') throw new Error('promotion traffic response was lost');
-            if (mode === 'mutation-landed') return { service: GCP_IDENTITY.service, traffic: [] };
-            return structuredClone(currentService);
-          }
-          if (argv[1] === 'services' && argv[2] === 'replace') {
-            if (argv.includes('--dry-run')) return structuredClone(plan.candidateServiceSpec);
-            currentService = {
-              service: GCP_IDENTITY.service,
-              traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 100 }],
-            };
-            return structuredClone(currentService);
-          }
-          if (argv[1] === 'services' && argv[2] === 'describe') {
-            if (plannedReadbackMustFail && trafficMutationAttempted) {
-              plannedReadbackMustFail = false;
-              throw new Error('post-promotion readback unavailable');
-            }
-            return structuredClone(currentService);
-          }
-          throw new Error(`unexpected operation: ${argv.join(' ')}`);
-        },
-        writeOutput: () => undefined,
-      });
-
-      assert.equal(result.exitCode, 1);
-      assert.equal(result.publicReport.code, 'RELEASE_PHASE_FAILED', `${JSON.stringify(result.publicReport)} calls=${JSON.stringify(calls)}`);
-      assert.equal(result.publicReport.promotionTrafficRestored, true);
-      assert.equal(result.publicReport.promotionIamRestored, true);
-      assert.deepEqual(currentService.traffic, [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 100 }]);
-      assert.equal(JSON.stringify(currentPolicy).includes('allUsers'), false);
-      assert.equal(evidenceChecks.length >= 1, true);
-      assert.equal(calls.flat().some((value) => String(value).includes('null')), false);
-      assert.equal(calls.some((argv) => argv.some((value) => value === '--to-revisions=null=100')), false);
-
-      const compensationStart = calls.findIndex((argv) => (
-        argv[1] === 'services' && argv[2] === 'replace' && argv.includes('--dry-run')
-      ));
-      assert.equal(compensationStart >= 0, true);
-      assert.deepEqual(calls[compensationStart].slice(0, 4), [
-        'run', 'services', 'replace', plan.candidateServiceSpecPath,
-      ]);
-      assert.equal(calls.slice(compensationStart).some((argv) => (
-        argv[1] === 'services' && argv[2] === 'replace' && !argv.includes('--dry-run')
-      )), true);
-      const finalReads = calls.slice(compensationStart).map((argv) => argv.slice(0, 3).join(' '));
-      assert.equal(finalReads.filter((value) => value === 'run services describe').length >= 1, true);
-      assert.equal(finalReads.filter((value) => value === 'run revisions describe').length >= 2, true);
-      assert.equal(finalReads.filter((value) => value === 'artifacts docker images').length >= 2, true);
-      assert.equal(finalReads.filter((value) => value === 'run services get-iam-policy').length >= 2, true);
-    });
-  }
-});
-
-test('first-release IAM response loss restores and re-verifies the complete private bootstrap chain', async () => {
-  const input = releaseInput({ previousRevision: null, previousImageDigest: null });
-  const plan = buildReleasePlan(input);
-  const calls = [];
-  const evidenceChecks = [];
-  const privatePolicy = {
-    bindings: [{ role: 'roles/run.invoker', members: ['user:qa@motionexp.com'] }],
-    etag: 'Bw-private-iam-loss=', version: 1,
-  };
-  let currentPolicy = structuredClone(privatePolicy);
-  const currentService = {
-    service: GCP_IDENTITY.service,
-    traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 100 }],
-  };
-  const attemptId = '77777777-7777-4777-8777-777777777777';
-  const restorePath = join(
-    dirname(plan.sourceArchive), `${REVISION}.iam-restore.${attemptId}.json`,
-  );
-  const result = await runGcpRelease({
-    argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`], input,
-    randomUUID: () => attemptId,
-    verifyEvidence: async (value, options) => {
-      evidenceChecks.push({ value, options });
-      return true;
-    },
-    writeIamRestorePolicy: async () => restorePath,
-    removeIamRestorePolicy: async () => true,
-    execute: async (argv) => {
-      calls.push(argv);
-      if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
-      if (argv[0] === 'artifacts') return { image: plan.expectedCandidate.image };
-      if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
-      if (argv[1] === 'services' && argv[2] === 'describe') return structuredClone(currentService);
-      if (argv.includes('get-iam-policy')) return structuredClone(currentPolicy);
-      if (argv.includes('add-iam-policy-binding')) {
-        currentPolicy = {
-          bindings: [{
-            role: 'roles/run.invoker', members: ['allUsers', 'user:qa@motionexp.com'],
-          }],
-          etag: 'Bw-public-iam-loss=', version: 1,
-        };
-        throw new Error('promotion IAM response was lost');
-      }
-      if (argv.includes('set-iam-policy')) {
-        currentPolicy = { ...structuredClone(privatePolicy), etag: 'Bw-restored-iam-loss=' };
-        return structuredClone(currentPolicy);
-      }
-      throw new Error(`unexpected operation: ${argv.join(' ')}`);
-    },
-    writeOutput: () => undefined,
-  });
-
-  assert.equal(result.exitCode, 1);
-  assert.equal(result.publicReport.code, 'RELEASE_PHASE_FAILED', JSON.stringify(result.publicReport));
-  assert.equal(result.publicReport.promotionTrafficRestored, true);
-  assert.equal(result.publicReport.promotionIamRestored, true);
-  assert.equal(JSON.stringify(currentPolicy).includes('allUsers'), false);
-  assert.equal(calls.some((argv) => argv.includes('update-traffic')), false);
-  assert.equal(calls.some((argv) => argv[1] === 'services' && argv[2] === 'replace'), false);
-  assert.equal(calls.flat().some((value) => String(value).includes('null')), false);
-  assert.equal(evidenceChecks.length >= 2, true);
-  assert.equal(calls.filter((argv) => argv[1] === 'services' && argv[2] === 'describe').length >= 3, true);
-  assert.equal(calls.filter((argv) => argv[1] === 'revisions').length >= 3, true);
-  assert.equal(calls.filter((argv) => argv[0] === 'artifacts').length >= 3, true);
-  assert.equal(calls.filter((argv) => argv.includes('get-iam-policy')).length >= 3, true);
-});
-
-test('first-release promotion compensation fails closed on drift or Service replacement failure', async (t) => {
-  const input = releaseInput({ previousRevision: null, previousImageDigest: null });
-  const plan = buildReleasePlan(input);
-  for (const drift of [
-    'service', 'revision', 'artifact', 'evidence', 'iam', 'replacement-failure',
-  ]) {
-    await t.test(drift, async () => {
-      const calls = [];
-      let promoted = false;
-      let iamReadsAfterPromotion = 0;
-      const privatePolicy = { bindings: [], etag: 'Bw-private=', version: 1 };
-      let currentPolicy = structuredClone(privatePolicy);
-      const result = await runGcpRelease({
-        argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`], input,
-        randomUUID: () => '66666666-6666-4666-8666-666666666666',
-        verifyEvidence: async () => drift !== 'evidence' || promoted === false,
-        writeCandidateSpec: async () => true,
-        writeIamRestorePolicy: async () => join(dirname(plan.sourceArchive), `${REVISION}.iam-restore.66666666-6666-4666-8666-666666666666.json`),
-        removeIamRestorePolicy: async () => true,
-        execute: async (argv) => {
-          calls.push(argv);
-          if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
-          if (argv.includes('get-iam-policy')) {
-            if (promoted) iamReadsAfterPromotion += 1;
-            if (drift === 'iam' && iamReadsAfterPromotion >= 3) {
-              return {
-                bindings: [{ role: 'roles/run.invoker', members: ['user:foreign@example.invalid'] }],
-                etag: 'Bw-drift=', version: 1,
-              };
-            }
-            return structuredClone(currentPolicy);
-          }
-          if (argv.includes('add-iam-policy-binding')) {
-            currentPolicy = { bindings: [{ role: 'roles/run.invoker', members: ['allUsers'] }], etag: 'Bw-public=', version: 1 };
-            return structuredClone(currentPolicy);
-          }
-          if (argv.includes('set-iam-policy')) {
-            currentPolicy = { ...structuredClone(privatePolicy), etag: 'Bw-restored=' };
-            return structuredClone(currentPolicy);
-          }
-          if (argv.includes('update-traffic')) {
-            promoted = true;
-            throw new Error('response lost');
-          }
-          if (argv[1] === 'services' && argv[2] === 'describe') {
-            if (!promoted) return {
-              service: GCP_IDENTITY.service,
-              traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 100 }],
-            };
-            return drift === 'service'
-              ? { service: GCP_IDENTITY.service, traffic: [{ revision: 'hkbuddy-v1-api-eeeeeeeeeeee', percent: 100 }] }
-              : { service: GCP_IDENTITY.service, traffic: [{ revision: REVISION, percent: 100 }] };
-          }
-          if (argv[1] === 'revisions') return drift === 'revision' && promoted
-            ? { ...structuredClone(plan.expectedCandidate), image: `${plan.expectedCandidate.image.slice(0, -1)}e` }
-            : structuredClone(plan.expectedCandidate);
-          if (argv[0] === 'artifacts') return drift === 'artifact' && promoted
-            ? { image: `${plan.expectedCandidate.image.slice(0, -1)}e` }
-            : { image: plan.expectedCandidate.image };
-          if (argv[1] === 'services' && argv[2] === 'replace') {
-            throw new Error(drift === 'replacement-failure'
-              ? 'controlled Service replacement failed'
-              : 'replacement must remain inert on drift');
-          }
-          throw new Error(`unexpected operation: ${argv.join(' ')}`);
-        },
-        writeOutput: () => undefined,
-      });
-      assert.equal(result.exitCode, 1);
-      assert.equal(result.publicReport.code, 'PROMOTION_COMPENSATION_FAILED');
-      assert.equal(result.publicReport.promotionTrafficRestored, false);
-      assert.equal(
-        calls.some((argv) => argv[1] === 'services' && argv[2] === 'replace'),
-        ['iam', 'replacement-failure'].includes(drift),
-      );
-      assert.equal(JSON.stringify(currentPolicy).includes('allUsers'), false);
-      assert.equal(calls.flat().some((value) => String(value).includes('null')), false);
-    });
-  }
-});
-
-test('first-release rollback and candidate cleanup fail closed without any control-plane mutation', async () => {
-  const input = releaseInput({ previousRevision: null, previousImageDigest: null });
-  for (const phase of ['rollback', 'candidate-cleanup']) {
-    const calls = [];
-    const preview = await runGcpRelease({
-      argv: [`--phase=${phase}`], input,
-      execute: async (argv) => { calls.push(argv); throw new Error('must remain inert'); },
-      writeOutput: () => undefined,
-    });
-    assert.equal(preview.exitCode, 1);
-    assert.equal(preview.publicReport.code, 'ROLLBACK_UNAVAILABLE_NO_PRIOR_RELEASE');
-    const result = await runGcpRelease({
-      argv: [`--phase=${phase}`, `--confirm-release=${RELEASE_SHA}`], input,
-      execute: async (argv) => { calls.push(argv); throw new Error('must remain inert'); },
-      writeOutput: () => undefined,
-    });
-    assert.equal(result.exitCode, 1);
-    assert.equal(result.publicReport.code, 'ROLLBACK_UNAVAILABLE_NO_PRIOR_RELEASE');
-    assert.equal(result.publicReport.mutationPerformed, false);
-    assert.deepEqual(calls, []);
-  }
 });
 
 test('later rollback validates immutable receipts and fresh revision/image/service/evidence before traffic mutation', async () => {
@@ -2681,6 +2579,7 @@ test('workload phase rejects every pre-existing artifact even with a complete-lo
     const filePath = join(directory, `${artifactIndex}.json`);
     await writeFile(filePath, contents);
     const workload = {
+      ...releaseInput().task8Evidence.workload,
       filePath,
       artifactSha256: finalized.artifactSha256,
       objectSha256: createHash('sha256').update(contents).digest('hex'),
@@ -2783,6 +2682,7 @@ test('workload receipt is created only by one controlled immutable run with witn
     task8Evidence: {
       ...base.task8Evidence,
       workload: {
+        ...base.task8Evidence.workload,
         filePath: workloadPath,
         artifactSha256: '0'.repeat(64),
         objectSha256: '0'.repeat(64),
@@ -2869,6 +2769,7 @@ test('valid-looking constants and 200 request logs cannot create a receipt witho
     task8Evidence: {
       ...base.task8Evidence,
       workload: {
+        ...base.task8Evidence.workload,
         filePath: join(directory, 'workload.json'),
         artifactSha256: '0'.repeat(64),
         objectSha256: '0'.repeat(64),
@@ -2941,6 +2842,7 @@ test('real-shape migration, authenticated workload, and tag-free promotion share
     task8Evidence: {
       ...base.task8Evidence,
       workload: {
+        ...base.task8Evidence.workload,
         filePath: workloadPath,
         artifactSha256: '0'.repeat(64),
         objectSha256: '0'.repeat(64),
@@ -2981,11 +2883,15 @@ test('real-shape migration, authenticated workload, and tag-free promotion share
 
   for (const phase of ['inventory', 'acceptance', 'collect', 'evidence', 'candidate', 'readiness']) {
     receipts.push(finalizeReleasePhaseReceipt({
-      schemaVersion: 1,
+      schemaVersion: 2,
       phase,
       sequence: receipts.length + 1,
       releaseSha: plan.releaseSha,
       releaseIdentitySha256: plan.releaseIdentitySha256,
+      candidateService: CANDIDATE_SERVICE,
+      stableService: STABLE_SERVICE,
+      trafficState: 'candidate-service-private-100',
+      stableTrafficState: plan.expectedStable.initialTrafficState,
       previousReceiptSha256: receipts.at(-1).receiptSha256,
       completed: plan.operations.filter((member) => member.phase === phase).map(({ id }) => id),
       outputs: fixtureReceiptOutputs(plan, phase),
@@ -3033,6 +2939,7 @@ test('real-shape migration, authenticated workload, and tag-free promotion share
     task8Evidence: {
       ...base.task8Evidence,
       workload: {
+        ...base.task8Evidence.workload,
         filePath: workloadPath,
         artifactSha256: workloadRecord.artifactSha256,
         objectSha256: createHash('sha256').update(workloadBytes).digest('hex'),
@@ -3042,27 +2949,23 @@ test('real-shape migration, authenticated workload, and tag-free promotion share
   const refreshedPlan = buildReleasePlan(refreshedInput);
 
   receipts.push(finalizeReleasePhaseReceipt({
-    schemaVersion: 1,
+    schemaVersion: 2,
     phase: 'mobile',
     sequence: receipts.length + 1,
     releaseSha: refreshedPlan.releaseSha,
     releaseIdentitySha256: refreshedPlan.releaseIdentitySha256,
+    candidateService: CANDIDATE_SERVICE,
+    stableService: STABLE_SERVICE,
+    trafficState: 'candidate-service-private-100',
+    stableTrafficState: refreshedPlan.expectedStable.initialTrafficState,
     previousReceiptSha256: receipts.at(-1).receiptSha256,
     completed: refreshedPlan.operations.filter((member) => member.phase === 'mobile').map(({ id }) => id),
     outputs: fixtureReceiptOutputs(refreshedPlan, 'mobile'),
   }));
 
-  let currentService = {
-    service: 'hkbuddy-v1-api',
-    traffic: [
-      { revision: input.previousRevision, percent: 100 },
-      { revision: REVISION, tag: CANDIDATE_TAG, percent: 0 },
-    ],
-  };
-  let currentPolicy = {
-    bindings: [{ role: 'roles/run.invoker', members: ['user:qa@motionexp.com'] }],
-    etag: 'Bw-private=', version: 1,
-  };
+  const currentCandidate = candidateServiceReadback(refreshedPlan);
+  let currentStable = stablePriorReadback(refreshedPlan);
+  const currentPolicy = stablePublicIam();
   let postPromotionReadbacks = 0;
   const promotion = await runGcpReleaseImpl({
     argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`], input: refreshedInput,
@@ -3071,46 +2974,62 @@ test('real-shape migration, authenticated workload, and tag-free promotion share
       acceptanceWindowId: workloadRecord.rawReceipts.acceptanceWindowId,
       candidateOrigin: CANDIDATE_ORIGIN,
       candidateRevision: REVISION,
+      candidateService: CANDIDATE_SERVICE,
+      stableService: STABLE_SERVICE,
+      trafficState: 'candidate-service-private-100',
+      stableTrafficState: refreshedPlan.expectedStable.initialTrafficState,
       controlPlaneRequests: workloadRecord.rawReceipts.controlPlaneRequests,
       expectedTraceIds: workloadRecord.rawReceipts.textTurns.map(({ traceId }) => traceId),
     } : true,
+    writeStableSpec: async () => true,
     execute: async (argv) => {
       if (argv[0] === 'logging') return controlPlaneLogEntries(workloadRecord);
       if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
-      if (argv[0] === 'artifacts') return { image: plan.expectedCandidate.image };
-      if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
-      if (argv.includes('get-iam-policy')) return structuredClone(currentPolicy);
-      if (argv.includes('add-iam-policy-binding')) {
-        currentPolicy = {
-          bindings: [{
-            role: 'roles/run.invoker', members: ['allUsers', 'user:qa@motionexp.com'],
-          }],
-          etag: 'Bw-public=', version: 1,
-        };
-        return structuredClone(currentPolicy);
+      if (argv[0] === 'artifacts') return {
+        image: argv.includes(refreshedPlan.previousImage)
+          ? refreshedPlan.previousImage : refreshedPlan.image,
+      };
+      if (argv[1] === 'revisions') {
+        if (argv[3] === refreshedPlan.candidateRevision) {
+          return structuredClone(refreshedPlan.expectedCandidate);
+        }
+        if (argv[3] === refreshedPlan.stableRevision) {
+          return structuredClone(refreshedPlan.expectedStable);
+        }
+        return { revision: refreshedPlan.previousRevision, image: refreshedPlan.previousImage };
+      }
+      if (argv.includes('get-iam-policy')) return argv[3] === CANDIDATE_SERVICE
+        ? candidatePrivateIam() : structuredClone(currentPolicy);
+      if (argv[1] === 'services' && argv[2] === 'replace') {
+        if (argv.includes('--dry-run')) return structuredClone(refreshedPlan.stableServiceSpec);
+        currentStable = stableStagedReadback(refreshedPlan);
+        return structuredClone(currentStable);
       }
       if (argv.includes('update-traffic')) {
-        currentService = { service: 'hkbuddy-v1-api', traffic: [{ revision: REVISION, percent: 100 }] };
-        return structuredClone(currentService);
+        currentStable = stablePromotedReadback(refreshedPlan);
+        return structuredClone(currentStable);
       }
       if (argv[1] === 'services' && argv[2] === 'describe') {
-        if (currentService.traffic[0].revision === REVISION) postPromotionReadbacks += 1;
-        return structuredClone(currentService);
+        if (argv[3] === CANDIDATE_SERVICE) return structuredClone(currentCandidate);
+        if (currentStable.traffic[0].revision === STABLE_REVISION) postPromotionReadbacks += 1;
+        return structuredClone(currentStable);
       }
       throw new Error(`unexpected promotion operation: ${argv.join(' ')}`);
     },
     now: () => new Date('2026-08-26T08:05:00.000Z'),
     writeOutput: () => undefined,
   });
-  assert.equal(promotion.exitCode, 0);
+  assert.equal(promotion.exitCode, 0, JSON.stringify(promotion.publicReport));
   assert.equal(postPromotionReadbacks, 1);
-  assert.deepEqual(currentService.traffic, [{ revision: REVISION, percent: 100 }]);
-  assert.equal(JSON.stringify(currentService).includes(CANDIDATE_TAG), false);
+  assert.deepEqual(currentStable.traffic, [{ revision: STABLE_REVISION, percent: 100 }]);
+  assert.equal(JSON.stringify(currentStable).includes(CANDIDATE_TAG), false);
+  assert.deepEqual(currentCandidate, candidateServiceReadback(refreshedPlan));
   assert.equal(currentPolicy.bindings[0].members.includes('allUsers'), true);
 });
 
-test('later-release promotion rereads the exact prior-100 candidate-0 private state before public access', () => {
-  const operations = buildReleasePlan(releaseInput()).operations;
+test('later promotion rereads private candidate and public prior stable before atomic stable switch', () => {
+  const plan = buildReleasePlan(releaseInput());
+  const operations = plan.operations;
   const ids = operations.map(({ id }) => id);
   for (const id of [
     'promote-candidate-service-readback', 'promote-candidate-revision-readback',
@@ -3119,12 +3038,21 @@ test('later-release promotion rereads the exact prior-100 candidate-0 private st
     assert.equal(ids.includes(id), true, id);
     assert.equal(ids.indexOf(id) < ids.indexOf('promote-traffic'), true, id);
   }
-  assert.equal(ids.indexOf('promote-candidate-artifact-readback') < ids.indexOf('promote-public-service'), true);
-  assert.equal(ids.indexOf('promote-public-service') < ids.indexOf('promote-public-iam-readback'), true);
-  assert.equal(ids.indexOf('promote-public-iam-readback') < ids.indexOf('promote-traffic'), true);
+  assert.equal(ids.includes('promote-public-service'), false);
+  assert.equal(ids.indexOf('promote-candidate-artifact-readback')
+    < ids.indexOf('promote-stable-service-precheck'), true);
+  assert.equal(ids.indexOf('promote-stable-public-iam-precheck')
+    < ids.indexOf('promote-stable-deploy'), true);
+  assert.equal(ids.indexOf('promote-stable-staged-readback') < ids.indexOf('promote-traffic'), true);
   assert.equal(ids.indexOf('promote-traffic') < ids.indexOf('promote-readback'), true);
+  assert.equal(ids.indexOf('promote-readback') < ids.indexOf('promote-public-iam-readback'), true);
   const traffic = operations.find(({ id }) => id === 'promote-traffic');
-  assert.equal(traffic.argv.includes(`--remove-tags=${CANDIDATE_TAG}`), true);
+  assert.equal(traffic.argv.includes(`--to-revisions=${STABLE_REVISION}=100`), true);
+  assert.equal(traffic.argv.includes(CANDIDATE_SERVICE), false);
+  assert.deepEqual(plan.stableServiceSpec.spec.traffic, [
+    { revisionName: plan.previousRevision, percent: 100 },
+    { revisionName: STABLE_REVISION, percent: 0 },
+  ]);
   const readback = operations.find(({ id }) => id === 'promote-readback');
   assert.deepEqual(readback.argv.slice(0, 4), ['run', 'services', 'describe', 'hkbuddy-v1-api']);
 });
@@ -3230,8 +3158,9 @@ test('operator docs require the complete receipt sequence and manifest refresh b
   }
   for (const text of [
     'previousImageDigest', 'ROLLBACK_UNAVAILABLE_NO_PRIOR_RELEASE',
-    'exact service describe returns\n`CLOUD_RUN_SERVICE_NOT_FOUND`', 'manifest is deliberately refreshed',
+    'candidate-service-private-100', 'manifest is deliberately refreshed',
   ]) assert.equal(operator.includes(text), true, text);
   assert.match(readme, /candidate -> readiness -> workload -> mobile -> promote/);
-  assert.match(readme, /fresh service, candidate\/prior revision/);
+  assert.match(readme, /hkbuddy-v1-api-candidate/);
+  assert.match(readme, /public IAM is read-only/);
 });

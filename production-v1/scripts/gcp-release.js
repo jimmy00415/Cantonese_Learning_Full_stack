@@ -21,7 +21,8 @@ import {
 
 const PROJECT = GCP_IDENTITY.projectId;
 const REGION = GCP_IDENTITY.region;
-const SERVICE = GCP_IDENTITY.service;
+const STABLE_SERVICE = GCP_IDENTITY.service;
+const CANDIDATE_SERVICE = GCP_IDENTITY.candidateService;
 const MIGRATION_JOB = GCP_IDENTITY.jobs.migration;
 const DEPENDENCY_ACCEPTANCE_JOB = GCP_IDENTITY.jobs.dependencies;
 const LLM_SMOKE_JOB = GCP_IDENTITY.jobs.llm;
@@ -40,7 +41,8 @@ const DIGEST = /^[0-9a-f]{64}$/;
 const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/;
 const NUMERIC_VERSION = /^[1-9]\d*$/;
 const PROJECT_NUMBER = /^\d{6,20}$/;
-const REVISION = /^hkbuddy-v1-api-[0-9a-f]{12}$/;
+const STABLE_REVISION = /^hkbuddy-v1-api-[0-9a-f]{12}$/;
+const CANDIDATE_REVISION = /^hkbuddy-v1-api-candidate-[0-9a-f]{12}$/;
 const BUILD_SOURCE_PREFIX = 'source/';
 const BUILD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ACCEPTANCE_RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -162,13 +164,21 @@ function isAbsoluteFile(value) {
     && !/[\u0000\r\n]/.test(value);
 }
 
-function assertTask8Evidence(value) {
+function assertTask8Evidence(value, { stableTrafficState } = {}) {
   if (!exactKeys(value, ['mobile', 'readiness', 'workload'])) throw releaseContractError();
   return Object.freeze(Object.fromEntries(Object.entries(value).map(([key, entry]) => {
-    if (!exactKeys(entry, ['artifactSha256', 'filePath', 'objectSha256'])
+    if (!exactKeys(entry, [
+      'artifactSha256', 'candidateService', 'filePath', 'objectSha256', 'schemaVersion',
+      'stableService', 'stableTrafficState', 'trafficState',
+    ])
+      || entry.schemaVersion !== 2
       || !isAbsoluteFile(entry.filePath)
       || !DIGEST.test(String(entry.artifactSha256 ?? ''))
-      || !DIGEST.test(String(entry.objectSha256 ?? ''))) throw releaseContractError();
+      || !DIGEST.test(String(entry.objectSha256 ?? ''))
+      || entry.candidateService !== CANDIDATE_SERVICE
+      || entry.stableService !== STABLE_SERVICE
+      || entry.trafficState !== 'candidate-service-private-100'
+      || entry.stableTrafficState !== stableTrafficState) throw releaseContractError();
     return [key, Object.freeze({ ...entry })];
   })));
 }
@@ -483,18 +493,16 @@ function operation(phase, id, argv) {
   return Object.freeze({ phase, id, argv: Object.freeze([...argv]) });
 }
 
-function candidateTrafficPercent({ previousRevision }) {
-  return previousRevision === null ? 100 : 0;
+function candidateTrafficPercent() {
+  return 100;
 }
 
-function candidateTrafficState({ previousRevision }) {
-  return previousRevision === null
-    ? 'private-bootstrap-100'
-    : 'prior-stable-100/candidate-0';
+function candidateTrafficState() {
+  return 'candidate-service-private-100';
 }
 
-function candidateServiceSpec({
-  candidateRevision, candidateTag, previousRevision, releaseSha, image, environment, bindings, probes,
+function cloudRunServiceSpec({
+  service, revision, releaseSha, image, environment, bindings, probes, traffic,
 }) {
   const mountEntries = Object.entries(bindings.mounts).sort(([left], [right]) => left.localeCompare(right));
   const volumes = mountEntries.map(([key, value]) => {
@@ -530,13 +538,13 @@ function candidateServiceSpec({
     apiVersion: 'serving.knative.dev/v1',
     kind: 'Service',
     metadata: Object.freeze({
-      name: SERVICE,
+      name: service,
       annotations: Object.freeze({ 'run.googleapis.com/ingress': 'all' }),
     }),
     spec: Object.freeze({
       template: Object.freeze({
         metadata: Object.freeze({
-          name: candidateRevision,
+          name: revision,
           labels: Object.freeze({ 'simplify-release-sha': releaseSha }),
           annotations: Object.freeze({
             'autoscaling.knative.dev/minScale': '1',
@@ -567,16 +575,47 @@ function candidateServiceSpec({
           volumes: Object.freeze(volumes.map(Object.freeze)),
         }),
       }),
-      traffic: Object.freeze([
-        ...(previousRevision === null
-          ? [] : [Object.freeze({ revisionName: previousRevision, percent: 100 })]),
-        Object.freeze({
-          revisionName: candidateRevision,
-          tag: candidateTag,
-          percent: previousRevision === null ? 100 : 0,
-        }),
-      ]),
+      traffic: Object.freeze(traffic.map(({ revision: revisionName, tag, percent }) => Object.freeze({
+        revisionName,
+        ...(tag === null ? {} : { tag }),
+        percent,
+      }))),
     }),
+  });
+}
+
+function candidateServiceSpec({
+  candidateRevision, candidateTag, releaseSha, image, environment, bindings, probes,
+}) {
+  return cloudRunServiceSpec({
+    service: CANDIDATE_SERVICE,
+    revision: candidateRevision,
+    releaseSha,
+    image,
+    environment,
+    bindings,
+    probes,
+    traffic: [{ revision: candidateRevision, tag: candidateTag, percent: 100 }],
+  });
+}
+
+function stableServiceSpec({
+  stableRevision, previousRevision, releaseSha, image, environment, bindings, probes,
+}) {
+  return cloudRunServiceSpec({
+    service: STABLE_SERVICE,
+    revision: stableRevision,
+    releaseSha,
+    image,
+    environment,
+    bindings,
+    probes,
+    traffic: previousRevision === null
+      ? [{ revision: stableRevision, tag: null, percent: 100 }]
+      : [
+        { revision: previousRevision, tag: null, percent: 100 },
+        { revision: stableRevision, tag: null, percent: 0 },
+      ],
   });
 }
 
@@ -595,9 +634,24 @@ async function writeCandidateServiceSpecFile(plan) {
   return true;
 }
 
+async function writeStableServiceSpecFile(plan) {
+  const contents = `${JSON.stringify(plan.stableServiceSpec, null, 2)}\n`;
+  try {
+    const metadata = await lstat(plan.stableServiceSpecPath);
+    if (!metadata.isFile() || metadata.isSymbolicLink()
+      || !Buffer.from(await readFile(plan.stableServiceSpecPath)).equals(Buffer.from(contents))) {
+      throw new Error('stable service specification drift');
+    }
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+    await writeFile(plan.stableServiceSpecPath, contents, { encoding: 'utf8', flag: 'wx' });
+  }
+  return true;
+}
+
 function promotionIamRestorePolicyPath(plan, attemptId) {
   if (!UUID.test(String(attemptId ?? ''))) throw new Error('promotion IAM restore attempt is invalid');
-  return join(dirname(plan.sourceArchive), `${plan.candidateRevision}.iam-restore.${attemptId}.json`);
+  return join(dirname(plan.sourceArchive), `${plan.stableRevision}.iam-restore.${attemptId}.json`);
 }
 
 async function writePromotionIamRestorePolicyFile(plan, policy, { attemptId } = {}) {
@@ -610,7 +664,7 @@ async function writePromotionIamRestorePolicyFile(plan, policy, { attemptId } = 
 async function removePromotionIamRestorePolicyFile(plan, filePath) {
   if (filePath !== promotionIamRestorePolicyPath(
     plan,
-    basename(filePath).slice(`${plan.candidateRevision}.iam-restore.`.length, -'.json'.length),
+    basename(filePath).slice(`${plan.stableRevision}.iam-restore.`.length, -'.json'.length),
   )) throw new Error('promotion IAM restore policy path is invalid');
   await rm(filePath);
   try {
@@ -648,7 +702,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       || Object.values(input.databaseSecretVersions).some((value) => !NUMERIC_VERSION.test(String(value ?? '')))
     ))
     || !((input.previousRevision === null && input.previousImageDigest === null)
-      || (REVISION.test(String(input.previousRevision ?? ''))
+      || (STABLE_REVISION.test(String(input.previousRevision ?? ''))
         && IMAGE_DIGEST.test(String(input.previousImageDigest ?? ''))))
     || (!unresolvedEvidence && (input.evidence === null || input.evidence === undefined))) {
     throw releaseContractError();
@@ -674,7 +728,8 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
   const previousRevision = input.previousRevision;
   const previousImageDigest = input.previousImageDigest;
   const releaseSha = input.releaseSha;
-  const task8Evidence = assertTask8Evidence(input.task8Evidence);
+  const stableTrafficState = previousRevision === null ? 'stable-absent' : 'stable-prior-100';
+  const task8Evidence = assertTask8Evidence(input.task8Evidence, { stableTrafficState });
   const acceptanceOutputs = unresolvedAcceptanceOutputs
     ? assertAcceptanceOutputs(Object.fromEntries(Object.entries(
       expectedAcceptanceObjects(releaseSha, input.acceptanceRunId),
@@ -689,21 +744,23 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       evidence[key].filePath !== acceptanceOutputs[key].filePath
     ))) throw releaseContractError();
   const candidateSuffix = releaseSha.slice(0, 12);
-  const candidateRevision = `${SERVICE}-${candidateSuffix}`;
+  const candidateRevision = `${CANDIDATE_SERVICE}-${candidateSuffix}`;
+  const stableRevision = `${STABLE_SERVICE}-${candidateSuffix}`;
   const candidateTag = `candidate-${candidateSuffix}`;
-  const serviceOrigin = `https://${SERVICE}-${input.projectNumber}.${REGION}.run.app`;
-  const candidateOrigin = `https://${candidateTag}---${SERVICE}-${input.projectNumber}.${REGION}.run.app`;
+  const serviceOrigin = `https://${STABLE_SERVICE}-${input.projectNumber}.${REGION}.run.app`;
+  const candidateServiceOrigin = `https://${CANDIDATE_SERVICE}-${input.projectNumber}.${REGION}.run.app`;
+  const candidateOrigin = `https://${candidateTag}---${CANDIDATE_SERVICE}-${input.projectNumber}.${REGION}.run.app`;
   const candidateAccess = Object.freeze({
     authenticated: true,
-    audience: serviceOrigin,
+    audience: candidateServiceOrigin,
     issuer: 'https://accounts.google.com',
     subjectSha256: createHash('sha256').update(PROMOTION_AUTHORITY).digest('hex'),
     taggedUrl: candidateOrigin,
   });
   const effectiveImageDigest = input.imageDigest ?? `sha256:${'0'.repeat(64)}`;
-  const image = `asia-east2-docker.pkg.dev/${PROJECT}/${REPOSITORY}/${SERVICE}@${effectiveImageDigest}`;
+  const image = `asia-east2-docker.pkg.dev/${PROJECT}/${REPOSITORY}/${STABLE_SERVICE}@${effectiveImageDigest}`;
   const previousImage = previousImageDigest === null ? null
-    : `asia-east2-docker.pkg.dev/${PROJECT}/${REPOSITORY}/${SERVICE}@${previousImageDigest}`;
+    : `asia-east2-docker.pkg.dev/${PROJECT}/${REPOSITORY}/${STABLE_SERVICE}@${previousImageDigest}`;
   const environment = environmentFor({ releaseSha, serviceOrigin, candidateOrigin, evidence });
   const bindings = secretBindings(databaseSecretVersions, evidence);
   const acceptanceRunId = input.acceptanceRunId;
@@ -879,8 +936,13 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     }),
   });
   const candidateServiceSpecPath = join(dirname(input.sourceArchive), `${candidateRevision}.service.yaml`);
+  const stableServiceSpecPath = join(dirname(input.sourceArchive), `${stableRevision}.service.yaml`);
   const controlledCandidateServiceSpec = candidateServiceSpec({
-    candidateRevision, candidateTag, previousRevision, releaseSha,
+    candidateRevision, candidateTag, releaseSha,
+    image, environment, bindings, probes,
+  });
+  const controlledStableServiceSpec = stableServiceSpec({
+    stableRevision, previousRevision, releaseSha,
     image, environment, bindings, probes,
   });
   const releaseIdentitySha256 = canonicalSha256({
@@ -890,6 +952,10 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     sourceArchiveSha256: input.sourceArchiveSha256,
     projectNumber: input.projectNumber,
     acceptanceRunId,
+    candidateService: CANDIDATE_SERVICE,
+    stableService: STABLE_SERVICE,
+    trafficState: candidateTrafficState(),
+    stableTrafficState,
   });
   const releaseReceiptDirectory = join(dirname(input.sourceArchive), `${releaseSha}-receipts`);
   const releaseReceiptPaths = Object.freeze(Object.fromEntries(RECEIPT_PHASES.map((receiptPhase, index) => [
@@ -1003,19 +1069,10 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     `--project=${PROJECT}`, '--format=json',
   ]));
   operations.push(
-    operation('candidate', 'candidate-stable-readback', [
-      'run', 'services', 'describe', SERVICE, `--project=${PROJECT}`, `--region=${REGION}`,
+    operation('candidate', 'candidate-service-precheck', [
+      'run', 'services', 'describe', CANDIDATE_SERVICE,
+      `--project=${PROJECT}`, `--region=${REGION}`,
       '--format=json',
-    ]),
-    ...(previousRevision === null ? [] : [
-      operation('candidate', 'candidate-prior-revision-readback', [
-        'run', 'revisions', 'describe', previousRevision,
-        `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-      ]),
-      operation('candidate', 'candidate-prior-artifact-readback', [
-        'artifacts', 'docker', 'images', 'describe', previousImage,
-        `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
-      ]),
     ]),
     operation('candidate', 'candidate-spec-dry-run', [
       'run', 'services', 'replace', candidateServiceSpecPath,
@@ -1026,61 +1083,63 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
     operation('candidate', 'candidate-service-readback', [
-      'run', 'services', 'describe', SERVICE, `--project=${PROJECT}`, `--region=${REGION}`,
+      'run', 'services', 'describe', CANDIDATE_SERVICE,
+      `--project=${PROJECT}`, `--region=${REGION}`,
       '--format=json',
     ]),
     operation('candidate', 'candidate-revision-readback', [
       'run', 'revisions', 'describe', candidateRevision,
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
-    operation('candidate', 'candidate-private-iam-readback', [
-      'run', 'services', 'get-iam-policy', SERVICE,
-      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-    ]),
-    operation('candidate', 'candidate-readback', [
+    operation('candidate', 'candidate-artifact-readback', [
       'artifacts', 'docker', 'images', 'describe', image,
       `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
     ]),
-    ...(previousRevision === null ? [] : [
+    operation('candidate', 'candidate-private-iam-baseline-readback', [
+      'run', 'services', 'get-iam-policy', CANDIDATE_SERVICE,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ]),
+    operation('candidate', 'candidate-private-iam-grant', [
+      'run', 'services', 'add-iam-policy-binding', CANDIDATE_SERVICE,
+      `--member=user:${PROMOTION_AUTHORITY}`, '--role=roles/run.invoker',
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ]),
+    operation('candidate', 'candidate-private-iam-readback', [
+      'run', 'services', 'get-iam-policy', CANDIDATE_SERVICE,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ]),
     operation('candidate-cleanup', 'candidate-cleanup-service-precheck', [
-      'run', 'services', 'describe', SERVICE, `--project=${PROJECT}`, `--region=${REGION}`,
+      'run', 'services', 'describe', CANDIDATE_SERVICE,
+      `--project=${PROJECT}`, `--region=${REGION}`,
       '--format=json',
     ]),
-    operation('candidate-cleanup', 'candidate-cleanup-candidate-revision-readback', [
+    operation('candidate-cleanup', 'candidate-cleanup-revision-readback', [
       'run', 'revisions', 'describe', candidateRevision,
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
-    operation('candidate-cleanup', 'candidate-cleanup-candidate-artifact-readback', [
+    operation('candidate-cleanup', 'candidate-cleanup-artifact-readback', [
       'artifacts', 'docker', 'images', 'describe', image,
       `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
     ]),
-    operation('candidate-cleanup', 'candidate-cleanup-prior-revision-readback', [
-      'run', 'revisions', 'describe', previousRevision,
+    operation('candidate-cleanup', 'candidate-cleanup-private-iam-readback', [
+      'run', 'services', 'get-iam-policy', CANDIDATE_SERVICE,
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
-    operation('candidate-cleanup', 'candidate-cleanup-prior-artifact-readback', [
-      'artifacts', 'docker', 'images', 'describe', previousImage,
-      `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
-    ]),
-    operation('candidate-cleanup', 'candidate-cleanup-traffic', [
-      'run', 'services', 'update-traffic', SERVICE,
-      `--remove-tags=${candidateTag}`, `--to-revisions=${previousRevision}=100`,
+    operation('candidate-cleanup', 'candidate-cleanup-delete', [
+      'run', 'services', 'delete', CANDIDATE_SERVICE, '--quiet',
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
-    operation('candidate-cleanup', 'candidate-cleanup-iam-readback', [
-      'run', 'services', 'get-iam-policy', SERVICE,
-      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-    ]),
-    operation('candidate-cleanup', 'candidate-cleanup-service-readback', [
-      'run', 'services', 'describe', SERVICE, `--project=${PROJECT}`, `--region=${REGION}`,
+    operation('candidate-cleanup', 'candidate-cleanup-absence-readback', [
+      'run', 'services', 'describe', CANDIDATE_SERVICE,
+      `--project=${PROJECT}`, `--region=${REGION}`,
       '--format=json',
-    ]),
     ]),
     operation('promote', 'promote-authority-readback', [
       'auth', 'list', '--filter=status:ACTIVE', '--format=json',
     ]),
     operation('promote', 'promote-candidate-service-readback', [
-      'run', 'services', 'describe', SERVICE, `--project=${PROJECT}`, `--region=${REGION}`,
+      'run', 'services', 'describe', CANDIDATE_SERVICE,
+      `--project=${PROJECT}`, `--region=${REGION}`,
       '--format=json',
     ]),
     operation('promote', 'promote-candidate-revision-readback', [
@@ -1088,40 +1147,91 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
     operation('promote', 'promote-candidate-iam-readback', [
-      'run', 'services', 'get-iam-policy', SERVICE,
+      'run', 'services', 'get-iam-policy', CANDIDATE_SERVICE,
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
     operation('promote', 'promote-candidate-artifact-readback', [
       'artifacts', 'docker', 'images', 'describe', image,
       `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
     ]),
-    operation('promote', 'promote-public-service', [
-      'run', 'services', 'add-iam-policy-binding', SERVICE, '--member=allUsers',
-      '--role=roles/run.invoker', `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-    ]),
-    operation('promote', 'promote-public-iam-readback', [
-      'run', 'services', 'get-iam-policy', SERVICE,
+    operation('promote', 'promote-stable-service-precheck', [
+      'run', 'services', 'describe', STABLE_SERVICE,
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
-    operation('promote', 'promote-traffic', [
-      'run', 'services', 'update-traffic', SERVICE,
-      `--remove-tags=${candidateTag}`, `--to-revisions=${candidateRevision}=100`,
+    ...(previousRevision === null ? [] : [
+      operation('promote', 'promote-stable-public-iam-precheck', [
+        'run', 'services', 'get-iam-policy', STABLE_SERVICE,
+        `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+      ]),
+      operation('promote', 'promote-prior-revision-readback', [
+        'run', 'revisions', 'describe', previousRevision,
+        `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+      ]),
+      operation('promote', 'promote-prior-artifact-readback', [
+        'artifacts', 'docker', 'images', 'describe', previousImage,
+        `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
+      ]),
+    ]),
+    operation('promote', 'promote-stable-spec-dry-run', [
+      'run', 'services', 'replace', stableServiceSpecPath,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--dry-run', '--format=json',
+    ]),
+    operation('promote', 'promote-stable-deploy', [
+      'run', 'services', 'replace', stableServiceSpecPath,
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
-    operation('promote', 'promote-readback', [
-      'run', 'services', 'describe', SERVICE, `--project=${PROJECT}`, `--region=${REGION}`,
+    operation('promote', 'promote-stable-staged-readback', [
+      'run', 'services', 'describe', STABLE_SERVICE,
+      `--project=${PROJECT}`, `--region=${REGION}`,
       '--format=json',
+    ]),
+    operation('promote', 'promote-stable-revision-readback', [
+      'run', 'revisions', 'describe', stableRevision,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ]),
+    operation('promote', 'promote-stable-artifact-readback', [
+      'artifacts', 'docker', 'images', 'describe', image,
+      `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
+    ]),
+    ...(previousRevision === null ? [
+      operation('promote', 'promote-stable-private-iam-readback', [
+        'run', 'services', 'get-iam-policy', STABLE_SERVICE,
+        `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+      ]),
+      operation('promote', 'promote-public-service', [
+        'run', 'services', 'add-iam-policy-binding', STABLE_SERVICE, '--member=allUsers',
+        '--role=roles/run.invoker', `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+      ]),
+      operation('promote', 'promote-public-iam-readback', [
+        'run', 'services', 'get-iam-policy', STABLE_SERVICE,
+        `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+      ]),
+    ] : [
+      operation('promote', 'promote-traffic', [
+        'run', 'services', 'update-traffic', STABLE_SERVICE,
+        `--to-revisions=${stableRevision}=100`,
+        `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+      ]),
+      operation('promote', 'promote-readback', [
+        'run', 'services', 'describe', STABLE_SERVICE,
+        `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+      ]),
+      operation('promote', 'promote-public-iam-readback', [
+        'run', 'services', 'get-iam-policy', STABLE_SERVICE,
+        `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+      ]),
     ]),
     ...(previousRevision === null ? [] : [
     operation('rollback', 'rollback-service-precheck', [
-      'run', 'services', 'describe', SERVICE, `--project=${PROJECT}`, `--region=${REGION}`,
+      'run', 'services', 'describe', STABLE_SERVICE,
+      `--project=${PROJECT}`, `--region=${REGION}`,
       '--format=json',
     ]),
-    operation('rollback', 'rollback-candidate-revision-readback', [
-      'run', 'revisions', 'describe', candidateRevision,
+    operation('rollback', 'rollback-current-revision-readback', [
+      'run', 'revisions', 'describe', stableRevision,
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
-    operation('rollback', 'rollback-candidate-artifact-readback', [
+    operation('rollback', 'rollback-current-artifact-readback', [
       'artifacts', 'docker', 'images', 'describe', image,
       `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
     ]),
@@ -1133,24 +1243,28 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       'artifacts', 'docker', 'images', 'describe', previousImage,
       `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
     ]),
+    operation('rollback', 'rollback-public-iam-precheck', [
+      'run', 'services', 'get-iam-policy', STABLE_SERVICE,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ]),
     operation('rollback', 'rollback-traffic', [
-      'run', 'services', 'update-traffic', SERVICE,
-      `--remove-tags=${candidateTag}`, `--to-revisions=${previousRevision}=100`,
+      'run', 'services', 'update-traffic', STABLE_SERVICE,
+      `--to-revisions=${previousRevision}=100`,
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
     operation('rollback', 'rollback-readback', [
-      'run', 'services', 'describe', SERVICE, `--project=${PROJECT}`, `--region=${REGION}`,
+      'run', 'services', 'describe', STABLE_SERVICE,
+      `--project=${PROJECT}`, `--region=${REGION}`,
       '--format=json',
+    ]),
+    operation('rollback', 'rollback-public-iam-readback', [
+      'run', 'services', 'get-iam-policy', STABLE_SERVICE,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
     ]),
   );
 
-  const expectedCandidate = Object.freeze({
-    project: PROJECT,
-    region: REGION,
-    service: SERVICE,
-    revision: candidateRevision,
-    tag: candidateTag,
+  const revisionContract = Object.freeze({
     image,
     serviceAccount: RUNTIME_SERVICE_ACCOUNT,
     executionEnvironment: 'gen2',
@@ -1169,19 +1283,38 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     secretEnvironment: bindings.environment,
     secretMounts: bindings.mounts,
     probes,
-    traffic: Object.freeze([
-      ...(previousRevision === null ? [] : [Object.freeze({
-        revision: previousRevision, tag: null, percent: 100,
-      })]),
-      Object.freeze({
-        revision: candidateRevision,
-        tag: candidateTag,
-        percent: candidateTrafficPercent({ previousRevision }),
-      }),
-    ]),
-    trafficState: candidateTrafficState({ previousRevision }),
+  });
+  const expectedCandidate = Object.freeze({
+    project: PROJECT,
+    region: REGION,
+    service: CANDIDATE_SERVICE,
+    revision: candidateRevision,
+    tag: candidateTag,
+    ...revisionContract,
+    traffic: Object.freeze([Object.freeze({
+      revision: candidateRevision, tag: candidateTag, percent: 100,
+    })]),
+    trafficState: candidateTrafficState(),
     access: candidateAccess,
-    iam: Object.freeze({ publicInvoker: false }),
+    iam: Object.freeze({ policy: 'candidate-private' }),
+  });
+  const expectedStable = Object.freeze({
+    project: PROJECT,
+    region: REGION,
+    service: STABLE_SERVICE,
+    revision: stableRevision,
+    tag: null,
+    ...revisionContract,
+    stagedTraffic: Object.freeze((previousRevision === null ? [
+      { revision: stableRevision, tag: null, percent: 100 },
+    ] : [
+      { revision: previousRevision, tag: null, percent: 100 },
+      { revision: stableRevision, tag: null, percent: 0 },
+    ]).map(Object.freeze)),
+    traffic: Object.freeze([Object.freeze({
+      revision: stableRevision, tag: null, percent: 100,
+    })]),
+    initialTrafficState: stableTrafficState,
   });
   return Object.freeze({
     project: PROJECT,
@@ -1190,16 +1323,23 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     sourceArchive: input.sourceArchive,
     sourceArchiveSha256: input.sourceArchiveSha256,
     imageDigest: input.imageDigest,
+    image,
     previousRevision,
     previousImageDigest,
     previousImage,
     candidateRevision,
+    stableRevision,
     candidateTag,
+    candidateService: CANDIDATE_SERVICE,
+    stableService: STABLE_SERVICE,
     serviceOrigin,
+    candidateServiceOrigin,
     candidateOrigin,
     candidateAccess,
     candidateServiceSpecPath,
     candidateServiceSpec: controlledCandidateServiceSpec,
+    stableServiceSpecPath,
+    stableServiceSpec: controlledStableServiceSpec,
     acceptanceRunId,
     releaseIdentitySha256,
     releaseReceiptDirectory,
@@ -1215,11 +1355,12 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     expectedJobs,
     expectedMigrationJob,
     expectedCandidate,
+    expectedStable,
   });
 }
 
 export function validateBuildReceipt(value, { releaseSha, sourceArchiveSha256 } = {}) {
-  const imageName = `asia-east2-docker.pkg.dev/${PROJECT}/${REPOSITORY}/${SERVICE}:${releaseSha}`;
+  const imageName = `asia-east2-docker.pkg.dev/${PROJECT}/${REPOSITORY}/${STABLE_SERVICE}:${releaseSha}`;
   const image = value?.results?.images;
   const source = value?.sourceProvenance?.resolvedStorageSource;
   const sourceUri = exactKeys(source, ['bucket', 'generation', 'object'])
@@ -1403,21 +1544,32 @@ function validateCandidateServiceSpecDryRun(value, plan) {
   const template = value?.spec?.template;
   const normalizedService = normalizeCandidateService(value);
   if (value?.apiVersion !== 'serving.knative.dev/v1' || value?.kind !== 'Service'
-    || !template || normalizedService?.service !== SERVICE
-    || !exact(normalizedService.traffic, [
-      ...(plan.previousRevision === null
-        ? [] : [{ revision: plan.previousRevision, tag: null, percent: 100 }]),
-      {
-        revision: plan.candidateRevision,
-        tag: plan.candidateTag,
-        percent: candidateTrafficPercent(plan),
-      },
-    ])
+    || !template || normalizedService?.service !== CANDIDATE_SERVICE
+    || !exact(normalizedService.traffic, [{
+      revision: plan.candidateRevision,
+      tag: plan.candidateTag,
+      percent: 100,
+    }])
     || !exact(
       normalizeCandidateRevision({ metadata: template.metadata, spec: template.spec }, plan.expectedCandidate),
       candidateRevisionContract(plan.expectedCandidate),
     )) {
     throw new Error('Cloud Run candidate Service dry-run is invalid');
+  }
+  return true;
+}
+
+function validateStableServiceSpecDryRun(value, plan) {
+  const template = value?.spec?.template;
+  const normalizedService = normalizeCandidateService(value);
+  if (value?.apiVersion !== 'serving.knative.dev/v1' || value?.kind !== 'Service'
+    || !template || normalizedService?.service !== STABLE_SERVICE
+    || !exact(normalizedService.traffic, plan.expectedStable.stagedTraffic)
+    || !exact(
+      normalizeCandidateRevision({ metadata: template.metadata, spec: template.spec }, plan.expectedStable),
+      candidateRevisionContract(plan.expectedStable),
+    )) {
+    throw new Error('Cloud Run stable Service dry-run is invalid');
   }
   return true;
 }
@@ -1450,10 +1602,28 @@ function validateCandidateService(value, expected) {
   return true;
 }
 
-function validateStableService(value, { previousRevision, candidateTag } = {}) {
+function validateStableStagedService(value, plan) {
   const normalized = normalizeCandidateService(value);
-  if (!normalized || normalized.service !== SERVICE
-    || normalized.traffic.some(({ tag }) => tag === candidateTag)) {
+  if (!normalized || normalized.service !== STABLE_SERVICE
+    || !exact(normalized.traffic, plan.expectedStable.stagedTraffic)
+    || normalized.traffic.some(({ tag }) => tag !== null)) {
+    throw new Error('Cloud Run staged stable service readback is invalid');
+  }
+  return true;
+}
+
+function validateStableRevisionReadback(value, plan) {
+  if (!exact(normalizeCandidateRevision(value, plan.expectedStable),
+    candidateRevisionContract(plan.expectedStable))) {
+    throw new Error('Cloud Run stable revision readback is invalid');
+  }
+  return true;
+}
+
+function validateStableService(value, { previousRevision } = {}) {
+  const normalized = normalizeCandidateService(value);
+  if (!normalized || normalized.service !== STABLE_SERVICE
+    || normalized.traffic.some(({ tag }) => tag !== null)) {
     throw new Error('Cloud Run stable service readback is invalid');
   }
   const active = normalized.traffic.filter(({ percent }) => percent > 0)
@@ -1466,20 +1636,16 @@ function validateStableService(value, { previousRevision, candidateTag } = {}) {
 
 function validateCandidateCleanupService(value, plan) {
   validateStableService(value, plan);
-  const traffic = normalizeCandidateService(value)?.traffic ?? [];
-  if (traffic.some(({ tag }) => tag === plan.candidateTag)) {
-    throw new Error('Cloud Run candidate cleanup readback is invalid');
-  }
   return true;
 }
 
 function validatePromotedService(value, plan) {
   const normalized = normalizeCandidateService(value);
-  if (!normalized || normalized.service !== SERVICE) {
+  if (!normalized || normalized.service !== STABLE_SERVICE) {
     throw new Error('Cloud Run promotion service readback is invalid');
   }
-  validateTrafficReceipt(value, { revision: plan.candidateRevision });
-  if (normalized.traffic.some(({ tag }) => tag === plan.candidateTag)) {
+  validateTrafficReceipt(value, { revision: plan.stableRevision });
+  if (normalized.traffic.some(({ tag }) => tag !== null)) {
     throw new Error('Cloud Run promotion tag cleanup readback is invalid');
   }
   return true;
@@ -1487,16 +1653,16 @@ function validatePromotedService(value, plan) {
 
 function validatePromotionCompensationSource(value, plan) {
   const normalized = normalizeCandidateService(value);
-  if (!normalized || normalized.service !== SERVICE || normalized.traffic.length < 1
+  if (!normalized || normalized.service !== STABLE_SERVICE || normalized.traffic.length < 1
     || normalized.traffic.length > 2) {
     throw new Error('Cloud Run promotion compensation source is invalid');
   }
   if (plan.previousRevision === null) {
     if (!exact(normalized.traffic, [{
-      revision: plan.candidateRevision,
-      tag: normalized.traffic[0]?.tag,
+      revision: plan.stableRevision,
+      tag: null,
       percent: 100,
-    }]) || ![null, plan.candidateTag].includes(normalized.traffic[0]?.tag)) {
+    }])) {
       throw new Error('Cloud Run promotion compensation source is invalid');
     }
     return true;
@@ -1504,9 +1670,8 @@ function validatePromotionCompensationSource(value, plan) {
   const seenRevisions = new Set();
   let routedRevision = null;
   for (const member of normalized.traffic) {
-    if (![plan.previousRevision, plan.candidateRevision].includes(member.revision)
-      || ![null, plan.candidateTag].includes(member.tag)
-      || (member.tag === plan.candidateTag && member.revision !== plan.candidateRevision)
+    if (![plan.previousRevision, plan.stableRevision].includes(member.revision)
+      || member.tag !== null
       || ![0, 100].includes(member.percent) || seenRevisions.has(member.revision)) {
       throw new Error('Cloud Run promotion compensation source is invalid');
     }
@@ -1516,18 +1681,8 @@ function validatePromotionCompensationSource(value, plan) {
       routedRevision = member.revision;
     }
   }
-  if (![plan.previousRevision, plan.candidateRevision].includes(routedRevision)) {
+  if (![plan.previousRevision, plan.stableRevision].includes(routedRevision)) {
     throw new Error('Cloud Run promotion compensation source is invalid');
-  }
-  return true;
-}
-
-function validateBootstrapCandidateService(value, plan) {
-  const normalized = normalizeCandidateService(value);
-  if (!normalized || normalized.service !== SERVICE || !exact(normalized.traffic, [{
-    revision: plan.candidateRevision, tag: plan.candidateTag, percent: 100,
-  }])) {
-    throw new Error('Cloud Run bootstrap candidate service readback is invalid');
   }
   return true;
 }
@@ -1554,7 +1709,7 @@ function validatePriorRevisionReadback(value, plan) {
   const revision = value?.revision ?? value?.metadata?.name;
   const image = value?.image ?? value?.spec?.containers?.[0]?.image;
   if (plan.previousRevision === null || plan.previousImage === null
-    || !REVISION.test(String(revision ?? ''))
+    || !STABLE_REVISION.test(String(revision ?? ''))
     || revision !== plan.previousRevision || image !== plan.previousImage) {
     throw new Error('Cloud Run prior revision readback is invalid');
   }
@@ -1563,18 +1718,13 @@ function validatePriorRevisionReadback(value, plan) {
 
 function validateRecoveryPrecheck(value, plan, phase) {
   if (phase === 'candidate-cleanup') {
-    const normalized = normalizeCandidateService(value);
-    if (!normalized || normalized.service !== SERVICE || !exact(normalized.traffic, [
-      { revision: plan.previousRevision, tag: null, percent: 100 },
-      { revision: plan.candidateRevision, tag: plan.candidateTag, percent: 0 },
-    ])) throw new Error('Cloud Run candidate cleanup precheck is invalid');
-    return true;
+    return validateCandidateService(value, plan.expectedCandidate);
   }
   if (phase === 'rollback') return validatePromotedService(value, plan);
   throw new Error('Cloud Run recovery precheck is invalid');
 }
 
-export function validateCandidateControlPlaneReadbacks(value, plan, { publicInvoker = false } = {}) {
+export function validateCandidateControlPlaneReadbacks(value, plan) {
   if (!exactKeys(value, ['artifact', 'iam', 'revision', 'service']) || !plan?.expectedCandidate) {
     throw new Error('Cloud Run candidate control-plane readback is invalid');
   }
@@ -1583,7 +1733,7 @@ export function validateCandidateControlPlaneReadbacks(value, plan, { publicInvo
   if (!exact(normalizeCandidateRevision(value.revision, expected), candidateRevisionContract(expected))) {
     throw new Error('Cloud Run candidate revision readback is invalid');
   }
-  validateServiceIamReceipt(value.iam, { publicInvoker });
+  validateServiceIamReceipt(value.iam, { policy: 'candidate-private' });
   validateCandidateArtifact(value.artifact, expected.image);
   return true;
 }
@@ -1659,11 +1809,31 @@ function validateIamPolicyState(value, expected, { requireEtag = true } = {}) {
   return normalized;
 }
 
-export function validateServiceIamReceipt(value, { publicInvoker, requireEtag = false } = {}) {
-  if (![true, false].includes(publicInvoker)) {
+export function validateServiceIamReceipt(value, {
+  policy = null, publicInvoker = null, requireEtag = false,
+} = {}) {
+  if (policy !== null && ![
+    'candidate-private', 'stable-private', 'stable-public',
+  ].includes(policy)) {
     throw new Error('Cloud Run service IAM readback is invalid');
   }
   const normalized = normalizeServiceIamPolicy(value, { requireEtag });
+  if (policy !== null) {
+    const expectedBindings = {
+      'candidate-private': [{
+        role: 'roles/run.invoker', members: [`user:${PROMOTION_AUTHORITY}`],
+      }],
+      'stable-private': [],
+      'stable-public': [{ role: 'roles/run.invoker', members: ['allUsers'] }],
+    }[policy];
+    if (!exact(normalized.bindings, expectedBindings)) {
+      throw new Error('Cloud Run service IAM readback is invalid');
+    }
+    return true;
+  }
+  if (![true, false].includes(publicInvoker)) {
+    throw new Error('Cloud Run service IAM readback is invalid');
+  }
   const publicMembers = normalized.bindings.flatMap((binding) => binding.members.map((member) => ({
     member, role: binding.role, conditioned: binding.condition !== undefined,
   }))).filter(({ member }) => member === 'allUsers' || member === 'allAuthenticatedUsers');
@@ -1677,7 +1847,8 @@ export function validateServiceIamReceipt(value, { publicInvoker, requireEtag = 
 
 export function validateTrafficReceipt(value, { revision } = {}) {
   const traffic = value?.status?.traffic ?? value?.traffic;
-  if (!REVISION.test(String(revision ?? '')) || !Array.isArray(traffic)) {
+  if (!(STABLE_REVISION.test(String(revision ?? ''))
+    || CANDIDATE_REVISION.test(String(revision ?? ''))) || !Array.isArray(traffic)) {
     throw new Error('Cloud Run traffic readback is invalid');
   }
   const active = traffic.filter(({ percent } = {}) => Number(percent) > 0).map((member) => ({
@@ -1995,8 +2166,12 @@ function validateRawLatencyReceipts(record, plan) {
   const raw = record?.rawReceipts;
   if (!exactKeys(raw, [
     'acceptanceWindowId', 'asrRequests', 'controlPlaneRequests', 'receiptsSha256',
-    'schemaVersion', 'textTurns', 'timingQueries', 'ttsRequests',
-  ]) || raw.schemaVersion !== 1 || !DIGEST.test(String(raw.acceptanceWindowId ?? ''))
+    'candidateService', 'schemaVersion', 'stableService', 'stableTrafficState',
+    'textTurns', 'timingQueries', 'trafficState', 'ttsRequests',
+  ]) || raw.schemaVersion !== 2 || !DIGEST.test(String(raw.acceptanceWindowId ?? ''))
+    || raw.candidateService !== CANDIDATE_SERVICE || raw.stableService !== STABLE_SERVICE
+    || raw.trafficState !== candidateTrafficState(plan)
+    || raw.stableTrafficState !== plan.expectedStable.initialTrafficState
     || !DIGEST.test(String(raw.receiptsSha256 ?? ''))) {
     throw new Error('Task 8 raw workload receipts are invalid');
   }
@@ -2320,12 +2495,13 @@ function validateLatencyAcceptanceRecord(record, plan, now) {
     && validateLatencyObservation(observations[layer].asr, 30)
     && validateLatencyObservation(observations[layer].tts, 30)
   ));
-  const expectedRevision = `${SERVICE}-${plan.releaseSha.slice(0, 12)}`;
-  const expectedOrigin = plan.serviceOrigin.replace('https://', `https://${plan.candidateTag}---`);
+  const expectedRevision = `${CANDIDATE_SERVICE}-${plan.releaseSha.slice(0, 12)}`;
+  const expectedOrigin = plan.candidateOrigin;
   const expectedReleaseBinding = {
     project: PROJECT,
     region: REGION,
-    service: SERVICE,
+    candidateService: CANDIDATE_SERVICE,
+    stableService: STABLE_SERVICE,
     releaseSha: plan.releaseSha,
     sourceArchiveSha256: plan.sourceArchiveSha256,
     imageDigest: plan.imageDigest,
@@ -2333,18 +2509,25 @@ function validateLatencyAcceptanceRecord(record, plan, now) {
     candidateTag: plan.candidateTag,
     serviceOrigin: plan.serviceOrigin,
     candidateOrigin: plan.candidateOrigin,
+    candidateAudience: plan.candidateServiceOrigin,
     trafficPercent: candidateTrafficPercent(plan),
+    trafficState: candidateTrafficState(plan),
+    stableTrafficState: plan.expectedStable.initialTrafficState,
   };
   let derived;
   try { derived = validateRawLatencyReceipts(record, plan); } catch {
     throw new Error('Task 8 workload evidence is invalid');
   }
   if (!exactKeys(record, [
-    'access', 'artifactSha256', 'candidateOrigin', 'commitSha', 'counts', 'fixtureSetSha256',
-    'invariants', 'metrics', 'observations', 'occurredAt', 'rawReceipts', 'releaseBinding',
-    'result', 'schemaVersion', 'workload',
-  ]) || record.schemaVersion !== 4 || record.commitSha !== plan.releaseSha
+    'access', 'artifactSha256', 'candidateOrigin', 'candidateService', 'commitSha', 'counts',
+    'fixtureSetSha256', 'invariants', 'metrics', 'observations', 'occurredAt', 'rawReceipts',
+    'releaseBinding', 'result', 'schemaVersion', 'stableService', 'stableTrafficState',
+    'trafficState', 'workload',
+  ]) || record.schemaVersion !== 5 || record.commitSha !== plan.releaseSha
     || record.candidateOrigin !== plan.candidateOrigin || plan.candidateOrigin !== expectedOrigin
+    || record.candidateService !== CANDIDATE_SERVICE || record.stableService !== STABLE_SERVICE
+    || record.trafficState !== candidateTrafficState(plan)
+    || record.stableTrafficState !== plan.expectedStable.initialTrafficState
     || plan.candidateRevision !== expectedRevision || !IMAGE_DIGEST.test(String(plan.imageDigest ?? ''))
     || !exact(record.access, plan.candidateAccess)
     || !exact(record.releaseBinding, expectedReleaseBinding)
@@ -2370,6 +2553,10 @@ function validateLatencyAcceptanceRecord(record, plan, now) {
     acceptanceWindowId: record.rawReceipts.acceptanceWindowId,
     candidateOrigin: plan.candidateOrigin,
     candidateRevision: plan.candidateRevision,
+    candidateService: CANDIDATE_SERVICE,
+    stableService: STABLE_SERVICE,
+    trafficState: candidateTrafficState(plan),
+    stableTrafficState: plan.expectedStable.initialTrafficState,
     controlPlaneRequests: record.rawReceipts.controlPlaneRequests,
     expectedTraceIds: record.rawReceipts.textTurns.map(({ traceId }) => traceId),
   });
@@ -2436,14 +2623,18 @@ async function validateTask8EvidenceArtifact(entry, phase, plan, { now }) {
     || record.commitSha !== plan.releaseSha || record.sourceArchiveSha256 !== plan.sourceArchiveSha256
     || record.imageDigest !== plan.imageDigest || record.candidateRevision !== plan.candidateRevision
     || record.candidateTag !== plan.candidateTag || record.candidateOrigin !== plan.candidateOrigin
-    || record.trafficPercent !== candidateTrafficPercent(plan) || record.result !== 'pass'
+    || record.trafficPercent !== candidateTrafficPercent(plan)
+    || record.candidateService !== CANDIDATE_SERVICE || record.stableService !== STABLE_SERVICE
+    || record.trafficState !== candidateTrafficState(plan)
+    || record.stableTrafficState !== plan.expectedStable.initialTrafficState
+    || record.result !== 'pass'
     || !recentEvidenceTime(record.occurredAt, now)) throw new Error(errorMessage);
   if (phase === 'readiness') {
     if (!exactKeys(record, [
-      'artifactSha256', 'candidateOrigin', 'candidateRevision', 'candidateTag', 'checks',
-      'commitSha', 'gate', 'imageDigest', 'occurredAt', 'result', 'schemaVersion',
-      'sourceArchiveSha256', 'trafficPercent',
-    ]) || record.schemaVersion !== 1 || record.gate !== 'readiness'
+      'artifactSha256', 'candidateOrigin', 'candidateRevision', 'candidateService', 'candidateTag',
+      'checks', 'commitSha', 'gate', 'imageDigest', 'occurredAt', 'result', 'schemaVersion',
+      'sourceArchiveSha256', 'stableService', 'stableTrafficState', 'trafficPercent', 'trafficState',
+    ]) || record.schemaVersion !== 2 || record.gate !== 'readiness'
       || !exact(record.checks, {
         evidenceMounted: true,
         liveStatus: 200,
@@ -2454,10 +2645,11 @@ async function validateTask8EvidenceArtifact(entry, phase, plan, { now }) {
     return true;
   }
   if (phase !== 'mobile' || !exactKeys(record, [
-    'access', 'artifactSha256', 'candidateOrigin', 'candidateRevision', 'candidateTag', 'commitSha',
-    'finalNavigationUrl', 'gate', 'imageDigest', 'occurredAt', 'result', 'schemaVersion',
-    'screenshots', 'sourceArchiveSha256', 'trace', 'trafficPercent', 'viewport',
-  ]) || record.schemaVersion !== 1 || record.gate !== 'mobile'
+    'access', 'artifactSha256', 'candidateOrigin', 'candidateRevision', 'candidateService',
+    'candidateTag', 'commitSha', 'finalNavigationUrl', 'gate', 'imageDigest', 'occurredAt',
+    'result', 'schemaVersion', 'screenshots', 'sourceArchiveSha256', 'stableService',
+    'stableTrafficState', 'trace', 'trafficPercent', 'trafficState', 'viewport',
+  ]) || record.schemaVersion !== 2 || record.gate !== 'mobile'
     || !exact(record.access, plan.candidateAccess)
     || record.finalNavigationUrl !== plan.candidateOrigin
     || !exact(record.viewport, { width: 390, height: 844 })
@@ -2466,11 +2658,15 @@ async function validateTask8EvidenceArtifact(entry, phase, plan, { now }) {
   }
   const trace = await validateBoundFile(record.trace, { json: true });
   if (!exactKeys(trace, [
-    'access', 'candidateOrigin', 'events', 'finalNavigationUrl', 'observedReleaseSha',
-    'schemaVersion', 'source', 'trafficPercent', 'viewport',
-  ]) || trace.schemaVersion !== 1 || trace.source !== 'codex-in-app-browser'
+    'access', 'candidateOrigin', 'candidateService', 'events', 'finalNavigationUrl',
+    'observedReleaseSha', 'schemaVersion', 'source', 'stableService', 'stableTrafficState',
+    'trafficPercent', 'trafficState', 'viewport',
+  ]) || trace.schemaVersion !== 2 || trace.source !== 'codex-in-app-browser'
     || !exact(trace.access, plan.candidateAccess)
     || trace.candidateOrigin !== plan.candidateOrigin || trace.finalNavigationUrl !== plan.candidateOrigin
+    || trace.candidateService !== CANDIDATE_SERVICE || trace.stableService !== STABLE_SERVICE
+    || trace.trafficState !== candidateTrafficState(plan)
+    || trace.stableTrafficState !== plan.expectedStable.initialTrafficState
     || trace.observedReleaseSha !== plan.releaseSha
     || trace.trafficPercent !== candidateTrafficPercent(plan)
     || !exact(trace.viewport, { width: 390, height: 844 })
@@ -2570,11 +2766,14 @@ function validateReceiptOutputs(phase, outputs, plan) {
     }
   } else if (phase === 'candidate') {
     if (!exactKeys(outputs, [
-      'access', 'candidateContractSha256', 'imageDigest', 'origin', 'publicInvoker',
-      'priorRelease', 'revision', 'tag', 'trafficPercent', 'trafficState',
+      'access', 'candidateContractSha256', 'candidateService', 'imageDigest', 'origin',
+      'publicInvoker', 'priorRelease', 'revision', 'stableService', 'stableTrafficState',
+      'tag', 'trafficPercent', 'trafficState',
     ])
       || !exact(outputs.access, plan.candidateAccess)
       || outputs.candidateContractSha256 !== canonicalSha256(plan.expectedCandidate)
+      || outputs.candidateService !== CANDIDATE_SERVICE || outputs.stableService !== STABLE_SERVICE
+      || outputs.stableTrafficState !== plan.expectedStable.initialTrafficState
       || outputs.imageDigest !== plan.imageDigest || outputs.origin !== plan.candidateOrigin
       || outputs.revision !== plan.candidateRevision || outputs.tag !== plan.candidateTag
       || outputs.trafficPercent !== candidateTrafficPercent(plan)
@@ -2589,7 +2788,10 @@ function validateReceiptOutputs(phase, outputs, plan) {
     }
   } else if (['readiness', 'workload', 'mobile'].includes(phase)) {
     const expected = plan.task8Evidence[phase];
-    const baseKeys = ['artifactSha256', 'candidateOrigin', 'candidateRevision', 'imageDigest', 'objectSha256'];
+    const baseKeys = [
+      'artifactSha256', 'candidateOrigin', 'candidateRevision', 'candidateService', 'imageDigest',
+      'objectSha256', 'stableService', 'stableTrafficState', 'trafficState',
+    ];
     const expectedKeys = phase === 'mobile' ? [...baseKeys, 'access', 'viewport']
       : phase === 'workload' ? [...baseKeys, 'execution'] : baseKeys;
     const unresolvedWorkload = phase === 'workload'
@@ -2604,6 +2806,9 @@ function validateReceiptOutputs(phase, outputs, plan) {
         || outputs.objectSha256 === '0'.repeat(64)))
       || outputs.candidateOrigin !== plan.candidateOrigin
       || outputs.candidateRevision !== plan.candidateRevision
+      || outputs.candidateService !== CANDIDATE_SERVICE || outputs.stableService !== STABLE_SERVICE
+      || outputs.trafficState !== candidateTrafficState(plan)
+      || outputs.stableTrafficState !== plan.expectedStable.initialTrafficState
       || outputs.imageDigest !== plan.imageDigest
       || (phase === 'workload' && (!exactKeys(outputs.execution, [
         'acceptanceWindowId', 'attemptId', 'networkWitnessSha256', 'observedRequestCount',
@@ -2632,11 +2837,15 @@ export function validateReleaseReceiptChain(value, plan, { through = 'mobile' } 
     const receipt = value[index];
     const phase = RECEIPT_PHASES[index];
     if (!exactKeys(receipt, [
-      'completed', 'outputs', 'phase', 'previousReceiptSha256', 'receiptSha256',
-      'releaseIdentitySha256', 'releaseSha', 'schemaVersion', 'sequence',
+      'candidateService', 'completed', 'outputs', 'phase', 'previousReceiptSha256',
+      'receiptSha256', 'releaseIdentitySha256', 'releaseSha', 'schemaVersion', 'sequence',
+      'stableService', 'stableTrafficState', 'trafficState',
     ])
-      || receipt.schemaVersion !== 1 || receipt.phase !== phase || receipt.sequence !== index + 1
+      || receipt.schemaVersion !== 2 || receipt.phase !== phase || receipt.sequence !== index + 1
       || receipt.releaseSha !== plan.releaseSha
+      || receipt.candidateService !== CANDIDATE_SERVICE || receipt.stableService !== STABLE_SERVICE
+      || receipt.trafficState !== candidateTrafficState(plan)
+      || receipt.stableTrafficState !== plan.expectedStable.initialTrafficState
       || receipt.releaseIdentitySha256 !== plan.releaseIdentitySha256
       || receipt.previousReceiptSha256 !== previousReceiptSha256
       || !exact(receipt.completed, expectedReceiptCompleted(plan, phase))
@@ -2721,6 +2930,7 @@ function releasePhaseReceiptOutputs(phase, plan, context) {
   if (phase === 'candidate') return Object.freeze({
     access: plan.candidateAccess,
     candidateContractSha256: canonicalSha256(plan.expectedCandidate),
+    candidateService: CANDIDATE_SERVICE,
     imageDigest: plan.imageDigest,
     origin: plan.candidateOrigin,
     publicInvoker: false,
@@ -2730,6 +2940,8 @@ function releasePhaseReceiptOutputs(phase, plan, context) {
       revision: plan.previousRevision,
     }),
     revision: plan.candidateRevision,
+    stableService: STABLE_SERVICE,
+    stableTrafficState: plan.expectedStable.initialTrafficState,
     tag: plan.candidateTag,
     trafficPercent: candidateTrafficPercent(plan),
     trafficState: candidateTrafficState(plan),
@@ -2742,7 +2954,11 @@ function releasePhaseReceiptOutputs(phase, plan, context) {
       objectSha256: evidence.objectSha256,
       candidateOrigin: plan.candidateOrigin,
       candidateRevision: plan.candidateRevision,
+      candidateService: CANDIDATE_SERVICE,
       imageDigest: plan.imageDigest,
+      stableService: STABLE_SERVICE,
+      stableTrafficState: plan.expectedStable.initialTrafficState,
+      trafficState: candidateTrafficState(plan),
       ...(phase === 'workload' ? { execution: context.workloadExecution?.execution } : {}),
       ...(phase === 'mobile' ? {
         access: plan.candidateAccess,
@@ -2759,11 +2975,15 @@ function createReleasePhaseReceipt(phase, plan, completed, context, priorReceipt
     throw new Error('Release receipt predecessor chain is invalid');
   }
   const receipt = finalizeReleasePhaseReceipt({
-    schemaVersion: 1,
+    schemaVersion: 2,
     phase,
     sequence,
     releaseSha: plan.releaseSha,
     releaseIdentitySha256: plan.releaseIdentitySha256,
+    candidateService: CANDIDATE_SERVICE,
+    stableService: STABLE_SERVICE,
+    trafficState: candidateTrafficState(plan),
+    stableTrafficState: plan.expectedStable.initialTrafficState,
     previousReceiptSha256: priorReceipts.at(-1)?.receiptSha256 ?? null,
     completed: Object.freeze([...completed]),
     outputs: releasePhaseReceiptOutputs(phase, plan, context),
@@ -2789,8 +3009,9 @@ function operationMayMutate(id) {
     || id.startsWith('inventory-publish:') || id.startsWith('evidence-publish:')
     || id.endsWith('-deploy') || id.endsWith('-execute')
     || id.startsWith('evidence-collect-copy:') || id.startsWith('evidence-output-delete:')
-    || id === 'candidate-deploy'
-    || id === 'promote-public-service' || id === 'candidate-cleanup-traffic'
+    || id === 'candidate-deploy' || id === 'candidate-private-iam-grant'
+    || id === 'candidate-cleanup-delete' || id === 'promote-stable-deploy'
+    || id === 'promote-public-service'
     || id === 'promote-traffic' || id === 'rollback-traffic';
 }
 
@@ -2817,7 +3038,7 @@ function workloadLoggingReadArgv(attestation) {
     'resource.type="cloud_run_revision"',
     `resource.labels.project_id="${PROJECT}"`,
     `resource.labels.location="${REGION}"`,
-    `resource.labels.service_name="${SERVICE}"`,
+    `resource.labels.service_name="${CANDIDATE_SERVICE}"`,
     `resource.labels.revision_name="${attestation.candidateRevision}"`,
     'httpRequest.requestMethod="POST"',
     `httpRequest.requestUrl="${attestation.candidateOrigin}/api/v1/messages"`,
@@ -2998,6 +3219,11 @@ async function executeControlledWorkload(plan, {
       V1_CANDIDATE_IMAGE_DIGEST: plan.imageDigest,
       V1_CANDIDATE_REVISION: plan.candidateRevision,
       V1_CANDIDATE_TRAFFIC_PERCENT: String(candidateTrafficPercent(plan)),
+      V1_CANDIDATE_AUDIENCE: plan.candidateServiceOrigin,
+      V1_CANDIDATE_SERVICE: CANDIDATE_SERVICE,
+      V1_STABLE_SERVICE: STABLE_SERVICE,
+      V1_CANDIDATE_TRAFFIC_STATE: candidateTrafficState(plan),
+      V1_STABLE_TRAFFIC_STATE: plan.expectedStable.initialTrafficState,
     },
     cwd: APP_ROOT,
     artifactDirectory: dirname(entry.filePath),
@@ -3062,6 +3288,7 @@ export async function runGcpRelease({
   verifySourceArchive = verifyReleaseArchiveBytes,
   verifyTask8Evidence = validateTask8EvidenceArtifact,
   writeCandidateSpec = writeCandidateServiceSpecFile,
+  writeStableSpec = writeStableServiceSpecFile,
   writeIamRestorePolicy = writePromotionIamRestorePolicyFile,
   removeIamRestorePolicy = removePromotionIamRestorePolicyFile,
   executeWorkload = runLatencyAcceptance,
@@ -3093,7 +3320,7 @@ export async function runGcpRelease({
     });
   }
   const selected = plan.operations.filter(({ phase }) => phase === selection.phase);
-  if (['candidate-cleanup', 'rollback'].includes(selection.phase)
+  if (selection.phase === 'rollback'
     && (plan.previousRevision === null || plan.previousImageDigest === null)) {
     return publish(writeOutput, 1, {
       status: 'failed', code: 'ROLLBACK_UNAVAILABLE_NO_PRIOR_RELEASE', mutationPerformed: false,
@@ -3209,16 +3436,21 @@ export async function runGcpRelease({
   const collectedEvidence = {};
   const collectedObjectReceipts = new Map();
   const candidateReadbacks = {};
-  const candidatePriorReadbacks = {};
   const promotionReadbacks = {};
-  const recoveryReadbacks = {};
   let buildReceipt = null;
   let migrationExecutionReceipt = null;
   let mutationAttempted = false;
   let promotionIamBaseline = null;
+  let stablePublicIamBaseline = null;
+  let stablePriorRevisionBaseline = null;
+  let stablePriorArtifactBaseline = null;
+  let candidateDeployMutationAttempted = false;
+  let candidateIamMutationAttempted = false;
+  let promotionStableMutationAttempted = false;
   let promotionIamMutationAttempted = false;
   let promotionTrafficMutationAttempted = false;
   let workloadArtifactPublished = false;
+  const responseLossRecoveries = [];
   if (task8Attestations.workload && task8Attestations.workload !== true) {
     try {
       const attestation = task8Attestations.workload;
@@ -3281,16 +3513,93 @@ export async function runGcpRelease({
     }
     for (const member of selected) {
       if (operationMayMutate(member.id)) mutationAttempted = true;
+      if (member.id === 'candidate-deploy') candidateDeployMutationAttempted = true;
+      if (member.id === 'candidate-private-iam-grant') candidateIamMutationAttempted = true;
+      if (member.id === 'promote-stable-deploy') promotionStableMutationAttempted = true;
       if (member.id === 'promote-public-service') promotionIamMutationAttempted = true;
       if (member.id === 'promote-traffic') promotionTrafficMutationAttempted = true;
       let receipt;
       try {
         receipt = await executor(member.argv);
       } catch (error) {
-        if (member.id !== 'candidate-stable-readback'
-          || error?.code !== 'CLOUD_RUN_SERVICE_NOT_FOUND'
-          || plan.previousRevision !== null || plan.previousImageDigest !== null) throw error;
+        if (member.id === 'candidate-deploy') {
+          const current = await executor([
+            'run', 'services', 'describe', CANDIDATE_SERVICE,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+          validateCandidateService(current, plan.expectedCandidate);
+          const revision = await executor([
+            'run', 'revisions', 'describe', plan.candidateRevision,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+          validateCandidateRevisionReadback(revision, plan);
+          const artifact = await executor([
+            'artifacts', 'docker', 'images', 'describe', plan.image,
+            `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
+          ]);
+          validateCandidateArtifact(artifact, plan.image);
+          const iam = await executor([
+            'run', 'services', 'get-iam-policy', CANDIDATE_SERVICE,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+          validateServiceIamReceipt(iam, { policy: 'stable-private', requireEtag: true });
+          receipt = current;
+          responseLossRecoveries.push('candidate-deploy');
+        } else if (member.id === 'candidate-private-iam-grant') {
+          receipt = await executor([
+            'run', 'services', 'get-iam-policy', CANDIDATE_SERVICE,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+          validateServiceIamReceipt(receipt, { policy: 'candidate-private', requireEtag: true });
+          responseLossRecoveries.push('candidate-private-iam-grant');
+        } else if (member.id === 'promote-stable-deploy') {
+          receipt = await executor([
+            'run', 'services', 'describe', STABLE_SERVICE,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+          validateStableStagedService(receipt, plan);
+          responseLossRecoveries.push('promote-stable-deploy');
+        } else if (member.id === 'promote-public-service') {
+          receipt = await executor([
+            'run', 'services', 'get-iam-policy', STABLE_SERVICE,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+          validateServiceIamReceipt(receipt, { policy: 'stable-public', requireEtag: true });
+          responseLossRecoveries.push('promote-public-service');
+        } else if (member.id === 'promote-traffic') {
+          receipt = await executor([
+            'run', 'services', 'describe', STABLE_SERVICE,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+          validatePromotedService(receipt, plan);
+          responseLossRecoveries.push('promote-traffic');
+        } else if (member.id === 'rollback-traffic') {
+          receipt = await executor([
+            'run', 'services', 'describe', STABLE_SERVICE,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+          validateCandidateCleanupService(receipt, plan);
+          responseLossRecoveries.push('rollback-traffic');
+        } else if (member.id === 'candidate-cleanup-delete') {
+          try {
+            await executor([
+              'run', 'services', 'describe', CANDIDATE_SERVICE,
+              `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+            ]);
+            throw error;
+          } catch (readbackError) {
+            if (readbackError?.code !== 'CLOUD_RUN_SERVICE_NOT_FOUND') throw error;
+          }
+          receipt = { responseLossRecovered: true };
+          responseLossRecoveries.push('candidate-cleanup-delete');
+        } else {
+        const canonicalServiceAbsence = error?.code === 'CLOUD_RUN_SERVICE_NOT_FOUND';
+        const absenceRead = member.id === 'candidate-service-precheck'
+          || member.id === 'candidate-cleanup-absence-readback'
+          || (member.id === 'promote-stable-service-precheck' && plan.previousRevision === null);
+        if (!canonicalServiceAbsence || !absenceRead) throw error;
         receipt = null;
+        }
       }
       if (member.id === 'build-submit') {
         buildReceipt = validateBuildReceipt(receipt, {
@@ -3329,11 +3638,41 @@ export async function runGcpRelease({
         promotionReadbacks.revision = receipt;
       } else if (member.id === 'promote-candidate-iam-readback') {
         promotionReadbacks.iam = receipt;
-        validateServiceIamReceipt(receipt, { publicInvoker: false, requireEtag: true });
-        promotionIamBaseline = normalizeServiceIamPolicy(receipt, { requireEtag: true });
+        validateServiceIamReceipt(receipt, { policy: 'candidate-private', requireEtag: true });
       } else if (member.id === 'promote-candidate-artifact-readback') {
         promotionReadbacks.artifact = receipt;
-        validateCandidateControlPlaneReadbacks(promotionReadbacks, plan, { publicInvoker: false });
+        validateCandidateControlPlaneReadbacks(promotionReadbacks, plan);
+      } else if (member.id === 'promote-stable-service-precheck') {
+        if (plan.previousRevision === null) {
+          if (receipt !== null) throw new Error('First stable service already exists');
+        } else {
+          if (receipt === null) throw new Error('Prior stable service is absent');
+          validateStableService(receipt, plan);
+        }
+        if (typeof writeStableSpec !== 'function' || await writeStableSpec(plan) !== true) {
+          throw new Error('Stable Service YAML is unavailable');
+        }
+      } else if (member.id === 'promote-stable-public-iam-precheck') {
+        validateServiceIamReceipt(receipt, { policy: 'stable-public', requireEtag: true });
+        stablePublicIamBaseline = normalizeServiceIamPolicy(receipt, { requireEtag: true });
+      } else if (member.id === 'promote-prior-revision-readback') {
+        validatePriorRevisionReadback(receipt, plan);
+        stablePriorRevisionBaseline = structuredClone(receipt);
+      } else if (member.id === 'promote-prior-artifact-readback') {
+        validateCandidateArtifact(receipt, plan.previousImage);
+        stablePriorArtifactBaseline = structuredClone(receipt);
+      } else if (member.id === 'promote-stable-spec-dry-run') {
+        validateStableServiceSpecDryRun(receipt, plan);
+      } else if (member.id === 'promote-stable-deploy'
+        || member.id === 'promote-stable-staged-readback') {
+        validateStableStagedService(receipt, plan);
+      } else if (member.id === 'promote-stable-revision-readback') {
+        validateStableRevisionReadback(receipt, plan);
+      } else if (member.id === 'promote-stable-artifact-readback') {
+        validateCandidateArtifact(receipt, plan.image);
+      } else if (member.id === 'promote-stable-private-iam-readback') {
+        validateServiceIamReceipt(receipt, { policy: 'stable-private', requireEtag: true });
+        promotionIamBaseline = normalizeServiceIamPolicy(receipt, { requireEtag: true });
       } else if (member.id === 'promote-public-service') {
         if (!promotionIamBaseline) throw new Error('Promotion IAM baseline is unavailable');
         const normalized = validateIamPolicyState(
@@ -3342,92 +3681,70 @@ export async function runGcpRelease({
         if (normalized.etag === promotionIamBaseline.etag) {
           throw new Error('Promotion IAM mutation has no new etag');
         }
-        validateServiceIamReceipt(receipt, { publicInvoker: true, requireEtag: true });
+        validateServiceIamReceipt(receipt, { policy: 'stable-public', requireEtag: true });
       } else if (member.id === 'promote-public-iam-readback') {
-        if (!promotionIamBaseline) throw new Error('Promotion IAM baseline is unavailable');
-        validateIamPolicyState(
-          receipt, publicIamPolicyState(promotionIamBaseline), { requireEtag: true },
-        );
-        validateServiceIamReceipt(receipt, { publicInvoker: true, requireEtag: true });
-      } else if (member.id === 'candidate-stable-readback') {
-        if (receipt === null) {
-          if (plan.previousRevision !== null || plan.previousImageDigest !== null) {
-            throw new Error('Cloud Run bootstrap state is invalid');
-          }
-        } else {
-          if (plan.previousRevision === null || plan.previousImageDigest === null) {
-            throw new Error('Cloud Run bootstrap state is ambiguous');
-          }
-          validateStableService(receipt, plan);
+        validateServiceIamReceipt(receipt, { policy: 'stable-public', requireEtag: true });
+        if (plan.previousRevision === null) {
+          if (!promotionIamBaseline) throw new Error('Promotion IAM baseline is unavailable');
+          validateIamPolicyState(
+            receipt, publicIamPolicyState(promotionIamBaseline), { requireEtag: true },
+          );
+        } else if (!stablePublicIamBaseline
+          || !exact(iamPolicyState(normalizeServiceIamPolicy(receipt, { requireEtag: true })),
+            iamPolicyState(stablePublicIamBaseline))) {
+          throw new Error('Stable public IAM changed during promotion');
         }
+      } else if (member.id === 'candidate-service-precheck') {
+        if (receipt !== null) throw new Error('Candidate service already exists; cleanup is required');
         if (typeof writeCandidateSpec !== 'function'
           || await writeCandidateSpec(plan) !== true) {
           throw new Error('Candidate Service YAML is unavailable');
         }
       } else if (member.id === 'candidate-spec-dry-run') {
         validateCandidateServiceSpecDryRun(receipt, plan);
-      } else if (member.id === 'candidate-prior-revision-readback') {
-        validatePriorRevisionReadback(receipt, plan);
-        candidatePriorReadbacks.revision = receipt;
-      } else if (member.id === 'candidate-prior-artifact-readback') {
-        validateCandidateArtifact(receipt, plan.previousImage);
-        candidatePriorReadbacks.artifact = receipt;
+      } else if (member.id === 'candidate-private-iam-baseline-readback') {
+        validateServiceIamReceipt(receipt, { policy: 'stable-private', requireEtag: true });
+      } else if (member.id === 'candidate-private-iam-grant') {
+        validateServiceIamReceipt(receipt, { policy: 'candidate-private', requireEtag: true });
       } else if (member.id === 'candidate-private-iam-readback') {
         candidateReadbacks.iam = receipt;
-        validateServiceIamReceipt(receipt, { publicInvoker: false });
+        validateServiceIamReceipt(receipt, { policy: 'candidate-private', requireEtag: true });
       } else if (member.id === 'candidate-service-readback') {
         candidateReadbacks.service = receipt;
       } else if (member.id === 'candidate-revision-readback') {
         candidateReadbacks.revision = receipt;
-      } else if (member.id === 'candidate-readback') {
+      } else if (member.id === 'candidate-artifact-readback') {
         candidateReadbacks.artifact = receipt;
-        validateCandidateControlPlaneReadbacks(candidateReadbacks, plan, { publicInvoker: false });
-      } else if (member.id === 'candidate-cleanup-iam-readback') {
-        validateServiceIamReceipt(receipt, { publicInvoker: false });
+        validateCandidateArtifact(receipt, plan.image);
       } else if (member.id === 'candidate-cleanup-service-precheck') {
         validateRecoveryPrecheck(receipt, plan, 'candidate-cleanup');
-        recoveryReadbacks.service = receipt;
-      } else if (member.id === 'candidate-cleanup-candidate-revision-readback') {
-        validateCandidateControlPlaneReadbacks({
-          service: recoveryReadbacks.service,
-          revision: receipt,
-          iam: { bindings: [] },
-          artifact: { image: plan.image },
-        }, plan);
-        recoveryReadbacks.candidateRevision = receipt;
-      } else if (member.id === 'candidate-cleanup-candidate-artifact-readback') {
+      } else if (member.id === 'candidate-cleanup-revision-readback') {
+        validateCandidateRevisionReadback(receipt, plan);
+      } else if (member.id === 'candidate-cleanup-artifact-readback') {
         validateCandidateArtifact(receipt, plan.image);
-        recoveryReadbacks.candidateArtifact = receipt;
-      } else if (member.id === 'candidate-cleanup-prior-revision-readback') {
-        validatePriorRevisionReadback(receipt, plan);
-        recoveryReadbacks.priorRevision = receipt;
-      } else if (member.id === 'candidate-cleanup-prior-artifact-readback') {
-        validateCandidateArtifact(receipt, plan.previousImage);
-        recoveryReadbacks.priorArtifact = receipt;
-      } else if (member.id === 'candidate-cleanup-traffic') {
-        validateTrafficReceipt(receipt, { revision: plan.previousRevision });
-      } else if (member.id === 'candidate-cleanup-service-readback') {
-        validateCandidateCleanupService(receipt, plan);
+      } else if (member.id === 'candidate-cleanup-private-iam-readback') {
+        validateServiceIamReceipt(receipt, { policy: 'candidate-private', requireEtag: true });
+      } else if (member.id === 'candidate-cleanup-delete') {
+        if (!receipt || typeof receipt !== 'object') {
+          throw new Error('Candidate service deletion receipt is invalid');
+        }
+      } else if (member.id === 'candidate-cleanup-absence-readback') {
+        if (receipt !== null) throw new Error('Candidate service remains after cleanup');
       } else if (member.id === 'promote-traffic' || member.id === 'promote-readback') {
         validatePromotedService(receipt, plan);
       } else if (member.id === 'rollback-service-precheck') {
         validateRecoveryPrecheck(receipt, plan, 'rollback');
-        recoveryReadbacks.service = receipt;
-      } else if (member.id === 'rollback-candidate-revision-readback') {
-        if (!exact(normalizeCandidateRevision(receipt, plan.expectedCandidate),
-          candidateRevisionContract(plan.expectedCandidate))) {
-          throw new Error('Cloud Run candidate revision readback is invalid');
-        }
-        recoveryReadbacks.candidateRevision = receipt;
-      } else if (member.id === 'rollback-candidate-artifact-readback') {
+      } else if (member.id === 'rollback-current-revision-readback') {
+        validateStableRevisionReadback(receipt, plan);
+      } else if (member.id === 'rollback-current-artifact-readback') {
         validateCandidateArtifact(receipt, plan.image);
-        recoveryReadbacks.candidateArtifact = receipt;
       } else if (member.id === 'rollback-prior-revision-readback') {
         validatePriorRevisionReadback(receipt, plan);
-        recoveryReadbacks.priorRevision = receipt;
       } else if (member.id === 'rollback-prior-artifact-readback') {
         validateCandidateArtifact(receipt, plan.previousImage);
-        recoveryReadbacks.priorArtifact = receipt;
+      } else if (member.id === 'rollback-public-iam-precheck'
+        || member.id === 'rollback-public-iam-readback') {
+        validateServiceIamReceipt(receipt, { policy: 'stable-public', requireEtag: true });
       } else if (member.id === 'rollback-traffic' || member.id === 'rollback-readback') {
         validateCandidateCleanupService(receipt, plan);
       } else if (selection.phase === 'acceptance' && member.id.endsWith('-readback')) {
@@ -3477,139 +3794,327 @@ export async function runGcpRelease({
       validateCandidateControlPlaneReadbacks(candidateReadbacks, plan);
     }
   } catch {
-    let cleanupFailed = false;
+    let compensationFailed = false;
+    let candidateServiceRestored = null;
+    let promotionServiceRestored = null;
     let promotionIamRestored = null;
-    let promotionTrafficRestored = null;
-    const firstReleasePromotionMutationAttempted = selection.phase === 'promote'
-      && plan.previousRevision === null
-      && (promotionTrafficMutationAttempted || promotionIamMutationAttempted);
-    if (selection.phase === 'promote'
-      && (promotionTrafficMutationAttempted || firstReleasePromotionMutationAttempted)) {
+
+    const readCandidateState = async () => {
+      const service = await executor([
+        'run', 'services', 'describe', CANDIDATE_SERVICE,
+        `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+      ]);
+      validateCandidateService(service, plan.expectedCandidate);
+      const revision = await executor([
+        'run', 'revisions', 'describe', plan.candidateRevision,
+        `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+      ]);
+      validateCandidateRevisionReadback(revision, plan);
+      const artifact = await executor([
+        'artifacts', 'docker', 'images', 'describe', plan.image,
+        `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
+      ]);
+      validateCandidateArtifact(artifact, plan.image);
+      const iam = await executor([
+        'run', 'services', 'get-iam-policy', CANDIDATE_SERVICE,
+        `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+      ]);
+      validateServiceIamReceipt(iam, { policy: 'candidate-private', requireEtag: true });
+      return { artifact, iam, revision, service };
+    };
+
+    if (selection.phase === 'candidate'
+      && (candidateDeployMutationAttempted || candidateIamMutationAttempted)) {
       try {
-        const currentService = await executor([
-          'run', 'services', 'describe', SERVICE,
-          `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-        ]);
-        if (plan.previousRevision === null) {
-          validatePromotionCompensationSource(currentService, plan);
-          let bootstrapServiceAlreadyRestored = false;
-          try {
-            validateBootstrapCandidateService(currentService, plan);
-            bootstrapServiceAlreadyRestored = true;
-          } catch {
-            // A tagless 100-percent candidate is a possible response-lost traffic mutation.
-          }
-          if (typeof verifyEvidence !== 'function'
-            || await verifyEvidence(plan.evidence, { releaseSha: plan.releaseSha }) !== true) {
-            throw new Error('Promotion compensation evidence is invalid');
-          }
-          const candidateRevision = await executor([
+        let candidate = null;
+        try {
+          candidate = await executor([
+            'run', 'services', 'describe', CANDIDATE_SERVICE,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+        } catch (error) {
+          if (error?.code !== 'CLOUD_RUN_SERVICE_NOT_FOUND') throw error;
+        }
+        if (candidate !== null) {
+          validateCandidateService(candidate, plan.expectedCandidate);
+          const revision = await executor([
             'run', 'revisions', 'describe', plan.candidateRevision,
             `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
           ]);
-          validateCandidateRevisionReadback(candidateRevision, plan);
-          const candidateArtifact = await executor([
-            'artifacts', 'docker', 'images', 'describe', plan.expectedCandidate.image,
+          validateCandidateRevisionReadback(revision, plan);
+          const artifact = await executor([
+            'artifacts', 'docker', 'images', 'describe', plan.image,
             `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
           ]);
-          validateCandidateArtifact(candidateArtifact, plan.expectedCandidate.image);
-          if (!bootstrapServiceAlreadyRestored) {
-            if (typeof writeCandidateSpec !== 'function'
-              || await writeCandidateSpec(plan) !== true) {
-              throw new Error('Candidate Service YAML is unavailable');
-            }
-            const dryRun = await executor([
-              'run', 'services', 'replace', plan.candidateServiceSpecPath,
-              `--project=${PROJECT}`, `--region=${REGION}`, '--dry-run', '--format=json',
-            ]);
-            validateCandidateServiceSpecDryRun(dryRun, plan);
-            const restoreReceipt = await executor([
-              'run', 'services', 'replace', plan.candidateServiceSpecPath,
-              `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-            ]);
-            validateBootstrapCandidateService(restoreReceipt, plan);
-            const freshService = await executor([
-              'run', 'services', 'describe', SERVICE,
-              `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-            ]);
-            validateBootstrapCandidateService(freshService, plan);
-            const freshRevision = await executor([
-              'run', 'revisions', 'describe', plan.candidateRevision,
-              `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-            ]);
-            validateCandidateRevisionReadback(freshRevision, plan);
-            const freshArtifact = await executor([
-              'artifacts', 'docker', 'images', 'describe', plan.expectedCandidate.image,
-              `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
-            ]);
-            validateCandidateArtifact(freshArtifact, plan.expectedCandidate.image);
-          }
-        } else {
+          validateCandidateArtifact(artifact, plan.image);
+          const iam = await executor([
+            'run', 'services', 'get-iam-policy', CANDIDATE_SERVICE,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
           try {
-            validateCandidateCleanupService(currentService, plan);
+            validateServiceIamReceipt(iam, { policy: 'stable-private', requireEtag: true });
           } catch {
-            validatePromotionCompensationSource(currentService, plan);
-            const restoreReceipt = await executor([
-              'run', 'services', 'update-traffic', SERVICE,
-              `--remove-tags=${plan.candidateTag}`, `--to-revisions=${plan.previousRevision}=100`,
+            validateServiceIamReceipt(iam, { policy: 'candidate-private', requireEtag: true });
+          }
+          try {
+            await executor([
+              'run', 'services', 'delete', CANDIDATE_SERVICE, '--quiet',
               `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
             ]);
-            validateCandidateCleanupService(restoreReceipt, plan);
-            const freshService = await executor([
-              'run', 'services', 'describe', SERVICE,
-              `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-            ]);
-            validateCandidateCleanupService(freshService, plan);
+          } catch (deleteError) {
+            try {
+              await executor([
+                'run', 'services', 'describe', CANDIDATE_SERVICE,
+                `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+              ]);
+              throw deleteError;
+            } catch (readbackError) {
+              if (readbackError?.code !== 'CLOUD_RUN_SERVICE_NOT_FOUND') throw deleteError;
+            }
           }
         }
-        promotionTrafficRestored = true;
+        try {
+          await executor([
+            'run', 'services', 'describe', CANDIDATE_SERVICE,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+          throw new Error('Candidate compensation did not remove the candidate service');
+        } catch (error) {
+          if (error?.code !== 'CLOUD_RUN_SERVICE_NOT_FOUND') throw error;
+        }
+        candidateServiceRestored = true;
       } catch {
-        cleanupFailed = true;
-        promotionTrafficRestored = false;
+        compensationFailed = true;
+        candidateServiceRestored = false;
       }
     }
-    if (selection.phase === 'promote' && promotionIamMutationAttempted && promotionIamBaseline) {
+
+    const promotionMutationAttempted = selection.phase === 'promote'
+      && (promotionStableMutationAttempted
+        || promotionTrafficMutationAttempted || promotionIamMutationAttempted);
+    if (promotionMutationAttempted) {
       let restorePath = null;
       try {
-        const currentReceipt = await executor([
-          'run', 'services', 'get-iam-policy', SERVICE,
-          `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-        ]);
-        const current = normalizeServiceIamPolicy(currentReceipt, { requireEtag: true });
-        const privateState = iamPolicyState(promotionIamBaseline);
-        if (!exact(iamPolicyState(current), privateState)) {
-          if (!exact(iamPolicyState(current), publicIamPolicyState(promotionIamBaseline))) {
-            throw new Error('Promotion IAM state changed outside the release mutation');
-          }
-          const restorePolicy = {
-            bindings: structuredClone(promotionIamBaseline.bindings),
-            etag: current.etag,
-            ...(promotionIamBaseline.version === null
-              ? {} : { version: promotionIamBaseline.version }),
-          };
-          const attemptId = typeof randomUUID === 'function' ? randomUUID() : null;
-          const expectedRestorePath = promotionIamRestorePolicyPath(plan, attemptId);
-          restorePath = typeof writeIamRestorePolicy === 'function'
-            ? await writeIamRestorePolicy(plan, restorePolicy, { attemptId }) : null;
-          if (restorePath !== expectedRestorePath) {
-            throw new Error('Promotion IAM restore policy is unavailable');
-          }
-          const restoreReceipt = await executor([
-            'run', 'services', 'set-iam-policy', SERVICE, restorePath,
-            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-          ]);
-          validateIamPolicyState(restoreReceipt, privateState, { requireEtag: true });
-          validateServiceIamReceipt(restoreReceipt, { publicInvoker: false, requireEtag: true });
-          const freshReceipt = await executor([
-            'run', 'services', 'get-iam-policy', SERVICE,
-            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-          ]);
-          validateIamPolicyState(freshReceipt, privateState, { requireEtag: true });
-          validateServiceIamReceipt(freshReceipt, { publicInvoker: false, requireEtag: true });
+        if (typeof verifyEvidence !== 'function'
+          || await verifyEvidence(plan.evidence, { releaseSha: plan.releaseSha }) !== true) {
+          throw new Error('Promotion compensation evidence is invalid');
         }
+        await readCandidateState();
+        if (plan.previousRevision === null) {
+          let stable = null;
+          try {
+            stable = await executor([
+              'run', 'services', 'describe', STABLE_SERVICE,
+              `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+            ]);
+          } catch (error) {
+            if (error?.code !== 'CLOUD_RUN_SERVICE_NOT_FOUND') throw error;
+          }
+          if (stable === null) {
+            if (typeof writeStableSpec !== 'function' || await writeStableSpec(plan) !== true) {
+              throw new Error('Stable Service YAML is unavailable');
+            }
+            const dryRun = await executor([
+              'run', 'services', 'replace', plan.stableServiceSpecPath,
+              `--project=${PROJECT}`, `--region=${REGION}`, '--dry-run', '--format=json',
+            ]);
+            validateStableServiceSpecDryRun(dryRun, plan);
+            try {
+              stable = await executor([
+                'run', 'services', 'replace', plan.stableServiceSpecPath,
+                `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+              ]);
+              validateStableStagedService(stable, plan);
+            } catch {
+              stable = await executor([
+                'run', 'services', 'describe', STABLE_SERVICE,
+                `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+              ]);
+              validateStableStagedService(stable, plan);
+              responseLossRecoveries.push('first-promotion-stable-compensation');
+            }
+          } else {
+            validatePromotionCompensationSource(stable, plan);
+          }
+          const stableRevision = await executor([
+            'run', 'revisions', 'describe', plan.stableRevision,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+          validateStableRevisionReadback(stableRevision, plan);
+          const stableArtifact = await executor([
+            'artifacts', 'docker', 'images', 'describe', plan.image,
+            `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
+          ]);
+          validateCandidateArtifact(stableArtifact, plan.image);
+          const currentIamReceipt = await executor([
+            'run', 'services', 'get-iam-policy', STABLE_SERVICE,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+          const currentIam = normalizeServiceIamPolicy(currentIamReceipt, { requireEtag: true });
+          let stableIsPrivate = true;
+          try {
+            validateServiceIamReceipt(currentIamReceipt, {
+              policy: 'stable-private', requireEtag: true,
+            });
+          } catch {
+            stableIsPrivate = false;
+            validateServiceIamReceipt(currentIamReceipt, {
+              policy: 'stable-public', requireEtag: true,
+            });
+          }
+          if (!stableIsPrivate) {
+            const privateState = promotionIamBaseline
+              ? iamPolicyState(promotionIamBaseline)
+              : { bindings: [], version: currentIam.version };
+            if (!exact(privateState.bindings, [])) {
+              throw new Error('First promotion private IAM baseline is invalid');
+            }
+            const restorePolicy = {
+              bindings: [],
+              etag: currentIam.etag,
+              ...(privateState.version === null ? {} : { version: privateState.version }),
+            };
+            const attemptId = typeof randomUUID === 'function' ? randomUUID() : null;
+            const expectedRestorePath = promotionIamRestorePolicyPath(plan, attemptId);
+            restorePath = typeof writeIamRestorePolicy === 'function'
+              ? await writeIamRestorePolicy(plan, restorePolicy, { attemptId }) : null;
+            if (restorePath !== expectedRestorePath) {
+              throw new Error('Promotion IAM restore policy is unavailable');
+            }
+            try {
+              const restored = await executor([
+                'run', 'services', 'set-iam-policy', STABLE_SERVICE, restorePath,
+                `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+              ]);
+              validateServiceIamReceipt(restored, {
+                policy: 'stable-private', requireEtag: true,
+              });
+            } catch {
+              const restored = await executor([
+                'run', 'services', 'get-iam-policy', STABLE_SERVICE,
+                `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+              ]);
+              validateServiceIamReceipt(restored, {
+                policy: 'stable-private', requireEtag: true,
+              });
+              responseLossRecoveries.push('first-promotion-iam-compensation');
+            }
+          }
+          const freshStable = await executor([
+            'run', 'services', 'describe', STABLE_SERVICE,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+          validatePromotionCompensationSource(freshStable, plan);
+          const freshRevision = await executor([
+            'run', 'revisions', 'describe', plan.stableRevision,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+          validateStableRevisionReadback(freshRevision, plan);
+          const freshArtifact = await executor([
+            'artifacts', 'docker', 'images', 'describe', plan.image,
+            `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
+          ]);
+          validateCandidateArtifact(freshArtifact, plan.image);
+          const freshIam = await executor([
+            'run', 'services', 'get-iam-policy', STABLE_SERVICE,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+          validateServiceIamReceipt(freshIam, { policy: 'stable-private', requireEtag: true });
+        } else {
+          if (!stablePublicIamBaseline || !stablePriorRevisionBaseline
+            || !stablePriorArtifactBaseline) {
+            throw new Error('Prior stable compensation baseline is unavailable');
+          }
+          const currentStable = await executor([
+            'run', 'services', 'describe', STABLE_SERVICE,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+          validatePromotionCompensationSource(currentStable, plan);
+          const currentIam = await executor([
+            'run', 'services', 'get-iam-policy', STABLE_SERVICE,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+          validateServiceIamReceipt(currentIam, { policy: 'stable-public', requireEtag: true });
+          if (!exact(iamPolicyState(normalizeServiceIamPolicy(currentIam, { requireEtag: true })),
+            iamPolicyState(stablePublicIamBaseline))) {
+            throw new Error('Stable public IAM changed during promotion');
+          }
+          const currentPriorRevision = await executor([
+            'run', 'revisions', 'describe', plan.previousRevision,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+          validatePriorRevisionReadback(currentPriorRevision, plan);
+          if (!exact(currentPriorRevision, stablePriorRevisionBaseline)) {
+            throw new Error('Prior stable revision configuration changed during promotion');
+          }
+          const currentPriorArtifact = await executor([
+            'artifacts', 'docker', 'images', 'describe', plan.previousImage,
+            `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
+          ]);
+          validateCandidateArtifact(currentPriorArtifact, plan.previousImage);
+          if (!exact(currentPriorArtifact, stablePriorArtifactBaseline)) {
+            throw new Error('Prior stable artifact changed during promotion');
+          }
+          let alreadyRestored = true;
+          try {
+            validateStableService(currentStable, plan);
+          } catch {
+            alreadyRestored = false;
+          }
+          if (!alreadyRestored) {
+            try {
+              const restored = await executor([
+                'run', 'services', 'update-traffic', STABLE_SERVICE,
+                `--to-revisions=${plan.previousRevision}=100`,
+                `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+              ]);
+              validateStableService(restored, plan);
+            } catch {
+              const restored = await executor([
+                'run', 'services', 'describe', STABLE_SERVICE,
+                `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+              ]);
+              validateStableService(restored, plan);
+              responseLossRecoveries.push('later-promotion-stable-compensation');
+            }
+          }
+          const freshStable = await executor([
+            'run', 'services', 'describe', STABLE_SERVICE,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+          validateStableService(freshStable, plan);
+          const freshPriorRevision = await executor([
+            'run', 'revisions', 'describe', plan.previousRevision,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+          validatePriorRevisionReadback(freshPriorRevision, plan);
+          if (!exact(freshPriorRevision, stablePriorRevisionBaseline)) {
+            throw new Error('Prior stable revision compensation is not exact');
+          }
+          const freshPriorArtifact = await executor([
+            'artifacts', 'docker', 'images', 'describe', plan.previousImage,
+            `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
+          ]);
+          validateCandidateArtifact(freshPriorArtifact, plan.previousImage);
+          if (!exact(freshPriorArtifact, stablePriorArtifactBaseline)) {
+            throw new Error('Prior stable artifact compensation is not exact');
+          }
+          const freshIam = await executor([
+            'run', 'services', 'get-iam-policy', STABLE_SERVICE,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+          validateServiceIamReceipt(freshIam, { policy: 'stable-public', requireEtag: true });
+          if (!exact(iamPolicyState(normalizeServiceIamPolicy(freshIam, { requireEtag: true })),
+            iamPolicyState(stablePublicIamBaseline))) {
+            throw new Error('Stable public IAM compensation is not exact');
+          }
+        }
+        await readCandidateState();
+        promotionServiceRestored = true;
         promotionIamRestored = true;
       } catch {
-        cleanupFailed = true;
+        compensationFailed = true;
+        promotionServiceRestored = false;
         promotionIamRestored = false;
       } finally {
         if (restorePath !== null) {
@@ -3619,53 +4124,23 @@ export async function runGcpRelease({
               throw new Error('Promotion IAM restore policy cleanup failed');
             }
           } catch {
-            cleanupFailed = true;
+            compensationFailed = true;
             promotionIamRestored = false;
           }
         }
       }
     }
-    if (firstReleasePromotionMutationAttempted
-      && promotionTrafficRestored === true && promotionIamRestored === true) {
-      try {
-        if (typeof verifyEvidence !== 'function'
-          || await verifyEvidence(plan.evidence, { releaseSha: plan.releaseSha }) !== true) {
-          throw new Error('Promotion compensation evidence is invalid');
-        }
-        const service = await executor([
-          'run', 'services', 'describe', SERVICE,
-          `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-        ]);
-        validateBootstrapCandidateService(service, plan);
-        const revision = await executor([
-          'run', 'revisions', 'describe', plan.candidateRevision,
-          `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-        ]);
-        validateCandidateRevisionReadback(revision, plan);
-        const artifact = await executor([
-          'artifacts', 'docker', 'images', 'describe', plan.expectedCandidate.image,
-          `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
-        ]);
-        validateCandidateArtifact(artifact, plan.expectedCandidate.image);
-        const iam = await executor([
-          'run', 'services', 'get-iam-policy', SERVICE,
-          `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-        ]);
-        validateIamPolicyState(iam, iamPolicyState(promotionIamBaseline), { requireEtag: true });
-        validateServiceIamReceipt(iam, { publicInvoker: false, requireEtag: true });
-      } catch {
-        cleanupFailed = true;
-        promotionTrafficRestored = false;
-        promotionIamRestored = false;
-      }
-    }
+    const compensationCode = selection.phase === 'candidate'
+      ? 'CANDIDATE_COMPENSATION_FAILED' : 'PROMOTION_COMPENSATION_FAILED';
     return publish(writeOutput, 1, {
-      status: 'failed', code: cleanupFailed ? 'PROMOTION_COMPENSATION_FAILED' : 'RELEASE_PHASE_FAILED',
+      status: 'failed', code: compensationFailed ? compensationCode : 'RELEASE_PHASE_FAILED',
       mutationPerformed: mutationAttempted,
       releaseSha: plan.releaseSha, phase: selection.phase, completed,
       resumeBoundary: selected[completed.length]?.id ?? null,
+      ...(candidateServiceRestored === null ? {} : { candidateServiceRestored }),
+      ...(promotionServiceRestored === null ? {} : { promotionServiceRestored }),
       ...(promotionIamRestored === null ? {} : { promotionIamRestored }),
-      ...(promotionTrafficRestored === null ? {} : { promotionTrafficRestored }),
+      ...(responseLossRecoveries.length === 0 ? {} : { responseLossRecoveries }),
     });
   }
   const publicReport = {
@@ -3678,6 +4153,9 @@ export async function runGcpRelease({
   if (selection.phase === 'collect') publicReport.collectedEvidence = collectedEvidence;
   if (selection.phase === 'build') publicReport.buildReceipt = buildReceipt;
   if (selection.phase === 'migration') publicReport.migrationExecutionReceipt = migrationExecutionReceipt;
+  if (responseLossRecoveries.length > 0) {
+    publicReport.responseLossRecoveries = responseLossRecoveries;
+  }
   if (receiptPhaseIndex >= 0) {
     try {
       const phaseReceipt = createReleasePhaseReceipt(

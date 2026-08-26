@@ -146,7 +146,7 @@ values. The production boundary uses these setting names:
   `V1_RUNTIME_SERVICE_ACCOUNT=hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com`,
   `V1_PUBLIC_ORIGIN=https://hkbuddy-v1-api-582852715831.asia-east2.run.app`,
   and a SHA-bound private candidate origin of
-  `https://candidate-<12-lowercase-hex>---hkbuddy-v1-api-582852715831.asia-east2.run.app`
+  `https://candidate-<12-lowercase-hex>---hkbuddy-v1-api-candidate-582852715831.asia-east2.run.app`
 - model: `V1_LLM_PROVIDER`, `V1_LLM_CREDENTIAL_VERSION`, plus the selected
   provider's complete V1-prefixed credential, endpoint, model/deployment,
   API-version, and request-profile set
@@ -304,33 +304,45 @@ Run `npm.cmd run migrate` as a separate one-shot job; it is never part of
 Follow the infrastructure operator guide's manifest refresh points and complete
 `build -> migration -> inventory -> acceptance -> collect -> evidence ->
 candidate -> readiness -> workload -> mobile -> promote`; a local pass or a
-partial receipt chain is not deployment readiness. Deploy only the digest-pinned
-revision `hkbuddy-v1-api-<12-lowercase-hex>` under the SHA-bound
-`candidate-<12-lowercase-hex>` tag. Existing services require an exact paired
-`previousRevision` and `previousImageDigest`; they stay at 100% while the
-private candidate is 0%. Empty-host bootstrap requires both fields to be null
-and the exact service describe to return `CLOUD_RUN_SERVICE_NOT_FOUND`; it
-creates the sole private tagged candidate at 100%, adds no `allUsers`, uses the
-authenticated tagged origin for acceptance, and records `private-bootstrap-100`
-with an explicit null prior release. Permission errors, generic not-found text,
-and any command/resource mismatch fail closed. Promote only after privacy, real
-provider, iOS voice, dependency, retention, readiness, mobile, and latency gates
-all pass for the same frozen commit and the controller freshly revalidates their
-immutable receipts. Promotion adds the reviewed public invoker binding and
-routes `hkbuddy-v1-api` to the accepted candidate at 100%; it also removes the
-candidate tag. If first-release IAM, traffic, or readback is ambiguous, the
-controller restores private IAM and the tagged 100% bootstrap state, then
-freshly verifies service, revision, immutable image, evidence, and IAM.
+partial receipt chain is not deployment readiness. Every acceptance deploys
+only the digest-pinned revision
+`hkbuddy-v1-api-candidate-<12-lowercase-hex>` to the separate
+`hkbuddy-v1-api-candidate` service, with the SHA-bound
+`candidate-<12-lowercase-hex>` tag at 100% private traffic. It has only the
+reviewed operator's Cloud Run Invoker binding: no public principal is accepted.
+Identity-token audience is the untagged candidate-service root; authenticated
+requests target the tagged candidate URL. Task 8 and phase receipts record
+`trafficState=candidate-service-private-100` plus `stableTrafficState` as
+`stable-absent` or `stable-prior-100`. The public `hkbuddy-v1-api` service is
+unchanged throughout candidate deployment and acceptance.
+
+Existing stable services require an exact paired `previousRevision` and
+`previousImageDigest`. Empty-host promotion requires both fields to be null and
+the exact stable-service describe to return `CLOUD_RUN_SERVICE_NOT_FOUND`.
+Permission errors, generic not-found text, and any command/resource mismatch
+fail closed. Promote only after privacy, real provider, iOS voice, dependency,
+retention, readiness, mobile, latency, production-trace, and receipt gates all
+pass for the same frozen commit. A later promotion creates the accepted
+`hkbuddy-v1-api-<sha12>` revision untagged at 0% while the evidenced prior stable
+revision remains at 100%, validates image/config and public IAM, then atomically
+switches stable traffic to the new revision at 100%; public IAM is read-only.
+A first promotion creates and verifies that stable revision privately at 100%,
+then makes `allUsers:roles/run.invoker` the final mutation, followed only by an
+IAM readback. Ambiguous first-release IAM restores the exact private stable IAM
+and accepted private stable service; ambiguous later promotion restores the
+exact prior stable revision at 100% without changing public IAM.
 
 Rollback is separately confirmed. Before traffic mutation it validates the
 complete mobile receipt chain, the candidate receipt's prior revision/image
-binding, all local evidence, and fresh service, candidate/prior revision, and
-candidate/prior immutable-image readbacks. Candidate cleanup uses the same gate
-through the candidate receipt. A first release has no prior target, so both
-operations return `ROLLBACK_UNAVAILABLE_NO_PRIOR_RELEASE` without a control-plane
-call. A later rollback routes `hkbuddy-v1-api` back to the exact previous
-evidenced V1 revision at 100%, removes the candidate tag, and verifies the stable
-readback. It does not delete data or resources and never edits,
+binding, all local evidence, and fresh stable revision/image/IAM readbacks.
+Rollback is unavailable only when no genuine prior stable release exists; a
+later rollback routes only `hkbuddy-v1-api` back to the exact evidenced prior
+revision at 100% and leaves the private candidate service unchanged. Receipt-
+bound candidate cleanup is valid on first and later releases: it validates the
+exact candidate service/revision/tag/image/private IAM, deletes only
+`hkbuddy-v1-api-candidate`, and verifies canonical candidate-service absence.
+It never changes stable traffic or IAM. These phases do not delete data and
+never edit,
 restarts, redeploys, migrates, or repoints `hkbuddy-pilot-0630`. No legacy app,
 protected shared-project state, or unrelated service is changed by candidate,
 promotion, or rollback.
