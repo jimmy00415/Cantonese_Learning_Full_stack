@@ -373,7 +373,10 @@ test('the executable contract fixes the isolated GCP topology and least-privileg
   assert.deepEqual(contract.resources.cloudRun, {
     service: GCP_IDENTITY.service, executionEnvironment: 'gen2', cpu: 2, memory: '1Gi',
     concurrency: 40, minInstances: 1, maxInstances: 1, cpuThrottling: false,
-    startupCpuBoost: true, timeoutSeconds: 60, initialTrafficPercent: 0,
+    startupCpuBoost: true, timeoutSeconds: 60,
+    firstReleaseTrafficState: 'private-bootstrap-100', firstReleaseTrafficPercent: 100,
+    laterReleaseTrafficState: 'prior-stable-100/candidate-0',
+    laterReleasePriorTrafficPercent: 100, laterReleaseCandidateTrafficPercent: 0,
     directVpc: true, egress: 'private-ranges-only',
     startupProbe: { path: '/api/health/ready', port: 8080, initialDelaySeconds: 0, timeoutSeconds: 5, periodSeconds: 10, failureThreshold: 12 },
     livenessProbe: { path: '/api/health/live', port: 8080, initialDelaySeconds: 30, timeoutSeconds: 5, periodSeconds: 30, failureThreshold: 3 },
@@ -577,6 +580,156 @@ test('gcloud classifies absence only for the exact canonical Cloud Run service d
         () => executorFor(stderr)(argv),
         (error) => error.code === 'TRANSPORT_AMBIGUOUS',
       );
+    });
+  }
+});
+
+test('gcloud classifies canonical absence only when describe argv and resource identity both match', async (t) => {
+  const role = 'hkbuddyV1AcceptanceBucketMetadataReader';
+  const cases = [
+    {
+      name: 'Artifact Registry repository',
+      argv: ['artifacts', 'repositories', 'describe', GCP_IDENTITY.repository, '--location=asia-east2', `--project=${PROJECT}`, '--format=json'],
+      stderr: `ERROR: (gcloud.artifacts.repositories.describe) NOT_FOUND: Repository [projects/${PROJECT}/locations/asia-east2/repositories/${GCP_IDENTITY.repository}] was not found.`,
+    },
+    {
+      name: 'service account',
+      argv: ['iam', 'service-accounts', 'describe', GCP_IDENTITY.serviceAccounts.runtime, `--project=${PROJECT}`, '--format=json'],
+      stderr: `ERROR: (gcloud.iam.service-accounts.describe) NOT_FOUND: Service account [${GCP_IDENTITY.serviceAccounts.runtime}] was not found in project [${PROJECT}].`,
+    },
+    {
+      name: 'custom role',
+      argv: ['iam', 'roles', 'describe', role, `--project=${PROJECT}`, '--format=json'],
+      stderr: `ERROR: (gcloud.iam.roles.describe) NOT_FOUND: Role [projects/${PROJECT}/roles/${role}] was not found.`,
+    },
+    {
+      name: 'Compute network',
+      argv: ['compute', 'networks', 'describe', GCP_IDENTITY.network, `--project=${PROJECT}`, '--format=json'],
+      stderr: `ERROR: (gcloud.compute.networks.describe) Could not fetch resource:\n - The resource 'projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}' was not found`,
+    },
+    {
+      name: 'Compute subnet',
+      argv: ['compute', 'networks', 'subnets', 'describe', GCP_IDENTITY.subnet, '--region=asia-east2', `--project=${PROJECT}`, '--format=json'],
+      stderr: `ERROR: (gcloud.compute.networks.subnets.describe) Could not fetch resource:\n - The resource 'projects/${PROJECT}/regions/asia-east2/subnetworks/${GCP_IDENTITY.subnet}' was not found`,
+    },
+    {
+      name: 'Compute global address',
+      argv: ['compute', 'addresses', 'describe', GCP_IDENTITY.psaRange, '--global', `--project=${PROJECT}`, '--format=json'],
+      stderr: `ERROR: (gcloud.compute.addresses.describe) Could not fetch resource:\n - The resource 'projects/${PROJECT}/global/addresses/${GCP_IDENTITY.psaRange}' was not found`,
+    },
+    {
+      name: 'Cloud SQL instance',
+      argv: ['sql', 'instances', 'describe', GCP_IDENTITY.cloudSqlInstance, `--project=${PROJECT}`, '--format=json'],
+      stderr: `ERROR: (gcloud.sql.instances.describe) HTTPError 404: The resource [projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}] was not found.`,
+    },
+    {
+      name: 'Cloud SQL database',
+      argv: ['sql', 'databases', 'describe', GCP_IDENTITY.database, `--instance=${GCP_IDENTITY.cloudSqlInstance}`, `--project=${PROJECT}`, '--format=json'],
+      stderr: `ERROR: (gcloud.sql.databases.describe) HTTPError 404: Database [projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}/databases/${GCP_IDENTITY.database}] was not found.`,
+    },
+    {
+      name: 'Storage bucket',
+      argv: ['storage', 'buckets', 'describe', `gs://${GCP_IDENTITY.bucket}`, `--project=${PROJECT}`, '--format=json'],
+      stderr: `ERROR: (gcloud.storage.buckets.describe) HTTPError 404: The specified bucket [gs://${GCP_IDENTITY.bucket}] does not exist.`,
+    },
+    {
+      name: 'Secret Manager secret',
+      argv: ['secrets', 'describe', GCP_IDENTITY.secrets.session, `--project=${PROJECT}`, '--format=json'],
+      stderr: `ERROR: (gcloud.secrets.describe) NOT_FOUND: Secret [projects/${PROJECT}/secrets/${GCP_IDENTITY.secrets.session}] not found.`,
+    },
+    {
+      name: 'Cloud Run job',
+      argv: ['run', 'jobs', 'describe', GCP_IDENTITY.jobs.migration, `--project=${PROJECT}`, '--region=asia-east2', '--format=json'],
+      stderr: `ERROR: (gcloud.run.jobs.describe) Job [${GCP_IDENTITY.jobs.migration}] could not be found.`,
+    },
+  ];
+
+  const executorFor = (stderr) => createGcloudExecutor({
+    executable: 'python.exe', prefixArgs: ['C:/gcloud/lib/gcloud.py'],
+    execFile: async () => { const error = new Error('gcloud failed'); error.stderr = stderr; throw error; },
+  });
+  for (const fixture of cases) {
+    await t.test(fixture.name, async () => {
+      await assert.rejects(
+        () => executorFor(fixture.stderr)(fixture.argv),
+        (error) => error.code === 'NOT_FOUND',
+      );
+      for (const argv of [
+        fixture.argv.with(fixture.argv.indexOf(`--project=${PROJECT}`), '--project=foreign-project'),
+        fixture.argv.with(fixture.argv.length - 1, '--format=yaml'),
+      ]) {
+        await assert.rejects(
+          () => executorFor(fixture.stderr)(argv),
+          (error) => error.code === 'TRANSPORT_AMBIGUOUS',
+        );
+      }
+      const wrongResourceStderr = fixture.stderr.includes(role)
+        ? fixture.stderr.replaceAll(role, `${role}Foreign`)
+        : fixture.stderr.replaceAll('hkbuddy-v1', 'hkbuddy-v1-foreign');
+      await assert.rejects(
+        () => executorFor(wrongResourceStderr)(fixture.argv),
+        (error) => error.code === 'TRANSPORT_AMBIGUOUS',
+      );
+    });
+  }
+});
+
+test('real control-plane create-or-readback families receive canonical absence and perform zero mutation', async (t) => {
+  const contract = await contractFixture();
+  const fixtures = [
+    ['artifact-registry', `ERROR: (gcloud.artifacts.repositories.describe) NOT_FOUND: Repository [projects/${PROJECT}/locations/asia-east2/repositories/${GCP_IDENTITY.repository}] was not found.`],
+    ['service-account:hkbuddy-v1-runtime', `ERROR: (gcloud.iam.service-accounts.describe) NOT_FOUND: Service account [${GCP_IDENTITY.serviceAccounts.runtime}] was not found in project [${PROJECT}].`],
+    ['custom-role:hkbuddyV1AcceptanceBucketMetadataReader', `ERROR: (gcloud.iam.roles.describe) NOT_FOUND: Role [projects/${PROJECT}/roles/hkbuddyV1AcceptanceBucketMetadataReader] was not found.`],
+    ['vpc', `ERROR: (gcloud.compute.networks.describe) Could not fetch resource:\n - The resource 'projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}' was not found`],
+    ['subnet', `ERROR: (gcloud.compute.networks.subnets.describe) Could not fetch resource:\n - The resource 'projects/${PROJECT}/regions/asia-east2/subnetworks/${GCP_IDENTITY.subnet}' was not found`],
+    ['psa-range', `ERROR: (gcloud.compute.addresses.describe) Could not fetch resource:\n - The resource 'projects/${PROJECT}/global/addresses/${GCP_IDENTITY.psaRange}' was not found`],
+    ['cloud-sql-instance', `ERROR: (gcloud.sql.instances.describe) HTTPError 404: The resource [projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}] was not found.`],
+    ['database', `ERROR: (gcloud.sql.databases.describe) HTTPError 404: Database [projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}/databases/${GCP_IDENTITY.database}] was not found.`],
+    ['bucket', `ERROR: (gcloud.storage.buckets.describe) HTTPError 404: The specified bucket [gs://${GCP_IDENTITY.bucket}] does not exist.`],
+    ['build-source-bucket', `ERROR: (gcloud.storage.buckets.describe) HTTPError 404: The specified bucket [gs://${GCP_IDENTITY.buildSourceBucket}] does not exist.`],
+    [`secret-container:${GCP_IDENTITY.secrets.session}`, `ERROR: (gcloud.secrets.describe) NOT_FOUND: Secret [projects/${PROJECT}/secrets/${GCP_IDENTITY.secrets.session}] not found.`],
+    [`job:${GCP_IDENTITY.jobs.migration}`, `ERROR: (gcloud.run.jobs.describe) Job [${GCP_IDENTITY.jobs.migration}] could not be found.`],
+  ];
+  for (const [id, stderr] of fixtures) {
+    await t.test(id, async () => {
+      const calls = [];
+      const executor = createGcloudExecutor({
+        executable: 'python.exe', prefixArgs: ['C:/gcloud/lib/gcloud.py'],
+        execFile: async (_executable, args) => {
+          calls.push(args.slice(1));
+          const error = new Error('gcloud failed'); error.stderr = stderr; throw error;
+        },
+      });
+      const plane = new GcpControlPlane({
+        contract, notificationChannel: CHANNEL, gcloud: executor,
+        request: async () => { throw new Error('HTTPS must not be used for gcloud describe families'); },
+      });
+      assert.deepEqual(await plane.read(id), { status: 'absent' });
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].some((value) => ['create', 'enable', 'add-iam-policy-binding'].includes(value)), false);
+
+      const ambiguousCalls = [];
+      const ambiguousPlane = new GcpControlPlane({
+        contract, notificationChannel: CHANNEL,
+        gcloud: createGcloudExecutor({
+          executable: 'python.exe', prefixArgs: ['C:/gcloud/lib/gcloud.py'],
+          execFile: async (_executable, args) => {
+            ambiguousCalls.push(args.slice(1));
+            const error = new Error('gcloud failed');
+            error.stderr = `${stderr} foreign-resource`;
+            throw error;
+          },
+        }),
+        request: async () => { throw new Error('HTTPS must remain inert'); },
+      });
+      await assert.rejects(
+        () => ambiguousPlane.read(id),
+        (error) => error.code === 'TRANSPORT_AMBIGUOUS',
+      );
+      assert.equal(ambiguousCalls.length, 1);
+      assert.equal(ambiguousCalls[0].some((value) => (
+        ['create', 'enable', 'add-iam-policy-binding'].includes(value)
+      )), false);
     });
   }
 });
@@ -1458,14 +1611,17 @@ test('global bucket ownership is target-project exact and a foreign collision ca
     contract: await contractFixture(), notificationChannel: CHANNEL,
     gcloud: async (args) => {
       gcloudCalls.push(args);
-      if (args[0] === 'projects' && args[1] === 'describe') {
+       if (args[0] === 'projects' && args[1] === 'describe') {
         return {
           projectId: PROJECT, projectNumber: PROJECT_NUMBER, lifecycleState: 'ACTIVE',
           parent: { type: 'organization', id: GCP_IDENTITY.organizationId }, name: 'Motion Expert HK LTD Webpage',
           labels: {},
-        };
-      }
-      throw new Error('unexpected gcloud operation');
+         };
+       }
+       if (args[0] === 'storage' && args[1] === 'buckets' && args[2] === 'describe') {
+         return exactBucket({ projectNumber: '999999999999' });
+       }
+       throw new Error('unexpected gcloud operation');
     },
     request: async (input) => {
       requests.push(input);
@@ -1475,7 +1631,7 @@ test('global bucket ownership is target-project exact and a foreign collision ca
   });
   assert.equal((await plane.read('project')).status, 'present');
   await assert.rejects(() => plane.read('bucket'), (error) => error.code === 'BUCKET_ID_COLLISION');
-  assert.equal(requests.every(({ method }) => method === 'GET'), true);
+  assert.equal(requests.length, 0);
   assert.equal(gcloudCalls.some((args) => args.includes('add-iam-policy-binding')), false);
 });
 

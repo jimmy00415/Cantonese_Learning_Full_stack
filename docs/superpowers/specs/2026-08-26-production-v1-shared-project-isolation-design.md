@@ -158,12 +158,17 @@ Provision APIs and the resource island in dependency order. Build from the
 frozen clean commit through exact staging directory
 `gs://hkbuddy-v1-582852715831-build-source/source`; accept provenance only from
 that bucket/prefix with the frozen source digest. Run the digest-pinned database
-migration and deploy the candidate with zero stable traffic. Existing services
-require a receipt-bound exact prior controller revision and immutable image
-digest. An empty host may bootstrap only after canonical service `NOT_FOUND`,
-with an explicit no-prior candidate receipt, private candidate tag, and no
-stable traffic. The public invoker binding and stable traffic remain promotion
-actions, not provisioning shortcuts.
+migration and deploy the candidate without changing public access. Existing
+services require a receipt-bound exact prior controller revision and immutable
+image digest; they keep that revision at 100% and the candidate at 0%. An empty
+host may bootstrap only after the command-, project-, region-, and
+service-specific canonical `CLOUD_RUN_SERVICE_NOT_FOUND`; it creates the sole
+candidate revision at 100%, keeps IAM private with no `allUsers`, runs acceptance
+through the authenticated tagged origin, and records explicit
+`private-bootstrap-100` plus no-prior receipt state. Only after the complete
+receipt chain is revalidated may promotion add public invocation and remove the
+candidate tag. Ambiguous promotion IAM or traffic results restore and freshly
+verify private IAM, service traffic/tag, revision, immutable image, and evidence.
 
 Promotion requires the existing production acceptance contract: real Vertex
 LLM, Cantonese/English/Mandarin ASR and TTS, governed HKBU answers and citations,

@@ -483,6 +483,16 @@ function operation(phase, id, argv) {
   return Object.freeze({ phase, id, argv: Object.freeze([...argv]) });
 }
 
+function candidateTrafficPercent({ previousRevision }) {
+  return previousRevision === null ? 100 : 0;
+}
+
+function candidateTrafficState({ previousRevision }) {
+  return previousRevision === null
+    ? 'private-bootstrap-100'
+    : 'prior-stable-100/candidate-0';
+}
+
 function candidateServiceSpec({
   candidateRevision, candidateTag, previousRevision, releaseSha, image, environment, bindings, probes,
 }) {
@@ -560,7 +570,11 @@ function candidateServiceSpec({
       traffic: Object.freeze([
         ...(previousRevision === null
           ? [] : [Object.freeze({ revisionName: previousRevision, percent: 100 })]),
-        Object.freeze({ revisionName: candidateRevision, tag: candidateTag, percent: 0 }),
+        Object.freeze({
+          revisionName: candidateRevision,
+          tag: candidateTag,
+          percent: previousRevision === null ? 100 : 0,
+        }),
       ]),
     }),
   });
@@ -1155,7 +1169,17 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     secretEnvironment: bindings.environment,
     secretMounts: bindings.mounts,
     probes,
-    traffic: Object.freeze([Object.freeze({ revision: candidateRevision, tag: candidateTag, percent: 0 })]),
+    traffic: Object.freeze([
+      ...(previousRevision === null ? [] : [Object.freeze({
+        revision: previousRevision, tag: null, percent: 100,
+      })]),
+      Object.freeze({
+        revision: candidateRevision,
+        tag: candidateTag,
+        percent: candidateTrafficPercent({ previousRevision }),
+      }),
+    ]),
+    trafficState: candidateTrafficState({ previousRevision }),
     access: candidateAccess,
     iam: Object.freeze({ publicInvoker: false }),
   });
@@ -1383,7 +1407,11 @@ function validateCandidateServiceSpecDryRun(value, plan) {
     || !exact(normalizedService.traffic, [
       ...(plan.previousRevision === null
         ? [] : [{ revision: plan.previousRevision, tag: null, percent: 100 }]),
-      { revision: plan.candidateRevision, tag: plan.candidateTag, percent: 0 },
+      {
+        revision: plan.candidateRevision,
+        tag: plan.candidateTag,
+        percent: candidateTrafficPercent(plan),
+      },
     ])
     || !exact(
       normalizeCandidateRevision({ metadata: template.metadata, spec: template.spec }, plan.expectedCandidate),
@@ -1404,7 +1432,9 @@ function normalizeCandidateService(value) {
     traffic: traffic.map((member) => ({
       revision: member.revision ?? member.revisionName,
       tag: member.tag ?? null,
-      percent: Number(member.percent ?? 0),
+      percent: member.percent === undefined || member.percent === null
+        ? (traffic.length === 1 ? 100 : Number.NaN)
+        : Number(member.percent),
     })),
   };
 }
@@ -1414,11 +1444,7 @@ function validateCandidateService(value, expected) {
   if (!normalized || normalized.service !== expected.service) {
     throw new Error('Cloud Run candidate service readback is invalid');
   }
-  const candidate = normalized.traffic.filter(({ revision, tag }) => (
-    revision === expected.revision || tag === expected.tag
-  ));
-  if (candidate.length !== 1 || candidate[0].revision !== expected.revision
-    || candidate[0].tag !== expected.tag || candidate[0].percent !== 0) {
+  if (!exact(normalized.traffic, expected.traffic)) {
     throw new Error('Cloud Run candidate service readback is invalid');
   }
   return true;
@@ -1468,9 +1494,9 @@ function validatePromotionCompensationSource(value, plan) {
   if (plan.previousRevision === null) {
     if (!exact(normalized.traffic, [{
       revision: plan.candidateRevision,
-      tag: normalized.traffic[0]?.percent === 0 ? plan.candidateTag : null,
-      percent: normalized.traffic[0]?.percent,
-    }]) || ![0, 100].includes(normalized.traffic[0]?.percent)) {
+      tag: normalized.traffic[0]?.tag,
+      percent: 100,
+    }]) || ![null, plan.candidateTag].includes(normalized.traffic[0]?.tag)) {
       throw new Error('Cloud Run promotion compensation source is invalid');
     }
     return true;
@@ -1499,7 +1525,7 @@ function validatePromotionCompensationSource(value, plan) {
 function validateBootstrapCandidateService(value, plan) {
   const normalized = normalizeCandidateService(value);
   if (!normalized || normalized.service !== SERVICE || !exact(normalized.traffic, [{
-    revision: plan.candidateRevision, tag: plan.candidateTag, percent: 0,
+    revision: plan.candidateRevision, tag: plan.candidateTag, percent: 100,
   }])) {
     throw new Error('Cloud Run bootstrap candidate service readback is invalid');
   }
@@ -2307,7 +2333,7 @@ function validateLatencyAcceptanceRecord(record, plan, now) {
     candidateTag: plan.candidateTag,
     serviceOrigin: plan.serviceOrigin,
     candidateOrigin: plan.candidateOrigin,
-    trafficPercent: 0,
+    trafficPercent: candidateTrafficPercent(plan),
   };
   let derived;
   try { derived = validateRawLatencyReceipts(record, plan); } catch {
@@ -2410,7 +2436,7 @@ async function validateTask8EvidenceArtifact(entry, phase, plan, { now }) {
     || record.commitSha !== plan.releaseSha || record.sourceArchiveSha256 !== plan.sourceArchiveSha256
     || record.imageDigest !== plan.imageDigest || record.candidateRevision !== plan.candidateRevision
     || record.candidateTag !== plan.candidateTag || record.candidateOrigin !== plan.candidateOrigin
-    || record.trafficPercent !== 0 || record.result !== 'pass'
+    || record.trafficPercent !== candidateTrafficPercent(plan) || record.result !== 'pass'
     || !recentEvidenceTime(record.occurredAt, now)) throw new Error(errorMessage);
   if (phase === 'readiness') {
     if (!exactKeys(record, [
@@ -2445,7 +2471,8 @@ async function validateTask8EvidenceArtifact(entry, phase, plan, { now }) {
   ]) || trace.schemaVersion !== 1 || trace.source !== 'codex-in-app-browser'
     || !exact(trace.access, plan.candidateAccess)
     || trace.candidateOrigin !== plan.candidateOrigin || trace.finalNavigationUrl !== plan.candidateOrigin
-    || trace.observedReleaseSha !== plan.releaseSha || trace.trafficPercent !== 0
+    || trace.observedReleaseSha !== plan.releaseSha
+    || trace.trafficPercent !== candidateTrafficPercent(plan)
     || !exact(trace.viewport, { width: 390, height: 844 })
     || !Array.isArray(trace.events) || trace.events.length !== MOBILE_CHECK_IDS.length
     || !trace.events.every((event, index) => exactKeys(event, ['evidence', 'id', 'status'])
@@ -2544,13 +2571,15 @@ function validateReceiptOutputs(phase, outputs, plan) {
   } else if (phase === 'candidate') {
     if (!exactKeys(outputs, [
       'access', 'candidateContractSha256', 'imageDigest', 'origin', 'publicInvoker',
-      'priorRelease', 'revision', 'tag', 'trafficPercent',
+      'priorRelease', 'revision', 'tag', 'trafficPercent', 'trafficState',
     ])
       || !exact(outputs.access, plan.candidateAccess)
       || outputs.candidateContractSha256 !== canonicalSha256(plan.expectedCandidate)
       || outputs.imageDigest !== plan.imageDigest || outputs.origin !== plan.candidateOrigin
       || outputs.revision !== plan.candidateRevision || outputs.tag !== plan.candidateTag
-      || outputs.trafficPercent !== 0 || outputs.publicInvoker !== false
+      || outputs.trafficPercent !== candidateTrafficPercent(plan)
+      || outputs.trafficState !== candidateTrafficState(plan)
+      || outputs.publicInvoker !== false
       || !exact(outputs.priorRelease, plan.previousRevision === null ? null : {
         image: plan.previousImage,
         imageDigest: plan.previousImageDigest,
@@ -2702,7 +2731,8 @@ function releasePhaseReceiptOutputs(phase, plan, context) {
     }),
     revision: plan.candidateRevision,
     tag: plan.candidateTag,
-    trafficPercent: 0,
+    trafficPercent: candidateTrafficPercent(plan),
+    trafficState: candidateTrafficState(plan),
   });
   if (['readiness', 'workload', 'mobile'].includes(phase)) {
     const evidence = phase === 'workload' && context.workloadExecution
@@ -2967,6 +2997,7 @@ async function executeControlledWorkload(plan, {
       V1_SOURCE_ARCHIVE_SHA256: plan.sourceArchiveSha256,
       V1_CANDIDATE_IMAGE_DIGEST: plan.imageDigest,
       V1_CANDIDATE_REVISION: plan.candidateRevision,
+      V1_CANDIDATE_TRAFFIC_PERCENT: String(candidateTrafficPercent(plan)),
     },
     cwd: APP_ROOT,
     artifactDirectory: dirname(entry.filePath),
@@ -3449,7 +3480,11 @@ export async function runGcpRelease({
     let cleanupFailed = false;
     let promotionIamRestored = null;
     let promotionTrafficRestored = null;
-    if (selection.phase === 'promote' && promotionTrafficMutationAttempted) {
+    const firstReleasePromotionMutationAttempted = selection.phase === 'promote'
+      && plan.previousRevision === null
+      && (promotionTrafficMutationAttempted || promotionIamMutationAttempted);
+    if (selection.phase === 'promote'
+      && (promotionTrafficMutationAttempted || firstReleasePromotionMutationAttempted)) {
       try {
         const currentService = await executor([
           'run', 'services', 'describe', SERVICE,
@@ -3457,6 +3492,13 @@ export async function runGcpRelease({
         ]);
         if (plan.previousRevision === null) {
           validatePromotionCompensationSource(currentService, plan);
+          let bootstrapServiceAlreadyRestored = false;
+          try {
+            validateBootstrapCandidateService(currentService, plan);
+            bootstrapServiceAlreadyRestored = true;
+          } catch {
+            // A tagless 100-percent candidate is a possible response-lost traffic mutation.
+          }
           if (typeof verifyEvidence !== 'function'
             || await verifyEvidence(plan.evidence, { releaseSha: plan.releaseSha }) !== true) {
             throw new Error('Promotion compensation evidence is invalid');
@@ -3471,35 +3513,37 @@ export async function runGcpRelease({
             `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
           ]);
           validateCandidateArtifact(candidateArtifact, plan.expectedCandidate.image);
-          if (typeof writeCandidateSpec !== 'function'
-            || await writeCandidateSpec(plan) !== true) {
-            throw new Error('Candidate Service YAML is unavailable');
+          if (!bootstrapServiceAlreadyRestored) {
+            if (typeof writeCandidateSpec !== 'function'
+              || await writeCandidateSpec(plan) !== true) {
+              throw new Error('Candidate Service YAML is unavailable');
+            }
+            const dryRun = await executor([
+              'run', 'services', 'replace', plan.candidateServiceSpecPath,
+              `--project=${PROJECT}`, `--region=${REGION}`, '--dry-run', '--format=json',
+            ]);
+            validateCandidateServiceSpecDryRun(dryRun, plan);
+            const restoreReceipt = await executor([
+              'run', 'services', 'replace', plan.candidateServiceSpecPath,
+              `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+            ]);
+            validateBootstrapCandidateService(restoreReceipt, plan);
+            const freshService = await executor([
+              'run', 'services', 'describe', SERVICE,
+              `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+            ]);
+            validateBootstrapCandidateService(freshService, plan);
+            const freshRevision = await executor([
+              'run', 'revisions', 'describe', plan.candidateRevision,
+              `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+            ]);
+            validateCandidateRevisionReadback(freshRevision, plan);
+            const freshArtifact = await executor([
+              'artifacts', 'docker', 'images', 'describe', plan.expectedCandidate.image,
+              `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
+            ]);
+            validateCandidateArtifact(freshArtifact, plan.expectedCandidate.image);
           }
-          const dryRun = await executor([
-            'run', 'services', 'replace', plan.candidateServiceSpecPath,
-            `--project=${PROJECT}`, `--region=${REGION}`, '--dry-run', '--format=json',
-          ]);
-          validateCandidateServiceSpecDryRun(dryRun, plan);
-          const restoreReceipt = await executor([
-            'run', 'services', 'replace', plan.candidateServiceSpecPath,
-            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-          ]);
-          validateBootstrapCandidateService(restoreReceipt, plan);
-          const freshService = await executor([
-            'run', 'services', 'describe', SERVICE,
-            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-          ]);
-          validateBootstrapCandidateService(freshService, plan);
-          const freshRevision = await executor([
-            'run', 'revisions', 'describe', plan.candidateRevision,
-            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-          ]);
-          validateCandidateRevisionReadback(freshRevision, plan);
-          const freshArtifact = await executor([
-            'artifacts', 'docker', 'images', 'describe', plan.expectedCandidate.image,
-            `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
-          ]);
-          validateCandidateArtifact(freshArtifact, plan.expectedCandidate.image);
         } else {
           try {
             validateCandidateCleanupService(currentService, plan);
@@ -3581,8 +3625,7 @@ export async function runGcpRelease({
         }
       }
     }
-    if (selection.phase === 'promote' && plan.previousRevision === null
-      && promotionTrafficMutationAttempted
+    if (firstReleasePromotionMutationAttempted
       && promotionTrafficRestored === true && promotionIamRestored === true) {
       try {
         if (typeof verifyEvidence !== 'function'

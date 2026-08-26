@@ -210,7 +210,7 @@ export function assertResourceContract(contract) {
     resources: contract.resources,
     iam: contract.iam,
   });
-  requireExact(contract.schemaVersion, 1);
+  requireExact(contract.schemaVersion, 2);
   requireExact(contract.project, {
     id: PROJECT,
     displayName: 'Motion Expert HK LTD Webpage',
@@ -301,7 +301,10 @@ export function assertResourceContract(contract) {
   requireExact(resources?.cloudRun, {
     service: GCP_IDENTITY.service, executionEnvironment: 'gen2', cpu: 2, memory: '1Gi',
     concurrency: 40, minInstances: 1, maxInstances: 1, cpuThrottling: false,
-    startupCpuBoost: true, timeoutSeconds: 60, initialTrafficPercent: 0,
+    startupCpuBoost: true, timeoutSeconds: 60,
+    firstReleaseTrafficState: 'private-bootstrap-100', firstReleaseTrafficPercent: 100,
+    laterReleaseTrafficState: 'prior-stable-100/candidate-0',
+    laterReleasePriorTrafficPercent: 100, laterReleaseCandidateTrafficPercent: 0,
     directVpc: true, egress: 'private-ranges-only',
     startupProbe: {
       path: '/api/health/ready', port: 8080, initialDelaySeconds: 0,
@@ -411,11 +414,64 @@ function isCanonicalCloudRunServiceDescribe(argv) {
   ]);
 }
 
+function canonicalDescribeAbsence(argv, stderr) {
+  const projectFlag = `--project=${PROJECT}`;
+  const formatFlag = '--format=json';
+  const role = 'hkbuddyV1AcceptanceBucketMetadataReader';
+  const descriptors = [
+    [
+      ['artifacts', 'repositories', 'describe', GCP_IDENTITY.repository, '--location=asia-east2', projectFlag, formatFlag],
+      `ERROR: (gcloud.artifacts.repositories.describe) NOT_FOUND: Repository [projects/${PROJECT}/locations/asia-east2/repositories/${GCP_IDENTITY.repository}] was not found.`,
+    ],
+    ...Object.values(GCP_IDENTITY.serviceAccounts).map((account) => [[
+      'iam', 'service-accounts', 'describe', account, projectFlag, formatFlag,
+    ], `ERROR: (gcloud.iam.service-accounts.describe) NOT_FOUND: Service account [${account}] was not found in project [${PROJECT}].`]),
+    [
+      ['iam', 'roles', 'describe', role, projectFlag, formatFlag],
+      `ERROR: (gcloud.iam.roles.describe) NOT_FOUND: Role [projects/${PROJECT}/roles/${role}] was not found.`,
+    ],
+    [
+      ['compute', 'networks', 'describe', GCP_IDENTITY.network, projectFlag, formatFlag],
+      `ERROR: (gcloud.compute.networks.describe) Could not fetch resource:\n - The resource 'projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}' was not found`,
+    ],
+    [
+      ['compute', 'networks', 'subnets', 'describe', GCP_IDENTITY.subnet, '--region=asia-east2', projectFlag, formatFlag],
+      `ERROR: (gcloud.compute.networks.subnets.describe) Could not fetch resource:\n - The resource 'projects/${PROJECT}/regions/asia-east2/subnetworks/${GCP_IDENTITY.subnet}' was not found`,
+    ],
+    [
+      ['compute', 'addresses', 'describe', GCP_IDENTITY.psaRange, '--global', projectFlag, formatFlag],
+      `ERROR: (gcloud.compute.addresses.describe) Could not fetch resource:\n - The resource 'projects/${PROJECT}/global/addresses/${GCP_IDENTITY.psaRange}' was not found`,
+    ],
+    [
+      ['sql', 'instances', 'describe', GCP_IDENTITY.cloudSqlInstance, projectFlag, formatFlag],
+      `ERROR: (gcloud.sql.instances.describe) HTTPError 404: The resource [projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}] was not found.`,
+    ],
+    [
+      ['sql', 'databases', 'describe', GCP_IDENTITY.database, `--instance=${GCP_IDENTITY.cloudSqlInstance}`, projectFlag, formatFlag],
+      `ERROR: (gcloud.sql.databases.describe) HTTPError 404: Database [projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}/databases/${GCP_IDENTITY.database}] was not found.`,
+    ],
+    ...[GCP_IDENTITY.bucket, GCP_IDENTITY.buildSourceBucket].map((bucket) => [[
+      'storage', 'buckets', 'describe', `gs://${bucket}`, projectFlag, formatFlag,
+    ], `ERROR: (gcloud.storage.buckets.describe) HTTPError 404: The specified bucket [gs://${bucket}] does not exist.`]),
+    ...Object.values(GCP_IDENTITY.secrets).map((secret) => [[
+      'secrets', 'describe', secret, projectFlag, formatFlag,
+    ], `ERROR: (gcloud.secrets.describe) NOT_FOUND: Secret [projects/${PROJECT}/secrets/${secret}] not found.`]),
+    ...Object.values(GCP_IDENTITY.jobs).map((job) => [[
+      'run', 'jobs', 'describe', job, projectFlag, `--region=${GCP_IDENTITY.region}`, formatFlag,
+    ], `ERROR: (gcloud.run.jobs.describe) Job [${job}] could not be found.`]),
+  ];
+  return descriptors.some(([expectedArgv, expectedStderr]) => (
+    exact(argv, expectedArgv) && stderr === expectedStderr
+  ));
+}
+
 function classifyTransportError(error, argv = null) {
   if (['NOT_FOUND', 'FORBIDDEN', 'ALREADY_EXISTS'].includes(error?.code)) return error.code;
   const status = Number(error?.response?.status ?? error?.status ?? error?.statusCode);
   if (status === 403) return 'FORBIDDEN';
-  if (status === 404) return 'NOT_FOUND';
+  if (status === 404 && canonicalDescribeAbsence(argv, String(error?.stderr ?? error?.message ?? '').trim())) {
+    return 'NOT_FOUND';
+  }
   if (status === 409) return 'ALREADY_EXISTS';
   const stderr = String(error?.stderr ?? error?.message ?? '');
   if (/PERMISSION_DENIED|permission denied|does not have permission|\b403\b|forbidden/i.test(stderr)) return 'FORBIDDEN';
@@ -423,6 +479,7 @@ function classifyTransportError(error, argv = null) {
     && stderr.trim() === `ERROR: (gcloud.run.services.describe) Service [${GCP_IDENTITY.service}] could not be found.`) {
     return 'CLOUD_RUN_SERVICE_NOT_FOUND';
   }
+  if (canonicalDescribeAbsence(argv, stderr.trim())) return 'NOT_FOUND';
   if (/ALREADY_EXISTS|already exists|\b409\b/i.test(stderr)) return 'ALREADY_EXISTS';
   return 'TRANSPORT_AMBIGUOUS';
 }
@@ -2079,10 +2136,9 @@ export class GcpControlPlane {
     }
     if (id === 'bucket' || id === 'build-source-bucket') {
       const bucket = id === 'bucket' ? GCP_IDENTITY.bucket : GCP_IDENTITY.buildSourceBucket;
-      const value = await this.#rest({
-        method: 'GET',
-        url: `https://storage.googleapis.com/storage/v1/b/${bucket}?projection=full`,
-      });
+      const value = await this.#gcloud([
+        'storage', 'buckets', 'describe', `gs://${bucket}`, `--project=${PROJECT}`, '--format=json',
+      ]);
       if (String(value?.projectNumber ?? '') !== this.#projectNumber()) {
         throw commandError('BUCKET_ID_COLLISION');
       }
@@ -2090,9 +2146,18 @@ export class GcpControlPlane {
     }
     if (id.startsWith('secret-container:')) {
       const secretId = id.slice('secret-container:'.length);
-      const value = await this.#rest({
-        method: 'GET', url: `https://secretmanager.googleapis.com/v1/projects/${PROJECT}/secrets/${secretId}`,
-      });
+      const value = await this.#gcloud([
+        'secrets', 'describe', secretId, `--project=${PROJECT}`, '--format=json',
+      ]);
+      return { status: 'present', value };
+    }
+    if (id.startsWith('job:')) {
+      const job = id.slice('job:'.length);
+      if (!Object.values(GCP_IDENTITY.jobs).includes(job)) throw commandError('UNKNOWN_PROVISION_STEP');
+      const value = await this.#gcloud([
+        'run', 'jobs', 'describe', job, `--project=${PROJECT}`,
+        `--region=${GCP_IDENTITY.region}`, '--format=json',
+      ]);
       return { status: 'present', value };
     }
     if (id.startsWith('secret-version:')) return this.#readSecretVersion(id.slice('secret-version:'.length));

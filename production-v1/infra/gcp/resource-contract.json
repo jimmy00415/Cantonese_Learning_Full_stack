@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "project": {
     "id": "motion-expert-hk-ltd-webpage",
     "displayName": "Motion Expert HK LTD Webpage",
@@ -241,7 +241,11 @@
       "cpuThrottling": false,
       "startupCpuBoost": true,
       "timeoutSeconds": 60,
-      "initialTrafficPercent": 0,
+      "firstReleaseTrafficState": "private-bootstrap-100",
+      "firstReleaseTrafficPercent": 100,
+      "laterReleaseTrafficState": "prior-stable-100/candidate-0",
+      "laterReleasePriorTrafficPercent": 100,
+      "laterReleaseCandidateTrafficPercent": 0,
       "directVpc": true,
       "egress": "private-ranges-only",
       "startupProbe": {

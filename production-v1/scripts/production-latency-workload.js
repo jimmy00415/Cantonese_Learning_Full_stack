@@ -1407,10 +1407,12 @@ export async function runLatencyAcceptance({
   const sourceArchiveSha256 = environment?.V1_SOURCE_ARCHIVE_SHA256;
   const imageDigest = environment?.V1_CANDIDATE_IMAGE_DIGEST;
   const candidateRevision = environment?.V1_CANDIDATE_REVISION;
+  const candidateTrafficPercent = Number(environment?.V1_CANDIDATE_TRAFFIC_PERCENT);
   const candidateTag = `candidate-${commitSha.slice(0, 12)}`;
   if (!SHA256.test(String(sourceArchiveSha256 ?? ''))
     || !IMAGE_DIGEST.test(String(imageDigest ?? ''))
-    || candidateRevision !== `${SERVICE}-${commitSha.slice(0, 12)}`) {
+    || candidateRevision !== `${SERVICE}-${commitSha.slice(0, 12)}`
+    || ![0, 100].includes(candidateTrafficPercent)) {
     return publish(writeOutput, 2, { status: 'not-run', code: 'RELEASE_BINDING_INVALID' });
   }
   operationDeadlineMs = deadlineValue(operationDeadlineMs, DEFAULT_OPERATION_DEADLINE_MS);
@@ -1709,7 +1711,7 @@ export async function runLatencyAcceptance({
     candidateTag,
     serviceOrigin: environment.V1_PUBLIC_ORIGIN,
     candidateOrigin,
-    trafficPercent: 0,
+    trafficPercent: candidateTrafficPercent,
   });
 
   const record = acceptanceRecord({

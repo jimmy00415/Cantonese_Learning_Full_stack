@@ -307,15 +307,20 @@ candidate -> readiness -> workload -> mobile -> promote`; a local pass or a
 partial receipt chain is not deployment readiness. Deploy only the digest-pinned
 revision `hkbuddy-v1-api-<12-lowercase-hex>` under the SHA-bound
 `candidate-<12-lowercase-hex>` tag. Existing services require an exact paired
-`previousRevision` and `previousImageDigest`. Empty-host bootstrap requires both
-fields to be null and the canonical service describe to return `NOT_FOUND`; it
-creates only the private candidate tag at 0% with no stable traffic. Permission
-errors and ambiguous absence fail closed. Promote only after privacy, real
+`previousRevision` and `previousImageDigest`; they stay at 100% while the
+private candidate is 0%. Empty-host bootstrap requires both fields to be null
+and the exact service describe to return `CLOUD_RUN_SERVICE_NOT_FOUND`; it
+creates the sole private tagged candidate at 100%, adds no `allUsers`, uses the
+authenticated tagged origin for acceptance, and records `private-bootstrap-100`
+with an explicit null prior release. Permission errors, generic not-found text,
+and any command/resource mismatch fail closed. Promote only after privacy, real
 provider, iOS voice, dependency, retention, readiness, mobile, and latency gates
 all pass for the same frozen commit and the controller freshly revalidates their
 immutable receipts. Promotion adds the reviewed public invoker binding and
 routes `hkbuddy-v1-api` to the accepted candidate at 100%; it also removes the
-candidate tag.
+candidate tag. If first-release IAM, traffic, or readback is ambiguous, the
+controller restores private IAM and the tagged 100% bootstrap state, then
+freshly verifies service, revision, immutable image, evidence, and IAM.
 
 Rollback is separately confirmed. Before traffic mutation it validates the
 complete mobile receipt chain, the candidate receipt's prior revision/image

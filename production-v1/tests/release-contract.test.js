@@ -661,7 +661,10 @@ function fixtureReceiptOutputs(plan, phase) {
     },
     revision: plan.candidateRevision,
     tag: plan.candidateTag,
-    trafficPercent: 0,
+    trafficPercent: plan.previousRevision === null ? 100 : 0,
+    trafficState: plan.previousRevision === null
+      ? 'private-bootstrap-100'
+      : 'prior-stable-100/candidate-0',
   };
   const output = {
     artifactSha256: plan.task8Evidence[phase].artifactSha256,
@@ -1479,7 +1482,7 @@ test('candidate readback requires private authenticated tagged QA and the exact 
   for (const mutate of [
     (value) => { value.image = value.image.replace('@sha256:', ':latest'); },
     (value) => { value.probes.startup.path = '/api/health/live'; },
-    (value) => { value.traffic[0].percent = 100; },
+    (value) => { value.traffic.at(-1).percent = 100; },
     (value) => { value.iam.publicInvoker = true; },
     (value) => { value.access.audience = value.access.taggedUrl; },
     (value) => { value.secretMounts.legacyInventory.version = 'latest'; },
@@ -1496,7 +1499,10 @@ test('confirmed candidate fails closed unless every control-plane readback match
   const readbacks = {
     service: {
       service: 'hkbuddy-v1-api',
-      traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 0 }],
+      traffic: [
+        { revision: input.previousRevision, percent: 100 },
+        { revision: REVISION, tag: CANDIDATE_TAG, percent: 0 },
+      ],
     },
     revision: structuredClone(plan.expectedCandidate),
     iam: {
@@ -1630,7 +1636,10 @@ test('public promotion requires the reviewed owner identity before its first mut
   const candidateReadbacks = {
     service: {
       service: 'hkbuddy-v1-api',
-      traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 0 }],
+      traffic: [
+        { revision: input.previousRevision, percent: 100 },
+        { revision: REVISION, tag: CANDIDATE_TAG, percent: 0 },
+      ],
     },
     revision: structuredClone(plan.expectedCandidate),
     iam: {
@@ -1751,7 +1760,10 @@ test('promotion restores the exact private IAM snapshot when the public grant la
       if (argv[1] === 'services' && argv[2] === 'describe') {
         return {
           service: 'hkbuddy-v1-api',
-          traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 0 }],
+          traffic: [
+            { revision: input.previousRevision, percent: 100 },
+            { revision: REVISION, tag: CANDIDATE_TAG, percent: 0 },
+          ],
         };
       }
       if (argv.includes('add-iam-policy-binding')) {
@@ -1954,12 +1966,22 @@ test('candidate deployment uses a controlled Service YAML and never the unsuppor
   assert.equal(plan.operations.some(({ id }) => id === 'candidate-cleanup-public-service'), false);
 });
 
-test('empty-host bootstrap is allowed only on canonical NOT_FOUND and creates a private tagged zero-traffic candidate', async () => {
+test('empty-host bootstrap is allowed only on canonical NOT_FOUND and creates a private tagged 100-percent candidate', async () => {
   const input = releaseInput({ previousRevision: null, previousImageDigest: null });
   const plan = buildReleasePlan(input, { phase: 'candidate' });
   assert.deepEqual(plan.candidateServiceSpec.spec.traffic, [{
-    revisionName: REVISION, tag: CANDIDATE_TAG, percent: 0,
+    revisionName: REVISION, tag: CANDIDATE_TAG, percent: 100,
   }]);
+  assert.deepEqual(plan.expectedCandidate.traffic, [{
+    revision: REVISION, tag: CANDIDATE_TAG, percent: 100,
+  }]);
+  assert.deepEqual(plan.candidateAccess, {
+    authenticated: true,
+    audience: STABLE_ORIGIN,
+    issuer: 'https://accounts.google.com',
+    subjectSha256: QA_SUBJECT_SHA256,
+    taggedUrl: CANDIDATE_ORIGIN,
+  });
   let serviceDescribeCount = 0;
   const calls = [];
   const result = await runGcpRelease({
@@ -1973,7 +1995,7 @@ test('empty-host bootstrap is allowed only on canonical NOT_FOUND and creates a 
           throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
         }
         return { service: 'hkbuddy-v1-api', traffic: [
-          { revision: REVISION, tag: CANDIDATE_TAG, percent: 0 },
+          { revision: REVISION, tag: CANDIDATE_TAG, percent: 100 },
         ] };
       }
       if (argv.includes('--dry-run')) return structuredClone(plan.candidateServiceSpec);
@@ -1990,6 +2012,9 @@ test('empty-host bootstrap is allowed only on canonical NOT_FOUND and creates a 
   assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
   assert.equal(calls.some((argv) => argv.includes('--member=allUsers')), false);
   assert.equal(calls.some((argv) => argv.includes('update-traffic')), false);
+  assert.equal(result.publicReport.phaseReceipt.outputs.trafficState, 'private-bootstrap-100');
+  assert.equal(result.publicReport.phaseReceipt.outputs.trafficPercent, 100);
+  assert.equal(result.publicReport.phaseReceipt.outputs.priorRelease, null);
 
   for (const error of [
     Object.assign(new Error('forbidden'), { code: 'FORBIDDEN' }),
@@ -2009,7 +2034,29 @@ test('empty-host bootstrap is allowed only on canonical NOT_FOUND and creates a 
   }
 });
 
-test('first-release failed promotion restores the exact private tagged zero-traffic candidate', async (t) => {
+test('first-release Service API default traffic normalizes to the exact private bootstrap state', () => {
+  const plan = buildReleasePlan(releaseInput({ previousRevision: null, previousImageDigest: null }));
+  assert.doesNotThrow(() => validateCandidateControlPlaneReadbacks({
+    service: {
+      metadata: { name: GCP_IDENTITY.service },
+      status: { traffic: [{ revisionName: REVISION, tag: CANDIDATE_TAG }] },
+    },
+    revision: structuredClone(plan.expectedCandidate),
+    iam: { bindings: [] },
+    artifact: { image: plan.expectedCandidate.image },
+  }, plan));
+  assert.throws(() => validateCandidateControlPlaneReadbacks({
+    service: {
+      metadata: { name: GCP_IDENTITY.service },
+      status: { traffic: [{ revisionName: REVISION, tag: CANDIDATE_TAG, percent: 0 }] },
+    },
+    revision: structuredClone(plan.expectedCandidate),
+    iam: { bindings: [] },
+    artifact: { image: plan.expectedCandidate.image },
+  }, plan), /candidate service readback/i);
+});
+
+test('first-release failed promotion restores the exact private tagged 100-percent candidate', async (t) => {
   const input = releaseInput({ previousRevision: null, previousImageDigest: null });
   const plan = buildReleasePlan(input);
   for (const mode of ['mutation-landed', 'response-lost', 'readback-failed']) {
@@ -2023,9 +2070,10 @@ test('first-release failed promotion restores the exact private tagged zero-traf
       let currentPolicy = structuredClone(privatePolicy);
       let currentService = {
         service: GCP_IDENTITY.service,
-        traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 0 }],
+        traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 100 }],
       };
       let plannedReadbackMustFail = mode === 'readback-failed';
+      let trafficMutationAttempted = false;
       const attemptId = '55555555-5555-4555-8555-555555555555';
       const restorePath = join(
         dirname(plan.sourceArchive), `${REVISION}.iam-restore.${attemptId}.json`,
@@ -2039,7 +2087,7 @@ test('first-release failed promotion restores the exact private tagged zero-traf
         },
         writeCandidateSpec: async (releasePlan) => {
           assert.deepEqual(releasePlan.candidateServiceSpec.spec.traffic, [{
-            revisionName: REVISION, tag: CANDIDATE_TAG, percent: 0,
+            revisionName: REVISION, tag: CANDIDATE_TAG, percent: 100,
           }]);
           return true;
         },
@@ -2065,6 +2113,7 @@ test('first-release failed promotion restores the exact private tagged zero-traf
             return structuredClone(currentPolicy);
           }
           if (argv.includes('update-traffic')) {
+            trafficMutationAttempted = true;
             currentService = {
               service: GCP_IDENTITY.service,
               traffic: [{ revision: REVISION, percent: 100 }],
@@ -2077,12 +2126,12 @@ test('first-release failed promotion restores the exact private tagged zero-traf
             if (argv.includes('--dry-run')) return structuredClone(plan.candidateServiceSpec);
             currentService = {
               service: GCP_IDENTITY.service,
-              traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 0 }],
+              traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 100 }],
             };
             return structuredClone(currentService);
           }
           if (argv[1] === 'services' && argv[2] === 'describe') {
-            if (plannedReadbackMustFail && currentService.traffic[0]?.percent === 100) {
+            if (plannedReadbackMustFail && trafficMutationAttempted) {
               plannedReadbackMustFail = false;
               throw new Error('post-promotion readback unavailable');
             }
@@ -2097,7 +2146,7 @@ test('first-release failed promotion restores the exact private tagged zero-traf
       assert.equal(result.publicReport.code, 'RELEASE_PHASE_FAILED', `${JSON.stringify(result.publicReport)} calls=${JSON.stringify(calls)}`);
       assert.equal(result.publicReport.promotionTrafficRestored, true);
       assert.equal(result.publicReport.promotionIamRestored, true);
-      assert.deepEqual(currentService.traffic, [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 0 }]);
+      assert.deepEqual(currentService.traffic, [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 100 }]);
       assert.equal(JSON.stringify(currentPolicy).includes('allUsers'), false);
       assert.equal(evidenceChecks.length >= 1, true);
       assert.equal(calls.flat().some((value) => String(value).includes('null')), false);
@@ -2120,6 +2169,73 @@ test('first-release failed promotion restores the exact private tagged zero-traf
       assert.equal(finalReads.filter((value) => value === 'run services get-iam-policy').length >= 2, true);
     });
   }
+});
+
+test('first-release IAM response loss restores and re-verifies the complete private bootstrap chain', async () => {
+  const input = releaseInput({ previousRevision: null, previousImageDigest: null });
+  const plan = buildReleasePlan(input);
+  const calls = [];
+  const evidenceChecks = [];
+  const privatePolicy = {
+    bindings: [{ role: 'roles/run.invoker', members: ['user:qa@motionexp.com'] }],
+    etag: 'Bw-private-iam-loss=', version: 1,
+  };
+  let currentPolicy = structuredClone(privatePolicy);
+  const currentService = {
+    service: GCP_IDENTITY.service,
+    traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 100 }],
+  };
+  const attemptId = '77777777-7777-4777-8777-777777777777';
+  const restorePath = join(
+    dirname(plan.sourceArchive), `${REVISION}.iam-restore.${attemptId}.json`,
+  );
+  const result = await runGcpRelease({
+    argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`], input,
+    randomUUID: () => attemptId,
+    verifyEvidence: async (value, options) => {
+      evidenceChecks.push({ value, options });
+      return true;
+    },
+    writeIamRestorePolicy: async () => restorePath,
+    removeIamRestorePolicy: async () => true,
+    execute: async (argv) => {
+      calls.push(argv);
+      if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
+      if (argv[0] === 'artifacts') return { image: plan.expectedCandidate.image };
+      if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
+      if (argv[1] === 'services' && argv[2] === 'describe') return structuredClone(currentService);
+      if (argv.includes('get-iam-policy')) return structuredClone(currentPolicy);
+      if (argv.includes('add-iam-policy-binding')) {
+        currentPolicy = {
+          bindings: [{
+            role: 'roles/run.invoker', members: ['allUsers', 'user:qa@motionexp.com'],
+          }],
+          etag: 'Bw-public-iam-loss=', version: 1,
+        };
+        throw new Error('promotion IAM response was lost');
+      }
+      if (argv.includes('set-iam-policy')) {
+        currentPolicy = { ...structuredClone(privatePolicy), etag: 'Bw-restored-iam-loss=' };
+        return structuredClone(currentPolicy);
+      }
+      throw new Error(`unexpected operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.publicReport.code, 'RELEASE_PHASE_FAILED', JSON.stringify(result.publicReport));
+  assert.equal(result.publicReport.promotionTrafficRestored, true);
+  assert.equal(result.publicReport.promotionIamRestored, true);
+  assert.equal(JSON.stringify(currentPolicy).includes('allUsers'), false);
+  assert.equal(calls.some((argv) => argv.includes('update-traffic')), false);
+  assert.equal(calls.some((argv) => argv[1] === 'services' && argv[2] === 'replace'), false);
+  assert.equal(calls.flat().some((value) => String(value).includes('null')), false);
+  assert.equal(evidenceChecks.length >= 2, true);
+  assert.equal(calls.filter((argv) => argv[1] === 'services' && argv[2] === 'describe').length >= 3, true);
+  assert.equal(calls.filter((argv) => argv[1] === 'revisions').length >= 3, true);
+  assert.equal(calls.filter((argv) => argv[0] === 'artifacts').length >= 3, true);
+  assert.equal(calls.filter((argv) => argv.includes('get-iam-policy')).length >= 3, true);
 });
 
 test('first-release promotion compensation fails closed on drift or Service replacement failure', async (t) => {
@@ -2166,9 +2282,15 @@ test('first-release promotion compensation fails closed on drift or Service repl
             promoted = true;
             throw new Error('response lost');
           }
-          if (argv[1] === 'services' && argv[2] === 'describe') return drift === 'service' && promoted
-            ? { service: GCP_IDENTITY.service, traffic: [{ revision: 'hkbuddy-v1-api-eeeeeeeeeeee', percent: 100 }] }
-            : { service: GCP_IDENTITY.service, traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 0 }] };
+          if (argv[1] === 'services' && argv[2] === 'describe') {
+            if (!promoted) return {
+              service: GCP_IDENTITY.service,
+              traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 100 }],
+            };
+            return drift === 'service'
+              ? { service: GCP_IDENTITY.service, traffic: [{ revision: 'hkbuddy-v1-api-eeeeeeeeeeee', percent: 100 }] }
+              : { service: GCP_IDENTITY.service, traffic: [{ revision: REVISION, percent: 100 }] };
+          }
           if (argv[1] === 'revisions') return drift === 'revision' && promoted
             ? { ...structuredClone(plan.expectedCandidate), image: `${plan.expectedCandidate.image.slice(0, -1)}e` }
             : structuredClone(plan.expectedCandidate);
@@ -2987,7 +3109,7 @@ test('real-shape migration, authenticated workload, and tag-free promotion share
   assert.equal(currentPolicy.bindings[0].members.includes('allUsers'), true);
 });
 
-test('promotion rereads the exact private zero-traffic candidate before granting public access and changing traffic', () => {
+test('later-release promotion rereads the exact prior-100 candidate-0 private state before public access', () => {
   const operations = buildReleasePlan(releaseInput()).operations;
   const ids = operations.map(({ id }) => id);
   for (const id of [
@@ -3108,7 +3230,7 @@ test('operator docs require the complete receipt sequence and manifest refresh b
   }
   for (const text of [
     'previousImageDigest', 'ROLLBACK_UNAVAILABLE_NO_PRIOR_RELEASE',
-    'canonical service describe returns `NOT_FOUND`', 'manifest is deliberately refreshed',
+    'exact service describe returns\n`CLOUD_RUN_SERVICE_NOT_FOUND`', 'manifest is deliberately refreshed',
   ]) assert.equal(operator.includes(text), true, text);
   assert.match(readme, /candidate -> readiness -> workload -> mobile -> promote/);
   assert.match(readme, /fresh service, candidate\/prior revision/);

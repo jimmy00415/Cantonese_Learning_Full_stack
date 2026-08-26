@@ -240,9 +240,10 @@ SHA-256 values. Evidence publication then accepts only the planned numeric
 version returned and described by Secret Manager. Only after all versions read
 back does it delete those exact GCS generations and require zero SHA-scoped
 output residue. Neither workload identity can publish Secret versions; that
-authority remains with the reviewed deployer. Candidate deployment is
-digest-pinned and
-zero-traffic with `/api/health/ready` as both startup dependency gate and
+  authority remains with the reviewed deployer. Candidate deployment is
+digest-pinned and private. Later releases keep the prior revision at 100% and
+the candidate at 0%; an exact empty-host first release assigns its sole
+candidate 100%. `/api/health/ready` is both the startup dependency gate and
 readiness probe, plus `/api/health/live` as the liveness probe. Public IAM can
 be changed only after the active account reads back as the reviewed owner
 `admin@motionexp.com`; the deployer is deliberately not granted
@@ -311,7 +312,14 @@ Each durable operation follows this sequence:
 3. create only when absent;
 4. read back and compare again.
 
-An inaccessible (`403`) resource is unknown, never absent. This includes the
+An inaccessible (`403`) resource is unknown, never absent. Canonical absence is
+recognized only when the exact family-specific describe argv, project/location,
+resource identity, and installed-gcloud error form agree for Artifact Registry,
+service accounts, custom roles, Compute networks/subnets/addresses, Cloud SQL
+instances/databases, Storage buckets, Secret Manager secrets, and Cloud Run
+jobs. Cloud Run service bootstrap retains its exclusive
+`CLOUD_RUN_SERVICE_NOT_FOUND` code. Generic not-found stderr or a wrong command,
+format, project, region, or resource is transport-ambiguous. This includes the
 target shared project: a `403`, absence, wrong project number, or baseline drift
 fails closed and never creates or probes a project. `ALREADY_EXISTS`, permission
 failure, unresolved readback, a global bucket/project collision, immutable
@@ -471,9 +479,13 @@ The stable service origin is exactly
 On an existing service, candidate deployment preserves the previous evidenced
 revision at 100% stable traffic, assigns the candidate 0% stable traffic, and
 does not add a public invoker binding. On the first release, bootstrap is
-allowed only when the canonical service describe returns `NOT_FOUND` and both
-prior fields are null; the service is created with only the private candidate
-tag at 0% and no stable traffic. A permission error, ambiguous error text, an
+allowed only when the exact service describe returns
+`CLOUD_RUN_SERVICE_NOT_FOUND` and both prior fields are null; the service is
+created with only the private candidate tag at 100%, no `allUsers`, and
+authenticated acceptance through the tagged origin. Its candidate receipt
+records `trafficState=private-bootstrap-100`, `trafficPercent=100`, and an
+explicit null prior release; later receipts record
+`prior-stable-100/candidate-0`. A permission error, ambiguous error text, an
 existing service with null prior fields, or a missing service with non-null
 prior fields fails closed.
 
@@ -489,7 +501,10 @@ node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=ro
 
 Promotion freshly validates the candidate service/revision/IAM/image, immutable
 readiness/workload/mobile artifacts, and 200 production traces before it can add
-the reviewed public invoker and route the candidate to 100%. Rollback is a
+the reviewed public invoker and convert the candidate to untagged stable 100%.
+If a first-release IAM, traffic, or readback is ambiguous, compensation restores
+private IAM and the tagged 100% candidate, then freshly verifies service,
+revision, immutable image, evidence, and IAM. Rollback is a
 separate recovery phase that first loads the complete mobile receipt chain,
 revalidates the candidate receipt's exact prior revision/image binding, rereads
 service, both revisions, both immutable images, and all evidence, then routes

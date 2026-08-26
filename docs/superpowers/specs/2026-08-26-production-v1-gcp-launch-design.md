@@ -412,15 +412,19 @@ Singapore STT, and TTS latency are measured rather than assumed.
    Artifact SHA-256 values remain separate from Secret version numbers.
 7. Only after those evidence versions exist, boot digest-pinned revision
    `hkbuddy-v1-api-<12 lowercase hex>` behind the SHA-bound private
-   `candidate-<12 lowercase hex>` tag at zero stable traffic, with the evidence
-   mounted as read-only files. The previous evidenced revision remains at 100%
-   and public invocation is unchanged.
+   `candidate-<12 lowercase hex>` tag, with the evidence mounted as read-only
+   files. A later release keeps the previous evidenced revision at 100% and the
+   candidate at 0%. A first release has no prior target, so its sole candidate
+   is 100% while IAM remains private and authenticated acceptance uses the tagged
+   origin. The candidate receipt records the exact traffic state.
 8. Run candidate-specific mobile, retention, readiness, and latency acceptance
    against the same resource identities, image digest, and frozen commit.
 9. Promote only after fresh candidate/service/IAM/image and immutable
    readiness/workload/mobile/trace validation. Then add the reviewed public
-   invoker binding, route the candidate to 100%, remove its tag, and read back
-   the stable service.
+   invoker binding, route the candidate to stable 100%, remove its tag, and read
+   back the stable service. Ambiguous first-release IAM or traffic results must
+   restore and verify private IAM, tagged bootstrap traffic, revision, image,
+   and evidence before the attempt may be reported as safely compensated.
 10. Return the exact stable origin
     `https://hkbuddy-v1-api-582852715831.asia-east2.run.app` and generate a
     decode-verified QR code from that URL outside tracked source.

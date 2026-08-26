@@ -325,14 +325,20 @@ image, build service account, labels, and receipt validation. Rename all release
 jobs/secrets/service accounts. Update revision regex, Cloud Run tag origin,
 logging filters, trace resource labels, digest checks, candidate cleanup,
 promotion, and rollback to `hkbuddy-v1-api`. Keep create-only evidence,
-one-frozen-workload, no-token persistence, zero-traffic candidate, and
-fresh-promotion-validation controls unchanged.
+one-frozen-workload, no-token persistence, private candidate, and
+fresh-promotion-validation controls unchanged. Later releases preserve the
+prior revision at 100% and candidate at 0%; the first release uses the sole
+private tagged candidate at 100% so Cloud Run has a supported serving target.
 
 Cloud Build submit must use exact staging directory
 `gs://hkbuddy-v1-582852715831-build-source/source`, and provenance must match its
 bucket/prefix and frozen source digest. Empty-host candidate bootstrap is valid
-only on canonical service `NOT_FOUND`, creates a private tagged 0% candidate,
-and writes an explicit no-prior receipt. Later cleanup/rollback accepts only the
+only on the exact service-describe `CLOUD_RUN_SERVICE_NOT_FOUND`, creates a
+private tagged 100% candidate with no `allUsers`, and writes explicit
+`private-bootstrap-100` plus no-prior receipt state. Every other create-or-readback
+family treats absence only when the exact describe command, project/location,
+resource identity, and canonical error agree; generic stderr remains ambiguous.
+Later cleanup/rollback accepts only the
 exact 12-hex controller revision plus paired immutable prior image in the
 receipt chain, and performs fresh service/revision/image/evidence validation
 before traffic mutation. First-release rollback is unavailable with zero calls.
@@ -429,7 +435,7 @@ repeats the complete verification ladder.
 
 **Interfaces:**
 - Consumes: clean reviewed commit, isolated Cloud SDK config, exact monitoring notification channel, and selected host project.
-- Produces: verified `hkbuddy-v1-*` GCP resource island, zero-traffic candidate, immutable acceptance receipts, promoted stable service, rollback receipt, public URL, and QR code.
+- Produces: verified `hkbuddy-v1-*` GCP resource island, private candidate (`private-bootstrap-100` on first release or prior-100/candidate-0 later), immutable acceptance receipts, promoted stable service, rollback receipt, public URL, and QR code.
 
 - [ ] **Step 1: Run fresh read-only preflight**
 
@@ -459,14 +465,16 @@ Expected: only required APIs and exact `hkbuddy-v1-*` resources are created;
 all existing unrelated resources read back unchanged. Secrets are generated
 without printing values. Re-running produces only `unchanged` results.
 
-- [ ] **Step 3: Build, migrate, and deploy the zero-traffic candidate**
+- [ ] **Step 3: Build, migrate, and deploy the private candidate**
 
 Run the release controller from the clean 40-hex commit using the complete
 manifest-refresh sequence: build, migration, inventory, acceptance, collect,
 evidence, candidate, readiness, workload, mobile, then promote. Require successful
 dependency security receipt, provenance, image labels, immutable digest,
 digest-pinned migration job, legacy inventory, dependency acceptance, real LLM,
-ASR, and TTS smoke receipts, and candidate traffic `0`.
+ASR, and TTS smoke receipts. Require receipt-bound candidate traffic: the sole
+private tagged candidate is `100` for the first release; later releases retain
+the prior evidenced revision at `100` and the candidate at `0`.
 
 - [ ] **Step 4: Run complete production acceptance**
 
@@ -481,9 +489,12 @@ on TTS failure.
 - [ ] **Step 5: Promote, verify rollback, and deliver**
 
 Freshly revalidate the acceptance artifact and 200 production traces, add the
-public invoker binding, promote the candidate to 100%, and verify stable health,
+public invoker binding, promote the candidate to stable 100% (removing its tag), and verify stable health,
 readiness, text, voice, sources, mobile safe area, and no autoplay. Execute the
 non-destructive rollback drill required by the release contract and return to
-the accepted revision. Generate a QR code for the final stable HTTPS URL and
+the accepted revision. On any ambiguous first-release IAM/traffic/readback,
+restore private IAM and the tagged 100% bootstrap state, then freshly verify
+service, revision, image, evidence, and IAM before reporting compensation.
+Generate a QR code for the final stable HTTPS URL and
 report exact deployed revision, image digest, release commit, acceptance result,
 known shared-project boundary, URL, and QR artifact.
