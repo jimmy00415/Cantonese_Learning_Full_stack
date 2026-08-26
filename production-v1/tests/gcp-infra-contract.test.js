@@ -1952,6 +1952,49 @@ test('Cloud Asset managed identities require exact type name numeric project par
   }
 });
 
+test('every exact managed top-level Cloud Asset identity is rejected on every wrong asset type', async (t) => {
+  const contract = await contractFixture();
+  const identities = [
+    ['service', `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/services/${GCP_IDENTITY.service}`, GCP_IDENTITY.service, 'asia-east2'],
+    ['repository', `//artifactregistry.googleapis.com/projects/${PROJECT}/locations/asia-east2/repositories/${GCP_IDENTITY.repository}`, GCP_IDENTITY.repository, 'asia-east2'],
+    ['bucket', `//storage.googleapis.com/${GCP_IDENTITY.bucket}`, GCP_IDENTITY.bucket, 'asia-east2'],
+    ['sql', `//sqladmin.googleapis.com/projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}`, GCP_IDENTITY.cloudSqlInstance, 'asia-east2'],
+    ['network', `//compute.googleapis.com/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`, GCP_IDENTITY.network, 'global'],
+    ['subnet', `//compute.googleapis.com/projects/${PROJECT}/regions/asia-east2/subnetworks/${GCP_IDENTITY.subnet}`, GCP_IDENTITY.subnet, 'asia-east2'],
+    ['psa range', `//compute.googleapis.com/projects/${PROJECT}/global/addresses/${GCP_IDENTITY.psaRange}`, GCP_IDENTITY.psaRange, 'global'],
+    ['psa connection', `//servicenetworking.googleapis.com/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`, GCP_IDENTITY.network, 'global'],
+    ...Object.values(GCP_IDENTITY.serviceAccounts).map((email) => [
+      `service account ${email}`, `//iam.googleapis.com/projects/${PROJECT}/serviceAccounts/${email}`,
+      email.split('@')[0], 'global',
+    ]),
+    ...Object.values(GCP_IDENTITY.secrets).map((id) => [
+      `secret ${id}`, `//secretmanager.googleapis.com/projects/${PROJECT}/secrets/${id}`, id, 'global',
+    ]),
+    ...Object.values(GCP_IDENTITY.jobs).map((id) => [
+      `job ${id}`, `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/jobs/${id}`, id, 'asia-east2',
+    ]),
+    ...contract.resources.customRoles.map(({ id }) => [
+      `role ${id}`, `//iam.googleapis.com/projects/${PROJECT}/roles/${id}`, id, 'global',
+    ]),
+  ];
+  for (const [label, name, displayName, location] of identities) {
+    await t.test(label, async () => {
+      const fixture = assetAuditControlPlane({
+        contract,
+        assets: [cloudAsset({
+          name, displayName, location, assetType: 'pubsub.googleapis.com/Topic',
+        })],
+      });
+      await assert.rejects(
+        () => fixture.plane.auditPreMutationState(),
+        (error) => error.code === 'RESOURCE_COLLISION',
+      );
+      assert.equal(fixture.gcloudCalls.some((args) => args.includes('enable') || args.includes('create')), false);
+      assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+    });
+  }
+});
+
 test('post-deployment Cloud Run revision and Docker image descendants remain preflight-idempotent only under exact ancestors', async (t) => {
   const contract = await contractFixture();
   const serviceName = `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/services/${GCP_IDENTITY.service}`;
@@ -2042,6 +2085,48 @@ test('enabled inventory rejects foreign managed display markers and malformed KR
   }
 });
 
+test('Monitoring policies channels and budgets reject the complete managed-name union before mutation', async (t) => {
+  const contract = await contractFixture();
+  const managedNames = [
+    'hkbuddy-v1-foreign',
+    'HK Buddy V1 foreign',
+    'Hong Kong Buddy Production V1 foreign',
+  ];
+  for (const resource of ['policy', 'channel', 'budget']) {
+    for (const displayName of managedNames) {
+      await t.test(`${resource}: ${displayName}`, async () => {
+        const monitoring = resource !== 'budget';
+        const restRows = resource === 'policy' ? {
+          '/alertPolicies': { alertPolicies: [{ name: `projects/${PROJECT_NUMBER}/alertPolicies/1`, displayName, userLabels: {} }] },
+          '/notificationChannels': { notificationChannels: [] },
+        } : resource === 'channel' ? {
+          '/alertPolicies': { alertPolicies: [] },
+          '/notificationChannels': { notificationChannels: [{
+            name: `projects/${PROJECT_NUMBER}/notificationChannels/1`, displayName,
+            type: 'email', enabled: true, verificationStatus: 'VERIFIED', userLabels: {},
+          }] },
+        } : {
+          '/budgets': { budgets: [{
+            name: `billingAccounts/${GCP_IDENTITY.billingAccountId}/budgets/1`, displayName,
+            budgetFilter: { projects: [ASSET_PROJECT] },
+          }] },
+        };
+        const fixture = assetAuditControlPlane({
+          contract, assets: [],
+          enabledApis: ['iam.googleapis.com', monitoring ? 'monitoring.googleapis.com' : 'billingbudgets.googleapis.com'],
+          restRows,
+        });
+        await assert.rejects(
+          () => fixture.plane.auditPreMutationState(),
+          (error) => error.code === 'RESOURCE_COLLISION',
+        );
+        assert.equal(fixture.gcloudCalls.some((args) => args.includes('enable') || args.includes('create')), false);
+        assert.equal(fixture.restCalls.every(({ method }) => method === 'GET'), true);
+      });
+    }
+  }
+});
+
 test('real Compute inventory validates malformed rows and includes regional addresses before every mutation', async (t) => {
   const contract = await contractFixture();
   const network = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/default`;
@@ -2079,6 +2164,81 @@ test('real Compute inventory validates malformed rows and includes regional addr
       const addressCalls = fixture.gcloudCalls.filter((args) => args[0] === 'compute' && args[1] === 'addresses' && args.includes('list'));
       assert.equal(addressCalls.length > 0, true);
       assert.equal(addressCalls.some((args) => args.includes('--global')), false);
+      assert.equal(fixture.gcloudCalls.some((args) => args.includes('enable') || args.includes('create')), false);
+      assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+    });
+  }
+});
+
+test('Compute validates malformed referenced rows even when the project network inventory is empty', async (t) => {
+  const contract = await contractFixture();
+  const missingNetwork = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/missing`;
+  const region = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/regions/asia-east2`;
+  const cases = [
+    ['subnet', {
+      'compute networks list': [],
+      'compute networks subnets': [{ name: 'foreign-subnet', network: missingNetwork, ipCidrRange: '192.168.1.0/24', region }],
+      'compute routes list': [], 'compute addresses list': [],
+    }],
+    ['route', {
+      'compute networks list': [], 'compute networks subnets': [],
+      'compute routes list': [{ name: 'foreign-route', network: missingNetwork, destRange: '192.168.1.0/24', nextHopVpnTunnel: `${region}/vpnTunnels/foreign` }],
+      'compute addresses list': [],
+    }],
+    ['PSA address', {
+      'compute networks list': [], 'compute networks subnets': [], 'compute routes list': [],
+      'compute addresses list': [{
+        name: 'foreign-psa', purpose: 'VPC_PEERING', network: missingNetwork,
+        address: '192.168.0.0', prefixLength: 16, addressType: 'INTERNAL', status: 'RESERVED',
+      }],
+    }],
+  ];
+  for (const [name, gcloudRows] of cases) {
+    await t.test(name, async () => {
+      const fixture = assetAuditControlPlane({
+        contract, assets: [], enabledApis: ['iam.googleapis.com', 'compute.googleapis.com'], gcloudRows,
+      });
+      await assert.rejects(
+        () => fixture.plane.auditPreMutationState(),
+        (error) => error.code === 'CIDR_AUDIT_INVALID',
+      );
+      assert.equal(fixture.gcloudCalls.some((args) => args.includes('enable') || args.includes('create')), false);
+      assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+    });
+  }
+});
+
+test('Compute rejects noncanonical resource names URIs regions IPv4 and prefix serialization', async (t) => {
+  const contract = await contractFixture();
+  const network = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/default`;
+  const region = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/regions/asia-east2`;
+  const base = {
+    'compute networks list': [{ name: 'default', selfLink: network, autoCreateSubnetworks: true }],
+    'compute networks subnets': [], 'compute routes list': [], 'compute addresses list': [],
+  };
+  const cases = [
+    ['network name', { ...base, 'compute networks list': [{ name: 'Default', selfLink: `${network.slice(0, -7)}Default` }] }],
+    ['network URI', { ...base, 'compute networks list': [{ name: 'default', selfLink: `${network}/extra` }] }],
+    ['subnet name', { ...base, 'compute networks subnets': [{ name: 'foreign_subnet', network, ipCidrRange: '192.168.1.0/24', region }] }],
+    ['subnet region prefix', { ...base, 'compute networks subnets': [{ name: 'foreign-subnet', network, ipCidrRange: '192.168.1.0/24', region: `${region}/extra` }] }],
+    ['subnet leading-zero IPv4', { ...base, 'compute networks subnets': [{ name: 'foreign-subnet', network, ipCidrRange: '192.168.001.0/24', region }] }],
+    ['subnet leading-zero prefix', { ...base, 'compute networks subnets': [{ name: 'foreign-subnet', network, ipCidrRange: '192.168.1.0/024', region }] }],
+    ['route name', { ...base, 'compute routes list': [{ name: 'foreign_route', network, destRange: '192.168.1.0/24', nextHopVpnTunnel: `${region}/vpnTunnels/foreign` }] }],
+    ['route next-hop URI', { ...base, 'compute routes list': [{ name: 'foreign-route', network, destRange: '192.168.1.0/24', nextHopVpnTunnel: `${region}/vpnTunnels/foreign/extra` }] }],
+    ['route leading-zero prefix', { ...base, 'compute routes list': [{ name: 'foreign-route', network, destRange: '192.168.1.0/024', nextHopVpnTunnel: `${region}/vpnTunnels/foreign` }] }],
+    ['address name', { ...base, 'compute addresses list': [{ name: 'foreign_psa', purpose: 'VPC_PEERING', network, address: '192.168.0.0', prefixLength: 16, addressType: 'INTERNAL', status: 'RESERVED' }] }],
+    ['address leading-zero IPv4', { ...base, 'compute addresses list': [{ name: 'foreign-psa', purpose: 'VPC_PEERING', network, address: '192.168.000.0', prefixLength: 16, addressType: 'INTERNAL', status: 'RESERVED' }] }],
+    ['address string prefix', { ...base, 'compute addresses list': [{ name: 'foreign-psa', purpose: 'VPC_PEERING', network, address: '192.168.0.0', prefixLength: '016', addressType: 'INTERNAL', status: 'RESERVED' }] }],
+  ];
+  for (const [name, gcloudRows] of cases) {
+    await t.test(name, async () => {
+      const fixture = assetAuditControlPlane({
+        contract, assets: [], enabledApis: ['iam.googleapis.com', 'compute.googleapis.com'], gcloudRows,
+      });
+      await assert.rejects(
+        () => fixture.plane.auditPreMutationState(),
+        (error) => error.code === 'CIDR_AUDIT_INVALID',
+      );
       assert.equal(fixture.gcloudCalls.some((args) => args.includes('enable') || args.includes('create')), false);
       assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
     });

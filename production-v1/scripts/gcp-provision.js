@@ -886,6 +886,112 @@ function sameNetwork(value, expected) {
   return candidate === normalized;
 }
 
+const COMPUTE_NAME = /^[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?$/;
+const COMPUTE_NETWORK_PREFIX = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/`;
+const COMPUTE_REGION = new RegExp(`^https://www\\.googleapis\\.com/compute/v1/projects/${PROJECT}/regions/[a-z]+(?:-[a-z]+)+[1-9]\\d*$`);
+const COMPUTE_DEFAULT_GATEWAY = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/gateways/default-internet-gateway`;
+
+function canonicalIpv4(value) {
+  const parts = String(value).split('.');
+  return parts.length === 4 && parts.every((part) => (
+    /^(?:0|[1-9]\d{0,2})$/.test(part) && Number(part) <= 255
+  ));
+}
+
+function canonicalCidr(value) {
+  if (typeof value !== 'string') return false;
+  const parts = value.split('/');
+  if (parts.length !== 2 || !canonicalIpv4(parts[0])
+    || !/^(?:[0-9]|[12]\d|3[0-2])$/.test(parts[1])) return false;
+  const bounds = cidrBounds(value);
+  return bounds !== null && bounds[0] === ipv4Number(parts[0]);
+}
+
+function canonicalNextHop(item, networkLinks) {
+  const entries = Object.entries(item).filter(([key]) => key.startsWith('nextHop'));
+  if (entries.length !== 1 || typeof entries[0][1] !== 'string') return false;
+  const [kind, value] = entries[0];
+  const project = '[a-z][a-z0-9-]{4,28}[a-z0-9]';
+  const name = '[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?';
+  const region = '[a-z]+(?:-[a-z]+)+[1-9]\\d*';
+  const zone = '[a-z]+(?:-[a-z0-9]+)+-[a-z]';
+  if (kind === 'nextHopIp') return canonicalIpv4(value);
+  if (kind === 'nextHopNetwork') return networkLinks.has(value);
+  if (kind === 'nextHopPeering') return COMPUTE_NAME.test(value);
+  if (kind === 'nextHopGateway') {
+    return new RegExp(`^https://www\\.googleapis\\.com/compute/v1/projects/${project}/global/gateways/${name}$`).test(value);
+  }
+  if (kind === 'nextHopInstance') {
+    return new RegExp(`^https://www\\.googleapis\\.com/compute/v1/projects/${project}/zones/${zone}/instances/${name}$`).test(value);
+  }
+  if (kind === 'nextHopVpnTunnel') {
+    return new RegExp(`^https://www\\.googleapis\\.com/compute/v1/projects/${project}/regions/${region}/vpnTunnels/${name}$`).test(value);
+  }
+  if (kind === 'nextHopIlb') {
+    return new RegExp(`^https://www\\.googleapis\\.com/compute/v1/projects/${project}/regions/${region}/forwardingRules/${name}$`).test(value);
+  }
+  return false;
+}
+
+function validateComputeInventory({ networks, subnets, routes, addresses }) {
+  if (!Array.isArray(networks) || !Array.isArray(subnets)
+    || !Array.isArray(routes) || !Array.isArray(addresses)) throw commandError('CIDR_AUDIT_INVALID');
+  if (networks.some((item) => !item || typeof item !== 'object' || Array.isArray(item)
+    || typeof item.name !== 'string' || !COMPUTE_NAME.test(item.name)
+    || item.selfLink !== `${COMPUTE_NETWORK_PREFIX}${item.name}`)) {
+    throw commandError('CIDR_AUDIT_INVALID');
+  }
+  const networkLinks = new Set(networks.map(({ selfLink }) => selfLink));
+  if (subnets.some((item) => !item || typeof item !== 'object' || Array.isArray(item)
+    || typeof item.name !== 'string' || !COMPUTE_NAME.test(item.name)
+    || !networkLinks.has(item.network) || !canonicalCidr(item.ipCidrRange)
+    || typeof item.region !== 'string' || !COMPUTE_REGION.test(item.region))) {
+    throw commandError('CIDR_AUDIT_INVALID');
+  }
+  if (routes.some((item) => !item || typeof item !== 'object' || Array.isArray(item)
+    || typeof item.name !== 'string' || !COMPUTE_NAME.test(item.name)
+    || !networkLinks.has(item.network) || !canonicalCidr(item.destRange)
+    || !canonicalNextHop(item, networkLinks))) {
+    throw commandError('CIDR_AUDIT_INVALID');
+  }
+  if (addresses.some((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)
+      || typeof item.name !== 'string' || !COMPUTE_NAME.test(item.name)
+      || typeof item.addressType !== 'string' || typeof item.status !== 'string') return true;
+    if (item.purpose === 'VPC_PEERING') {
+      return !networkLinks.has(item.network) || item.addressType !== 'INTERNAL'
+        || !canonicalIpv4(item.address) || !Number.isInteger(item.prefixLength)
+        || item.prefixLength < 0 || item.prefixLength > 32
+        || !canonicalCidr(`${item.address}/${item.prefixLength}`) || Object.hasOwn(item, 'region');
+    }
+    return Object.hasOwn(item, 'region') && (
+      typeof item.region !== 'string' || !COMPUTE_REGION.test(item.region)
+    );
+  })) throw commandError('CIDR_AUDIT_INVALID');
+  return networkLinks;
+}
+
+function assertCidrNoOverlap({ desired, network, subnets, routes, addresses }) {
+  const targetSubnets = subnets
+    .filter((item) => sameNetwork(item?.network, network))
+    .map(({ ipCidrRange }) => ipCidrRange);
+  const targetRoutes = routes
+    .filter((item) => sameNetwork(item?.network, network))
+    .filter(({ destRange, nextHopGateway }) => !(
+      destRange === '0.0.0.0/0' && nextHopGateway === COMPUTE_DEFAULT_GATEWAY
+    ))
+    .map(({ destRange }) => destRange);
+  const targetAddresses = addresses
+    .filter(({ purpose, network: memberNetwork }) => (
+      purpose === 'VPC_PEERING' && sameNetwork(memberNetwork, network)
+    ))
+    .map(({ address, prefixLength }) => `${address}/${prefixLength}`);
+  if ([...targetSubnets, ...targetAddresses].some((candidate) => cidrOverlap(desired, candidate))
+    || targetRoutes.some((candidate) => cidrOverlap(desired, candidate))) {
+    throw commandError('CIDR_OVERLAP');
+  }
+}
+
 export function assertCidrAvailable({
   desired, network, networks, subnets, routes, addresses, kind = 'subnet',
 }) {
@@ -894,69 +1000,12 @@ export function assertCidrAvailable({
     || !Array.isArray(subnets) || !Array.isArray(routes) || !Array.isArray(addresses)) {
     throw commandError('CIDR_AUDIT_INVALID');
   }
-  const strict = networks !== undefined;
-  const canonicalNetwork = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/`;
-  const canonicalRegion = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/regions/`;
-  const canonicalDefaultGateway = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/gateways/default-internet-gateway`;
-  const canonicalCidr = (value) => {
-    const bounds = cidrBounds(value);
-    return bounds !== null && bounds[0] === ipv4Number(String(value).split('/')[0]);
-  };
   if (!canonicalCidr(desired)) throw commandError('CIDR_AUDIT_INVALID');
-  if (strict) {
-    if (!Array.isArray(networks) || networks.some((item) => (
-      !item || typeof item !== 'object' || Array.isArray(item)
-      || typeof item.name !== 'string' || !/^[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?$/.test(item.name)
-      || item.selfLink !== `${canonicalNetwork}${item.name}`
-    ))) throw commandError('CIDR_AUDIT_INVALID');
-    const networkLinks = new Set(networks.map(({ selfLink }) => selfLink));
+  if (networks !== undefined) {
+    const networkLinks = validateComputeInventory({ networks, subnets, routes, addresses });
     if (!networkLinks.has(network)) throw commandError('CIDR_AUDIT_INVALID');
-    if (subnets.some((item) => !item || typeof item.name !== 'string'
-      || !networkLinks.has(item.network) || !canonicalCidr(item.ipCidrRange)
-      || typeof item.region !== 'string' || !item.region.startsWith(canonicalRegion))) {
-      throw commandError('CIDR_AUDIT_INVALID');
-    }
-    if (routes.some((item) => !item || typeof item.name !== 'string'
-      || !networkLinks.has(item.network) || !canonicalCidr(item.destRange)
-      || !Object.entries(item).some(([key, value]) => key.startsWith('nextHop') && typeof value === 'string' && value.length > 0))) {
-      throw commandError('CIDR_AUDIT_INVALID');
-    }
-    if (addresses.some((item) => {
-      if (!item || typeof item.name !== 'string' || typeof item.addressType !== 'string'
-        || typeof item.status !== 'string') return true;
-      if (item.purpose === 'VPC_PEERING') {
-        return !networkLinks.has(item.network) || item.addressType !== 'INTERNAL'
-          || typeof item.address !== 'string' || !Number.isInteger(Number(item.prefixLength))
-          || !canonicalCidr(`${item.address}/${item.prefixLength}`) || Object.hasOwn(item, 'region');
-      }
-      return Object.hasOwn(item, 'region') && (
-        typeof item.region !== 'string' || !item.region.startsWith(canonicalRegion)
-      );
-    })) throw commandError('CIDR_AUDIT_INVALID');
   }
-  const targetSubnets = subnets
-    .filter((item) => sameNetwork(item?.network, network))
-    .map(({ ipCidrRange }) => ipCidrRange);
-  const targetRoutes = routes
-    .filter((item) => sameNetwork(item?.network, network))
-    .filter(({ destRange, nextHopGateway }) => !(
-      destRange === '0.0.0.0/0'
-      && nextHopGateway === canonicalDefaultGateway
-    ))
-    .map(({ destRange }) => destRange);
-  const targetAddresses = addresses
-    .filter(({ purpose, network: memberNetwork }) => (
-      purpose === 'VPC_PEERING' && sameNetwork(memberNetwork, network)
-    ))
-    .map(({ address, prefixLength }) => (
-      address && prefixLength !== undefined ? `${address}/${prefixLength}` : null
-    ));
-  const allocatedConflict = [...targetSubnets, ...targetAddresses]
-    .filter(Boolean).some((candidate) => cidrOverlap(desired, candidate));
-  const routeConflict = targetRoutes.filter(Boolean).some((candidate) => cidrOverlap(desired, candidate));
-  if (allocatedConflict || routeConflict) {
-    throw commandError('CIDR_OVERLAP');
-  }
+  assertCidrNoOverlap({ desired, network, subnets, routes, addresses });
 }
 
 function assertProjectWideCidrAvailability({ networks, subnets, routes, addresses }) {
@@ -964,10 +1013,10 @@ function assertProjectWideCidrAvailability({ networks, subnets, routes, addresse
     networks: requireObjectList(networks), subnets: requireObjectList(subnets),
     routes: requireObjectList(routes), addresses: requireObjectList(addresses),
   };
-  const allNetworks = new Set(inventory.networks.map(({ selfLink }) => selfLink));
+  const allNetworks = validateComputeInventory(inventory);
   for (const network of allNetworks) {
-    assertCidrAvailable({ desired: '10.24.0.0/26', network, kind: 'subnet', ...inventory });
-    assertCidrAvailable({ desired: '10.25.0.0/16', network, kind: 'psa', ...inventory });
+    assertCidrNoOverlap({ desired: '10.24.0.0/26', network, ...inventory });
+    assertCidrNoOverlap({ desired: '10.25.0.0/16', network, ...inventory });
   }
 }
 
@@ -996,6 +1045,11 @@ function assertManagedIdentityInventory(items, expected, extractor, marker = /hk
   }
 }
 
+function hasManagedName(value) {
+  return /hkbuddy-v1(?:-|\b)|\bhk buddy v1(?:\s|$)|\bhong kong buddy production v1(?:\s|$)/i
+    .test(String(value));
+}
+
 function assertMonitoringInventory(policies, channels) {
   const expectedPolicies = new Map(REQUIRED_MONITORING.policies.map((policy) => [policy.displayName, policy]));
   const seenPolicies = new Set();
@@ -1008,7 +1062,7 @@ function assertMonitoringInventory(policies, channels) {
       throw commandError('LIST_RESPONSE_AMBIGUOUS');
     }
     const marker = policy.userLabels?.hkbuddy_contract;
-    const managed = /\bhk buddy v1\b/i.test(policy.displayName ?? '') || typeof marker === 'string';
+    const managed = hasManagedName(policy.displayName) || typeof marker === 'string';
     if (!managed) continue;
     const definition = expectedPolicies.get(policy.displayName);
     if (!definition || marker !== definition.id.replaceAll('-', '_')
@@ -1029,7 +1083,7 @@ function assertMonitoringInventory(policies, channels) {
         || typeof channel.userLabels !== 'object' || Array.isArray(channel.userLabels)))) {
       throw commandError('LIST_RESPONSE_AMBIGUOUS');
     }
-    const managed = /\bhk buddy v1\b/i.test(channel.displayName ?? '')
+    const managed = hasManagedName(channel.displayName)
       || channel.userLabels?.application === OWNERSHIP_LABELS.application;
     if (managed && (channel.displayName !== REQUIRED_MONITORING.notificationChannel.displayName
       || !exact(channel.userLabels, OWNERSHIP_LABELS) || channel.type !== 'email'
@@ -1050,7 +1104,7 @@ function assertBudgetInventory(budgets, projectNumber) {
       || typeof budget.budgetFilter !== 'object' || Array.isArray(budget.budgetFilter)) {
       throw commandError('LIST_RESPONSE_AMBIGUOUS');
     }
-    if (/^Hong Kong Buddy Production V1/i.test(budget.displayName ?? '')
+    if (hasManagedName(budget.displayName)
       && (budget.displayName !== 'Hong Kong Buddy Production V1 monthly guard'
         || !exact(budget.budgetFilter, { projects: [`projects/${projectNumber}`], calendarPeriod: 'MONTH' }))) {
       throw commandError('RESOURCE_COLLISION');
@@ -1146,7 +1200,7 @@ function assetHasManagedMarker(asset) {
   const text = [asset.name, asset.displayName, asset.description, asset.parentFullResourceName,
     ...Object.entries(asset.labels ?? {}).flat()]
     .filter((value) => typeof value === 'string').join(' ');
-  return /hkbuddy-v1-|hkbuddyv1|\bhk buddy v1\b|\bhong kong buddy production v1\b/i.test(text);
+  return hasManagedName(text) || /hkbuddyv1/i.test(text);
 }
 
 function assertCloudAssetInventory(assets) {
