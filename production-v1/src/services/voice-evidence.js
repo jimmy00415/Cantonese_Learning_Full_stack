@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 
+import { GCP_IDENTITY } from '../gcp-identity.js';
 import { readBoundedJsonObjectFile } from './release-evidence.js';
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
@@ -8,8 +9,8 @@ const RELEASE_SHA = /^[0-9a-f]{40}$/i;
 const DIGEST = /^[0-9a-f]{64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const AZURE_REGION = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-const GOOGLE_PROJECT = 'hkbuddy-prod-v1-20260826';
-const GOOGLE_SPEECH_LOCATION = 'asia-southeast1';
+const GOOGLE_PROJECT = GCP_IDENTITY.projectId;
+const GOOGLE_SPEECH_LOCATION = GCP_IDENTITY.speechRegion;
 const GOOGLE_RESPONSE_LANGUAGE_CODES = Object.freeze({
   en: 'en-US',
   'yue-Hant-HK': 'yue-Hant-HK',

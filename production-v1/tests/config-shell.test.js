@@ -17,15 +17,15 @@ import { createLogger } from '../src/telemetry/logger.js';
 
 const TEST_RELEASE_COMMIT = 'a'.repeat(40);
 const TEST_DATABASE_URL = 'postgres://localhost/v1';
-const TEST_GCS_PROJECT = 'hkbuddy-prod-v1-20260826';
-const TEST_GCS_BUCKET = 'hkbuddy-prod-v1-20260826-media';
+const TEST_GCS_PROJECT = 'motion-expert-hk-ltd-webpage';
+const TEST_GCS_BUCKET = 'hkbuddy-v1-582852715831-media';
 const TEST_POSTGRES_RESOURCE_ID = 'test-v1-postgres';
-const TEST_GCS_RESOURCE_ID = '//storage.googleapis.com/projects/_/buckets/hkbuddy-prod-v1-20260826-media';
+const TEST_GCS_RESOURCE_ID = '//storage.googleapis.com/projects/_/buckets/hkbuddy-v1-582852715831-media';
 const TEST_LLM_CREDENTIAL_VERSION = 'llm-credential-v1';
-const TEST_PROJECT_NUMBER = '123456789012';
-const TEST_STABLE_ORIGIN = `https://hkbuddy-api-${TEST_PROJECT_NUMBER}.asia-east2.run.app`;
-const TEST_CANDIDATE_ORIGIN = `https://candidate-${TEST_RELEASE_COMMIT.slice(0, 12)}---hkbuddy-api-${TEST_PROJECT_NUMBER}.asia-east2.run.app`;
-const TEST_RUNTIME_SERVICE_ACCOUNT = 'hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com';
+const TEST_PROJECT_NUMBER = '582852715831';
+const TEST_STABLE_ORIGIN = `https://hkbuddy-v1-api-${TEST_PROJECT_NUMBER}.asia-east2.run.app`;
+const TEST_CANDIDATE_ORIGIN = `https://candidate-${TEST_RELEASE_COMMIT.slice(0, 12)}---hkbuddy-v1-api-${TEST_PROJECT_NUMBER}.asia-east2.run.app`;
+const TEST_RUNTIME_SERVICE_ACCOUNT = 'hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com';
 const TEST_LLM_CONFIG = {
   provider: 'hkbu',
   credentialVersion: TEST_LLM_CREDENTIAL_VERSION,
@@ -284,12 +284,13 @@ test('production origin allowlist is exactly stable plus the SHA-bound candidate
   assert.equal(config.trustedProxyHops, 1);
   assert.equal(config.runtimeServiceAccount, TEST_RUNTIME_SERVICE_ACCOUNT);
   for (const overrides of [
-    { V1_CANDIDATE_ORIGIN: `https://other---hkbuddy-api-${TEST_PROJECT_NUMBER}.asia-east2.run.app` },
-    { V1_CANDIDATE_ORIGIN: `https://candidate-${'b'.repeat(12)}---hkbuddy-api-${TEST_PROJECT_NUMBER}.asia-east2.run.app` },
-    { V1_CANDIDATE_ORIGIN: `https://candidate-${TEST_RELEASE_COMMIT.slice(0, 12)}---hkbuddy-api-999999999999.asia-east2.run.app` },
+    { V1_CANDIDATE_ORIGIN: `https://other---hkbuddy-v1-api-${TEST_PROJECT_NUMBER}.asia-east2.run.app` },
+    { V1_CANDIDATE_ORIGIN: `https://candidate-${'b'.repeat(12)}---hkbuddy-v1-api-${TEST_PROJECT_NUMBER}.asia-east2.run.app` },
+    { V1_CANDIDATE_ORIGIN: `https://candidate-${TEST_RELEASE_COMMIT.slice(0, 12)}---hkbuddy-v1-api-999999999999.asia-east2.run.app` },
+    { V1_PUBLIC_ORIGIN: `https://hkbuddy-api-${TEST_PROJECT_NUMBER}.asia-east2.run.app` },
     { V1_PUBLIC_ORIGIN: 'https://hkbuddy-pilot-0630.azurewebsites.net' },
     { V1_TRUST_PROXY_HOPS: '2' },
-    { V1_RUNTIME_SERVICE_ACCOUNT: 'owner@example.iam.gserviceaccount.com' },
+    { V1_RUNTIME_SERVICE_ACCOUNT: 'hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com' },
   ]) {
     assert.throws(() => loadConfig(productionEnvironment(overrides)), /origin|candidate|proxy|runtime service account/i);
   }
@@ -315,8 +316,8 @@ test('production requires exact V1-only postgres plus private GCS identity while
 
   for (const [name, overrides] of [
     ['Azure production driver', { V1_MEDIA_DRIVER: 'azure-blob' }],
-    ['wrong project', { V1_GOOGLE_CLOUD_PROJECT: 'hkbuddy-pilot-0630' }],
-    ['wrong bucket', { V1_GCS_BUCKET: 'hkbuddy-pilot-0630-media' }],
+    ['old project', { V1_GOOGLE_CLOUD_PROJECT: 'hkbuddy-prod-v1-20260826' }],
+    ['old bucket', { V1_GCS_BUCKET: 'hkbuddy-prod-v1-20260826-media' }],
     ['wrong resource', { V1_GCS_RESOURCE_ID: `gs://${TEST_GCS_BUCKET}` }],
     ['missing bucket with unprefixed fallback', { V1_GCS_BUCKET: undefined, GCS_BUCKET: TEST_GCS_BUCKET }],
     ['missing driver with unprefixed fallback', { V1_MEDIA_DRIVER: undefined, MEDIA_DRIVER: 'gcs' }],
@@ -437,7 +438,7 @@ test('Google AI config is ADC-only, V1-prefixed, and binds one exact voice per l
     NODE_ENV: 'test',
     V1_LLM_PROVIDER: 'vertex-ai',
     V1_LLM_CREDENTIAL_VERSION: 'runtime-sa-rotation-v1',
-    V1_GOOGLE_CLOUD_PROJECT: 'hkbuddy-prod-v1-20260826',
+    V1_GOOGLE_CLOUD_PROJECT: TEST_GCS_PROJECT,
     V1_VERTEX_LOCATION: 'global',
     V1_VERTEX_MODEL: 'gemini-2.5-flash',
     V1_ASR_PROVIDER: 'google-stt-v2',
@@ -454,7 +455,7 @@ test('Google AI config is ADC-only, V1-prefixed, and binds one exact voice per l
 
   assert.equal(google.llm.available, true);
   assert.deepEqual(google.llm.settings, {
-    projectId: 'hkbuddy-prod-v1-20260826',
+    projectId: TEST_GCS_PROJECT,
     location: 'global',
     model: 'gemini-2.5-flash',
   });
@@ -480,7 +481,7 @@ test('Google AI config is ADC-only, V1-prefixed, and binds one exact voice per l
   const base = {
     NODE_ENV: 'test',
     V1_LLM_PROVIDER: 'vertex-ai', V1_LLM_CREDENTIAL_VERSION: 'runtime-sa-rotation-v1',
-    V1_GOOGLE_CLOUD_PROJECT: 'hkbuddy-prod-v1-20260826', V1_VERTEX_LOCATION: 'global',
+    V1_GOOGLE_CLOUD_PROJECT: TEST_GCS_PROJECT, V1_VERTEX_LOCATION: 'global',
     V1_VERTEX_MODEL: 'gemini-2.5-flash', V1_ASR_PROVIDER: 'google-stt-v2',
     V1_GOOGLE_STT_LOCATION: 'asia-southeast1', V1_GOOGLE_STT_MODEL: 'chirp_2',
     V1_GOOGLE_STT_RECOGNIZER: '_', V1_TTS_PROVIDER: 'google-tts',

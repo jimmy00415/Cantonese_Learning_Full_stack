@@ -9,6 +9,7 @@ import {
   speechError,
   withSpeechDeadline,
 } from './speech-common.js';
+import { GCP_IDENTITY } from '../gcp-identity.js';
 import { createGoogleAccessTokenProvider } from './google-auth.js';
 import { validateCanonicalWav } from '../media/canonical-wav.js';
 
@@ -66,8 +67,8 @@ function googleTtsUrl(settings) {
     yueHant: { languageCode: 'yue-HK', name: 'yue-HK-Chirp3-HD-Achernar' },
     zhHans: { languageCode: 'cmn-CN', name: 'cmn-CN-Chirp3-HD-Achernar' },
   };
-  if (settings?.projectId !== 'hkbuddy-prod-v1-20260826'
-    || settings.location !== 'asia-southeast1'
+  if (settings?.projectId !== GCP_IDENTITY.projectId
+    || settings.location !== GCP_IDENTITY.speechRegion
     || JSON.stringify(settings.voices) !== JSON.stringify(expected)) {
     throw speechError('VOICE_PROVIDER_MISCONFIGURED', 503, false, 'configuration');
   }

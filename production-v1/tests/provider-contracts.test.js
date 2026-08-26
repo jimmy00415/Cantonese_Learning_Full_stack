@@ -131,7 +131,7 @@ test('Vertex AI uses ADC generateContent and normalizes candidate text without e
   const provider = createLlmProvider({
     config: {
       provider: 'vertex-ai', timeoutMs: 12_000,
-      settings: { projectId: 'hkbuddy-prod-v1-20260826', location: 'global', model: 'gemini-2.5-flash' },
+      settings: { projectId: 'motion-expert-hk-ltd-webpage', location: 'global', model: 'gemini-2.5-flash' },
     },
     googleAuthProvider: {
       fetch: async (url, init) => {
@@ -146,7 +146,7 @@ test('Vertex AI uses ADC generateContent and normalizes candidate text without e
   });
   const result = await provider.generate(TURN_INPUT);
   const body = JSON.parse(request.init.body);
-  assert.equal(request.url, 'https://aiplatform.googleapis.com/v1/projects/hkbuddy-prod-v1-20260826/locations/global/publishers/google/models/gemini-2.5-flash:generateContent');
+  assert.equal(request.url, 'https://aiplatform.googleapis.com/v1/projects/motion-expert-hk-ltd-webpage/locations/global/publishers/google/models/gemini-2.5-flash:generateContent');
   assert.deepEqual(body.generationConfig.responseMimeType, 'application/json');
   assert.match(body.systemInstruction.parts[0].text, /one strict JSON object/i);
   assert.match(body.contents.at(-1).parts[0].text, /untrusted_reference_data/);
@@ -174,21 +174,21 @@ test('Google STT V2 and TTS issue locale-bound ADC requests with no hidden fallb
   };
   const asr = createAsrProvider({
     config: { provider: 'google-stt-v2', settings: {
-      projectId: 'hkbuddy-prod-v1-20260826', location: 'asia-southeast1', model: 'chirp_2', recognizer: '_',
+      projectId: 'motion-expert-hk-ltd-webpage', location: 'asia-southeast1', model: 'chirp_2', recognizer: '_',
       languageCodes: ['yue-Hant-HK', 'en-US', 'cmn-Hans-CN'], credentialVersion: 'runtime-sa-rotation-v1',
     } },
     googleAuthProvider: auth,
   });
   const asrResult = await asr.transcribe(Buffer.from('RIFFcanonical-wav'), { responseLanguage: 'en' });
   const asrBody = JSON.parse(requests[0].init.body);
-  assert.match(requests[0].url, /asia-southeast1-speech\.googleapis\.com\/v2\/projects\/hkbuddy-prod-v1-20260826\/locations\/asia-southeast1\/recognizers\/_:recognize$/);
+  assert.match(requests[0].url, /asia-southeast1-speech\.googleapis\.com\/v2\/projects\/motion-expert-hk-ltd-webpage\/locations\/asia-southeast1\/recognizers\/_:recognize$/);
   assert.deepEqual(asrBody.config.languageCodes, ['en-US', 'yue-Hant-HK', 'cmn-Hans-CN']);
   assert.equal(asrBody.config.model, 'chirp_2');
   assert.equal(asrResult.transcript, '你好');
 
   const tts = createTtsProvider({
     config: { provider: 'google-tts', settings: {
-      projectId: 'hkbuddy-prod-v1-20260826', location: 'asia-southeast1', credentialVersion: 'runtime-sa-rotation-v1',
+      projectId: 'motion-expert-hk-ltd-webpage', location: 'asia-southeast1', credentialVersion: 'runtime-sa-rotation-v1',
       voices: {
         en: { languageCode: 'en-US', name: 'en-US-Chirp3-HD-Achernar' },
         yueHant: { languageCode: 'yue-HK', name: 'yue-HK-Chirp3-HD-Achernar' },
@@ -211,7 +211,7 @@ test('Google STT rejects unsupported response locales before ADC transport', asy
   let requests = 0;
   const asr = createAsrProvider({
     config: { provider: 'google-stt-v2', settings: {
-      projectId: 'hkbuddy-prod-v1-20260826', location: 'asia-southeast1', model: 'chirp_2', recognizer: '_',
+      projectId: 'motion-expert-hk-ltd-webpage', location: 'asia-southeast1', model: 'chirp_2', recognizer: '_',
       languageCodes: ['yue-Hant-HK', 'en-US', 'cmn-Hans-CN'], credentialVersion: 'runtime-sa-rotation-v1',
     } },
     googleAuthProvider: { fetch: async () => { requests += 1; return new Response('{}'); } },
@@ -712,7 +712,7 @@ test('provider smoke preserves normalized Vertex token usage in immutable eviden
   const records = [];
   const llm = {
     available: true, provider: 'vertex-ai', credentialVersion: 'runtime-sa-rotation-v1', timeoutMs: 12_000,
-    settings: { projectId: 'hkbuddy-prod-v1-20260826', location: 'global', model: 'gemini-2.5-flash' },
+    settings: { projectId: 'motion-expert-hk-ltd-webpage', location: 'global', model: 'gemini-2.5-flash' },
   };
   const exitCode = await runProviderSmoke({
     argv: ['--confirm-real-provider'],

@@ -1,4 +1,5 @@
 import { contextLimits, retainRecentCompletePairs } from '../context-budget.js';
+import { GCP_IDENTITY } from '../gcp-identity.js';
 import { createGoogleAccessTokenProvider } from './google-auth.js';
 
 const MAX_RESPONSE_BYTES = 256 * 1024;
@@ -165,7 +166,7 @@ function buildRequest(config, input) {
   }
 
   if (config.provider === 'vertex-ai') {
-    if (settings.projectId !== 'hkbuddy-prod-v1-20260826'
+    if (settings.projectId !== GCP_IDENTITY.projectId
       || settings.location !== 'global' || settings.model !== 'gemini-2.5-flash') {
       throw providerError('PROVIDER_NOT_CONFIGURED');
     }

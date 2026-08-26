@@ -28,14 +28,14 @@ const POSTGRES_RESOURCE_ID = '/subscriptions/new/resourceGroups/v1/providers/Mic
 const BLOB_RESOURCE_ID = '/subscriptions/new/resourceGroups/v1/providers/Microsoft.Storage/storageAccounts/v1storage';
 const POSTGRES_IDENTITY = '37e3ef0cd42741f428370ea8381fd9150406e460513d0bb3deeb61ac08ec8d18';
 const BLOB_IDENTITY = 'fc85e13a0ac799694d2cfbead9dec319c5bc5130b6a991de6e0e193a20bbd454';
-const GCS_PROJECT_ID = 'hkbuddy-prod-v1-20260826';
-const GCS_BUCKET = 'hkbuddy-prod-v1-20260826-media';
-const GCS_RESOURCE_ID = '//storage.googleapis.com/projects/_/buckets/hkbuddy-prod-v1-20260826-media';
-const GCS_IDENTITY = '790771a3d488e3ea04123af67c5f17fac94783a7859f72363ea142df95b70d4f';
-const CLOUD_RUN_PROJECT_NUMBER = '123456789012';
-const PUBLIC_ORIGIN = `https://hkbuddy-api-${CLOUD_RUN_PROJECT_NUMBER}.asia-east2.run.app`;
-const CANDIDATE_ORIGIN = `https://candidate-${COMMIT.slice(0, 12)}---hkbuddy-api-${CLOUD_RUN_PROJECT_NUMBER}.asia-east2.run.app`;
-const RUNTIME_SERVICE_ACCOUNT = 'hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com';
+const GCS_PROJECT_ID = 'motion-expert-hk-ltd-webpage';
+const GCS_BUCKET = 'hkbuddy-v1-582852715831-media';
+const GCS_RESOURCE_ID = '//storage.googleapis.com/projects/_/buckets/hkbuddy-v1-582852715831-media';
+const GCS_IDENTITY = 'b60bf7854808438017272bc274128d73be1efeec544e520be76c13474c7bbd38';
+const CLOUD_RUN_PROJECT_NUMBER = '582852715831';
+const PUBLIC_ORIGIN = `https://hkbuddy-v1-api-${CLOUD_RUN_PROJECT_NUMBER}.asia-east2.run.app`;
+const CANDIDATE_ORIGIN = `https://candidate-${COMMIT.slice(0, 12)}---hkbuddy-v1-api-${CLOUD_RUN_PROJECT_NUMBER}.asia-east2.run.app`;
+const RUNTIME_SERVICE_ACCOUNT = 'hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com';
 
 function inventoryPayload(overrides = {}) {
   return {

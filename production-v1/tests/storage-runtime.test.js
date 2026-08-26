@@ -32,9 +32,9 @@ function productionConfig(overrides = {}) {
     storeDriver: 'postgres',
     databaseUrl: 'postgresql://v1-db.example.test/campus?sslmode=require',
     mediaDriver: 'gcs',
-    gcsProjectId: 'hkbuddy-prod-v1-20260826',
-    gcsBucket: 'hkbuddy-prod-v1-20260826-media',
-    gcsResourceId: '//storage.googleapis.com/projects/_/buckets/hkbuddy-prod-v1-20260826-media',
+    gcsProjectId: 'motion-expert-hk-ltd-webpage',
+    gcsBucket: 'hkbuddy-v1-582852715831-media',
+    gcsResourceId: '//storage.googleapis.com/projects/_/buckets/hkbuddy-v1-582852715831-media',
     dependencyInitTimeoutMs: 1_000,
     postgresConnectionTimeoutMs: 1_600,
     postgresQueryTimeoutMs: 2_600,
@@ -86,10 +86,10 @@ test('atomic-file plus local creates and initializes only the local adapters', a
 test('postgres plus GCS initializes the store first through the injected ADC storage seam', async (t) => {
   const log = [];
   const databaseUrl = 'postgresql://v1-db.example.test/campus?sslmode=require';
-  const bucket = { name: 'hkbuddy-prod-v1-20260826-media' };
+  const bucket = { name: 'hkbuddy-v1-582852715831-media' };
   const gcsStorage = {
     bucket(name) {
-      assert.equal(name, 'hkbuddy-prod-v1-20260826-media');
+      assert.equal(name, 'hkbuddy-v1-582852715831-media');
       return bucket;
     },
   };
@@ -135,8 +135,8 @@ test('postgres plus GCS initializes the store first through the injected ADC sto
 
   assert.equal(runtime.store instanceof PostgresStore, true);
   assert.equal(runtime.mediaStore instanceof GcsMediaStore, true);
-  assert.equal(runtime.mediaStore.projectId, 'hkbuddy-prod-v1-20260826');
-  assert.equal(runtime.mediaStore.bucketName, 'hkbuddy-prod-v1-20260826-media');
+  assert.equal(runtime.mediaStore.projectId, 'motion-expert-hk-ltd-webpage');
+  assert.equal(runtime.mediaStore.bucketName, 'hkbuddy-v1-582852715831-media');
   assert.equal(runtime.mediaStore.bucket, bucket);
   assert.deepEqual(log, ['pool.create', 'store.init', 'media.init']);
   await runtime.close();
@@ -186,9 +186,9 @@ test('production PostgreSQL requires an explicit secure TLS mode before pool con
 
 test('wrong GCS project, bucket, or full resource identity fails before PostgreSQL or GCS construction', async () => {
   const cases = [
-    productionConfig({ gcsProjectId: 'legacy-project' }),
-    productionConfig({ gcsBucket: 'legacy-media' }),
-    productionConfig({ gcsResourceId: 'projects/_/buckets/hkbuddy-prod-v1-20260826-media' }),
+    productionConfig({ gcsProjectId: 'hkbuddy-prod-v1-20260826' }),
+    productionConfig({ gcsBucket: 'hkbuddy-prod-v1-20260826-media' }),
+    productionConfig({ gcsResourceId: 'projects/_/buckets/hkbuddy-v1-582852715831-media' }),
   ];
   for (const config of cases) {
     let poolFactoryCalls = 0;

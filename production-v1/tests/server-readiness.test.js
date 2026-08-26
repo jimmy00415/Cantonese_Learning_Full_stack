@@ -34,9 +34,9 @@ function productionConfig() {
     trustedProxyHops: 1,
     storeDriver: 'postgres',
     mediaDriver: 'gcs',
-    gcsProjectId: 'hkbuddy-prod-v1-20260826',
-    gcsBucket: 'hkbuddy-prod-v1-20260826-media',
-    gcsResourceId: '//storage.googleapis.com/projects/_/buckets/hkbuddy-prod-v1-20260826-media',
+    gcsProjectId: 'motion-expert-hk-ltd-webpage',
+    gcsBucket: 'hkbuddy-v1-582852715831-media',
+    gcsResourceId: '//storage.googleapis.com/projects/_/buckets/hkbuddy-v1-582852715831-media',
     llm: { available: true, provider: 'hkbu', timeoutMs: 1_000 },
     asr: { available: false, provider: 'none', settings: {} },
     tts: { available: false, provider: 'none', settings: {} },
@@ -634,14 +634,14 @@ test('server creates one shared ADC adapter for all configured Google providers'
   const config = productionConfig();
   config.llm = {
     available: true, provider: 'vertex-ai', timeoutMs: 1_000,
-    settings: { projectId: 'hkbuddy-prod-v1-20260826', location: 'global', model: 'gemini-2.5-flash' },
+    settings: { projectId: 'motion-expert-hk-ltd-webpage', location: 'global', model: 'gemini-2.5-flash' },
   };
   config.asr = { available: true, provider: 'google-stt-v2', settings: {
-    projectId: 'hkbuddy-prod-v1-20260826', location: 'asia-southeast1', model: 'chirp_2', recognizer: '_',
+    projectId: 'motion-expert-hk-ltd-webpage', location: 'asia-southeast1', model: 'chirp_2', recognizer: '_',
     languageCodes: ['yue-Hant-HK', 'en-US', 'cmn-Hans-CN'], credentialVersion: 'runtime-sa-rotation-v1',
   } };
   config.tts = { available: true, provider: 'google-tts', settings: {
-    projectId: 'hkbuddy-prod-v1-20260826', location: 'asia-southeast1', credentialVersion: 'runtime-sa-rotation-v1',
+    projectId: 'motion-expert-hk-ltd-webpage', location: 'asia-southeast1', credentialVersion: 'runtime-sa-rotation-v1',
     voices: {
       en: { languageCode: 'en-US', name: 'en-US-Chirp3-HD-Achernar' },
       yueHant: { languageCode: 'yue-HK', name: 'yue-HK-Chirp3-HD-Achernar' },

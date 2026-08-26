@@ -1076,10 +1076,10 @@ test('voice release evidence is artifact/config/commit bound and expires dynamic
   const commitSha = 'd'.repeat(40);
   const occurredAt = '2026-08-25T00:00:00.000Z';
   const databaseUrl = 'postgres://v1.example.test/v1';
-  const gcsProjectId = 'hkbuddy-prod-v1-20260826';
-  const gcsBucket = 'hkbuddy-prod-v1-20260826-media';
+  const gcsProjectId = 'motion-expert-hk-ltd-webpage';
+  const gcsBucket = 'hkbuddy-v1-582852715831-media';
   const postgresResourceId = '/subscriptions/new/resourceGroups/v1/providers/Microsoft.DBforPostgreSQL/flexibleServers/v1';
-  const gcsResourceId = '//storage.googleapis.com/projects/_/buckets/hkbuddy-prod-v1-20260826-media';
+  const gcsResourceId = '//storage.googleapis.com/projects/_/buckets/hkbuddy-v1-582852715831-media';
   const postgresIdentity = postgresIdentitySha256(databaseUrl);
   const gcsIdentity = gcsIdentitySha256({ projectId: gcsProjectId, bucket: gcsBucket });
   const inventoryRecord = finalizeReleaseEvidenceRecord({
@@ -1146,12 +1146,12 @@ test('voice release evidence is artifact/config/commit bound and expires dynamic
   await writeFile(inventoryPath, JSON.stringify(inventoryRecord));
   await writeFile(dependencyPath, JSON.stringify(dependencyRecord));
   await writeFile(llmPath, JSON.stringify(llmRecord));
-  const projectNumber = '123456789012';
+  const projectNumber = '582852715831';
   const baseEnvironment = {
     NODE_ENV: 'production',
-    V1_PUBLIC_ORIGIN: `https://hkbuddy-api-${projectNumber}.asia-east2.run.app`,
-    V1_CANDIDATE_ORIGIN: `https://candidate-${commitSha.slice(0, 12)}---hkbuddy-api-${projectNumber}.asia-east2.run.app`,
-    V1_RUNTIME_SERVICE_ACCOUNT: 'hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com',
+    V1_PUBLIC_ORIGIN: `https://hkbuddy-v1-api-${projectNumber}.asia-east2.run.app`,
+    V1_CANDIDATE_ORIGIN: `https://candidate-${commitSha.slice(0, 12)}---hkbuddy-v1-api-${projectNumber}.asia-east2.run.app`,
+    V1_RUNTIME_SERVICE_ACCOUNT: 'hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com',
     V1_SESSION_SECRET: 's'.repeat(32),
     V1_TRUST_PROXY_HOPS: '1', V1_STORE_DRIVER: 'postgres', V1_DATABASE_URL: databaseUrl,
     V1_POSTGRES_RESOURCE_ID: postgresResourceId,

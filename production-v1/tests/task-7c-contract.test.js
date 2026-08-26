@@ -34,9 +34,9 @@ import {
 } from './fixtures/canonical-mp3-fixture.js';
 
 const COMMIT = '1'.repeat(40);
-const PROJECT_NUMBER = '123456789012';
-const STABLE_ORIGIN = `https://hkbuddy-api-${PROJECT_NUMBER}.asia-east2.run.app`;
-const CANDIDATE_ORIGIN = `https://candidate-${COMMIT.slice(0, 12)}---hkbuddy-api-${PROJECT_NUMBER}.asia-east2.run.app`;
+const PROJECT_NUMBER = '582852715831';
+const STABLE_ORIGIN = `https://hkbuddy-v1-api-${PROJECT_NUMBER}.asia-east2.run.app`;
+const CANDIDATE_ORIGIN = `https://candidate-${COMMIT.slice(0, 12)}---hkbuddy-v1-api-${PROJECT_NUMBER}.asia-east2.run.app`;
 const executeFile = promisify(execFile);
 const IOS_NORMALIZER_ARGUMENTS = Object.freeze([
   '-nostdin', '-hide_banner', '-loglevel', 'error',
@@ -148,8 +148,8 @@ test('preboot voice smoke configuration has no dependency or prior-evidence circ
   const config = loadVoiceSmokeConfiguration({
     V1_RELEASE_COMMIT_SHA: COMMIT,
     V1_RELEASE_MANIFEST_FILE: '/app/release-manifest.json',
-    V1_RUNTIME_SERVICE_ACCOUNT: 'hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com',
-    V1_GOOGLE_CLOUD_PROJECT: 'hkbuddy-prod-v1-20260826',
+    V1_RUNTIME_SERVICE_ACCOUNT: 'hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com',
+    V1_GOOGLE_CLOUD_PROJECT: 'motion-expert-hk-ltd-webpage',
     V1_ASR_PROVIDER: 'google-stt-v2', V1_GOOGLE_STT_LOCATION: 'asia-southeast1',
     V1_GOOGLE_STT_MODEL: 'chirp_2', V1_GOOGLE_STT_RECOGNIZER: '_',
     V1_TTS_PROVIDER: 'google-tts', V1_GOOGLE_TTS_LOCATION: 'asia-southeast1',
@@ -494,7 +494,7 @@ test('pinned Google TTS can generate canonical LINEAR16 fixtures separately from
   const wav = canonicalWav();
   const provider = createTtsProvider({
     config: { provider: 'google-tts', settings: {
-      projectId: 'hkbuddy-prod-v1-20260826', location: 'asia-southeast1',
+      projectId: 'motion-expert-hk-ltd-webpage', location: 'asia-southeast1',
       credentialVersion: 'runtime-sa-rotation-v1',
       voices: {
         en: { languageCode: 'en-US', name: 'en-US-Chirp3-HD-Achernar' },
@@ -516,7 +516,7 @@ test('pinned Google TTS can generate canonical LINEAR16 fixtures separately from
 });
 
 test('Google speech evidence v2 requires three locales, content-free metrics, decodable audio, and runtime identity', () => {
-  const runtimeIdentity = 'hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com';
+  const runtimeIdentity = 'hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com';
   const occurredAt = '2026-08-26T00:00:00.000Z';
   const definitions = [
     ['yue-Hant-HK', 'yue-Hant-HK', 'voice-smoke-yue-v1', 'yue-HK-Chirp3-HD-Achernar'],
@@ -583,7 +583,7 @@ test('Google ASR smoke generates three pinned non-sensitive LINEAR16 fixtures be
   const runtimeIdentity = 'hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com';
   const environment = {
     NODE_ENV: 'test', V1_RELEASE_COMMIT_SHA: COMMIT,
-    V1_GOOGLE_CLOUD_PROJECT: 'hkbuddy-prod-v1-20260826',
+    V1_GOOGLE_CLOUD_PROJECT: 'motion-expert-hk-ltd-webpage',
     V1_ASR_PROVIDER: 'google-stt-v2', V1_GOOGLE_STT_LOCATION: 'asia-southeast1',
     V1_GOOGLE_STT_MODEL: 'chirp_2', V1_GOOGLE_STT_RECOGNIZER: '_',
     V1_TTS_PROVIDER: 'google-tts', V1_GOOGLE_TTS_LOCATION: 'asia-southeast1',
@@ -664,8 +664,8 @@ test('Google ASR smoke generates three pinned non-sensitive LINEAR16 fixtures be
 });
 
 test('candidate URL shape is SHA bound rather than an arbitrary HTTPS or run.app tag', () => {
-  assert.equal(CANDIDATE_ORIGIN, 'https://candidate-111111111111---hkbuddy-api-123456789012.asia-east2.run.app');
-  assert.equal(STABLE_ORIGIN, 'https://hkbuddy-api-123456789012.asia-east2.run.app');
+  assert.equal(CANDIDATE_ORIGIN, 'https://candidate-111111111111---hkbuddy-v1-api-582852715831.asia-east2.run.app');
+  assert.equal(STABLE_ORIGIN, 'https://hkbuddy-v1-api-582852715831.asia-east2.run.app');
 });
 
 test('iOS evidence generator derives a decodable AAC fixture with its pinned offline normalizer and rejects forged bindings', async (t) => {
@@ -816,13 +816,13 @@ test('smoke evidence upload is immutable, generation-bound, and returns only a c
   let request;
   const record = { schemaVersion: 1, artifactSha256: 'a'.repeat(64), result: 'pass' };
   const receipt = await writeImmutableGcsEvidence({
-    bucket: 'hkbuddy-prod-v1-20260826-media',
+    bucket: 'hkbuddy-v1-582852715831-media',
     objectName: `release-evidence/${COMMIT}/voice-smoke/asr-99999999-9999-4999-8999-999999999999.json`,
     record,
     googleAuthProvider: { fetch: async (url, init) => {
       request = { url, init };
       return new Response(JSON.stringify({
-        bucket: 'hkbuddy-prod-v1-20260826-media',
+        bucket: 'hkbuddy-v1-582852715831-media',
         name: `release-evidence/${COMMIT}/voice-smoke/asr-99999999-9999-4999-8999-999999999999.json`,
         generation: '123456789',
       }), { status: 200, headers: { 'content-type': 'application/json' } });

@@ -7,6 +7,7 @@ import {
   speechError,
   withSpeechDeadline,
 } from './speech-common.js';
+import { GCP_IDENTITY } from '../gcp-identity.js';
 import { createGoogleAccessTokenProvider } from './google-auth.js';
 
 const AZURE_REGION = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -50,8 +51,8 @@ function parseAzurePayload(buffer) {
 }
 
 function googleAsrUrl(settings) {
-  if (settings?.projectId !== 'hkbuddy-prod-v1-20260826'
-    || settings.location !== 'asia-southeast1' || settings.model !== 'chirp_2'
+  if (settings?.projectId !== GCP_IDENTITY.projectId
+    || settings.location !== GCP_IDENTITY.speechRegion || settings.model !== 'chirp_2'
     || settings.recognizer !== '_'
     || JSON.stringify(settings.languageCodes) !== JSON.stringify(['yue-Hant-HK', 'en-US', 'cmn-Hans-CN'])) {
     throw speechError('VOICE_PROVIDER_MISCONFIGURED', 503, false, 'configuration');

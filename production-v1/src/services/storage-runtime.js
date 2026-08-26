@@ -1,6 +1,7 @@
 import { DefaultAzureCredential } from '@azure/identity';
 import { Pool } from 'pg';
 
+import { GCP_IDENTITY } from '../gcp-identity.js';
 import { AtomicFileStore } from '../stores/atomic-file-store.js';
 import { AzureBlobMediaStore } from '../stores/azure-blob-media-store.js';
 import { GcsMediaStore } from '../stores/gcs-media-store.js';
@@ -134,7 +135,7 @@ function validateConfig({ config, suppliedStore, suppliedMediaStore, poolFactory
       } catch {
         throw new Error('GCS storage requires the exact project and bucket identity');
       }
-      if (config.gcsResourceId !== '//storage.googleapis.com/projects/_/buckets/hkbuddy-prod-v1-20260826-media') {
+      if (config.gcsResourceId !== `//storage.googleapis.com/projects/_/buckets/${GCP_IDENTITY.bucket}`) {
         throw new Error('GCS storage requires the exact full resource identity');
       }
     }

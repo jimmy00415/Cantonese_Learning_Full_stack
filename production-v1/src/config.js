@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse } from 'dotenv';
 
+import { GCP_IDENTITY } from './gcp-identity.js';
 import {
   providerConfigDigest,
   readEvidenceRecord,
@@ -24,8 +25,9 @@ export const NORMALIZER_CONTRACT_VERSION = 'canonical-wav-v1';
 const RELEASE_SHA = /^[0-9a-f]{40}$/;
 const AZURE_SPEECH_REGION = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const GOOGLE_PROJECT_ID = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
-const STABLE_CLOUD_RUN_HOST = /^hkbuddy-api-(\d{6,20})\.asia-east2\.run\.app$/;
-const RUNTIME_SERVICE_ACCOUNT = 'hkbuddy-runtime@hkbuddy-prod-v1-20260826.iam.gserviceaccount.com';
+const STABLE_CLOUD_RUN_HOST = new RegExp(`^${GCP_IDENTITY.service}-${GCP_IDENTITY.projectNumber}\\.${GCP_IDENTITY.region}\\.run\\.app$`);
+const RUNTIME_SERVICE_ACCOUNT = GCP_IDENTITY.serviceAccounts.runtime;
+const GCS_RESOURCE_ID = `//storage.googleapis.com/projects/_/buckets/${GCP_IDENTITY.bucket}`;
 const GOOGLE_SECRET_ENV_NAMES = Object.freeze([
   'V1_GOOGLE_API_KEY', 'GOOGLE_API_KEY', 'GEMINI_API_KEY',
   'GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_APPLICATION_CREDENTIALS_JSON',
@@ -111,7 +113,7 @@ function configuredLlm(provider, settings) {
   }
   if (provider === 'minimax') return Boolean(settings.apiKey && settings.baseUrl && settings.anthropicBaseUrl && settings.model);
   if (provider === 'vertex-ai') {
-    return settings.projectId === 'hkbuddy-prod-v1-20260826'
+    return settings.projectId === GCP_IDENTITY.projectId
       && settings.location === 'global' && settings.model === 'gemini-2.5-flash';
   }
   return provider === 'deterministic';
@@ -124,7 +126,7 @@ function assertGoogleAdcOnly(env) {
 }
 
 function validateGoogleProject(value) {
-  if (!GOOGLE_PROJECT_ID.test(String(value ?? '')) || value !== 'hkbuddy-prod-v1-20260826') {
+  if (!GOOGLE_PROJECT_ID.test(String(value ?? '')) || value !== GCP_IDENTITY.projectId) {
     throw new Error('V1_GOOGLE_CLOUD_PROJECT is invalid');
   }
 }
@@ -297,7 +299,7 @@ function productionOriginAllowlist(publicOrigin, candidateOrigin, commitSha) {
   const stableUrl = new URL(stable);
   const match = STABLE_CLOUD_RUN_HOST.exec(stableUrl.hostname);
   if (!match) return null;
-  const expectedCandidate = `https://candidate-${commitSha.slice(0, 12)}---hkbuddy-api-${match[1]}.asia-east2.run.app`;
+  const expectedCandidate = `https://candidate-${commitSha.slice(0, 12)}---${GCP_IDENTITY.service}-${GCP_IDENTITY.projectNumber}.${GCP_IDENTITY.region}.run.app`;
   return candidate === expectedCandidate ? Object.freeze([stable, candidate]) : null;
 }
 
@@ -322,14 +324,14 @@ function assertProductionReady(config) {
   if (!config.databaseUrl) throw new Error('V1_DATABASE_URL is required in production');
   if (!validResourceId(config.postgresResourceId)) throw new Error('V1_POSTGRES_RESOURCE_ID is required in production');
   if (config.mediaDriver !== 'gcs') throw new Error('V1_MEDIA_DRIVER=gcs is required in production');
-  if (config.gcsProjectId !== 'hkbuddy-prod-v1-20260826') {
+  if (config.gcsProjectId !== GCP_IDENTITY.projectId) {
     throw new Error('V1_GOOGLE_CLOUD_PROJECT must identify the exact V1 Google project in production');
   }
-  if (config.gcsBucket !== 'hkbuddy-prod-v1-20260826-media') {
+  if (config.gcsBucket !== GCP_IDENTITY.bucket) {
     throw new Error('V1_GCS_BUCKET must identify the exact private V1 media bucket in production');
   }
   gcsIdentitySha256({ projectId: config.gcsProjectId, bucket: config.gcsBucket });
-  if (config.gcsResourceId !== '//storage.googleapis.com/projects/_/buckets/hkbuddy-prod-v1-20260826-media') {
+  if (config.gcsResourceId !== GCS_RESOURCE_ID) {
     throw new Error('V1_GCS_RESOURCE_ID is invalid in production');
   }
   if (!config.llm.available || config.llm.provider === 'deterministic') {

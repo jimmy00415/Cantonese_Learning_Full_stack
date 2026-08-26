@@ -4,8 +4,8 @@ import test from 'node:test';
 
 import { GcsMediaStore } from '../src/stores/gcs-media-store.js';
 
-const PROJECT_ID = 'hkbuddy-prod-v1-20260826';
-const BUCKET_NAME = 'hkbuddy-prod-v1-20260826-media';
+const PROJECT_ID = 'motion-expert-hk-ltd-webpage';
+const BUCKET_NAME = 'hkbuddy-v1-582852715831-media';
 
 async function readableBuffer(readable) {
   const chunks = [];

@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
 
+import { GCP_IDENTITY } from '../gcp-identity.js';
 import { createGoogleAccessTokenProvider } from '../providers/google-auth.js';
 
-const BUCKET = 'hkbuddy-prod-v1-20260826-media';
+const BUCKET = GCP_IDENTITY.bucket;
 const OBJECT_NAME = /^release-evidence\/[0-9a-f]{40}\/(?:llm-smoke|voice-smoke)\/[a-z]+-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json$/;
 
 async function boundedText(response, maximumBytes = 16 * 1024) {

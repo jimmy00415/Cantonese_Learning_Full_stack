@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { GCP_IDENTITY } from '../gcp-identity.js';
 import {
   closeSync,
   constants as fsConstants,
@@ -185,7 +186,7 @@ function llmProviderConfigDescriptor(config) {
     const projectId = safeConfigurationText(settings.projectId);
     const location = safeConfigurationText(settings.location);
     const model = safeConfigurationText(settings.model);
-    if (projectId !== 'hkbuddy-prod-v1-20260826'
+    if (projectId !== GCP_IDENTITY.projectId
       || location !== 'global' || model !== 'gemini-2.5-flash') {
       throw llmConfigurationError();
     }
@@ -307,8 +308,8 @@ export function blobIdentitySha256({ accountUrl, connectionString, container } =
 
 export function gcsIdentitySha256(value = {}) {
   if (!exactKeys(value, ['bucket', 'projectId'])
-    || value.projectId !== 'hkbuddy-prod-v1-20260826'
-    || value.bucket !== 'hkbuddy-prod-v1-20260826-media') {
+    || value.projectId !== GCP_IDENTITY.projectId
+    || value.bucket !== GCP_IDENTITY.bucket) {
     throw new Error('GCS identity is invalid');
   }
   return sha256(canonicalJson(['gcs', value.projectId, value.bucket]));
@@ -516,7 +517,7 @@ export function validateDependencyAcceptanceEvidence(record, {
     && record.postgresIdentitySha256 === expectedPostgresIdentity
     && (gcsMode
       ? typeof gcsResourceId === 'string' && record.gcsResourceId === gcsResourceId
-        && gcsResourceId === '//storage.googleapis.com/projects/_/buckets/hkbuddy-prod-v1-20260826-media'
+        && gcsResourceId === `//storage.googleapis.com/projects/_/buckets/${GCP_IDENTITY.bucket}`
         && record.gcsIdentitySha256 === expectedGcsIdentity
       : typeof blobResourceId === 'string' && record.blobResourceId === blobResourceId
         && DIGEST.test(String(expectedBlobIdentity ?? ''))

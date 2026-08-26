@@ -51,16 +51,16 @@ function azureLlmConfig(overrides = {}) {
 test('GCS identity digest binds the exact new project and private bucket without credentials', () => {
   assert.equal(typeof releaseEvidence.gcsIdentitySha256, 'function');
   const identity = {
-    projectId: 'hkbuddy-prod-v1-20260826',
-    bucket: 'hkbuddy-prod-v1-20260826-media',
+    projectId: 'motion-expert-hk-ltd-webpage',
+    bucket: 'hkbuddy-v1-582852715831-media',
   };
   assert.equal(
     releaseEvidence.gcsIdentitySha256(identity),
-    '790771a3d488e3ea04123af67c5f17fac94783a7859f72363ea142df95b70d4f',
+    'b60bf7854808438017272bc274128d73be1efeec544e520be76c13474c7bbd38',
   );
   for (const invalid of [
-    { ...identity, projectId: 'legacy-project' },
-    { ...identity, bucket: 'legacy-media' },
+    { ...identity, projectId: 'hkbuddy-prod-v1-20260826' },
+    { ...identity, bucket: 'hkbuddy-prod-v1-20260826-media' },
     { ...identity, credential: 'must-not-be-accepted' },
   ]) assert.throws(() => releaseEvidence.gcsIdentitySha256(invalid), /GCS identity/i);
 });
@@ -125,7 +125,7 @@ test('LLM config digest canonicalizes the effective HKBU and MiniMax transports'
 test('Vertex config digest binds ADC rotation, project, location, model, and excludes credential bytes', () => {
   const config = {
     provider: 'vertex-ai', credentialVersion: 'runtime-sa-rotation-v1', timeoutMs: 12_000,
-    settings: { projectId: 'hkbuddy-prod-v1-20260826', location: 'global', model: 'gemini-2.5-flash' },
+    settings: { projectId: 'motion-expert-hk-ltd-webpage', location: 'global', model: 'gemini-2.5-flash' },
   };
   const digest = releaseEvidence.llmProviderConfigDigest(config);
   assert.match(digest, /^[0-9a-f]{64}$/);

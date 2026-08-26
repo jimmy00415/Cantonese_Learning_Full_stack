@@ -5,11 +5,11 @@ import { providerConfigDescriptor, providerConfigDigest, readEvidenceRecord } fr
 
 test('Google speech evidence binds exact regional recognizer and one selected voice per locale', () => {
   const asr = { provider: 'google-stt-v2', settings: {
-    projectId: 'hkbuddy-prod-v1-20260826', location: 'asia-southeast1', model: 'chirp_2', recognizer: '_',
+    projectId: 'motion-expert-hk-ltd-webpage', location: 'asia-southeast1', model: 'chirp_2', recognizer: '_',
     languageCodes: ['yue-Hant-HK', 'en-US', 'cmn-Hans-CN'], credentialVersion: 'runtime-sa-rotation-v1',
   } };
   const tts = { provider: 'google-tts', settings: {
-    projectId: 'hkbuddy-prod-v1-20260826', location: 'asia-southeast1', credentialVersion: 'runtime-sa-rotation-v1',
+    projectId: 'motion-expert-hk-ltd-webpage', location: 'asia-southeast1', credentialVersion: 'runtime-sa-rotation-v1',
     voices: {
       en: { languageCode: 'en-US', name: 'en-US-Chirp3-HD-Achernar' },
       yueHant: { languageCode: 'yue-HK', name: 'yue-HK-Chirp3-HD-Achernar' },
@@ -18,8 +18,8 @@ test('Google speech evidence binds exact regional recognizer and one selected vo
   } };
   assert.deepEqual(providerConfigDescriptor(asr, 'asr'), {
     provider: 'google-stt-v2', capability: 'asr',
-    endpoint: 'https://asia-southeast1-speech.googleapis.com/v2/projects/hkbuddy-prod-v1-20260826/locations/asia-southeast1/recognizers/_:recognize',
-    projectId: 'hkbuddy-prod-v1-20260826', location: 'asia-southeast1', recognizer: '_', model: 'chirp_2',
+    endpoint: 'https://asia-southeast1-speech.googleapis.com/v2/projects/motion-expert-hk-ltd-webpage/locations/asia-southeast1/recognizers/_:recognize',
+    projectId: 'motion-expert-hk-ltd-webpage', location: 'asia-southeast1', recognizer: '_', model: 'chirp_2',
     languageCodes: ['yue-Hant-HK', 'en-US', 'cmn-Hans-CN'],
     allowedResponseLanguages: ['en', 'yue-Hant-HK', 'cmn-Hans-CN'],
     responseLanguageCodes: { en: 'en-US', 'yue-Hant-HK': 'yue-Hant-HK', 'cmn-Hans-CN': 'cmn-Hans-CN' },
@@ -29,7 +29,7 @@ test('Google speech evidence binds exact regional recognizer and one selected vo
   assert.deepEqual(providerConfigDescriptor(tts, 'tts'), {
     provider: 'google-tts', capability: 'tts',
     endpoint: 'https://asia-southeast1-texttospeech.googleapis.com/v1/text:synthesize',
-    projectId: 'hkbuddy-prod-v1-20260826', location: 'asia-southeast1',
+    projectId: 'motion-expert-hk-ltd-webpage', location: 'asia-southeast1',
     voices: tts.settings.voices, audioEncoding: 'MP3', outputChannels: 1,
     credentialVersion: 'runtime-sa-rotation-v1', fallbackPolicy: 'none',
   });
