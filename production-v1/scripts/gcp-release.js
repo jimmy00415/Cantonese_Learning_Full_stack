@@ -3943,6 +3943,9 @@ function canonicalMutationAfterObservation(plan, operationId, observed) {
       && !['candidate-deploy', 'promote-stable-deploy'].includes(operationId))) {
     const job = operationId === 'migration-deploy' ? plan.expectedMigrationJob
       : plan.expectedJobs[operationId.slice(0, -'-deploy'.length)];
+    // Safe-result identity intentionally excludes SDK-managed observation-only fields such as
+    // metadata.resourceVersion, status.executionCount, and status.latestCreatedExecution. The
+    // normalized Job recipe below still binds every image, identity, secret, network, and limit.
     validateReleaseJobReadback(observed, job);
     const actual = Object.freeze({
       job: exact(observed, job) ? observed : normalizeV1JobReadback(observed),
@@ -4003,6 +4006,8 @@ function canonicalMutationAfterObservation(plan, operationId, observed) {
     const serviceExpected = operationId === 'candidate-deploy'
       ? plan.expectedCandidate : plan.expectedStable;
     const service = normalizeCandidateService(observed?.service);
+    // Service metadata.resourceVersion is server-managed; semantic service identity remains the
+    // exact invoker-IAM annotation and traffic tuple, paired with exact revision and image truth.
     if (operationId === 'candidate-deploy') validateCandidateService(observed?.service, serviceExpected);
     else validateStableStagedService(observed?.service, plan);
     const revision = normalizeCandidateRevision(observed?.revision, serviceExpected);
@@ -4188,11 +4193,14 @@ function mutationSafeResult(plan, operationId, context) {
   }
   const absent = operationId === 'candidate-cleanup-delete'
     || operationId.startsWith('evidence-output-delete:');
+  const observation = canonicalMutationAfterObservation(
+    plan, operationId, context.observedAfter,
+  );
   return Object.freeze({
     kind: 'resource',
     state: absent ? 'absent' : 'present',
     identitySha256: canonicalSha256(mutationSpec(plan, operationId)),
-    valueSha256: canonicalSha256(absent ? { state: 'absent' } : context.observedReceipt),
+    valueSha256: canonicalSha256(observation),
   });
 }
 
@@ -4217,8 +4225,8 @@ function createReleaseMutationAdapter(plan, member, context) {
     canonicalState(state, observed) {
       return state === 'before' ? this.readBefore(observed) : this.readAfter(observed);
     },
-    safeResult(observedReceipt) {
-      return mutationSafeResult(plan, member.id, { ...context(), observedReceipt });
+    safeResult(observedAfter) {
+      return mutationSafeResult(plan, member.id, { ...context(), observedAfter });
     },
   });
 }
@@ -4240,11 +4248,19 @@ function checkpointSafeResult(records, attemptId, operationId) {
 
 function validateResourceSafeResult(plan, member, safeResult, observed) {
   const identity = releaseMutationPlanIdentity(plan, member);
+  const absent = member.id === 'candidate-cleanup-delete'
+    || member.id.startsWith('evidence-output-delete:');
+  let canonicalObservation;
+  try {
+    canonicalObservation = canonicalMutationAfterObservation(plan, member.id, observed);
+  } catch {
+    throw new Error('Checkpointed resource differs from its authoritative readback');
+  }
   if (!exactKeys(safeResult, [
     'identitySha256', 'kind', 'state', 'valueSha256',
-  ]) || safeResult.kind !== 'resource' || safeResult.state !== 'present'
+  ]) || safeResult.kind !== 'resource' || safeResult.state !== (absent ? 'absent' : 'present')
     || safeResult.identitySha256 !== identity.specSha256
-    || safeResult.valueSha256 !== canonicalSha256(observed)) {
+    || safeResult.valueSha256 !== canonicalSha256(canonicalObservation)) {
     throw new Error('Checkpointed resource differs from its authoritative readback');
   }
   return true;
@@ -4272,18 +4288,6 @@ function validateSecretVersionSafeResult(safeResult, expected) {
     || safeResult.name !== `projects/${PROJECT}/secrets/${expected.secret}`
     || safeResult.version !== expected.secretVersion) {
     throw new Error('Checkpointed Secret version identity is invalid');
-  }
-  return true;
-}
-
-function validateAbsentResourceSafeResult(plan, member, safeResult) {
-  const identity = releaseMutationPlanIdentity(plan, member);
-  if (!exactKeys(safeResult, [
-    'identitySha256', 'kind', 'state', 'valueSha256',
-  ]) || safeResult.kind !== 'resource' || safeResult.state !== 'absent'
-    || safeResult.identitySha256 !== identity.specSha256
-    || safeResult.valueSha256 !== canonicalSha256({ state: 'absent' })) {
-    throw new Error('Checkpointed resource absence is invalid');
   }
   return true;
 }
@@ -5234,15 +5238,16 @@ export async function runGcpRelease({
           if (!member || !readback) {
             throw new Error('Checkpointed evidence deletion is unavailable');
           }
-          validateAbsentResourceSafeResult(
-            plan,
-            member,
-            checkpointSafeResult(openJournalRecords, stateStore.attemptId, operationId),
-          );
           const residue = await executor([...readback.argv]);
           if (!Array.isArray(residue) || residue.length !== 0) {
             throw new Error('Checkpointed evidence output is no longer absent');
           }
+          validateResourceSafeResult(
+            plan,
+            member,
+            checkpointSafeResult(openJournalRecords, stateStore.attemptId, operationId),
+            residue,
+          );
         }
         const zeroReadback = plan.operations.find(
           ({ id }) => id === 'evidence-output-zero-readback',
@@ -5285,7 +5290,11 @@ export async function runGcpRelease({
       } else if (selection.phase === 'candidate' && checkpoint?.recordType === 'checkpoint') {
         Object.assign(candidateReadbacks, await readCandidateControlPlaneState(executor, plan));
         for (const [operationId, observed] of [
-          ['candidate-deploy', candidateReadbacks.service],
+          ['candidate-deploy', {
+            artifact: candidateReadbacks.artifact,
+            revision: candidateReadbacks.revision,
+            service: candidateReadbacks.service,
+          }],
           ['candidate-private-iam-grant', candidateReadbacks.iam],
         ]) {
           const member = plan.operations.find(({ id }) => id === operationId);
@@ -5428,7 +5437,6 @@ export async function runGcpRelease({
           adapter: mutationAdapter,
           afterSha256: journalAfterSha256,
           intent: journalIntent,
-          mutationReceipt: undefined,
           operationId: member.id,
           restarting: restartingMutation,
         };
@@ -5888,9 +5896,6 @@ export async function runGcpRelease({
           throw new Error('Evidence version readback is not publication-bound');
         }
       }
-      if (pendingJournal !== null && pendingJournal.operationId === member.id) {
-        pendingJournal.mutationReceipt = structuredClone(receipt);
-      }
       if (pendingJournal !== null
         && journalCheckpointBoundary(pendingJournal.operationId) === member.id) {
         try {
@@ -5920,9 +5925,6 @@ export async function runGcpRelease({
           if (observationSha256 !== pendingJournal.afterSha256) {
             throw new Error('Authoritative mutation state differs from the durable intent');
           }
-          const observedReceipt = ['candidate-deploy', 'promote-stable-deploy']
-            .includes(pendingJournal.operationId)
-            ? pendingJournal.mutationReceipt : receipt;
           await stateStore.appendCheckpoint({
             intentRecordSha256: pendingJournal.intent.recordSha256,
             classification: 'after',
@@ -5930,7 +5932,7 @@ export async function runGcpRelease({
               : (responseLossRecoveries.includes(pendingJournal.operationId)
                 ? 'adopted-response-loss' : 'applied'),
             observationSha256,
-            safeResult: pendingJournal.adapter.safeResult(observedReceipt),
+            safeResult: pendingJournal.adapter.safeResult(observedAfter),
           });
           pendingJournal = null;
         } catch (error) {

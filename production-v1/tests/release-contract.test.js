@@ -2504,7 +2504,10 @@ test('all-checkpoint migration restart reconstructs exact Job and execution outp
       identitySha256: releaseMutationPlanIdentity(
         plan, plan.operations.find(({ id }) => id === 'migration-deploy'),
       ).specSha256,
-      valueSha256: createHash('sha256').update(JSON.stringify(canonicalFixture(job))).digest('hex'),
+      valueSha256: createHash('sha256').update(JSON.stringify(canonicalFixture({
+        job: plan.expectedMigrationJob,
+        kind: 'cloud-run-job',
+      }))).digest('hex'),
     },
   });
   await appendTestMutationCheckpoint(store, {
@@ -2546,6 +2549,79 @@ test('all-checkpoint migration restart reconstructs exact Job and execution outp
   assert.equal(store.records.at(-1).recordType, 'terminal');
 });
 
+test('migration receipt-write crash tolerates only server-managed Job status drift on read-only restart', async () => {
+  const input = releaseInput();
+  const plan = buildReleasePlan(input, { phase: 'migration' });
+  const execution = realV1ExecutionReadback(
+    plan.expectedMigrationJob, 'hkbuddy-v1-migrate-release-001',
+  );
+  const initialJob = realV1JobReadback(plan.expectedMigrationJob);
+  initialJob.status = { executionCount: 0 };
+  const store = createTestStateStore();
+  const first = await runGcpRelease({
+    argv: ['--phase=migration', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    openStateStore: async () => store,
+    loadPhaseReceipt: async () => null,
+    persistReceipt: async () => { throw new Error('injected receipt write failure'); },
+    execute: async (argv) => {
+      if (argv[1] === 'jobs' && argv[2] === 'deploy') {
+        return { metadata: { name: plan.expectedMigrationJob.job } };
+      }
+      if (argv[1] === 'jobs' && argv[2] === 'describe') {
+        return structuredClone(initialJob);
+      }
+      if (argv[1] === 'jobs' && argv[2] === 'execute') return structuredClone(execution);
+      if (argv[2] === 'executions' && argv[3] === 'describe') {
+        return structuredClone(execution);
+      }
+      throw new Error(`unexpected initial migration operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(first.exitCode, 1);
+  assert.equal(first.publicReport.code, 'RELEASE_RECEIPT_WRITE_FAILED');
+  assert.equal(store.records.filter(({ recordType }) => recordType === 'checkpoint').length, 2);
+  assert.equal(store.records.some(({ recordType }) => recordType === 'terminal'), false);
+
+  const currentJob = realV1JobReadback(plan.expectedMigrationJob);
+  currentJob.status = {
+    executionCount: 1,
+    latestCreatedExecution: {
+      name: execution.metadata.name,
+      creationTimestamp: '2026-08-26T07:59:00.000Z',
+      completionTimestamp: '2026-08-26T08:00:00.000Z',
+    },
+  };
+  const restartCalls = [];
+  let persisted = null;
+  const restarted = await runGcpRelease({
+    argv: ['--phase=migration', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    openStateStore: async () => store,
+    loadPhaseReceipt: async () => null,
+    persistReceipt: async (_releasePlan, receipt) => {
+      persisted = structuredClone(receipt);
+      return true;
+    },
+    execute: async (argv) => {
+      restartCalls.push(argv);
+      if (argv[1] === 'jobs' && argv[2] === 'describe') return structuredClone(currentJob);
+      if (argv[2] === 'executions' && argv[3] === 'describe') {
+        return structuredClone(execution);
+      }
+      throw new Error(`restart attempted a migration mutation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+
+  assert.equal(restarted.exitCode, 0, JSON.stringify(restarted.publicReport));
+  assert.equal(restarted.publicReport.mutationPerformed, false);
+  assert.equal(restartCalls.some((argv) => ['deploy', 'execute'].includes(argv[2])), false);
+  assert.equal(persisted.phase, 'migration');
+  assert.equal(store.records.at(-1).recordType, 'terminal');
+});
+
 test('all-checkpoint acceptance restart reconstructs every exact Job execution without mutation', async () => {
   const input = releaseInput();
   const plan = buildReleasePlan(input, { phase: 'acceptance' });
@@ -2569,7 +2645,10 @@ test('all-checkpoint acceptance restart reconstructs every exact Job execution w
           plan, plan.operations.find(({ id }) => id === `${key}-deploy`),
         ).specSha256,
         valueSha256: createHash('sha256')
-          .update(JSON.stringify(canonicalFixture(job))).digest('hex'),
+          .update(JSON.stringify(canonicalFixture({
+            job: expected,
+            kind: 'cloud-run-job',
+          }))).digest('hex'),
       },
     });
     mutationOrdinal += 1;
@@ -2702,7 +2781,13 @@ test('all-checkpoint evidence restart reconstructs exact Secret versions and del
         state: 'absent',
         identitySha256: releaseMutationPlanIdentity(plan, member).specSha256,
         valueSha256: createHash('sha256')
-          .update(JSON.stringify(canonicalFixture({ state: 'absent' }))).digest('hex'),
+          .update(JSON.stringify(canonicalFixture({
+            bucket: plan.acceptanceOutputs[key].bucket,
+            generation: plan.acceptanceOutputs[key].generation,
+            kind: 'gcs-object-absence',
+            object: plan.acceptanceOutputs[key].object,
+            state: 'absent',
+          }))).digest('hex'),
       },
     });
   }
@@ -2841,10 +2926,40 @@ test('all-checkpoint candidate restart reconstructs exact private Service and IA
   const plan = buildReleasePlan(input, { phase: 'candidate' });
   const service = candidateServiceReadback(plan);
   const iam = candidatePrivateIam();
+  const revision = {
+    revision: plan.expectedCandidate.revision,
+    image: plan.expectedCandidate.image,
+    serviceAccount: plan.expectedCandidate.serviceAccount,
+    executionEnvironment: plan.expectedCandidate.executionEnvironment,
+    cpu: plan.expectedCandidate.cpu,
+    memory: plan.expectedCandidate.memory,
+    concurrency: plan.expectedCandidate.concurrency,
+    minInstances: plan.expectedCandidate.minInstances,
+    maxInstances: plan.expectedCandidate.maxInstances,
+    cpuThrottling: plan.expectedCandidate.cpuThrottling,
+    startupCpuBoost: plan.expectedCandidate.startupCpuBoost,
+    timeoutSeconds: plan.expectedCandidate.timeoutSeconds,
+    network: plan.expectedCandidate.network,
+    subnet: plan.expectedCandidate.subnet,
+    vpcEgress: plan.expectedCandidate.vpcEgress,
+    environment: plan.expectedCandidate.environment,
+    secretEnvironment: plan.expectedCandidate.secretEnvironment,
+    secretMounts: plan.expectedCandidate.secretMounts,
+    probes: plan.expectedCandidate.probes,
+  };
   const store = createTestStateStore();
-  for (const [index, [operationId, reconcileKind, observed]] of [
-    ['candidate-deploy', 'cloud-run-service-replace', service],
-    ['candidate-private-iam-grant', 'cloud-run-service-iam', iam],
+  for (const [index, [operationId, reconcileKind, semanticObservation]] of [
+    ['candidate-deploy', 'cloud-run-service-replace', {
+      artifact: plan.image,
+      kind: 'cloud-run-service',
+      revision,
+      service,
+    }],
+    ['candidate-private-iam-grant', 'cloud-run-service-iam', {
+      bindings: [{ members: ['user:admin@motionexp.com'], role: 'roles/run.invoker' }],
+      kind: 'cloud-run-service-iam',
+      service: CANDIDATE_SERVICE,
+    }],
   ].entries()) {
     const member = plan.operations.find(({ id }) => id === operationId);
     await appendTestMutationCheckpoint(store, {
@@ -2857,7 +2972,7 @@ test('all-checkpoint candidate restart reconstructs exact private Service and IA
         state: 'present',
         identitySha256: releaseMutationPlanIdentity(plan, member).specSha256,
         valueSha256: createHash('sha256')
-          .update(JSON.stringify(canonicalFixture(observed))).digest('hex'),
+          .update(JSON.stringify(canonicalFixture(semanticObservation))).digest('hex'),
       },
     });
   }
@@ -2894,6 +3009,103 @@ test('all-checkpoint candidate restart reconstructs exact private Service and IA
     || argv.includes('add-iam-policy-binding')), false);
   assert.equal(calls.length, 4);
   assert.equal(persisted.outputs.candidateService, CANDIDATE_SERVICE);
+  assert.equal(store.records.at(-1).recordType, 'terminal');
+});
+
+test('candidate receipt-write crash hashes authoritative readbacks and ignores only Service resourceVersion drift', async () => {
+  const input = releaseInput();
+  const plan = buildReleasePlan(input, { phase: 'candidate' });
+  const service = (resourceVersion) => ({
+    apiVersion: 'serving.knative.dev/v1',
+    kind: 'Service',
+    metadata: {
+      name: CANDIDATE_SERVICE,
+      resourceVersion,
+      annotations: { 'run.googleapis.com/invoker-iam-disabled': 'false' },
+    },
+    status: { traffic: [{
+      revisionName: plan.candidateRevision,
+      tag: plan.candidateTag,
+      url: plan.candidateOrigin,
+      percent: 100,
+    }] },
+  });
+  const revision = structuredClone(plan.expectedCandidate);
+  const artifact = { image: plan.image };
+  const privateIam = candidatePrivateIam('candidate-private-final');
+  const store = createTestStateStore();
+  let deployed = false;
+  let iamGranted = false;
+  const first = await runGcpRelease({
+    argv: ['--phase=candidate', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    openStateStore: async () => store,
+    loadPhaseReceipt: async () => null,
+    persistReceipt: async () => { throw new Error('injected receipt write failure'); },
+    writeCandidateSpec: async () => true,
+    execute: async (argv) => {
+      if (argv.includes('--dry-run')) return structuredClone(plan.candidateServiceSpec);
+      if (argv[1] === 'services' && argv[2] === 'replace') {
+        deployed = true;
+        return service('mutation-ack-version');
+      }
+      if (argv[1] === 'services' && argv[2] === 'describe') {
+        if (!deployed) {
+          throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+        }
+        return service('authoritative-version-1');
+      }
+      if (argv[1] === 'revisions' && argv[2] === 'describe') {
+        return structuredClone(revision);
+      }
+      if (argv[0] === 'artifacts') return structuredClone(artifact);
+      if (argv.includes('add-iam-policy-binding')) {
+        iamGranted = true;
+        return structuredClone(privateIam);
+      }
+      if (argv.includes('get-iam-policy')) {
+        return iamGranted ? structuredClone(privateIam) : stablePrivateIam('candidate-baseline');
+      }
+      throw new Error(`unexpected initial candidate operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(first.exitCode, 1);
+  assert.equal(first.publicReport.code, 'RELEASE_RECEIPT_WRITE_FAILED');
+  assert.equal(store.records.filter(({ recordType }) => recordType === 'checkpoint').length, 2);
+  assert.equal(store.records.some(({ recordType }) => recordType === 'terminal'), false);
+
+  const restartCalls = [];
+  let persisted = null;
+  const restarted = await runGcpRelease({
+    argv: ['--phase=candidate', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    openStateStore: async () => store,
+    loadPhaseReceipt: async () => null,
+    persistReceipt: async (_releasePlan, receipt) => {
+      persisted = structuredClone(receipt);
+      return true;
+    },
+    execute: async (argv) => {
+      restartCalls.push(argv);
+      if (argv[1] === 'services' && argv[2] === 'describe') {
+        return service('authoritative-version-2');
+      }
+      if (argv[1] === 'revisions' && argv[2] === 'describe') {
+        return structuredClone(revision);
+      }
+      if (argv[0] === 'artifacts') return structuredClone(artifact);
+      if (argv.includes('get-iam-policy')) return structuredClone(privateIam);
+      throw new Error(`restart attempted a candidate mutation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+
+  assert.equal(restarted.exitCode, 0, JSON.stringify(restarted.publicReport));
+  assert.equal(restarted.publicReport.mutationPerformed, false);
+  assert.equal(restartCalls.some((argv) => argv[2] === 'replace'
+    || argv.includes('add-iam-policy-binding')), false);
+  assert.equal(persisted.phase, 'candidate');
   assert.equal(store.records.at(-1).recordType, 'terminal');
 });
 
