@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID as systemRandomUUID } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { lstat, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
@@ -14,6 +14,7 @@ import { finalizeEvidenceRecord } from '../src/services/voice-evidence.js';
 import {
   LATENCY_ACCEPTANCE_CONTRACT,
   finalizeLatencyAcceptanceRecord,
+  normalizeControlPlaneTurnReceipts,
 } from './production-latency-workload.js';
 
 const PROJECT = 'hkbuddy-prod-v1-20260826';
@@ -39,6 +40,9 @@ const PROJECT_NUMBER = /^\d{6,20}$/;
 const REVISION = /^hkbuddy-api-[a-z0-9](?:[a-z0-9-]{0,47}[a-z0-9])?$/;
 const BUILD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ACCEPTANCE_RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const FORBIDDEN_SECRET_KEY = /^(?:authorization|proxy-authorization|cookie|set-cookie|access[_-]?token|id[_-]?token|refresh[_-]?token|token|jwt)$/i;
+const FORBIDDEN_SECRET_VALUE = /(?:\bBearer\s+[A-Za-z0-9._~+/=-]{20,}|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|postgres(?:ql)?:\/\/[^/@\s:]+:[^/@\s]+@)/i;
 const PHASES = Object.freeze([
   'build', 'migration', 'inventory', 'acceptance', 'collect', 'evidence', 'candidate',
   'readiness', 'workload', 'mobile', 'candidate-cleanup', 'promote', 'rollback',
@@ -72,37 +76,37 @@ const execFileAsync = promisify(execFile);
 const EVIDENCE_DEFINITIONS = Object.freeze({
   legacyInventory: Object.freeze({
     secret: 'hkbuddy-legacy-inventory',
-    mountPath: '/var/run/secrets/hkbuddy/legacy-inventory.json',
+    mountPath: '/var/run/secrets/hkbuddy/legacy-inventory/legacy-inventory.json',
     fileEnv: 'V1_LEGACY_RESOURCE_INVENTORY_FILE',
     versionEnv: 'V1_LEGACY_RESOURCE_INVENTORY_VERSION',
   }),
   dependencyAcceptance: Object.freeze({
     secret: 'hkbuddy-dependency-acceptance',
-    mountPath: '/var/run/secrets/hkbuddy/dependency-acceptance.json',
+    mountPath: '/var/run/secrets/hkbuddy/dependency-acceptance/dependency-acceptance.json',
     fileEnv: 'V1_DEPENDENCY_ACCEPTANCE_EVIDENCE_FILE',
     versionEnv: 'V1_DEPENDENCY_ACCEPTANCE_EVIDENCE_VERSION',
   }),
   llmSmoke: Object.freeze({
     secret: 'hkbuddy-llm-smoke',
-    mountPath: '/var/run/secrets/hkbuddy/llm-smoke.json',
+    mountPath: '/var/run/secrets/hkbuddy/llm-smoke/llm-smoke.json',
     fileEnv: 'V1_LLM_SMOKE_EVIDENCE_FILE',
     versionEnv: 'V1_LLM_SMOKE_EVIDENCE_VERSION',
   }),
   asrSmoke: Object.freeze({
     secret: 'hkbuddy-asr-smoke',
-    mountPath: '/var/run/secrets/hkbuddy/asr-smoke.json',
+    mountPath: '/var/run/secrets/hkbuddy/asr-smoke/asr-smoke.json',
     fileEnv: 'V1_ASR_SMOKE_EVIDENCE_FILE',
     versionEnv: 'V1_ASR_SMOKE_EVIDENCE_VERSION',
   }),
   ttsSmoke: Object.freeze({
     secret: 'hkbuddy-tts-smoke',
-    mountPath: '/var/run/secrets/hkbuddy/tts-smoke.json',
+    mountPath: '/var/run/secrets/hkbuddy/tts-smoke/tts-smoke.json',
     fileEnv: 'V1_TTS_SMOKE_EVIDENCE_FILE',
     versionEnv: 'V1_TTS_SMOKE_EVIDENCE_VERSION',
   }),
   iosVoiceAcceptance: Object.freeze({
     secret: 'hkbuddy-ios-voice-acceptance',
-    mountPath: '/var/run/secrets/hkbuddy/ios-voice-acceptance.json',
+    mountPath: '/var/run/secrets/hkbuddy/ios-voice-acceptance/ios-voice-acceptance.json',
     fileEnv: 'V1_IOS_VOICE_ACCEPTANCE_FILE',
     versionEnv: 'V1_IOS_VOICE_ACCEPTANCE_VERSION',
   }),
@@ -115,6 +119,15 @@ function releaseContractError() {
 function exactKeys(value, expected) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value)
     && Object.keys(value).sort().join('\0') === [...expected].sort().join('\0'));
+}
+
+export function containsForbiddenPersistedSecret(value) {
+  if (typeof value === 'string') return FORBIDDEN_SECRET_VALUE.test(value);
+  if (Array.isArray(value)) return value.some(containsForbiddenPersistedSecret);
+  if (!value || typeof value !== 'object') return false;
+  return Object.entries(value).some(([key, child]) => (
+    FORBIDDEN_SECRET_KEY.test(key) || containsForbiddenPersistedSecret(child)
+  ));
 }
 
 function canonical(value) {
@@ -563,19 +576,31 @@ async function writeCandidateServiceSpecFile(plan) {
   return true;
 }
 
-async function writePromotionIamRestorePolicyFile(plan, policy) {
+function promotionIamRestorePolicyPath(plan, attemptId) {
+  if (!UUID.test(String(attemptId ?? ''))) throw new Error('promotion IAM restore attempt is invalid');
+  return join(dirname(plan.sourceArchive), `${plan.candidateRevision}.iam-restore.${attemptId}.json`);
+}
+
+async function writePromotionIamRestorePolicyFile(plan, policy, { attemptId } = {}) {
+  const filePath = promotionIamRestorePolicyPath(plan, attemptId);
   const contents = `${JSON.stringify(policy, null, 2)}\n`;
+  await writeFile(filePath, contents, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+  return filePath;
+}
+
+async function removePromotionIamRestorePolicyFile(plan, filePath) {
+  if (filePath !== promotionIamRestorePolicyPath(
+    plan,
+    basename(filePath).slice(`${plan.candidateRevision}.iam-restore.`.length, -'.json'.length),
+  )) throw new Error('promotion IAM restore policy path is invalid');
+  await rm(filePath);
   try {
-    const metadata = await lstat(plan.promotionIamRestorePolicyPath);
-    if (!metadata.isFile() || metadata.isSymbolicLink()
-      || !Buffer.from(await readFile(plan.promotionIamRestorePolicyPath)).equals(Buffer.from(contents))) {
-      throw new Error('promotion IAM restore policy drift');
-    }
+    await lstat(filePath);
+    throw new Error('promotion IAM restore policy residue remains');
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
-    await writeFile(plan.promotionIamRestorePolicyPath, contents, { encoding: 'utf8', flag: 'wx' });
   }
-  return plan.promotionIamRestorePolicyPath;
+  return true;
 }
 
 export function buildReleasePlan(input = {}, { phase = null } = {}) {
@@ -650,6 +675,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
   const candidateAccess = Object.freeze({
     authenticated: true,
     audience: serviceOrigin,
+    issuer: 'https://accounts.google.com',
     subjectSha256: createHash('sha256').update(PROMOTION_AUTHORITY).digest('hex'),
     taggedUrl: candidateOrigin,
   });
@@ -830,9 +856,6 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     }),
   });
   const candidateServiceSpecPath = join(dirname(input.sourceArchive), `${candidateRevision}.service.yaml`);
-  const promotionIamRestorePolicyPath = join(
-    dirname(input.sourceArchive), `${candidateRevision}.iam-restore.json`,
-  );
   const controlledCandidateServiceSpec = candidateServiceSpec({
     candidateRevision, candidateTag, previousRevision, releaseSha,
     image, environment, bindings, probes,
@@ -1025,7 +1048,8 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
     operation('promote', 'promote-traffic', [
-      'run', 'services', 'update-traffic', SERVICE, `--to-revisions=${candidateRevision}=100`,
+      'run', 'services', 'update-traffic', SERVICE,
+      `--remove-tags=${candidateTag}`, `--to-revisions=${candidateRevision}=100`,
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
     operation('promote', 'promote-readback', [
@@ -1086,7 +1110,6 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     candidateAccess,
     candidateServiceSpecPath,
     candidateServiceSpec: controlledCandidateServiceSpec,
-    promotionIamRestorePolicyPath,
     acceptanceRunId,
     releaseIdentitySha256,
     releaseReceiptDirectory,
@@ -1304,11 +1327,12 @@ function validateCandidateServiceSpecDryRun(value, plan) {
 }
 
 function normalizeCandidateService(value) {
-  if (value?.service && Array.isArray(value.traffic)) return value;
-  const traffic = value?.status?.traffic ?? value?.spec?.traffic;
-  if (!value?.metadata?.name || !Array.isArray(traffic)) return null;
+  const direct = value?.service && Array.isArray(value.traffic);
+  const traffic = direct ? value.traffic : value?.status?.traffic ?? value?.spec?.traffic;
+  const service = direct ? value.service : value?.metadata?.name;
+  if (!service || !Array.isArray(traffic)) return null;
   return {
-    service: value.metadata.name,
+    service,
     traffic: traffic.map((member) => ({
       revision: member.revision ?? member.revisionName,
       tag: member.tag ?? null,
@@ -1351,6 +1375,45 @@ function validateCandidateCleanupService(value, plan) {
   const traffic = normalizeCandidateService(value)?.traffic ?? [];
   if (traffic.some(({ tag }) => tag === plan.candidateTag)) {
     throw new Error('Cloud Run candidate cleanup readback is invalid');
+  }
+  return true;
+}
+
+function validatePromotedService(value, plan) {
+  const normalized = normalizeCandidateService(value);
+  if (!normalized || normalized.service !== SERVICE) {
+    throw new Error('Cloud Run promotion service readback is invalid');
+  }
+  validateTrafficReceipt(value, { revision: plan.candidateRevision });
+  if (normalized.traffic.some(({ tag }) => tag === plan.candidateTag)) {
+    throw new Error('Cloud Run promotion tag cleanup readback is invalid');
+  }
+  return true;
+}
+
+function validatePromotionCompensationSource(value, plan) {
+  const normalized = normalizeCandidateService(value);
+  if (!normalized || normalized.service !== SERVICE || normalized.traffic.length < 1
+    || normalized.traffic.length > 2) {
+    throw new Error('Cloud Run promotion compensation source is invalid');
+  }
+  const seenRevisions = new Set();
+  let routedRevision = null;
+  for (const member of normalized.traffic) {
+    if (![plan.previousRevision, plan.candidateRevision].includes(member.revision)
+      || ![null, plan.candidateTag].includes(member.tag)
+      || (member.tag === plan.candidateTag && member.revision !== plan.candidateRevision)
+      || ![0, 100].includes(member.percent) || seenRevisions.has(member.revision)) {
+      throw new Error('Cloud Run promotion compensation source is invalid');
+    }
+    seenRevisions.add(member.revision);
+    if (member.percent === 100) {
+      if (routedRevision !== null) throw new Error('Cloud Run promotion compensation source is invalid');
+      routedRevision = member.revision;
+    }
+  }
+  if (![plan.previousRevision, plan.candidateRevision].includes(routedRevision)) {
+    throw new Error('Cloud Run promotion compensation source is invalid');
   }
   return true;
 }
@@ -1577,10 +1640,10 @@ export function validateMigrationExecutionReceipt(value, { releaseSha } = {}) {
     || value?.apiVersion !== 'run.googleapis.com/v1' || value?.kind !== 'Execution'
     || !validName || taskCount !== 1 || parallelism !== 1
     || nonnegativeInteger(status?.succeededCount) !== 1
-    || nonnegativeInteger(status?.failedCount) !== 0
-    || nonnegativeInteger(status?.cancelledCount) !== 0
-    || nonnegativeInteger(status?.retriedCount) !== 0
-    || nonnegativeInteger(status?.runningCount) !== 0
+    || nonnegativeInteger(status?.failedCount ?? 0) !== 0
+    || nonnegativeInteger(status?.cancelledCount ?? 0) !== 0
+    || nonnegativeInteger(status?.retriedCount ?? 0) !== 0
+    || nonnegativeInteger(status?.runningCount ?? 0) !== 0
     || completed.length !== 1 || completed[0]?.status !== 'True'
     || typeof completionTime !== 'string' || !Number.isFinite(Date.parse(completionTime))) {
     throw new Error('Cloud Run migration execution receipt is invalid');
@@ -1630,6 +1693,7 @@ export async function validateEvidenceArtifactFile(value, { releaseSha, kind = n
   }
   let record;
   try { record = JSON.parse(textValue); } catch { throw new Error('Evidence artifact file is invalid'); }
+  if (containsForbiddenPersistedSecret(record)) throw new Error('Evidence artifact file is invalid');
   let semanticDigest;
   try { semanticDigest = semanticEvidenceFinalizer(kind)(record).artifactSha256; } catch {
     throw new Error('Evidence artifact file is invalid');
@@ -1687,6 +1751,7 @@ export async function inspectCollectedEvidenceArtifact(filePath, { releaseSha, k
   }
   let record;
   try { record = JSON.parse(textValue); } catch { throw new Error('Collected evidence artifact is invalid'); }
+  if (containsForbiddenPersistedSecret(record)) throw new Error('Collected evidence artifact is invalid');
   const artifactSha256 = record?.artifactSha256;
   const objectSha256 = createHash('sha256').update(contents).digest('hex');
   const expectedCapabilities = {
@@ -1747,6 +1812,306 @@ function validateLatencyObservation(value, expectedSampleCount) {
     && value.available === true && value.sampleCount === expectedSampleCount
     && Number.isFinite(value.p50Ms) && value.p50Ms >= 0
     && Number.isFinite(value.p95Ms) && value.p95Ms >= value.p50Ms;
+}
+
+function rawNearestRank(values, percentile) {
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted.length === 0 ? null : sorted[Math.max(0, Math.ceil(percentile * sorted.length) - 1)];
+}
+
+function rawLatencyMetric(values, expectedCount, { p50 = null, p95 }) {
+  const safe = values.filter((value) => Number.isFinite(value) && value >= 0);
+  const p50Ms = rawNearestRank(safe, 0.5);
+  const p95Ms = rawNearestRank(safe, 0.95);
+  return {
+    sampleCount: safe.length,
+    ...(p50 === null ? {} : { p50Ms, p50ThresholdMs: p50 }),
+    p95Ms,
+    p95ThresholdMs: p95,
+    pass: safe.length === expectedCount && p95Ms !== null && p95Ms <= p95
+      && (p50 === null || (p50Ms !== null && p50Ms <= p50)),
+  };
+}
+
+function rawTimingObservation(samples, operation, layer, expectedCount) {
+  const values = samples.filter((sample) => (
+    sample.operation === operation && sample.layer === layer && sample.outcome === 'success'
+  )).map(({ latencyMs }) => latencyMs);
+  return {
+    available: values.length === expectedCount,
+    sampleCount: values.length,
+    p50Ms: rawNearestRank(values, 0.5),
+    p95Ms: rawNearestRank(values, 0.95),
+  };
+}
+
+function validateRawLatencyReceipts(record, plan) {
+  const raw = record?.rawReceipts;
+  if (!exactKeys(raw, [
+    'acceptanceWindowId', 'asrRequests', 'controlPlaneRequests', 'receiptsSha256',
+    'schemaVersion', 'textTurns', 'timingQueries', 'ttsRequests',
+  ]) || raw.schemaVersion !== 1 || !DIGEST.test(String(raw.acceptanceWindowId ?? ''))
+    || !DIGEST.test(String(raw.receiptsSha256 ?? ''))) {
+    throw new Error('Task 8 raw workload receipts are invalid');
+  }
+  const { receiptsSha256: ignored, ...rawPayload } = raw;
+  void ignored;
+  if (canonicalSha256(rawPayload) !== raw.receiptsSha256
+    || !Array.isArray(raw.textTurns) || raw.textTurns.length !== 200
+    || !Array.isArray(raw.asrRequests) || raw.asrRequests.length !== 30
+    || !Array.isArray(raw.ttsRequests) || raw.ttsRequests.length !== 31
+    || !Array.isArray(raw.timingQueries) || raw.timingQueries.length !== 20
+    || !Array.isArray(raw.controlPlaneRequests) || raw.controlPlaneRequests.length !== 200) {
+    throw new Error('Task 8 raw workload receipts are invalid');
+  }
+  const textKeys = [
+    'ackMs', 'acknowledged', 'assistantMessageId', 'clientMessageId', 'controlledTtsFailure',
+    'correlationId', 'delivered', 'duplicateAssistantReplyCount', 'finalAnswerMs',
+    'groundingEvidenceSha256', 'groundingSatisfied', 'groundingVerified', 'messageLost',
+    'processingVisible', 'processingVisibleMs', 'promptClass', 'replyLanguage', 'replyMode',
+    'requestId', 'requestStatus', 'responseRequestId', 'responseStatus', 'sequence',
+    'sessionIdSha256', 'sessionIndex', 'traceId', 'turnIndex', 'unsupportedVerifiedClaimCount',
+  ];
+  const uuids = new Set();
+  const traceIds = new Set();
+  const assistantIds = new Set();
+  const sessionHashes = new Map();
+  for (const [index, turn] of raw.textTurns.entries()) {
+    const sessionIndex = Math.floor(index / 10);
+    const turnIndex = index % 10;
+    const expectedClass = turnIndex < 4 ? 'grounded' : (turnIndex < 7 ? 'abstention' : 'casual');
+    const expectedMode = turnIndex === 0 || (turnIndex === 1 && sessionIndex < 11) ? 'voice' : 'text';
+    const expectedControlledFailure = turnIndex === 1 && sessionIndex === 10;
+    if (!exactKeys(turn, textKeys) || turn.sequence !== index + 1
+      || turn.sessionIndex !== sessionIndex || turn.turnIndex !== turnIndex
+      || turn.promptClass !== expectedClass || turn.replyMode !== expectedMode
+      || turn.controlledTtsFailure !== expectedControlledFailure
+      || !['en', 'yue-Hant-HK', 'cmn-Hans-CN'].includes(turn.replyLanguage)
+      || turn.replyLanguage !== ['en', 'yue-Hant-HK', 'cmn-Hans-CN'][index % 3]
+      || !DIGEST.test(String(turn.sessionIdSha256 ?? ''))
+      || !UUID.test(String(turn.clientMessageId ?? '')) || !UUID.test(String(turn.correlationId ?? ''))
+      || !UUID.test(String(turn.requestId ?? '')) || !UUID.test(String(turn.responseRequestId ?? ''))
+      || !/^[0-9a-f]{32}$/.test(String(turn.traceId ?? ''))
+      || typeof turn.assistantMessageId !== 'string' || turn.assistantMessageId.length < 1
+      || turn.assistantMessageId.length > 128 || !DIGEST.test(String(turn.groundingEvidenceSha256 ?? ''))
+      || turn.requestStatus !== 202 || turn.responseStatus !== 200
+      || turn.acknowledged !== true || turn.processingVisible !== true || turn.delivered !== true
+      || !Number.isFinite(turn.ackMs) || turn.ackMs < 0
+      || !Number.isFinite(turn.processingVisibleMs) || turn.processingVisibleMs < 0
+      || !Number.isFinite(turn.finalAnswerMs) || turn.finalAnswerMs < 0
+      || turn.messageLost !== false || turn.duplicateAssistantReplyCount !== 0
+      || turn.unsupportedVerifiedClaimCount !== 0 || turn.groundingSatisfied !== true
+      || turn.groundingVerified !== (expectedClass === 'grounded')) {
+      throw new Error('Task 8 raw workload receipts are invalid');
+    }
+    const identifiers = [turn.clientMessageId, turn.correlationId, turn.requestId, turn.responseRequestId];
+    if (identifiers.some((value) => uuids.has(value))) throw new Error('Task 8 raw workload receipts are invalid');
+    identifiers.forEach((value) => uuids.add(value));
+    if (traceIds.has(turn.traceId) || assistantIds.has(turn.assistantMessageId)) {
+      throw new Error('Task 8 raw workload receipts are invalid');
+    }
+    traceIds.add(turn.traceId);
+    assistantIds.add(turn.assistantMessageId);
+    if (sessionHashes.has(sessionIndex) && sessionHashes.get(sessionIndex) !== turn.sessionIdSha256) {
+      throw new Error('Task 8 raw workload receipts are invalid');
+    }
+    sessionHashes.set(sessionIndex, turn.sessionIdSha256);
+  }
+  if (sessionHashes.size !== 20) throw new Error('Task 8 raw workload receipts are invalid');
+
+  const asrKeys = [
+    'bindingId', 'clientUploadId', 'correlationId', 'durationBucketSeconds', 'durationMs',
+    'fixtureId', 'fixtureSha256', 'language', 'ready', 'requestId', 'requestStatus',
+    'responseRequestId', 'responseStatus', 'sampleIndex', 'sequence', 'sessionIndex', 'wireLanguage',
+  ];
+  const languageWire = { cantonese: 'yue-Hant-HK', english: 'en', mandarin: 'cmn-Hans-CN' };
+  for (const [index, item] of raw.asrRequests.entries()) {
+    if (!exactKeys(item, asrKeys) || item.sequence !== index + 1 || item.sampleIndex !== index
+      || item.sessionIndex !== index % 20 || item.ready !== true
+      || item.bindingId !== item.clientUploadId || !UUID.test(String(item.clientUploadId ?? ''))
+      || !UUID.test(String(item.correlationId ?? '')) || !UUID.test(String(item.requestId ?? ''))
+      || !UUID.test(String(item.responseRequestId ?? '')) || item.requestStatus !== 202
+      || item.responseStatus !== 200 || !DIGEST.test(String(item.fixtureSha256 ?? ''))
+      || typeof item.fixtureId !== 'string' || item.fixtureId.length < 1
+      || !Object.hasOwn(languageWire, item.language) || item.wireLanguage !== languageWire[item.language]
+      || ![10, 30, 55].includes(item.durationBucketSeconds)
+      || !Number.isFinite(item.durationMs) || Math.abs(item.durationMs - item.durationBucketSeconds * 1_000) > 1_000) {
+      throw new Error('Task 8 raw workload receipts are invalid');
+    }
+  }
+  const ttsKeys = [
+    'bindingId', 'correlationId', 'durationMs', 'expectedProviderFailure', 'failureCode',
+    'mediaValidated', 'messageIdMatches', 'providerFailureObserved', 'ready', 'requestId',
+    'requestIndex', 'requestStatus', 'responseRequestId', 'responseStatus', 'sequence',
+    'sessionIndex', 'sourceTurnIndex', 'textAvailable',
+  ];
+  for (const [index, item] of raw.ttsRequests.entries()) {
+    const failure = index === 30;
+    if (!exactKeys(item, ttsKeys) || item.sequence !== index + 1 || item.requestIndex !== index
+      || !Number.isSafeInteger(item.sessionIndex) || item.sessionIndex < 0 || item.sessionIndex > 19
+      || !Number.isSafeInteger(item.sourceTurnIndex) || item.sourceTurnIndex < 0 || item.sourceTurnIndex > 9
+      || typeof item.bindingId !== 'string' || !assistantIds.has(item.bindingId)
+      || !UUID.test(String(item.correlationId ?? '')) || !UUID.test(String(item.requestId ?? ''))
+      || !UUID.test(String(item.responseRequestId ?? '')) || item.requestStatus !== 200
+      || item.responseStatus !== 200 || item.durationMs !== null || item.expectedProviderFailure !== failure
+      || item.ready !== !failure || item.providerFailureObserved !== failure
+      || item.failureCode !== (failure ? 'VOICE_SYNTHESIS_REJECTED' : null)
+      || item.textAvailable !== true || item.messageIdMatches !== true || item.mediaValidated !== !failure) {
+      throw new Error('Task 8 raw workload receipts are invalid');
+    }
+  }
+
+  const samples = [];
+  const queryDigests = [];
+  for (const [index, query] of raw.timingQueries.entries()) {
+    if (!exactKeys(query, ['queryDigest', 'samples', 'sequence', 'sessionIndex'])
+      || query.sequence !== index + 1 || query.sessionIndex !== index
+      || !DIGEST.test(String(query.queryDigest ?? '')) || !Array.isArray(query.samples)) {
+      throw new Error('Task 8 raw workload receipts are invalid');
+    }
+    queryDigests.push(query.queryDigest);
+    for (const sample of query.samples) {
+      if (!exactKeys(sample, [
+        'bindingId', 'correlationId', 'durationMs', 'failureCode', 'latencyMs', 'layer',
+        'operation', 'outcome',
+      ]) || !UUID.test(String(sample.correlationId ?? ''))
+        || typeof sample.bindingId !== 'string' || sample.bindingId.length < 1
+        || !['text', 'asr', 'tts'].includes(sample.operation)
+        || !['provider', 'server'].includes(sample.layer)
+        || !['success', 'failure'].includes(sample.outcome)
+        || !Number.isFinite(sample.latencyMs) || sample.latencyMs < 0
+        || (sample.operation === 'asr' ? !Number.isFinite(sample.durationMs) : sample.durationMs !== null)
+        || (sample.outcome === 'success' ? sample.failureCode !== null
+          : sample.failureCode !== 'VOICE_SYNTHESIS_REJECTED')) {
+        throw new Error('Task 8 raw workload receipts are invalid');
+      }
+      samples.push(sample);
+    }
+  }
+  if (samples.length !== 402 || new Set(queryDigests).size !== 20) {
+    throw new Error('Task 8 raw workload receipts are invalid');
+  }
+  const sampleKeys = new Set();
+  for (const sample of samples) {
+    const key = `${sample.operation}\0${sample.layer}\0${sample.correlationId}\0${sample.bindingId}`;
+    if (sampleKeys.has(key)) throw new Error('Task 8 raw workload receipts are invalid');
+    sampleKeys.add(key);
+  }
+  const match = (item, operation, layer) => samples.filter((sample) => (
+    sample.operation === operation && sample.layer === layer
+    && sample.correlationId === item.correlationId && sample.bindingId === item.bindingId
+  ));
+  const textWithBinding = raw.textTurns.map((item) => ({ ...item, bindingId: item.assistantMessageId }));
+  if (textWithBinding.some((item) => match(item, 'text', 'server').length !== 1
+      || match(item, 'text', 'provider').length !== (item.promptClass === 'grounded' ? 1 : 0))
+    || raw.asrRequests.some((item) => match(item, 'asr', 'server').length !== 1
+      || match(item, 'asr', 'provider').length !== 1)
+    || raw.ttsRequests.some((item) => match(item, 'tts', 'server').length !== 1
+      || match(item, 'tts', 'provider').length !== 1)) {
+    throw new Error('Task 8 raw workload receipts are invalid');
+  }
+  for (const item of raw.asrRequests) {
+    for (const sample of [...match(item, 'asr', 'server'), ...match(item, 'asr', 'provider')]) {
+      if (sample.durationMs !== item.durationMs || sample.outcome !== 'success' || sample.failureCode !== null) {
+        throw new Error('Task 8 raw workload receipts are invalid');
+      }
+    }
+  }
+  for (const item of raw.ttsRequests) {
+    const outcome = item.expectedProviderFailure ? 'failure' : 'success';
+    for (const sample of [...match(item, 'tts', 'server'), ...match(item, 'tts', 'provider')]) {
+      if (sample.outcome !== outcome
+        || sample.failureCode !== (item.expectedProviderFailure ? 'VOICE_SYNTHESIS_REJECTED' : null)) {
+        throw new Error('Task 8 raw workload receipts are invalid');
+      }
+    }
+  }
+
+  const controlKeys = ['insertId', 'latencyMs', 'sequence', 'status', 'timestamp', 'trace'];
+  const controlInsertIds = new Set();
+  const controlTraces = new Set();
+  for (const [index, entry] of raw.controlPlaneRequests.entries()) {
+    if (!exactKeys(entry, controlKeys) || entry.sequence !== index + 1 || entry.status !== 202
+      || typeof entry.insertId !== 'string' || entry.insertId.length < 1
+      || typeof entry.trace !== 'string'
+      || !new RegExp(`^projects/${PROJECT}/traces/[0-9a-f]{32}$`).test(entry.trace)
+      || !Number.isFinite(Date.parse(entry.timestamp))
+      || !Number.isFinite(entry.latencyMs) || entry.latencyMs < 0 || entry.latencyMs > 60_000
+      || controlInsertIds.has(entry.insertId) || controlTraces.has(entry.trace)) {
+      throw new Error('Task 8 raw workload receipts are invalid');
+    }
+    controlInsertIds.add(entry.insertId);
+    controlTraces.add(entry.trace);
+  }
+  if (![...traceIds].every((traceId) => controlTraces.has(`projects/${PROJECT}/traces/${traceId}`))) {
+    throw new Error('Task 8 raw workload receipts are invalid');
+  }
+
+  const asrServerLatency = (item) => match(item, 'asr', 'server')[0].latencyMs;
+  const successfulTts = raw.ttsRequests.filter(({ expectedProviderFailure }) => !expectedProviderFailure);
+  const metrics = {
+    sendAck: rawLatencyMetric(raw.textTurns.map(({ ackMs }) => ackMs), 200, { p95: 300 }),
+    processingVisible: rawLatencyMetric(raw.textTurns.map(({ processingVisibleMs }) => processingVisibleMs), 200, { p95: 500 }),
+    groundedResponse: rawLatencyMetric(raw.textTurns.filter(({ promptClass }) => promptClass === 'grounded')
+      .map(({ finalAnswerMs }) => finalAnswerMs), 80, { p50: 2_500, p95: 6_000 }),
+    asr10: rawLatencyMetric(raw.asrRequests.filter(({ durationBucketSeconds }) => durationBucketSeconds === 10)
+      .map(asrServerLatency), 10, { p50: 2_500, p95: 4_000 }),
+    asr30: rawLatencyMetric(raw.asrRequests.filter(({ durationBucketSeconds }) => durationBucketSeconds === 30)
+      .map(asrServerLatency), 10, { p95: 6_000 }),
+    asr55: rawLatencyMetric(raw.asrRequests.filter(({ durationBucketSeconds }) => durationBucketSeconds === 55)
+      .map(asrServerLatency), 10, { p95: 6_000 }),
+    ttsReady: rawLatencyMetric(successfulTts.map((item) => match(item, 'tts', 'server')[0].latencyMs), 30,
+      { p50: 2_500, p95: 5_000 }),
+  };
+  const counts = {
+    sessionsCreated: sessionHashes.size,
+    textTurnsAttempted: raw.textTurns.length,
+    textTurnsAcknowledged: raw.textTurns.filter(({ acknowledged }) => acknowledged).length,
+    textTurnsDelivered: raw.textTurns.filter(({ delivered }) => delivered).length,
+    asrRequestsAttempted: raw.asrRequests.length,
+    asrReady: raw.asrRequests.filter(({ ready }) => ready).length,
+    ttsRequestsAttempted: raw.ttsRequests.length,
+    ttsReady: raw.ttsRequests.filter(({ ready }) => ready).length,
+    ttsControlledProviderFailures: raw.ttsRequests.filter((item) => (
+      item.expectedProviderFailure && item.providerFailureObserved
+      && item.failureCode === 'VOICE_SYNTHESIS_REJECTED'
+    )).length,
+  };
+  const invariants = {
+    acknowledgedMessageLossCount: raw.textTurns.filter(({ acknowledged, messageLost }) => acknowledged && messageLost).length,
+    duplicateAssistantReplyCount: raw.textTurns.reduce((sum, item) => sum + item.duplicateAssistantReplyCount, 0),
+    unsupportedVerifiedClaimCount: raw.textTurns.reduce((sum, item) => sum + item.unsupportedVerifiedClaimCount, 0),
+    ttsFailureTextLossCount: raw.ttsRequests.filter(({ textAvailable }) => !textAvailable).length,
+    ttsMediaValidationFailureCount: raw.ttsRequests.filter((item) => !item.expectedProviderFailure && !item.mediaValidated).length,
+    ttsMessageBindingMismatchCount: raw.ttsRequests.filter(({ messageIdMatches }) => !messageIdMatches).length,
+    controlledTtsProviderFailureMismatchCount: raw.ttsRequests.filter((item) => item.expectedProviderFailure && (
+      item.ready || !item.providerFailureObserved || item.failureCode !== 'VOICE_SYNTHESIS_REJECTED'
+    )).length,
+  };
+  const observations = {
+    releaseCommitSha: plan.releaseSha,
+    queryDigests: { sampleCount: 20, values: [...queryDigests].sort(), pass: true },
+    provider: {
+      text: rawTimingObservation(samples, 'text', 'provider', 80),
+      asr: rawTimingObservation(samples, 'asr', 'provider', 30),
+      tts: rawTimingObservation(samples, 'tts', 'provider', 30),
+    },
+    server: {
+      text: rawTimingObservation(samples, 'text', 'server', 200),
+      asr: rawTimingObservation(samples, 'asr', 'server', 30),
+      tts: rawTimingObservation(samples, 'tts', 'server', 30),
+    },
+    pairs: {
+      text: { available: true, expectedServerCount: 200, serverBoundCount: 200, expectedProviderCount: 80, providerPairedCount: 80 },
+      asr: { available: true, expectedCount: 30, pairedCount: 30 },
+      tts: { available: true, expectedSuccessCount: 30, successPairedCount: 30, expectedFailureCount: 1, failurePairedCount: 1 },
+    },
+  };
+  const result = Object.values(metrics).every(({ pass }) => pass)
+    && Object.values(invariants).every((value) => value === 0)
+    && Object.values(counts).every((value, index) => value === [20, 200, 200, 200, 30, 30, 31, 30, 1][index])
+    && ['provider', 'server'].every((layer) => Object.values(observations[layer]).every(({ available }) => available));
+  return { counts, invariants, metrics, observations, result };
 }
 
 function validateLatencyAcceptanceRecord(record, plan, now) {
@@ -1811,15 +2176,36 @@ function validateLatencyAcceptanceRecord(record, plan, now) {
   ));
   const expectedRevision = `${SERVICE}-${plan.releaseSha.slice(0, 12)}`;
   const expectedOrigin = plan.serviceOrigin.replace('https://', `https://${plan.candidateTag}---`);
+  const expectedReleaseBinding = {
+    project: PROJECT,
+    region: REGION,
+    service: SERVICE,
+    releaseSha: plan.releaseSha,
+    sourceArchiveSha256: plan.sourceArchiveSha256,
+    imageDigest: plan.imageDigest,
+    candidateRevision: plan.candidateRevision,
+    candidateTag: plan.candidateTag,
+    serviceOrigin: plan.serviceOrigin,
+    candidateOrigin: plan.candidateOrigin,
+    trafficPercent: 0,
+  };
+  let derived;
+  try { derived = validateRawLatencyReceipts(record, plan); } catch {
+    throw new Error('Task 8 workload evidence is invalid');
+  }
   if (!exactKeys(record, [
-    'artifactSha256', 'candidateOrigin', 'commitSha', 'counts', 'fixtureSetSha256',
-    'invariants', 'metrics', 'observations', 'occurredAt', 'result', 'schemaVersion', 'workload',
-  ]) || record.schemaVersion !== 3 || record.commitSha !== plan.releaseSha
+    'access', 'artifactSha256', 'candidateOrigin', 'commitSha', 'counts', 'fixtureSetSha256',
+    'invariants', 'metrics', 'observations', 'occurredAt', 'rawReceipts', 'releaseBinding',
+    'result', 'schemaVersion', 'workload',
+  ]) || record.schemaVersion !== 4 || record.commitSha !== plan.releaseSha
     || record.candidateOrigin !== plan.candidateOrigin || plan.candidateOrigin !== expectedOrigin
     || plan.candidateRevision !== expectedRevision || !IMAGE_DIGEST.test(String(plan.imageDigest ?? ''))
+    || !exact(record.access, plan.candidateAccess)
+    || !exact(record.releaseBinding, expectedReleaseBinding)
     || !DIGEST.test(String(record.fixtureSetSha256 ?? ''))
     || !exact(record.workload, LATENCY_ACCEPTANCE_CONTRACT)
     || !exact(record.counts, expectedCounts) || !exact(record.invariants, expectedInvariants)
+    || !exact(record.counts, derived.counts) || !exact(record.invariants, derived.invariants)
     || !exactKeys(record.metrics, Object.keys(expectedMetrics))
     || !Object.entries(expectedMetrics).every(([key, expected]) => (
       validateLatencyMetric(record.metrics[key], expected)
@@ -1829,11 +2215,18 @@ function validateLatencyAcceptanceRecord(record, plan, now) {
     || !exactKeys(queryDigests, ['pass', 'sampleCount', 'values'])
     || queryDigests.sampleCount !== 20 || queryDigests.pass !== true || !exactQueryDigests
     || !exactObservationLayers || !exact(observations.pairs, expectedPairs)
-    || record.result !== true || !recentEvidenceTime(record.occurredAt, now)
+    || !exact(record.metrics, derived.metrics) || !exact(record.observations, derived.observations)
+    || record.result !== true || record.result !== derived.result || !recentEvidenceTime(record.occurredAt, now)
     || finalizeLatencyAcceptanceRecord(record).artifactSha256 !== record.artifactSha256) {
     throw new Error('Task 8 workload evidence is invalid');
   }
-  return true;
+  return Object.freeze({
+    acceptanceWindowId: record.rawReceipts.acceptanceWindowId,
+    candidateOrigin: plan.candidateOrigin,
+    candidateRevision: plan.candidateRevision,
+    controlPlaneRequests: record.rawReceipts.controlPlaneRequests,
+    expectedTraceIds: record.rawReceipts.textTurns.map(({ traceId }) => traceId),
+  });
 }
 
 async function readExactJsonArtifact(entry, errorMessage) {
@@ -1856,6 +2249,7 @@ async function readExactJsonArtifact(entry, errorMessage) {
   }
   let record;
   try { record = JSON.parse(raw); } catch { throw new Error(errorMessage); }
+  if (containsForbiddenPersistedSecret(record)) throw new Error(errorMessage);
   if (raw !== `${JSON.stringify(record, null, 2)}\n`) throw new Error(errorMessage);
   return { record, bytes };
 }
@@ -1880,6 +2274,7 @@ async function validateBoundFile(value, { json = false, png = false } = {}) {
   if (!Buffer.from(raw).equals(bytes)) throw new Error('Mobile evidence trace is invalid');
   let parsed;
   try { parsed = JSON.parse(raw); } catch { throw new Error('Mobile evidence trace is invalid'); }
+  if (containsForbiddenPersistedSecret(parsed)) throw new Error('Mobile evidence trace is invalid');
   if (raw !== `${JSON.stringify(parsed, null, 2)}\n`) throw new Error('Mobile evidence trace is invalid');
   return parsed;
 }
@@ -1889,8 +2284,7 @@ async function validateTask8EvidenceArtifact(entry, phase, plan, { now }) {
   const { record } = await readExactJsonArtifact(entry, errorMessage);
   if (record?.artifactSha256 !== entry.artifactSha256) throw new Error(errorMessage);
   if (phase === 'workload') {
-    try { validateLatencyAcceptanceRecord(record, plan, now); } catch { throw new Error(errorMessage); }
-    return true;
+    try { return validateLatencyAcceptanceRecord(record, plan, now); } catch { throw new Error(errorMessage); }
   }
   if (finalizeReleaseEvidenceRecord(record).artifactSha256 !== record.artifactSha256
     || record.commitSha !== plan.releaseSha || record.sourceArchiveSha256 !== plan.sourceArchiveSha256
@@ -1995,7 +2389,8 @@ function validateReceiptOutputs(phase, outputs, plan) {
   } else if (phase === 'migration') {
     if (!exactKeys(outputs, ['executionName', 'imageDigest', 'job'])
       || outputs.imageDigest !== plan.imageDigest || outputs.job !== MIGRATION_JOB
-      || typeof outputs.executionName !== 'string' || !outputs.executionName.includes('/executions/')) {
+      || typeof outputs.executionName !== 'string'
+      || !new RegExp(`^${MIGRATION_JOB}-[a-z0-9](?:[a-z0-9-]{0,48}[a-z0-9])?$`).test(outputs.executionName)) {
       throw new Error('Release migration receipt outputs are invalid');
     }
   } else if (phase === 'inventory') {
@@ -2234,6 +2629,25 @@ function parseArguments(argv, releaseSha) {
   return { phase, confirmed };
 }
 
+function workloadLoggingReadArgv(attestation) {
+  const userAgent = `hkbuddy-v1-acceptance/${attestation.acceptanceWindowId}`;
+  const filter = [
+    'logName="projects/hkbuddy-prod-v1-20260826/logs/run.googleapis.com%2Frequests"',
+    'resource.type="cloud_run_revision"',
+    `resource.labels.project_id="${PROJECT}"`,
+    `resource.labels.location="${REGION}"`,
+    `resource.labels.service_name="${SERVICE}"`,
+    `resource.labels.revision_name="${attestation.candidateRevision}"`,
+    'httpRequest.requestMethod="POST"',
+    `httpRequest.requestUrl="${attestation.candidateOrigin}/api/v1/messages"`,
+    'httpRequest.status=202',
+    `httpRequest.userAgent="${userAgent}"`,
+  ].join(' AND ');
+  return [
+    'logging', 'read', filter, `--project=${PROJECT}`, '--order=asc', '--limit=201', '--format=json',
+  ];
+}
+
 function publish(writeOutput, exitCode, publicReport) {
   writeOutput(`${JSON.stringify(publicReport)}\n`);
   return { exitCode, publicReport };
@@ -2249,6 +2663,8 @@ export async function runGcpRelease({
   verifyTask8Evidence = validateTask8EvidenceArtifact,
   writeCandidateSpec = writeCandidateServiceSpecFile,
   writeIamRestorePolicy = writePromotionIamRestorePolicyFile,
+  removeIamRestorePolicy = removePromotionIamRestorePolicyFile,
+  randomUUID = systemRandomUUID,
   loadReceipts = loadReleaseReceiptFiles,
   persistReceipt = persistReleaseReceipt,
   now = () => new Date(),
@@ -2297,6 +2713,7 @@ export async function runGcpRelease({
   }
   let priorReceipts = [];
   const receiptPhaseIndex = RECEIPT_PHASES.indexOf(selection.phase);
+  const task8Attestations = {};
   try {
     if (selection.phase === 'promote') {
       if (typeof loadReceipts !== 'function') throw new Error('receipt loader unavailable');
@@ -2319,10 +2736,15 @@ export async function runGcpRelease({
       ? ['readiness', 'workload', 'mobile']
       : (['readiness', 'workload', 'mobile'].includes(selection.phase) ? [selection.phase] : []);
     for (const phase of task8Phases) {
-      if (typeof verifyTask8Evidence !== 'function'
-        || await verifyTask8Evidence(plan.task8Evidence[phase], phase, plan, { now: now() }) !== true) {
+      if (typeof verifyTask8Evidence !== 'function') {
         throw new Error('Task 8 evidence verification failed');
       }
+      const verified = await verifyTask8Evidence(plan.task8Evidence[phase], phase, plan, { now: now() });
+      if (verified !== true && !(phase === 'workload' && verified
+        && typeof verified === 'object' && !Array.isArray(verified))) {
+        throw new Error('Task 8 evidence verification failed');
+      }
+      task8Attestations[phase] = verified;
     }
   } catch {
     return publish(writeOutput, 1, {
@@ -2332,7 +2754,7 @@ export async function runGcpRelease({
   }
   let executor;
   try {
-    executor = execute ?? (selected.length > 0
+    executor = execute ?? (selected.length > 0 || task8Attestations.workload !== undefined
       ? createDefaultGcloudExecutor({ environment })
       : async () => { throw new Error('No control-plane operation is planned'); });
   } catch {
@@ -2352,6 +2774,27 @@ export async function runGcpRelease({
   let mutationAttempted = false;
   let promotionIamBaseline = null;
   let promotionIamMutationAttempted = false;
+  let promotionTrafficMutationAttempted = false;
+  if (task8Attestations.workload && task8Attestations.workload !== true) {
+    try {
+      const attestation = task8Attestations.workload;
+      const rawLogs = await executor(workloadLoggingReadArgv(attestation));
+      const normalized = normalizeControlPlaneTurnReceipts(rawLogs, {
+        acceptanceWindowId: attestation.acceptanceWindowId,
+        candidateOrigin: attestation.candidateOrigin,
+        candidateRevision: attestation.candidateRevision,
+        expectedTraceIds: attestation.expectedTraceIds,
+      });
+      if (!normalized || !exact(normalized, attestation.controlPlaneRequests)) {
+        throw new Error('workload request logs differ from the evidence artifact');
+      }
+    } catch {
+      return publish(writeOutput, 1, {
+        status: 'failed', code: 'WORKLOAD_CONTROL_PLANE_INVALID', mutationPerformed: false,
+        releaseSha: plan.releaseSha, phase: selection.phase, completed: [],
+      });
+    }
+  }
   try {
     if (selection.phase === 'collect') {
       await assertCollectionDestinationsAbsent(plan.acceptanceOutputs);
@@ -2365,6 +2808,7 @@ export async function runGcpRelease({
     for (const member of selected) {
       if (operationMayMutate(member.id)) mutationAttempted = true;
       if (member.id === 'promote-public-service') promotionIamMutationAttempted = true;
+      if (member.id === 'promote-traffic') promotionTrafficMutationAttempted = true;
       const receipt = await executor(member.argv);
       if (member.id === 'build-submit') {
         buildReceipt = validateBuildReceipt(receipt, {
@@ -2448,7 +2892,7 @@ export async function runGcpRelease({
       } else if (member.id === 'candidate-cleanup-service-readback') {
         validateCandidateCleanupService(receipt, plan);
       } else if (member.id === 'promote-traffic' || member.id === 'promote-readback') {
-        validateTrafficReceipt(receipt, { revision: plan.candidateRevision });
+        validatePromotedService(receipt, plan);
       } else if (member.id === 'rollback-traffic' || member.id === 'rollback-readback') {
         validateCandidateCleanupService(receipt, plan);
       } else if (selection.phase === 'acceptance' && member.id.endsWith('-readback')) {
@@ -2500,7 +2944,37 @@ export async function runGcpRelease({
   } catch {
     let cleanupFailed = false;
     let promotionIamRestored = null;
+    let promotionTrafficRestored = null;
+    if (selection.phase === 'promote' && promotionTrafficMutationAttempted) {
+      try {
+        const currentService = await executor([
+          'run', 'services', 'describe', SERVICE,
+          `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+        ]);
+        try {
+          validateCandidateCleanupService(currentService, plan);
+        } catch {
+          validatePromotionCompensationSource(currentService, plan);
+          const restoreReceipt = await executor([
+            'run', 'services', 'update-traffic', SERVICE,
+            `--remove-tags=${plan.candidateTag}`, `--to-revisions=${plan.previousRevision}=100`,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+          validateCandidateCleanupService(restoreReceipt, plan);
+          const freshService = await executor([
+            'run', 'services', 'describe', SERVICE,
+            `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+          ]);
+          validateCandidateCleanupService(freshService, plan);
+        }
+        promotionTrafficRestored = true;
+      } catch {
+        cleanupFailed = true;
+        promotionTrafficRestored = false;
+      }
+    }
     if (selection.phase === 'promote' && promotionIamMutationAttempted && promotionIamBaseline) {
+      let restorePath = null;
       try {
         const currentReceipt = await executor([
           'run', 'services', 'get-iam-policy', SERVICE,
@@ -2518,9 +2992,11 @@ export async function runGcpRelease({
             ...(promotionIamBaseline.version === null
               ? {} : { version: promotionIamBaseline.version }),
           };
-          const restorePath = typeof writeIamRestorePolicy === 'function'
-            ? await writeIamRestorePolicy(plan, restorePolicy) : null;
-          if (restorePath !== plan.promotionIamRestorePolicyPath) {
+          const attemptId = typeof randomUUID === 'function' ? randomUUID() : null;
+          const expectedRestorePath = promotionIamRestorePolicyPath(plan, attemptId);
+          restorePath = typeof writeIamRestorePolicy === 'function'
+            ? await writeIamRestorePolicy(plan, restorePolicy, { attemptId }) : null;
+          if (restorePath !== expectedRestorePath) {
             throw new Error('Promotion IAM restore policy is unavailable');
           }
           const restoreReceipt = await executor([
@@ -2540,14 +3016,27 @@ export async function runGcpRelease({
       } catch {
         cleanupFailed = true;
         promotionIamRestored = false;
+      } finally {
+        if (restorePath !== null) {
+          try {
+            if (typeof removeIamRestorePolicy !== 'function'
+              || await removeIamRestorePolicy(plan, restorePath) !== true) {
+              throw new Error('Promotion IAM restore policy cleanup failed');
+            }
+          } catch {
+            cleanupFailed = true;
+            promotionIamRestored = false;
+          }
+        }
       }
     }
     return publish(writeOutput, 1, {
-      status: 'failed', code: cleanupFailed ? 'PROMOTION_IAM_RESTORE_FAILED' : 'RELEASE_PHASE_FAILED',
+      status: 'failed', code: cleanupFailed ? 'PROMOTION_COMPENSATION_FAILED' : 'RELEASE_PHASE_FAILED',
       mutationPerformed: mutationAttempted,
       releaseSha: plan.releaseSha, phase: selection.phase, completed,
       resumeBoundary: selected[completed.length]?.id ?? null,
       ...(promotionIamRestored === null ? {} : { promotionIamRestored }),
+      ...(promotionTrafficRestored === null ? {} : { promotionTrafficRestored }),
     });
   }
   const publicReport = {

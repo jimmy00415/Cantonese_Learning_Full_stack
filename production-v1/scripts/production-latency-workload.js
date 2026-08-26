@@ -11,8 +11,15 @@ export { decodeCanonicalMp3, validateCanonicalMp3 } from '../src/media/canonical
 import { decodeCanonicalMp3 } from '../src/media/canonical-mp3.js';
 
 const execFileAsync = promisify(execFile);
+const PROJECT = 'hkbuddy-prod-v1-20260826';
+const REGION = 'asia-east2';
+const SERVICE = 'hkbuddy-api';
+const QA_PRINCIPAL = 'admin@motionexp.com';
 const RELEASE_SHA = /^[0-9a-f]{40}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
+const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/;
+const CANDIDATE_REVISION = /^hkbuddy-api-[0-9a-f]{12}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SAMPLE_ID = /^[a-z0-9][a-z0-9._-]{0,79}$/;
 const REPLY_LANGUAGES = Object.freeze(['en', 'yue-Hant-HK', 'cmn-Hans-CN']);
 const DEFAULT_OPERATION_DEADLINE_MS = 30_000;
@@ -27,7 +34,7 @@ const productionRoot = fileURLToPath(new URL('../', import.meta.url));
 const defaultArtifactDirectory = join(productionRoot, 'reports', 'latency');
 
 export const LATENCY_ACCEPTANCE_CONTRACT = Object.freeze({
-  schemaVersion: 3,
+  schemaVersion: 4,
   text: {
     sessions: 20,
     turns: 200,
@@ -153,6 +160,124 @@ function canonicalValue(value) {
 
 function canonicalJson(value) {
   return JSON.stringify(canonicalValue(value));
+}
+
+function sha256(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function decodeJwtPayload(token) {
+  if (typeof token !== 'string' || token.length < 40 || token.length > 16 * 1024
+    || /\s/.test(token) || token.split('.').length !== 3) return null;
+  try {
+    const [headerPart, payloadPart, signaturePart] = token.split('.');
+    const header = JSON.parse(Buffer.from(headerPart, 'base64url').toString('utf8'));
+    const payload = JSON.parse(Buffer.from(payloadPart, 'base64url').toString('utf8'));
+    if (header?.alg !== 'RS256' || header?.typ !== 'JWT' || !signaturePart
+      || !payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+    return payload;
+  } catch { return null; }
+}
+
+function authenticatedAccess(token, { audience, taggedUrl, now }) {
+  const payload = decodeJwtPayload(token);
+  const nowSeconds = Math.floor(new Date(now).getTime() / 1_000);
+  const issuer = payload?.iss;
+  if (!payload || !Number.isFinite(nowSeconds)
+    || !['accounts.google.com', 'https://accounts.google.com'].includes(issuer)
+    || payload.aud !== audience || payload.email !== QA_PRINCIPAL
+    || typeof payload.sub !== 'string' || payload.sub.length < 1 || payload.sub.length > 256
+    || payload.email_verified === false
+    || !Number.isSafeInteger(payload.iat) || !Number.isSafeInteger(payload.exp)
+    || payload.iat > nowSeconds + 60 || payload.exp <= nowSeconds || payload.exp - payload.iat > 3_700) return null;
+  return Object.freeze({
+    authenticated: true,
+    audience,
+    issuer: issuer === 'accounts.google.com' ? 'https://accounts.google.com' : issuer,
+    subjectSha256: sha256(payload.email),
+    taggedUrl,
+  });
+}
+
+export async function mintGcloudIdentityToken({ audience, signal, executeFile = execFileAsync } = {}) {
+  if (typeof audience !== 'string' || !audience.startsWith('https://') || signal?.aborted) {
+    throw new Error('identity token request is invalid');
+  }
+  const result = await executeFile('gcloud', [
+    'auth', 'print-identity-token', `--audiences=${audience}`, `--account=${QA_PRINCIPAL}`, '--quiet',
+  ], { encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024, signal });
+  const token = String(result?.stdout ?? '').trim();
+  if (!token || /[\r\n\s]/.test(token)) throw new Error('identity token response is invalid');
+  return token;
+}
+
+async function defaultReadControlPlaneReceipts({
+  acceptanceWindowId, candidateOrigin, candidateRevision, occurredAt,
+}, { signal, executeFile = execFileAsync } = {}) {
+  const userAgent = `hkbuddy-v1-acceptance/${acceptanceWindowId}`;
+  const filter = [
+    'resource.type="cloud_run_revision"',
+    `logName="projects/${PROJECT}/logs/run.googleapis.com%2Frequests"`,
+    `resource.labels.project_id="${PROJECT}"`,
+    `resource.labels.location="${REGION}"`,
+    `resource.labels.service_name="${SERVICE}"`,
+    `resource.labels.revision_name="${candidateRevision}"`,
+    'httpRequest.requestMethod="POST"',
+    `httpRequest.requestUrl="${candidateOrigin}/api/v1/messages"`,
+    'httpRequest.status=202',
+    `httpRequest.userAgent="${userAgent}"`,
+    `timestamp>="${occurredAt}"`,
+  ].join(' AND ');
+  const result = await executeFile('gcloud', [
+    'logging', 'read', filter, `--project=${PROJECT}`, '--order=asc', '--limit=201', '--format=json',
+  ], { encoding: 'utf8', windowsHide: true, maxBuffer: 4 * 1024 * 1024, signal });
+  const parsed = JSON.parse(String(result?.stdout ?? ''));
+  if (!Array.isArray(parsed)) throw new Error('control-plane workload receipts are invalid');
+  return parsed;
+}
+
+export function normalizeControlPlaneTurnReceipts(entries, {
+  acceptanceWindowId, candidateOrigin, candidateRevision, expectedTraceIds,
+} = {}) {
+  const userAgent = `hkbuddy-v1-acceptance/${acceptanceWindowId}`;
+  if (!SHA256.test(String(acceptanceWindowId ?? ''))
+    || !CANDIDATE_REVISION.test(String(candidateRevision ?? ''))
+    || !Array.isArray(expectedTraceIds) || expectedTraceIds.length !== 200
+    || expectedTraceIds.some((value) => !/^[0-9a-f]{32}$/.test(String(value ?? '')))
+    || new Set(expectedTraceIds).size !== 200
+    || typeof candidateOrigin !== 'string' || !Array.isArray(entries) || entries.length !== 200) return null;
+  const normalized = [];
+  for (const value of entries) {
+    const labels = value?.resource?.labels;
+    const request = value?.httpRequest;
+    const latency = /^([0-9]+(?:\.[0-9]{1,9})?)s$/.exec(String(request?.latency ?? ''));
+    const latencyMs = latency ? Number(latency[1]) * 1_000 : NaN;
+    if (value?.resource?.type !== 'cloud_run_revision'
+      || labels?.project_id !== PROJECT || labels?.location !== REGION
+      || labels?.service_name !== SERVICE || labels?.revision_name !== candidateRevision
+      || request?.requestMethod !== 'POST' || request?.requestUrl !== `${candidateOrigin}/api/v1/messages`
+      || request?.userAgent !== userAgent || Number(request?.status) !== 202
+      || typeof value?.insertId !== 'string' || value.insertId.length < 1 || value.insertId.length > 256
+      || typeof value?.trace !== 'string' || !new RegExp(`^projects/${PROJECT}/traces/[0-9a-f]{32}$`, 'i').test(value.trace)
+      || typeof value?.timestamp !== 'string' || !Number.isFinite(Date.parse(value.timestamp))
+      || !Number.isFinite(latencyMs) || latencyMs < 0 || latencyMs > 60_000) return null;
+    normalized.push({
+      insertId: value.insertId,
+      latencyMs,
+      status: 202,
+      timestamp: new Date(value.timestamp).toISOString(),
+      trace: value.trace,
+    });
+  }
+  normalized.sort((left, right) => (
+    left.timestamp.localeCompare(right.timestamp) || left.insertId.localeCompare(right.insertId)
+  ));
+  if (new Set(normalized.map(({ insertId }) => insertId)).size !== 200
+    || new Set(normalized.map(({ trace }) => trace)).size !== 200
+    || !expectedTraceIds.every((traceId) => normalized.some(({ trace }) => (
+      trace === `projects/${PROJECT}/traces/${traceId}`
+    )))) return null;
+  return Object.freeze(normalized.map((value, index) => Object.freeze({ sequence: index + 1, ...value })));
 }
 
 export function finalizeLatencyAcceptanceRecord(record) {
@@ -367,6 +492,15 @@ function normalizeTextResult(value) {
     messageLost: acknowledged && value?.messageLost === true,
     duplicateAssistantReplyCount: Math.max(0, nonNegativeInteger(value?.assistantReplyCount, 0) - 1),
     unsupportedVerifiedClaimCount: nonNegativeInteger(value?.unsupportedVerifiedClaimCount, 0),
+    requestStatus: nonNegativeInteger(value?.requestStatus, 0),
+    requestId: UUID.test(String(value?.requestId ?? '')) ? value.requestId.toLowerCase() : null,
+    responseStatus: nonNegativeInteger(value?.responseStatus, 0),
+    responseRequestId: UUID.test(String(value?.responseRequestId ?? ''))
+      ? value.responseRequestId.toLowerCase() : null,
+    groundingSatisfied: value?.groundingSatisfied === true,
+    groundingVerified: value?.groundingVerified === true,
+    groundingEvidenceSha256: SHA256.test(String(value?.groundingEvidenceSha256 ?? ''))
+      ? value.groundingEvidenceSha256 : null,
     replyMode: value?.replyMode === 'voice' ? 'voice' : 'text',
     assistantMessageId: delivered && typeof value?.assistantMessageId === 'string' && value.assistantMessageId
       ? value.assistantMessageId : null,
@@ -382,6 +516,11 @@ function normalizeAsrResult(value, expected = {}) {
     durationMs: Number.isFinite(expected.durationMs) ? expected.durationMs : null,
     durationBucketSeconds: [10, 30, 55].includes(expected.durationBucketSeconds)
       ? expected.durationBucketSeconds : null,
+    requestStatus: nonNegativeInteger(value?.requestStatus, 0),
+    requestId: UUID.test(String(value?.requestId ?? '')) ? value.requestId.toLowerCase() : null,
+    responseStatus: nonNegativeInteger(value?.responseStatus, 0),
+    responseRequestId: UUID.test(String(value?.responseRequestId ?? ''))
+      ? value.responseRequestId.toLowerCase() : null,
   };
 }
 
@@ -398,6 +537,11 @@ function normalizeTtsResult(value, expected = {}) {
     textAvailable: value?.textAvailable === true,
     mediaValidated: value?.mediaValidated === true,
     messageIdMatches: value?.messageIdMatches === true,
+    requestStatus: nonNegativeInteger(value?.requestStatus, 0),
+    requestId: UUID.test(String(value?.requestId ?? '')) ? value.requestId.toLowerCase() : null,
+    responseStatus: nonNegativeInteger(value?.responseStatus, 0),
+    responseRequestId: UUID.test(String(value?.responseRequestId ?? ''))
+      ? value.responseRequestId.toLowerCase() : null,
   };
 }
 
@@ -582,9 +726,65 @@ function correlatedTextTimings(samples, expected) {
   };
 }
 
+function buildRawReceipts({
+  acceptanceWindowId, textOperational, asrResults, ttsResults, timingQueries,
+  controlPlaneRequests,
+}) {
+  const textTurns = textOperational.map((item, index) => ({
+    sequence: index + 1,
+    sessionIndex: item.sessionIndex,
+    turnIndex: item.turnIndex,
+    sessionIdSha256: typeof item.session?.id === 'string' && item.session.id
+      ? sha256(item.session.id) : null,
+    clientMessageId: item.clientMessageId,
+    correlationId: item.correlationId,
+    traceId: item.traceId,
+    controlledTtsFailure: item.controlledTtsFailure,
+    promptClass: item.normalized.promptClass,
+    replyLanguage: item.normalized.replyLanguage,
+    replyMode: item.normalized.replyMode,
+    acknowledged: item.normalized.acknowledged,
+    ackMs: item.normalized.ackMs,
+    processingVisible: item.normalized.processingVisible,
+    processingVisibleMs: item.normalized.processingVisibleMs,
+    delivered: item.normalized.delivered,
+    finalAnswerMs: item.normalized.finalAnswerMs,
+    messageLost: item.normalized.messageLost,
+    duplicateAssistantReplyCount: item.normalized.duplicateAssistantReplyCount,
+    unsupportedVerifiedClaimCount: item.normalized.unsupportedVerifiedClaimCount,
+    assistantMessageId: item.normalized.assistantMessageId,
+    requestStatus: item.normalized.requestStatus,
+    requestId: item.normalized.requestId,
+    responseStatus: item.normalized.responseStatus,
+    responseRequestId: item.normalized.responseRequestId,
+    groundingSatisfied: item.normalized.groundingSatisfied,
+    groundingVerified: item.normalized.groundingVerified,
+    groundingEvidenceSha256: item.normalized.groundingEvidenceSha256,
+  }));
+  const asrRequests = asrResults.map((item, index) => ({ sequence: index + 1, ...item }));
+  const ttsRequests = ttsResults.map((item, index) => ({ sequence: index + 1, ...item }));
+  const normalizedTimingQueries = timingQueries.map((item, index) => ({
+    sequence: index + 1,
+    sessionIndex: index,
+    queryDigest: item?.queryDigest ?? null,
+    samples: item?.samples ?? [],
+  }));
+  const payload = {
+    schemaVersion: 1,
+    acceptanceWindowId,
+    textTurns,
+    asrRequests,
+    ttsRequests,
+    timingQueries: normalizedTimingQueries,
+    controlPlaneRequests,
+  };
+  return Object.freeze({ ...payload, receiptsSha256: sha256(canonicalJson(payload)) });
+}
+
 function acceptanceRecord({
   commitSha, candidateOrigin, fixtureSetSha256, occurredAt,
   sessions, textResults, asrResults, ttsResults, timingSamples, timingQueryDigests,
+  rawReceipts, access, releaseBinding,
 }) {
   const thresholds = LATENCY_ACCEPTANCE_CONTRACT.thresholdsMs;
   const textTimings = correlatedTextTimings(timingSamples, textResults);
@@ -680,15 +880,18 @@ function acceptanceRecord({
     && observations.pairs.tts.available
     && ['provider', 'server'].every((layer) => Object.values(observations[layer]).every((item) => item.available));
   return finalizeLatencyAcceptanceRecord({
-    schemaVersion: 3,
+    schemaVersion: 4,
     commitSha,
     candidateOrigin,
+    access,
+    releaseBinding,
     fixtureSetSha256,
     workload: LATENCY_ACCEPTANCE_CONTRACT,
     counts,
     metrics,
     invariants,
     observations,
+    rawReceipts,
     occurredAt,
     result,
   });
@@ -830,6 +1033,8 @@ function retryDelay(response) {
 
 export function createLatencyHttpRequester({
   candidateOrigin,
+  identityToken = null,
+  acceptanceUserAgent = null,
   fetchImpl = globalThis.fetch,
   monotonicNow = () => performance.now(),
   sleep = defaultPollSleep,
@@ -840,10 +1045,21 @@ export function createLatencyHttpRequester({
   pollDeadlineMs = deadlineValue(pollDeadlineMs, DEFAULT_POLL_DEADLINE_MS);
   if (typeof fetchImpl !== 'function' || typeof sleep !== 'function'
     || fetchDeadlineMs === null || pollDeadlineMs === null) throw new Error('fetch unavailable');
+  if (identityToken !== null && (typeof identityToken !== 'string' || identityToken.length < 40
+    || identityToken.length > 16 * 1024 || /\s/.test(identityToken))) throw new Error('identity token is invalid');
+  if (acceptanceUserAgent !== null
+    && !/^hkbuddy-v1-acceptance\/[0-9a-f]{64}$/.test(acceptanceUserAgent)) {
+    throw new Error('acceptance user agent is invalid');
+  }
+  const privateHeaders = Object.freeze({
+    ...(identityToken === null ? {} : { Authorization: `Bearer ${identityToken}` }),
+    ...(acceptanceUserAgent === null ? {} : { 'User-Agent': acceptanceUserAgent }),
+  });
 
   const fetchJson = (path, options = {}, parentSignal = null) => withDeadline(async (signal) => {
     const response = await fetchImpl(sameOriginUrl(candidateOrigin, path), {
       ...options,
+      headers: { ...(options.headers ?? {}), ...privateHeaders },
       redirect: 'error',
       signal,
     });
@@ -856,7 +1072,7 @@ export function createLatencyHttpRequester({
 
   const fetchRaw = (path, options = {}, parentSignal = null) => withDeadline(async (deadlineSignal) => fetchImpl(
     sameOriginUrl(candidateOrigin, path),
-    { ...options, redirect: 'error', signal: deadlineSignal },
+    { ...options, headers: { ...(options.headers ?? {}), ...privateHeaders }, redirect: 'error', signal: deadlineSignal },
   ), {
     timeoutMs: fetchDeadlineMs,
     code: 'LATENCY_HTTP_DEADLINE_EXCEEDED',
@@ -870,7 +1086,12 @@ export function createLatencyHttpRequester({
         while (monotonicNow() - startedAt <= pollDeadlineMs) {
           const result = await fetchJson(path, { headers: { Cookie: session.cookie } }, pollSignal);
           const inspected = inspect(result);
-          if (inspected?.done) return inspected;
+          if (inspected?.done) return {
+            ...inspected,
+            responseStatus: result.response.status,
+            responseRequestId: UUID.test(String(result.body?.requestId ?? ''))
+              ? result.body.requestId.toLowerCase() : null,
+          };
           await sleep(retryDelay(result.response), { signal: pollSignal });
         }
         return { done: true, failed: true };
@@ -933,6 +1154,7 @@ export function createLatencyHttpRequester({
           'Content-Type': 'application/json',
           ...(input.acceptanceWindowId ? { 'X-Acceptance-Window-Id': input.acceptanceWindowId } : {}),
           ...(input.correlationId ? { 'X-Acceptance-Correlation-Id': input.correlationId } : {}),
+          ...(input.traceId ? { 'X-Cloud-Trace-Context': `${input.traceId}/1;o=1` } : {}),
           ...(input.controlledTtsFailure === true
             ? { 'X-Acceptance-Controlled-TTS-Failure': 'provider-rejection-v1' } : {}),
         },
@@ -974,9 +1196,18 @@ export function createLatencyHttpRequester({
         },
       });
       const assistant = finalMessages.find((message) => message.status === 'delivered') ?? null;
-      const unsupportedVerifiedClaimCount = exactGroundingResponse(
+      const groundingSatisfied = exactGroundingResponse(
         assistant, input.promptClass, input.expectedGrounding,
-      ) ? 0 : 1;
+      );
+      const groundingEvidenceSha256 = sha256(canonicalJson({
+        citations: Array.isArray(assistant?.citations) ? assistant.citations.map((citation) => ({
+          evidenceId: citation?.evidenceId ?? null,
+          sourceId: citation?.sourceId ?? null,
+          status: citation?.status ?? null,
+          url: citation?.url ?? null,
+        })) : [],
+        groundingStatus: assistant?.groundingStatus ?? null,
+      }));
       return {
         acknowledged: true,
         ackMs: acknowledgedAt - startedAt,
@@ -986,8 +1217,15 @@ export function createLatencyHttpRequester({
         finalAnswerMs,
         messageLost: !canonicalUserSeen,
         assistantReplyCount: finalMessages.length,
-        unsupportedVerifiedClaimCount,
+        unsupportedVerifiedClaimCount: groundingSatisfied ? 0 : 1,
         assistantMessageId: assistant?.id ?? null,
+        requestStatus: posted.response.status,
+        requestId: UUID.test(String(posted.body?.requestId ?? '')) ? posted.body.requestId.toLowerCase() : null,
+        responseStatus: final.responseStatus ?? 0,
+        responseRequestId: final.responseRequestId ?? null,
+        groundingSatisfied,
+        groundingVerified: assistant?.groundingStatus === 'verified',
+        groundingEvidenceSha256,
       };
     }
 
@@ -1020,6 +1258,12 @@ export function createLatencyHttpRequester({
         return { done: false };
       };
       let outcome = inspect(posted);
+      if (outcome.done) outcome = {
+        ...outcome,
+        responseStatus: posted.response.status,
+        responseRequestId: UUID.test(String(posted.body?.requestId ?? ''))
+          ? posted.body.requestId.toLowerCase() : null,
+      };
       if (!outcome.done) {
         outcome = await poll({
           path: `/api/v1/voice/uploads/${input.clientUploadId}`,
@@ -1032,6 +1276,10 @@ export function createLatencyHttpRequester({
         ready: outcome.ready === true && uploadCompletedAt !== null,
         transcriptMs: outcome.ready && uploadCompletedAt !== null ? monotonicNow() - uploadCompletedAt : null,
         durationBucketSeconds: input.sample.durationBucketSeconds ?? null,
+        requestStatus: posted.response.status,
+        requestId: UUID.test(String(posted.body?.requestId ?? '')) ? posted.body.requestId.toLowerCase() : null,
+        responseStatus: outcome.responseStatus ?? 0,
+        responseRequestId: outcome.responseRequestId ?? null,
       };
     }
 
@@ -1102,6 +1350,11 @@ export function createLatencyHttpRequester({
         textAvailable,
         mediaValidated,
         messageIdMatches: outcome.messageIdMatches === true,
+        requestStatus: outcome.responseStatus ?? 0,
+        requestId: outcome.responseRequestId ?? null,
+        responseStatus: canonical.response.status,
+        responseRequestId: UUID.test(String(canonical.body?.requestId ?? ''))
+          ? canonical.body.requestId.toLowerCase() : null,
       };
     }
     return null;
@@ -1116,6 +1369,8 @@ export async function runLatencyAcceptance({
   now = () => new Date(),
   inspectGit = inspectGitState,
   loadAsrFixtures = defaultLoadAsrFixtures,
+  mintIdentityToken = mintGcloudIdentityToken,
+  readControlPlaneReceipts = defaultReadControlPlaneReceipts,
   requester = null,
   fetchImpl = globalThis.fetch,
   randomUUID = systemRandomUUID,
@@ -1142,6 +1397,15 @@ export async function runLatencyAcceptance({
     configuredCandidateOrigin: environment?.V1_CANDIDATE_ORIGIN,
   });
   if (!candidateOrigin) return publish(writeOutput, 2, { status: 'not-run', code: 'CANDIDATE_ORIGIN_INVALID' });
+  const sourceArchiveSha256 = environment?.V1_SOURCE_ARCHIVE_SHA256;
+  const imageDigest = environment?.V1_CANDIDATE_IMAGE_DIGEST;
+  const candidateRevision = environment?.V1_CANDIDATE_REVISION;
+  const candidateTag = `candidate-${commitSha.slice(0, 12)}`;
+  if (!SHA256.test(String(sourceArchiveSha256 ?? ''))
+    || !IMAGE_DIGEST.test(String(imageDigest ?? ''))
+    || candidateRevision !== `${SERVICE}-${commitSha.slice(0, 12)}`) {
+    return publish(writeOutput, 2, { status: 'not-run', code: 'RELEASE_BINDING_INVALID' });
+  }
   operationDeadlineMs = deadlineValue(operationDeadlineMs, DEFAULT_OPERATION_DEADLINE_MS);
   fetchDeadlineMs = deadlineValue(fetchDeadlineMs, DEFAULT_FETCH_DEADLINE_MS);
   pollDeadlineMs = deadlineValue(pollDeadlineMs, DEFAULT_POLL_DEADLINE_MS);
@@ -1164,6 +1428,7 @@ export async function runLatencyAcceptance({
     parentSignal: commandBudget.signal,
   });
 
+  let identityToken = null;
   try {
 
   let gitState;
@@ -1205,11 +1470,30 @@ export async function runLatencyAcceptance({
     occurredAt,
     contractSchemaVersion: LATENCY_ACCEPTANCE_CONTRACT.schemaVersion,
   })).digest('hex');
+  let access;
+  try {
+    identityToken = await commandOperation((signal) => mintIdentityToken({
+      audience: environment.V1_PUBLIC_ORIGIN,
+      taggedUrl: candidateOrigin,
+      signal,
+    }));
+    access = authenticatedAccess(identityToken, {
+      audience: environment.V1_PUBLIC_ORIGIN,
+      taggedUrl: candidateOrigin,
+      now: occurredAt,
+    });
+  } catch {
+    access = null;
+  }
+  if (!access) return publish(writeOutput, 1, { status: 'failed', code: 'CANDIDATE_AUTHENTICATION_INVALID' });
+  const acceptanceUserAgent = `hkbuddy-v1-acceptance/${acceptanceWindowId}`;
 
   let selectedRequester = requester;
   try {
     selectedRequester ??= createLatencyHttpRequester({
       candidateOrigin,
+      identityToken,
+      acceptanceUserAgent,
       fetchImpl,
       fetchDeadlineMs,
       pollDeadlineMs,
@@ -1249,20 +1533,23 @@ export async function runLatencyAcceptance({
       const replyMode = turnIndex === 0 || (turnIndex === 1 && sessionIndex < 11) ? 'voice' : 'text';
       const controlledTtsFailure = turnIndex === 1 && sessionIndex === 10;
       const correlationId = randomUUID();
+      const clientMessageId = randomUUID();
+      const traceId = sha256(canonicalJson({ acceptanceWindowId, correlationId })).slice(0, 32);
       const raw = session ? await safeRequest(selectedRequester, {
         operation: 'text', candidateOrigin, releaseCommitSha: commitSha,
         session, sessionIndex, turnIndex,
         prompt: prompt.text, promptClass: prompt.promptClass,
         expectedGrounding: prompt.expectedGrounding ?? null,
         replyLanguage, replyMode, acceptanceWindowId, correlationId,
-        controlledTtsFailure,
-        clientMessageId: randomUUID(),
+        controlledTtsFailure, traceId, clientMessageId,
       }, requestContext) : null;
       turns.push({
         session,
         sessionIndex,
         turnIndex,
+        clientMessageId,
         correlationId,
+        traceId,
         controlledTtsFailure,
         normalized: { ...normalizeTextResult(raw), promptClass: prompt.promptClass, replyLanguage, replyMode },
       });
@@ -1287,12 +1574,21 @@ export async function runLatencyAcceptance({
       responseLanguage: { cantonese: 'yue-Hant-HK', english: 'en', mandarin: 'cmn-Hans-CN' }[sample.language],
       acceptanceWindowId, correlationId,
     }, requestContext) : null;
-    return normalizeAsrResult(raw, {
+    return {
+      sessionIndex,
+      sampleIndex,
+      fixtureId: sample.id,
+      fixtureSha256: sample.sha256,
+      language: sample.language,
+      wireLanguage: { cantonese: 'yue-Hant-HK', english: 'en', mandarin: 'cmn-Hans-CN' }[sample.language],
+      clientUploadId,
+      ...normalizeAsrResult(raw, {
       correlationId,
       bindingId: clientUploadId,
       durationMs: sample.durationMs,
       durationBucketSeconds: sample.durationBucketSeconds,
-    });
+      }),
+    };
   });
 
   const ttsCandidates = [];
@@ -1325,11 +1621,16 @@ export async function runLatencyAcceptance({
       acceptanceWindowId, correlationId: candidate.correlationId,
       expectedProviderFailure,
     }, requestContext) : null;
-    return normalizeTtsResult(raw, {
+    return {
+      requestIndex,
+      sessionIndex: candidate?.sessionIndex ?? null,
+      sourceTurnIndex: candidate?.turnIndex ?? null,
+      ...normalizeTtsResult(raw, {
       correlationId: candidate?.correlationId ?? null,
       bindingId: candidate?.normalized.assistantMessageId ?? null,
       expectedProviderFailure,
-    });
+      }),
+    };
   });
 
   const timingQueries = await mapConcurrent(sessions.map((session, sessionIndex) => ({ session, sessionIndex })), 5, async ({ session, sessionIndex }) => {
@@ -1338,11 +1639,12 @@ export async function runLatencyAcceptance({
       operation: 'timings', candidateOrigin, releaseCommitSha: commitSha,
       acceptanceWindowId, session, sessionIndex,
     }, requestContext);
-    return normalizeTimingQuery(raw, {
+    const normalized = normalizeTimingQuery(raw, {
       commitSha,
       acceptanceWindowId,
       sessionId: session.id,
     });
+    return normalized ? { ...normalized, sessionIndex } : null;
   });
   const timingSamples = timingQueries.flatMap((query) => query?.samples ?? []);
   const timingQueryDigests = timingQueries.map((query) => query?.queryDigest).filter(Boolean);
@@ -1358,9 +1660,55 @@ export async function runLatencyAcceptance({
     return publish(writeOutput, 1, { status: 'failed', code: 'CANDIDATE_RELEASE_CHANGED' });
   }
 
+  const expectedTraceIds = textOperational.map(({ traceId }) => traceId);
+  let controlPlaneRequests;
+  try {
+    const rawControlPlane = await commandOperation((signal) => readControlPlaneReceipts({
+      acceptanceWindowId,
+      candidateOrigin,
+      candidateRevision,
+      occurredAt,
+      expectedTraceIds,
+    }, { signal }));
+    controlPlaneRequests = normalizeControlPlaneTurnReceipts(rawControlPlane, {
+      acceptanceWindowId,
+      candidateOrigin,
+      candidateRevision,
+      expectedTraceIds,
+    });
+  } catch {
+    controlPlaneRequests = null;
+  }
+  if (!controlPlaneRequests) {
+    return publish(writeOutput, 1, { status: 'failed', code: 'CONTROL_PLANE_RECEIPTS_INVALID' });
+  }
+
+  const rawReceipts = buildRawReceipts({
+    acceptanceWindowId,
+    textOperational,
+    asrResults,
+    ttsResults,
+    timingQueries,
+    controlPlaneRequests,
+  });
+  const releaseBinding = Object.freeze({
+    project: PROJECT,
+    region: REGION,
+    service: SERVICE,
+    releaseSha: commitSha,
+    sourceArchiveSha256,
+    imageDigest,
+    candidateRevision,
+    candidateTag,
+    serviceOrigin: environment.V1_PUBLIC_ORIGIN,
+    candidateOrigin,
+    trafficPercent: 0,
+  });
+
   const record = acceptanceRecord({
     commitSha, candidateOrigin, fixtureSetSha256: fixtureSet.fixtureSetSha256,
     occurredAt, sessions, textResults, asrResults, ttsResults, timingSamples, timingQueryDigests,
+    rawReceipts, access, releaseBinding,
   });
   let finalGitState;
   try {
@@ -1401,6 +1749,7 @@ export async function runLatencyAcceptance({
     }
     return publish(writeOutput, 1, { status: 'failed', code: 'LATENCY_COMMAND_FAILED' });
   } finally {
+    identityToken = null;
     commandBudget.dispose();
   }
 }

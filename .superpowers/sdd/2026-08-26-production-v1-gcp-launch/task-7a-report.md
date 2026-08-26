@@ -330,6 +330,90 @@ exit 0 (line-ending warnings only)
 No GCP mutation, build submission, Job execution, deployment, IAM change, or
 traffic change was performed during this second follow-up.
 
+### Third independent-review follow-up
+
+The third review identified that the previous workload artifact could still be
+constructed from an unkeyed aggregate, that the private candidate access path
+described identity-token authentication without executing it, and that
+ambiguous promotion failures did not fully restore traffic, tags, IAM, and
+temporary restore artifacts. The first focused run preserved these findings as
+RED before implementation:
+
+```text
+node --test tests/latency-acceptance.test.js tests/release-contract.test.js
+100 tests: 94 pass, 6 fail, 0 skip, exit 1
+- workload evidence lacked raw per-turn/control-plane receipts
+- the HTTP requester did not send an audience-bound Authorization token
+- candidate Service secret mounts reused one invalid directory
+- real v1 execution receipts with omitted zero counters were rejected
+- aggregate-only workload evidence was accepted
+- successful promotion did not remove and freshly prove absence of the candidate tag
+```
+
+The accepted workload record is now schema 4. It contains exact ordered raw
+receipts for 200 text turns, 30 ASR requests, 31 TTS outcomes, all bounded timing
+queries, and 200 unique Cloud Run request-log bindings. Promotion independently
+recomputes the raw receipt digest, counts, latency metrics, thresholds,
+invariants, grounding/speech bindings, release/revision/image/origin identity,
+and semantic artifact digest. It then re-queries the exact Cloud Logging request
+log for the candidate revision, tagged origin, status, user agent, and trace set;
+an aggregate-only, duplicated, reordered, mutated, or replayed record remains
+inert.
+
+Private QA now invokes `gcloud auth print-identity-token` with the stable Cloud
+Run service URL as audience and sends the returned token only in the in-memory
+`Authorization` header to the exact candidate-tag URL. Evidence retains only
+the Google issuer, audience, tagged URL, authenticated flag, and SHA-256 subject
+binding. Recursive guards reject Authorization/cookie keys, Bearer values, JWT
+shapes, or token fields from workload, mobile, trace, screenshot metadata, and
+release evidence.
+
+Cloud Run Service JSON uses six unique read-only secret directories whose item
+paths exactly match their environment file paths. A raw generated document is
+exercised through a gcloud-553-compatible v1 dry-run fixture. Migration accepts
+the real v1 successful Execution shape when optional zero counters are absent
+and carries one canonical short execution name through the phase receipt.
+
+Promotion marks IAM and traffic mutations attempted before each call. On any
+ambiguous response or later readback failure it freshly inspects traffic,
+restores the exact previous revision at 100 percent while removing the candidate
+tag, proves that state, then restores the exact pre-mutation IAM policy and
+proves it again. The etag-fenced IAM restore file is private, create-only, UUID
+attempt-scoped, deleted on every path, and checked for zero residue; repeated
+same-release attempts cannot reuse it. Any compensation or cleanup failure is a
+blocking `PROMOTION_COMPENSATION_FAILED`. Successful promotion also removes the
+candidate tag and requires a fresh tag-free service readback.
+
+A real-shape in-memory phase test carries one predecessor-hashed receipt chain
+through successful v1 migration, authenticated 200-turn workload with fresh
+Cloud Logging receipts, and public promotion with exact tag/IAM cleanup.
+
+Fresh third-follow-up verification:
+
+```text
+node --test tests/latency-acceptance.test.js tests/release-contract.test.js
+108 tests: 108 pass, 0 fail, 0 skip, exit 0
+
+npm.cmd test
+1457 tests: 1456 pass, 0 fail, 1 approved real-PostgreSQL skip, exit 0
+
+npm.cmd run check
+exit 0
+
+npm.cmd run security:dependencies
+DEPENDENCY_SECURITY_EXCEPTION_REVIEWED, exit 0
+
+node --check scripts/gcp-release.js
+node --check scripts/production-latency-workload.js
+both exit 0
+
+git diff --check
+exit 0 (line-ending warnings only)
+```
+
+No GCP mutation, build submission, Job execution, deployment, IAM change, or
+traffic change was performed during this third follow-up.
+
 No GCP mutation, build submission, Job execution, deployment, IAM change, or
 traffic change was performed during this remediation.
 
@@ -347,13 +431,16 @@ traffic change was performed during this remediation.
 - `production-v1/scripts/gcp-provision.js`
 - `production-v1/scripts/gcp-release.js`
 - `production-v1/scripts/image-release-contract.js`
+- `production-v1/scripts/production-latency-workload.js`
 - `production-v1/scripts/run-migrations.js`
 - `production-v1/tests/gcp-infra-contract.test.js`
 - `production-v1/tests/migration-runner.test.js`
+- `production-v1/tests/latency-acceptance.test.js`
 - `production-v1/tests/release-contract.test.js`
 
-No package, runtime config, HTTP security, provider, latency, voice, or real GCS
-acceptance source file was edited by Task 7A.
+No package, runtime config, HTTP security, provider, voice, or real GCS acceptance
+source file was edited by Task 7A. The third review explicitly authorized the
+minimal latency workload and regression-test changes listed above.
 
 ## Residual live prerequisites
 

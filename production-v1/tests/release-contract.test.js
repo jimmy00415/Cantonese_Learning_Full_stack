@@ -22,6 +22,7 @@ import {
 } from '../scripts/production-latency-workload.js';
 import {
   buildReleasePlan,
+  containsForbiddenPersistedSecret,
   inspectCollectedEvidenceArtifact,
   prepareReleaseArchive,
   runPrepareReleaseArchive,
@@ -157,10 +158,173 @@ function validWorkloadAcceptanceRecord() {
   const queryDigests = Array.from({ length: 20 }, (_, index) => (
     createHash('sha256').update(`query-${index}`).digest('hex')
   )).sort();
+  const uuid = (group, ordinal) => (
+    `00000000-0000-4000-8${group.toString(16).padStart(3, '0')}-${String(ordinal).padStart(12, '0')}`
+  );
+  const textTurns = Array.from({ length: 200 }, (_, index) => {
+    const sessionIndex = Math.floor(index / 10);
+    const turnIndex = index % 10;
+    const promptClass = turnIndex < 4 ? 'grounded' : (turnIndex < 7 ? 'abstention' : 'casual');
+    const correlationId = uuid(1, index + 1);
+    return {
+      sequence: index + 1,
+      sessionIndex,
+      turnIndex,
+      sessionIdSha256: createHash('sha256').update(`session-${sessionIndex}`).digest('hex'),
+      clientMessageId: uuid(2, index + 1),
+      correlationId,
+      traceId: createHash('sha256').update(`trace-${index + 1}`).digest('hex').slice(0, 32),
+      controlledTtsFailure: turnIndex === 1 && sessionIndex === 10,
+      promptClass,
+      replyLanguage: ['en', 'yue-Hant-HK', 'cmn-Hans-CN'][index % 3],
+      replyMode: turnIndex === 0 || (turnIndex === 1 && sessionIndex < 11) ? 'voice' : 'text',
+      acknowledged: true,
+      ackMs: 200,
+      processingVisible: true,
+      processingVisibleMs: 400,
+      delivered: true,
+      finalAnswerMs: 2_400,
+      messageLost: false,
+      duplicateAssistantReplyCount: 0,
+      unsupportedVerifiedClaimCount: 0,
+      assistantMessageId: `assistant-${sessionIndex}-${turnIndex}`,
+      requestStatus: 202,
+      requestId: uuid(3, index + 1),
+      responseStatus: 200,
+      responseRequestId: uuid(4, index + 1),
+      groundingSatisfied: true,
+      groundingVerified: promptClass === 'grounded',
+      groundingEvidenceSha256: createHash('sha256').update(`grounding-${index + 1}`).digest('hex'),
+    };
+  });
+  const asrRequests = Array.from({ length: 30 }, (_, index) => {
+    const durationBucketSeconds = [10, 30, 55][Math.floor(index / 10)];
+    const language = ['cantonese', 'english', 'mandarin'][index % 3];
+    const bindingId = uuid(5, index + 1);
+    return {
+      sequence: index + 1,
+      sessionIndex: index % 20,
+      sampleIndex: index,
+      fixtureId: `${language}-${durationBucketSeconds}-${index + 1}`,
+      fixtureSha256: createHash('sha256').update(`fixture-${index + 1}`).digest('hex'),
+      language,
+      wireLanguage: { cantonese: 'yue-Hant-HK', english: 'en', mandarin: 'cmn-Hans-CN' }[language],
+      clientUploadId: bindingId,
+      ready: true,
+      correlationId: uuid(6, index + 1),
+      bindingId,
+      durationMs: durationBucketSeconds * 1_000,
+      durationBucketSeconds,
+      requestStatus: 202,
+      requestId: uuid(7, index + 1),
+      responseStatus: 200,
+      responseRequestId: uuid(8, index + 1),
+    };
+  });
+  const voiceSources = [
+    ...Array.from({ length: 20 }, (_, sessionIndex) => textTurns[sessionIndex * 10]),
+    ...Array.from({ length: 11 }, (_, sessionIndex) => textTurns[sessionIndex * 10 + 1]),
+  ];
+  const ttsRequests = voiceSources.map((source, index) => {
+    const failure = index === 30;
+    return {
+      sequence: index + 1,
+      requestIndex: index,
+      sessionIndex: source.sessionIndex,
+      sourceTurnIndex: source.turnIndex,
+      ready: !failure,
+      correlationId: source.correlationId,
+      bindingId: source.assistantMessageId,
+      durationMs: null,
+      expectedProviderFailure: failure,
+      providerFailureObserved: failure,
+      failureCode: failure ? 'VOICE_SYNTHESIS_REJECTED' : null,
+      textAvailable: true,
+      mediaValidated: !failure,
+      messageIdMatches: true,
+      requestStatus: 200,
+      requestId: uuid(9, index + 1),
+      responseStatus: 200,
+      responseRequestId: uuid(10, index + 1),
+    };
+  });
+  const samplesBySession = Array.from({ length: 20 }, () => []);
+  for (const item of textTurns) {
+    samplesBySession[item.sessionIndex].push({
+      correlationId: item.correlationId, bindingId: item.assistantMessageId, durationMs: null,
+      operation: 'text', layer: 'server', latencyMs: 2_300, outcome: 'success', failureCode: null,
+    });
+    if (item.promptClass === 'grounded') samplesBySession[item.sessionIndex].push({
+      correlationId: item.correlationId, bindingId: item.assistantMessageId, durationMs: null,
+      operation: 'text', layer: 'provider', latencyMs: 1_800, outcome: 'success', failureCode: null,
+    });
+  }
+  for (const item of asrRequests) {
+    for (const [layer, latencyMs] of [['provider', 1_800], ['server', item.durationBucketSeconds === 10 ? 2_000 : 5_000]]) {
+      samplesBySession[item.sessionIndex].push({
+        correlationId: item.correlationId, bindingId: item.bindingId, durationMs: item.durationMs,
+        operation: 'asr', layer, latencyMs, outcome: 'success', failureCode: null,
+      });
+    }
+  }
+  for (const item of ttsRequests) {
+    for (const [layer, latencyMs] of [['provider', 1_700], ['server', 1_900]]) {
+      samplesBySession[item.sessionIndex].push({
+        correlationId: item.correlationId, bindingId: item.bindingId, durationMs: null,
+        operation: 'tts', layer, latencyMs,
+        outcome: item.expectedProviderFailure ? 'failure' : 'success',
+        failureCode: item.expectedProviderFailure ? 'VOICE_SYNTHESIS_REJECTED' : null,
+      });
+    }
+  }
+  const timingQueries = Array.from({ length: 20 }, (_, index) => ({
+    sequence: index + 1, sessionIndex: index, queryDigest: queryDigests[index], samples: samplesBySession[index],
+  }));
+  const controlPlaneRequests = textTurns.map((item, index) => ({
+    sequence: index + 1,
+    insertId: `request-${String(index + 1).padStart(3, '0')}`,
+    latencyMs: 200,
+    status: 202,
+    timestamp: new Date(Date.parse('2026-08-26T08:00:00.000Z') + index).toISOString(),
+    trace: `projects/${PROJECT}/traces/${item.traceId}`,
+  }));
+  const rawPayload = {
+    schemaVersion: 1,
+    acceptanceWindowId: createHash('sha256').update('acceptance-window').digest('hex'),
+    textTurns,
+    asrRequests,
+    ttsRequests,
+    timingQueries,
+    controlPlaneRequests,
+  };
+  const rawReceipts = {
+    ...rawPayload,
+    receiptsSha256: createHash('sha256').update(JSON.stringify(canonicalFixture(rawPayload))).digest('hex'),
+  };
   return finalizeLatencyAcceptanceRecord({
-    schemaVersion: 3,
+    schemaVersion: 4,
     commitSha: RELEASE_SHA,
     candidateOrigin: CANDIDATE_ORIGIN,
+    access: {
+      authenticated: true,
+      audience: STABLE_ORIGIN,
+      issuer: 'https://accounts.google.com',
+      subjectSha256: QA_SUBJECT_SHA256,
+      taggedUrl: CANDIDATE_ORIGIN,
+    },
+    releaseBinding: {
+      project: PROJECT,
+      region: REGION,
+      service: 'hkbuddy-api',
+      releaseSha: RELEASE_SHA,
+      sourceArchiveSha256: SOURCE_SHA,
+      imageDigest: IMAGE_DIGEST,
+      candidateRevision: REVISION,
+      candidateTag: CANDIDATE_TAG,
+      serviceOrigin: STABLE_ORIGIN,
+      candidateOrigin: CANDIDATE_ORIGIN,
+      trafficPercent: 0,
+    },
     fixtureSetSha256: 'd'.repeat(64),
     workload: LATENCY_ACCEPTANCE_CONTRACT,
     counts: {
@@ -226,9 +390,30 @@ function validWorkloadAcceptanceRecord() {
         },
       },
     },
+    rawReceipts,
     occurredAt: '2026-08-26T08:00:00.000Z',
     result: true,
   });
+}
+
+function controlPlaneLogEntries(record) {
+  return record.rawReceipts.controlPlaneRequests.map((entry) => ({
+    insertId: entry.insertId,
+    timestamp: entry.timestamp,
+    trace: entry.trace,
+    resource: {
+      type: 'cloud_run_revision',
+      labels: {
+        project_id: PROJECT, location: REGION, service_name: 'hkbuddy-api',
+        revision_name: REVISION,
+      },
+    },
+    httpRequest: {
+      requestMethod: 'POST', requestUrl: `${CANDIDATE_ORIGIN}/api/v1/messages`,
+      status: 202, latency: `${entry.latencyMs / 1_000}s`,
+      userAgent: `hkbuddy-v1-acceptance/${record.rawReceipts.acceptanceWindowId}`,
+    },
+  }));
 }
 
 function realV1JobReadback(expected) {
@@ -302,7 +487,7 @@ function fixtureReceiptOutputs(plan, phase) {
     },
   };
   if (phase === 'migration') return {
-    executionName: `projects/${PROJECT}/locations/${REGION}/jobs/hkbuddy-migrate/executions/migrate-123`,
+    executionName: 'hkbuddy-migrate-release-001',
     job: 'hkbuddy-migrate', imageDigest: plan.imageDigest,
   };
   if (phase === 'inventory') return {
@@ -576,6 +761,10 @@ test('release plan is archive-bound, digest-pinned, evidence-first, probe-exact,
   assert.equal(serviceSpec.spec.template.spec.containers[0].readinessProbe.httpGet.path, '/api/health/ready');
   assert.equal(typeof serviceSpec.spec.template.spec.timeoutSeconds, 'number');
   assert.equal(serviceSpec.spec.template.spec.timeoutSeconds, 60);
+  const mountPaths = serviceSpec.spec.template.spec.containers[0].volumeMounts
+    .map(({ mountPath }) => mountPath);
+  assert.equal(new Set(mountPaths).size, mountPaths.length,
+    'Cloud Run v1 rejects multiple secret volumes mounted at one directory');
   assert.deepEqual(serviceSpec.spec.traffic, [
     { revisionName: 'hkbuddy-api-stable123456', percent: 100 },
     { revisionName: REVISION, tag: CANDIDATE_TAG, percent: 0 },
@@ -593,6 +782,7 @@ test('release plan is archive-bound, digest-pinned, evidence-first, probe-exact,
   assert.deepEqual(plan.candidateAccess, {
     authenticated: true,
     audience: STABLE_ORIGIN,
+    issuer: 'https://accounts.google.com',
     subjectSha256: QA_SUBJECT_SHA256,
     taggedUrl: CANDIDATE_ORIGIN,
   });
@@ -643,6 +833,62 @@ test('candidate deploy is fenced by the canonical gcloud Service v1 dry-run resu
   )), false);
 });
 
+test('candidate phase feeds raw Service JSON through gcloud 553-compatible secret-mount semantics', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'hkbuddy-candidate-service-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const input = releaseInput({ sourceArchive: join(directory, 'source.tar.gz') });
+  const plan = buildReleasePlan(input);
+  let describeCount = 0;
+  const dryRun = (service) => {
+    const revisionSpec = service?.spec?.template?.spec;
+    const container = revisionSpec?.containers?.[0];
+    if (!Number.isInteger(revisionSpec?.timeoutSeconds)) throw new Error('invalid v1 timeout');
+    const paths = container?.volumeMounts?.map(({ mountPath }) => mountPath) ?? [];
+    if (paths.length !== new Set(paths).size) throw new Error('duplicate v1 mount path');
+    const envValues = new Set((container?.env ?? []).map(({ value }) => value).filter(Boolean));
+    for (const mount of container?.volumeMounts ?? []) {
+      const volume = revisionSpec.volumes.find(({ name }) => name === mount.name);
+      const itemPath = volume?.secret?.items?.[0]?.path;
+      if (!itemPath || !envValues.has(`${mount.mountPath}/${itemPath}`)) {
+        throw new Error('secret file environment path is not volume-bound');
+      }
+    }
+    return service;
+  };
+  const result = await runGcpRelease({
+    argv: ['--phase=candidate', `--confirm-release=${RELEASE_SHA}`], input,
+    execute: async (argv) => {
+      if (argv[1] === 'services' && argv[2] === 'replace') {
+        const raw = JSON.parse(await readFile(argv[3], 'utf8'));
+        return dryRun(raw);
+      }
+      if (argv[1] === 'services' && argv[2] === 'describe') {
+        describeCount += 1;
+        return describeCount === 1 ? {
+          service: 'hkbuddy-api', traffic: [{ revision: input.previousRevision, percent: 100 }],
+        } : {
+          service: 'hkbuddy-api', traffic: [
+            { revision: input.previousRevision, percent: 100 },
+            { revision: REVISION, tag: CANDIDATE_TAG, percent: 0 },
+          ],
+        };
+      }
+      if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
+      if (argv.includes('get-iam-policy')) return {
+        bindings: [{ role: 'roles/run.invoker', members: ['user:qa@motionexp.com'] }],
+      };
+      if (argv[0] === 'artifacts') return { image: plan.expectedCandidate.image };
+      throw new Error(`unexpected operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 0);
+  const invalid = structuredClone(plan.candidateServiceSpec);
+  invalid.spec.template.spec.containers[0].volumeMounts[1].mountPath
+    = invalid.spec.template.spec.containers[0].volumeMounts[0].mountPath;
+  assert.throws(() => dryRun(invalid), /duplicate v1 mount path/);
+});
+
 test('preboot acceptance jobs are digest-pinned, identity-exact, and produce evidence before candidate boot', () => {
   const plan = buildReleasePlan(releaseInput());
   const dependency = plan.operations.find(({ id }) => id === 'dependency-acceptance-deploy');
@@ -661,7 +907,7 @@ test('preboot acceptance jobs are digest-pinned, identity-exact, and produce evi
   assert.match(dependencySecrets, /V1_DATABASE_URL=hkbuddy-db-app-url:7/);
   assert.match(dependencySecrets, /V1_ACCEPTANCE_DATABASE_URL=hkbuddy-db-app-url:7/);
   assert.match(dependencySecrets, /V1_ACCEPTANCE_MIGRATOR_DATABASE_URL=hkbuddy-db-migrator-url:8/);
-  assert.match(dependencySecrets, /\/var\/run\/secrets\/hkbuddy\/legacy-inventory\.json=hkbuddy-legacy-inventory:11/);
+  assert.match(dependencySecrets, /\/var\/run\/secrets\/hkbuddy\/legacy-inventory\/legacy-inventory\.json=hkbuddy-legacy-inventory:11/);
 
   const expected = {
     'dependency-acceptance': { serviceAccount: ACCEPTANCE_SA, script: 'scripts/real-dependencies-acceptance.js' },
@@ -1204,6 +1450,7 @@ test('public promotion requires the reviewed owner identity before its first mut
     artifact: { image: plan.expectedCandidate.image },
   };
   let promoted = false;
+  let promotedReadbackCount = 0;
   let publicGranted = false;
   const accepted = await runGcpRelease({
     argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`], input,
@@ -1232,11 +1479,13 @@ test('public promotion requires the reviewed owner identity before its first mut
       if (argv[1] === 'services' && argv[2] === 'describe' && !promoted) {
         return structuredClone(candidateReadbacks.service);
       }
-      return { traffic: [{ revision: REVISION, percent: 100 }] };
+      if (argv[1] === 'services' && argv[2] === 'describe' && promoted) promotedReadbackCount += 1;
+      return { service: 'hkbuddy-api', traffic: [{ revision: REVISION, percent: 100 }] };
     },
     writeOutput: () => undefined,
   });
   assert.equal(accepted.exitCode, 0);
+  assert.equal(promotedReadbackCount, 1, 'promotion requires one fresh tag-free service readback');
 
   const rejected = await runGcpRelease({
     argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`], input,
@@ -1279,13 +1528,28 @@ test('promotion restores the exact private IAM snapshot when the public grant la
   };
   let currentPolicy = structuredClone(privatePolicy);
   let restorePolicy = null;
+  let restorePolicyPath = null;
+  let restorePolicyRemoved = false;
+  const attemptId = '11111111-1111-4111-8111-111111111111';
   const calls = [];
   const result = await runGcpRelease({
     argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`],
     input,
-    writeIamRestorePolicy: async (releasePlan, policy) => {
+    randomUUID: () => attemptId,
+    writeIamRestorePolicy: async (releasePlan, policy, options) => {
+      assert.equal(options.attemptId, attemptId);
       restorePolicy = structuredClone(policy);
-      return releasePlan.promotionIamRestorePolicyPath;
+      restorePolicyPath = join(
+        dirname(releasePlan.sourceArchive),
+        `${releasePlan.candidateRevision}.iam-restore.${attemptId}.json`,
+      );
+      return restorePolicyPath;
+    },
+    removeIamRestorePolicy: async (releasePlan, filePath) => {
+      assert.equal(releasePlan.candidateRevision, plan.candidateRevision);
+      assert.equal(filePath, restorePolicyPath);
+      restorePolicyRemoved = true;
+      return true;
     },
     execute: async (argv) => {
       calls.push(argv);
@@ -1316,11 +1580,171 @@ test('promotion restores the exact private IAM snapshot when the public grant la
   assert.equal(result.exitCode, 1);
   assert.equal(result.publicReport.mutationPerformed, true);
   assert.equal(result.publicReport.promotionIamRestored, true);
+  assert.equal(restorePolicyRemoved, true);
   assert.deepEqual(currentPolicy.bindings, privatePolicy.bindings);
   const addIndex = calls.findIndex((argv) => argv.includes('add-iam-policy-binding'));
   const setIndex = calls.findIndex((argv) => argv.includes('set-iam-policy'));
   const finalReadIndex = calls.findLastIndex((argv) => argv.includes('get-iam-policy'));
   assert.equal(addIndex >= 0 && addIndex < setIndex && setIndex < finalReadIndex, true);
+});
+
+test('ambiguous promotion traffic is compensated before IAM and repeated retries leave no restore artifact', async () => {
+  const input = releaseInput();
+  const plan = buildReleasePlan(input);
+  const restorePaths = new Set();
+  const attemptedIds = [
+    '22222222-2222-4222-8222-222222222222',
+    '33333333-3333-4333-8333-333333333333',
+  ];
+
+  for (const [attemptIndex, mutationLands] of [false, true].entries()) {
+    const calls = [];
+    const privatePolicy = {
+      bindings: [{ role: 'roles/run.invoker', members: ['user:qa@motionexp.com'] }],
+      etag: `Bw-private-${attemptIndex}=`,
+      version: 1,
+    };
+    let currentPolicy = structuredClone(privatePolicy);
+    let currentService = {
+      service: 'hkbuddy-api',
+      traffic: [
+        { revision: input.previousRevision, percent: 100 },
+        { revision: REVISION, tag: CANDIDATE_TAG, percent: 0 },
+      ],
+    };
+    let restorePolicy = null;
+    let restorePath = null;
+    let residue = false;
+    const result = await runGcpRelease({
+      argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`],
+      input,
+      randomUUID: () => attemptedIds[attemptIndex],
+      writeIamRestorePolicy: async (releasePlan, policy, { attemptId }) => {
+        restorePolicy = structuredClone(policy);
+        restorePath = join(
+          dirname(releasePlan.sourceArchive),
+          `${releasePlan.candidateRevision}.iam-restore.${attemptId}.json`,
+        );
+        assert.equal(restorePaths.has(restorePath), false);
+        restorePaths.add(restorePath);
+        residue = true;
+        return restorePath;
+      },
+      removeIamRestorePolicy: async (_releasePlan, filePath) => {
+        assert.equal(filePath, restorePath);
+        residue = false;
+        return true;
+      },
+      execute: async (argv) => {
+        calls.push(argv);
+        if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
+        if (argv[0] === 'artifacts') return { image: plan.expectedCandidate.image };
+        if (argv.includes('get-iam-policy')) return structuredClone(currentPolicy);
+        if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
+        if (argv[1] === 'services' && argv[2] === 'describe') return structuredClone(currentService);
+        if (argv.includes('add-iam-policy-binding')) {
+          currentPolicy = {
+            bindings: [{
+              role: 'roles/run.invoker', members: ['allUsers', 'user:qa@motionexp.com'],
+            }],
+            etag: `Bw-public-${attemptIndex}=`,
+            version: 1,
+          };
+          return structuredClone(currentPolicy);
+        }
+        if (argv.includes('update-traffic') && argv.includes(`--to-revisions=${REVISION}=100`)) {
+          if (mutationLands) currentService = {
+            service: 'hkbuddy-api', traffic: [{ revision: REVISION, percent: 100 }],
+          };
+          throw new Error('promotion traffic response was lost');
+        }
+        if (argv.includes('update-traffic')
+          && argv.includes(`--to-revisions=${input.previousRevision}=100`)) {
+          currentService = {
+            service: 'hkbuddy-api', traffic: [{ revision: input.previousRevision, percent: 100 }],
+          };
+          return structuredClone(currentService);
+        }
+        if (argv.includes('set-iam-policy')) {
+          assert.equal(argv.includes(restorePath), true);
+          assert.equal(restorePolicy.etag, currentPolicy.etag);
+          currentPolicy = { ...structuredClone(privatePolicy), etag: `Bw-restored-${attemptIndex}=` };
+          return structuredClone(currentPolicy);
+        }
+        throw new Error(`unexpected operation: ${argv.join(' ')}`);
+      },
+      writeOutput: () => undefined,
+    });
+
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.publicReport.code, 'RELEASE_PHASE_FAILED', JSON.stringify(result.publicReport));
+    assert.equal(result.publicReport.promotionTrafficRestored, true);
+    assert.equal(result.publicReport.promotionIamRestored, true);
+    assert.equal(residue, false);
+    assert.deepEqual(currentService.traffic, [{ revision: input.previousRevision, percent: 100 }]);
+    assert.deepEqual(currentPolicy.bindings, privatePolicy.bindings);
+    const trafficRestore = calls.findIndex((argv) => (
+      argv.includes('update-traffic') && argv.includes(`--to-revisions=${input.previousRevision}=100`)
+    ));
+    const iamRestore = calls.findIndex((argv) => argv.includes('set-iam-policy'));
+    assert.equal(trafficRestore >= 0 && trafficRestore < iamRestore, true);
+  }
+  assert.equal(restorePaths.size, 2);
+});
+
+test('a failed traffic compensation is explicit and blocks the promotion result', async () => {
+  const input = releaseInput();
+  const plan = buildReleasePlan(input);
+  const privatePolicy = {
+    bindings: [{ role: 'roles/run.invoker', members: ['user:qa@motionexp.com'] }],
+    etag: 'Bw-private=', version: 1,
+  };
+  let currentPolicy = structuredClone(privatePolicy);
+  const candidateService = {
+    service: 'hkbuddy-api',
+    traffic: [
+      { revision: input.previousRevision, percent: 100 },
+      { revision: REVISION, tag: CANDIDATE_TAG, percent: 0 },
+    ],
+  };
+  const attemptId = '44444444-4444-4444-8444-444444444444';
+  const restorePath = join(
+    dirname(plan.sourceArchive), `${REVISION}.iam-restore.${attemptId}.json`,
+  );
+  const result = await runGcpRelease({
+    argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`], input,
+    randomUUID: () => attemptId,
+    writeIamRestorePolicy: async () => restorePath,
+    removeIamRestorePolicy: async () => true,
+    execute: async (argv) => {
+      if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
+      if (argv[0] === 'artifacts') return { image: plan.expectedCandidate.image };
+      if (argv.includes('get-iam-policy')) return structuredClone(currentPolicy);
+      if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
+      if (argv[1] === 'services' && argv[2] === 'describe') return structuredClone(candidateService);
+      if (argv.includes('add-iam-policy-binding')) {
+        currentPolicy = {
+          bindings: [{
+            role: 'roles/run.invoker', members: ['allUsers', 'user:qa@motionexp.com'],
+          }],
+          etag: 'Bw-public=', version: 1,
+        };
+        return structuredClone(currentPolicy);
+      }
+      if (argv.includes('update-traffic')) throw new Error('traffic control plane unavailable');
+      if (argv.includes('set-iam-policy')) {
+        currentPolicy = { ...structuredClone(privatePolicy), etag: 'Bw-restored=' };
+        return structuredClone(currentPolicy);
+      }
+      throw new Error(`unexpected operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.publicReport.code, 'PROMOTION_COMPENSATION_FAILED');
+  assert.equal(result.publicReport.promotionTrafficRestored, false);
+  assert.equal(result.publicReport.promotionIamRestored, true);
+  assert.deepEqual(currentPolicy.bindings, privatePolicy.bindings);
 });
 
 test('candidate deployment uses a controlled Service YAML and never the unsupported deploy readiness flag', () => {
@@ -1437,6 +1861,26 @@ test('evidence validation rejects a forged self-reported semantic digest even wh
   }, { releaseSha: RELEASE_SHA }), /evidence artifact/i);
 });
 
+test('release evidence recursively rejects persisted authorization and token material', () => {
+  for (const value of [
+    { trace: { request: { headers: { Authorization: 'redacted' } } } },
+    { screenshot: { metadata: { note: `Bearer ${'x'.repeat(40)}` } } },
+    { events: [{ evidence: `eyJ${'a'.repeat(12)}.eyJ${'b'.repeat(12)}.${'c'.repeat(20)}` }] },
+    { nested: [{ id_token: 'redacted' }] },
+  ]) assert.equal(containsForbiddenPersistedSecret(value), true);
+
+  assert.equal(containsForbiddenPersistedSecret({
+    access: {
+      authenticated: true,
+      audience: STABLE_ORIGIN,
+      issuer: 'https://accounts.google.com',
+      subjectSha256: QA_SUBJECT_SHA256,
+      taggedUrl: CANDIDATE_ORIGIN,
+    },
+    evidence: 'Authenticated request returned the expected candidate release binding.',
+  }), false);
+});
+
 test('migration refuses execution when the exact deployed Job readback drifts', async () => {
   const calls = [];
   const result = await runGcpRelease({
@@ -1480,6 +1924,14 @@ test('migration execution accepts the real Cloud Run Jobs v1 terminal success sh
     succeededCount: 1,
     completionTime: '2026-08-26T08:00:00.000Z',
   });
+  const omittedZeroCounters = structuredClone(execution);
+  for (const key of ['runningCount', 'failedCount', 'cancelledCount', 'retriedCount']) {
+    delete omittedZeroCounters.status[key];
+  }
+  assert.deepEqual(
+    validateMigrationExecutionReceipt(omittedZeroCounters, { releaseSha: RELEASE_SHA }),
+    validateMigrationExecutionReceipt(execution, { releaseSha: RELEASE_SHA }),
+  );
   for (const mutate of [
     (value) => { value.status.conditions[0].status = 'False'; },
     (value) => { value.status.succeededCount = 0; },
@@ -1495,6 +1947,44 @@ test('migration execution accepts the real Cloud Run Jobs v1 terminal success sh
       /migration execution receipt/i,
     );
   }
+});
+
+test('migration phase persists the canonical short v1 execution identity with omitted zero counters', async () => {
+  const input = releaseInput({ evidence: null, acceptanceOutputs: null, previousRevision: null });
+  const plan = buildReleasePlan(input, { phase: 'migration' });
+  let persisted = null;
+  const result = await runGcpRelease({
+    argv: ['--phase=migration', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    persistReceipt: async (_releasePlan, receipt) => {
+      persisted = structuredClone(receipt);
+      return true;
+    },
+    execute: async (argv) => {
+      if (argv[2] === 'deploy') return { metadata: { name: 'hkbuddy-migrate' } };
+      if (argv[2] === 'describe') return realV1JobReadback(plan.expectedMigrationJob);
+      if (argv[2] === 'execute') return {
+        apiVersion: 'run.googleapis.com/v1',
+        kind: 'Execution',
+        metadata: {
+          name: 'hkbuddy-migrate-release-001',
+          labels: { 'run.googleapis.com/job': 'hkbuddy-migrate' },
+        },
+        spec: { taskCount: 1, parallelism: 1 },
+        status: {
+          conditions: [{ type: 'Completed', status: 'True' }],
+          completionTime: '2026-08-26T08:00:00.000Z',
+          succeededCount: 1,
+        },
+      };
+      throw new Error(`unexpected operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.publicReport.migrationExecutionReceipt.name, 'hkbuddy-migrate-release-001');
+  assert.equal(persisted.outputs.executionName, 'hkbuddy-migrate-release-001');
+  assert.doesNotMatch(persisted.outputs.executionName, /\/executions\//);
 });
 
 test('promotion without the complete predecessor receipt chain remains inert', async () => {
@@ -1554,6 +2044,10 @@ test('workload Task 8 gate independently verifies the complete 200-turn acceptan
       input,
       loadReceipts: async (plan, { through }) => fixtureReceiptChain(plan, through),
       persistReceipt: async () => true,
+      execute: async (argv) => {
+        assert.deepEqual(argv.slice(0, 2), ['logging', 'read']);
+        return controlPlaneLogEntries(finalized);
+      },
       now: () => new Date('2026-08-26T08:05:00.000Z'),
       writeOutput: () => undefined,
     });
@@ -1561,6 +2055,13 @@ test('workload Task 8 gate independently verifies the complete 200-turn acceptan
 
   const valid = validWorkloadAcceptanceRecord();
   assert.equal((await runRecord(valid)).exitCode, 0);
+
+  const syntheticSummary = structuredClone(valid);
+  delete syntheticSummary.rawReceipts;
+  syntheticSummary.artifactSha256 = finalizeLatencyAcceptanceRecord(syntheticSummary).artifactSha256;
+  const syntheticRejected = await runRecord(syntheticSummary);
+  assert.equal(syntheticRejected.exitCode, 1,
+    'aggregate-only evidence must not certify a workload with zero HTTP turns');
 
   const forgedFiveField = finalizeLatencyAcceptanceRecord({
     schemaVersion: 3,
@@ -1578,6 +2079,26 @@ test('workload Task 8 gate independently verifies the complete 200-turn acceptan
     = duplicateObservation.observations.queryDigests.values[0];
   const staleReplay = structuredClone(valid);
   staleReplay.occurredAt = '2026-08-24T08:00:00.000Z';
+  const refinalizeRaw = (record) => {
+    const { receiptsSha256: ignored, ...payload } = record.rawReceipts;
+    void ignored;
+    record.rawReceipts.receiptsSha256 = createHash('sha256')
+      .update(JSON.stringify(canonicalFixture(payload))).digest('hex');
+    return record;
+  };
+  const mutatedRawStatus = structuredClone(valid);
+  mutatedRawStatus.rawReceipts.textTurns[0].requestStatus = 500;
+  refinalizeRaw(mutatedRawStatus);
+  const duplicatedControlPlane = structuredClone(valid);
+  duplicatedControlPlane.rawReceipts.controlPlaneRequests[1] = {
+    ...structuredClone(duplicatedControlPlane.rawReceipts.controlPlaneRequests[0]), sequence: 2,
+  };
+  refinalizeRaw(duplicatedControlPlane);
+  const reorderedTurns = structuredClone(valid);
+  [reorderedTurns.rawReceipts.textTurns[0], reorderedTurns.rawReceipts.textTurns[1]] = [
+    reorderedTurns.rawReceipts.textTurns[1], reorderedTurns.rawReceipts.textTurns[0],
+  ];
+  refinalizeRaw(reorderedTurns);
 
   for (const [name, record] of [
     ['forged five-field record', forgedFiveField],
@@ -1585,12 +2106,159 @@ test('workload Task 8 gate independently verifies the complete 200-turn acceptan
     ['mutated metric sample count', mutatedMetric],
     ['duplicate timing query observation', duplicateObservation],
     ['stale replay', staleReplay],
+    ['mutated raw request status with recomputed receipts digest', mutatedRawStatus],
+    ['duplicate control-plane request with recomputed receipts digest', duplicatedControlPlane],
+    ['reordered raw turns with recomputed receipts digest', reorderedTurns],
   ]) {
     const rejected = await runRecord(record);
     assert.equal(rejected.exitCode, 1, name);
     assert.equal(rejected.publicReport.code, 'TASK8_EVIDENCE_INVALID', name);
     assert.equal(rejected.publicReport.mutationPerformed, false, name);
   }
+});
+
+test('real-shape migration, authenticated workload, and tag-free promotion share one receipt chain', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'hkbuddy-integrated-release-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const workloadRecord = validWorkloadAcceptanceRecord();
+  const workloadBytes = `${JSON.stringify(workloadRecord, null, 2)}\n`;
+  const workloadPath = join(directory, 'workload.json');
+  await writeFile(workloadPath, workloadBytes);
+  const base = releaseInput();
+  const input = releaseInput({
+    task8Evidence: {
+      ...base.task8Evidence,
+      workload: {
+        filePath: workloadPath,
+        artifactSha256: workloadRecord.artifactSha256,
+        objectSha256: createHash('sha256').update(workloadBytes).digest('hex'),
+      },
+    },
+  });
+  const plan = buildReleasePlan(input);
+  const receipts = fixtureReceiptChain(plan, 'build');
+  const persistReceipt = async (_releasePlan, receipt) => {
+    receipts.push(structuredClone(receipt));
+    return true;
+  };
+
+  const migration = await runGcpReleaseImpl({
+    argv: ['--phase=migration', `--confirm-release=${RELEASE_SHA}`], input,
+    loadReceipts: async () => structuredClone(receipts),
+    persistReceipt,
+    execute: async (argv) => {
+      if (argv[2] === 'deploy') return { metadata: { name: 'hkbuddy-migrate' } };
+      if (argv[2] === 'describe') return realV1JobReadback(plan.expectedMigrationJob);
+      if (argv[2] === 'execute') return {
+        apiVersion: 'run.googleapis.com/v1', kind: 'Execution',
+        metadata: {
+          name: 'hkbuddy-migrate-release-001',
+          labels: { 'run.googleapis.com/job': 'hkbuddy-migrate' },
+        },
+        spec: { taskCount: 1, parallelism: 1 },
+        status: {
+          conditions: [{ type: 'Completed', status: 'True' }],
+          completionTime: '2026-08-26T08:00:00.000Z', succeededCount: 1,
+        },
+      };
+      throw new Error(`unexpected migration operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(migration.exitCode, 0);
+
+  for (const phase of ['inventory', 'acceptance', 'collect', 'evidence', 'candidate', 'readiness']) {
+    receipts.push(finalizeReleasePhaseReceipt({
+      schemaVersion: 1,
+      phase,
+      sequence: receipts.length + 1,
+      releaseSha: plan.releaseSha,
+      releaseIdentitySha256: plan.releaseIdentitySha256,
+      previousReceiptSha256: receipts.at(-1).receiptSha256,
+      completed: plan.operations.filter((member) => member.phase === phase).map(({ id }) => id),
+      outputs: fixtureReceiptOutputs(plan, phase),
+    }));
+  }
+
+  const workload = await runGcpReleaseImpl({
+    argv: ['--phase=workload', `--confirm-release=${RELEASE_SHA}`], input,
+    loadReceipts: async () => structuredClone(receipts),
+    persistReceipt,
+    execute: async (argv) => {
+      assert.deepEqual(argv.slice(0, 2), ['logging', 'read']);
+      return controlPlaneLogEntries(workloadRecord);
+    },
+    now: () => new Date('2026-08-26T08:05:00.000Z'),
+    writeOutput: () => undefined,
+  });
+  assert.equal(workload.exitCode, 0);
+
+  receipts.push(finalizeReleasePhaseReceipt({
+    schemaVersion: 1,
+    phase: 'mobile',
+    sequence: receipts.length + 1,
+    releaseSha: plan.releaseSha,
+    releaseIdentitySha256: plan.releaseIdentitySha256,
+    previousReceiptSha256: receipts.at(-1).receiptSha256,
+    completed: plan.operations.filter((member) => member.phase === 'mobile').map(({ id }) => id),
+    outputs: fixtureReceiptOutputs(plan, 'mobile'),
+  }));
+
+  let currentService = {
+    service: 'hkbuddy-api',
+    traffic: [
+      { revision: input.previousRevision, percent: 100 },
+      { revision: REVISION, tag: CANDIDATE_TAG, percent: 0 },
+    ],
+  };
+  let currentPolicy = {
+    bindings: [{ role: 'roles/run.invoker', members: ['user:qa@motionexp.com'] }],
+    etag: 'Bw-private=', version: 1,
+  };
+  let postPromotionReadbacks = 0;
+  const promotion = await runGcpReleaseImpl({
+    argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`], input,
+    loadReceipts: async () => structuredClone(receipts),
+    verifyTask8Evidence: async (_entry, phase) => phase === 'workload' ? {
+      acceptanceWindowId: workloadRecord.rawReceipts.acceptanceWindowId,
+      candidateOrigin: CANDIDATE_ORIGIN,
+      candidateRevision: REVISION,
+      controlPlaneRequests: workloadRecord.rawReceipts.controlPlaneRequests,
+      expectedTraceIds: workloadRecord.rawReceipts.textTurns.map(({ traceId }) => traceId),
+    } : true,
+    execute: async (argv) => {
+      if (argv[0] === 'logging') return controlPlaneLogEntries(workloadRecord);
+      if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
+      if (argv[0] === 'artifacts') return { image: plan.expectedCandidate.image };
+      if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
+      if (argv.includes('get-iam-policy')) return structuredClone(currentPolicy);
+      if (argv.includes('add-iam-policy-binding')) {
+        currentPolicy = {
+          bindings: [{
+            role: 'roles/run.invoker', members: ['allUsers', 'user:qa@motionexp.com'],
+          }],
+          etag: 'Bw-public=', version: 1,
+        };
+        return structuredClone(currentPolicy);
+      }
+      if (argv.includes('update-traffic')) {
+        currentService = { service: 'hkbuddy-api', traffic: [{ revision: REVISION, percent: 100 }] };
+        return structuredClone(currentService);
+      }
+      if (argv[1] === 'services' && argv[2] === 'describe') {
+        if (currentService.traffic[0].revision === REVISION) postPromotionReadbacks += 1;
+        return structuredClone(currentService);
+      }
+      throw new Error(`unexpected promotion operation: ${argv.join(' ')}`);
+    },
+    now: () => new Date('2026-08-26T08:05:00.000Z'),
+    writeOutput: () => undefined,
+  });
+  assert.equal(promotion.exitCode, 0);
+  assert.equal(postPromotionReadbacks, 1);
+  assert.deepEqual(currentService.traffic, [{ revision: REVISION, percent: 100 }]);
+  assert.equal(JSON.stringify(currentService).includes(CANDIDATE_TAG), false);
+  assert.equal(currentPolicy.bindings[0].members.includes('allUsers'), true);
 });
 
 test('promotion rereads the exact private zero-traffic candidate before granting public access and changing traffic', () => {
@@ -1606,6 +2274,11 @@ test('promotion rereads the exact private zero-traffic candidate before granting
   assert.equal(ids.indexOf('promote-candidate-artifact-readback') < ids.indexOf('promote-public-service'), true);
   assert.equal(ids.indexOf('promote-public-service') < ids.indexOf('promote-public-iam-readback'), true);
   assert.equal(ids.indexOf('promote-public-iam-readback') < ids.indexOf('promote-traffic'), true);
+  assert.equal(ids.indexOf('promote-traffic') < ids.indexOf('promote-readback'), true);
+  const traffic = operations.find(({ id }) => id === 'promote-traffic');
+  assert.equal(traffic.argv.includes(`--remove-tags=${CANDIDATE_TAG}`), true);
+  const readback = operations.find(({ id }) => id === 'promote-readback');
+  assert.deepEqual(readback.argv.slice(0, 4), ['run', 'services', 'describe', 'hkbuddy-api']);
 });
 
 function planPhase(plan, phase) {

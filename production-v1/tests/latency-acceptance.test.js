@@ -12,6 +12,7 @@ import {
   createLatencyHttpRequester,
   finalizeLatencyAcceptanceRecord,
   inspectGitState,
+  mintGcloudIdentityToken,
   nearestRankP50,
   nearestRankP95,
   runLatencyAcceptance,
@@ -25,6 +26,21 @@ const ORIGIN = `https://candidate-${COMMIT.slice(0, 12)}---hkbuddy-api-${PROJECT
 const MANIFEST_PATH = resolve('latency-asr-fixtures.json');
 const CWD = resolve('..');
 const NOW = new Date('2026-08-25T12:00:00.000Z');
+const SOURCE_ARCHIVE_SHA256 = '2'.repeat(64);
+const CANDIDATE_IMAGE_DIGEST = `sha256:${'3'.repeat(64)}`;
+const CANDIDATE_REVISION = `hkbuddy-api-${COMMIT.slice(0, 12)}`;
+const TEST_ID_TOKEN = [
+  Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url'),
+  Buffer.from(JSON.stringify({
+    iss: 'https://accounts.google.com',
+    aud: STABLE_ORIGIN,
+    sub: '1234567890',
+    email: 'admin@motionexp.com',
+    iat: Math.floor(NOW.getTime() / 1000) - 30,
+    exp: Math.floor(NOW.getTime() / 1000) + 3_600,
+  })).toString('base64url'),
+  'test-signature',
+].join('.');
 
 function exactArgv(origin = ORIGIN, manifestPath = MANIFEST_PATH) {
   return [
@@ -89,6 +105,9 @@ function createHarness({
     V1_RELEASE_COMMIT_SHA: COMMIT,
     V1_PUBLIC_ORIGIN: STABLE_ORIGIN,
     V1_CANDIDATE_ORIGIN: ORIGIN,
+    V1_SOURCE_ARCHIVE_SHA256: SOURCE_ARCHIVE_SHA256,
+    V1_CANDIDATE_IMAGE_DIGEST: CANDIDATE_IMAGE_DIGEST,
+    V1_CANDIDATE_REVISION: CANDIDATE_REVISION,
   },
   argv = exactArgv(),
   gitState = { head: COMMIT, clean: true },
@@ -105,6 +124,11 @@ function createHarness({
   const maximum = { bootstrap: 0, verifyCandidate: 0, text: 0, asr: 0, tts: 0, timings: 0 };
 
   const defaultResult = (input) => {
+    const ordinal = input.operation === 'text'
+      ? input.sessionIndex * 10 + input.turnIndex + 1
+      : (input.sampleIndex ?? input.requestIndex ?? input.sessionIndex ?? 0) + 1;
+    const requestId = `00000000-0000-4000-8001-${String(ordinal).padStart(12, '0')}`;
+    const responseRequestId = `00000000-0000-4000-8002-${String(ordinal).padStart(12, '0')}`;
     if (['bootstrap', 'verifyCandidate'].includes(input.operation)) {
       return {
         ok: true,
@@ -133,6 +157,13 @@ function createHarness({
         providerLatencyMs: 5_500,
         serverLatencyMs: 250,
         privateBody: 'must-not-enter-artifact',
+        requestStatus: 202,
+        requestId,
+        responseStatus: 200,
+        responseRequestId,
+        groundingSatisfied: true,
+        groundingVerified: input.promptClass === 'grounded',
+        groundingEvidenceSha256: createHash('sha256').update(`grounding-${ordinal}`).digest('hex'),
       };
     }
     if (input.operation === 'asr') {
@@ -143,6 +174,10 @@ function createHarness({
         providerLatencyMs: 4_400,
         serverLatencyMs: 300,
         transcript: 'private transcript must not enter artifact',
+        requestStatus: 202,
+        requestId,
+        responseStatus: 200,
+        responseRequestId,
       };
     }
     return {
@@ -155,6 +190,10 @@ function createHarness({
       providerLatencyMs: 3_500,
       serverLatencyMs: 200,
       audio: 'private audio must not enter artifact',
+      requestStatus: 200,
+      requestId,
+      responseStatus: 200,
+      responseRequestId,
     };
   };
 
@@ -223,6 +262,30 @@ function createHarness({
       artifacts.push(input);
     }),
     writeOutput: (line) => outputs.push(line),
+    mintIdentityToken: async ({ audience }) => {
+      calls.push(['identity-token', audience]);
+      return TEST_ID_TOKEN;
+    },
+    readControlPlaneReceipts: async (query) => {
+      calls.push(['control-plane', query]);
+      return Array.from({ length: 200 }, (_, index) => ({
+        insertId: `request-${String(index + 1).padStart(3, '0')}`,
+        timestamp: new Date(NOW.getTime() + index).toISOString(),
+        trace: `projects/hkbuddy-prod-v1-20260826/traces/${query.expectedTraceIds[index]}`,
+        resource: {
+          type: 'cloud_run_revision',
+          labels: {
+            project_id: 'hkbuddy-prod-v1-20260826', location: 'asia-east2',
+            service_name: 'hkbuddy-api', revision_name: `hkbuddy-api-${COMMIT.slice(0, 12)}`,
+          },
+        },
+        httpRequest: {
+          requestMethod: 'POST', requestUrl: `${ORIGIN}/api/v1/messages`,
+          status: 202, latency: '0.200s',
+          userAgent: `hkbuddy-v1-acceptance/${query.acceptanceWindowId}`,
+        },
+      }));
+    },
     ...overrides,
   });
 
@@ -238,7 +301,7 @@ test('nearest-rank percentiles are deterministic and the acceptance contract fix
   assert.throws(() => nearestRankP95([1, Number.NaN]), /finite/i);
 
   assert.deepEqual(LATENCY_ACCEPTANCE_CONTRACT, {
-    schemaVersion: 3,
+    schemaVersion: 4,
     text: {
       sessions: 20,
       turns: 200,
@@ -268,6 +331,26 @@ test('nearest-rank percentiles are deterministic and the acceptance contract fix
       ttsReadyP95: 5_000,
     },
   });
+});
+
+test('private candidate authentication mints the exact audience-bound gcloud ID token in memory', async () => {
+  const calls = [];
+  const token = await mintGcloudIdentityToken({
+    audience: STABLE_ORIGIN,
+    executeFile: async (file, argv, options) => {
+      calls.push({ file, argv, options });
+      return { stdout: `${TEST_ID_TOKEN}\n`, stderr: '' };
+    },
+  });
+  assert.equal(token, TEST_ID_TOKEN);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].file, 'gcloud');
+  assert.deepEqual(calls[0].argv, [
+    'auth', 'print-identity-token', `--audiences=${STABLE_ORIGIN}`,
+    '--account=admin@motionexp.com', '--quiet',
+  ]);
+  assert.equal(calls[0].options.windowsHide, true);
+  assert.equal(JSON.stringify(calls).includes(TEST_ID_TOKEN), false);
 });
 
 test('command is inert unless exact arguments, explicit load confirmation, frozen SHA, and safe candidate are present', async (t) => {
@@ -302,6 +385,18 @@ test('command is inert unless exact arguments, explicit load confirmation, froze
       assert.deepEqual(fixture.outputs, [`${JSON.stringify(result.publicReport)}\n`]);
     });
   }
+});
+
+test('an invalid audience-bound identity token fails before the first candidate HTTP request', async () => {
+  const harness = createHarness();
+  let requested = false;
+  const result = await harness.run({
+    mintIdentityToken: async () => 'not-a-jwt',
+    requester: async () => { requested = true; throw new Error('must remain inert'); },
+  });
+  assert.equal(result.exitCode, 1);
+  assert.equal(JSON.parse(harness.outputs.at(-1)).code, 'CANDIDATE_AUTHENTICATION_INVALID');
+  assert.equal(requested, false);
 });
 
 test('clean current HEAD must equal the frozen release SHA before fixture or network access', async (t) => {
@@ -364,7 +459,7 @@ test('candidate preflight uses the first of exactly 20 sessions and fences a mis
 
       assert.equal(result.exitCode, 1);
       assert.equal(result.publicReport.code, code);
-      assert.deepEqual(fixture.calls.map(([kind]) => kind), ['git', 'fixtures', 'request']);
+      assert.deepEqual(fixture.calls.map(([kind]) => kind), ['git', 'fixtures', 'identity-token', 'request']);
       assert.equal(fixture.calls.at(-1)[1].operation, 'bootstrap');
       assert.equal(fixture.calls.at(-1)[1].sessionIndex, 0);
     });
@@ -424,6 +519,20 @@ test('passing run executes the exact workload at concurrency five and writes one
   assert.equal(fixture.maximum.tts, 5);
 
   const { filePath, record, contents } = fixture.artifacts[0];
+  assert.equal(record.schemaVersion, 4);
+  assert.equal(record.rawReceipts.textTurns.length, 200);
+  assert.equal(record.rawReceipts.asrRequests.length, 30);
+  assert.equal(record.rawReceipts.ttsRequests.length, 31);
+  assert.equal(record.rawReceipts.timingQueries.length, 20);
+  assert.equal(record.rawReceipts.controlPlaneRequests.length, 200);
+  assert.deepEqual(record.access, {
+    authenticated: true,
+    audience: STABLE_ORIGIN,
+    issuer: 'https://accounts.google.com',
+    subjectSha256: createHash('sha256').update('admin@motionexp.com').digest('hex'),
+    taggedUrl: ORIGIN,
+  });
+  assert.equal(JSON.stringify(record).includes(TEST_ID_TOKEN), false);
   assert.equal(basename(filePath), `${COMMIT}-${record.artifactSha256}.json`);
   assert.deepEqual(record.workload, LATENCY_ACCEPTANCE_CONTRACT);
   assert.deepEqual(record.metrics, {
@@ -504,6 +613,34 @@ test('passing run executes the exact workload at concurrency five and writes one
   for (const forbidden of ['must-not-enter-artifact', 'private transcript', 'private audio', MANIFEST_PATH]) {
     assert.equal(artifactText.includes(forbidden), false);
   }
+});
+
+test('real requester sends the private-candidate ID token only in memory on every request', async () => {
+  const observed = [];
+  const requester = createLatencyHttpRequester({
+    candidateOrigin: ORIGIN,
+    identityToken: TEST_ID_TOKEN,
+    acceptanceUserAgent: `hkbuddy-v1-acceptance/${'a'.repeat(64)}`,
+    fetchImpl: async (url, options) => {
+      observed.push({ url: String(url), headers: { ...options.headers } });
+      return new Response(JSON.stringify({ data: {
+        session: { id: 'session-1' },
+        capabilities: {
+          productionReady: true, releaseCommitSha: COMMIT, voiceInput: true, voiceOutput: true,
+        },
+      }, error: null, requestId: '00000000-0000-4000-8000-000000000001' }), {
+        status: 201,
+        headers: { 'set-cookie': 'hb_v1_session=fake-local-cookie; HttpOnly' },
+      });
+    },
+  });
+  const result = await requester({ operation: 'bootstrap', sessionIndex: 0 });
+  assert.equal(result.ok, true);
+  assert.equal(observed.length, 1);
+  assert.equal(observed[0].headers.Authorization, `Bearer ${TEST_ID_TOKEN}`);
+  assert.equal(observed[0].headers['X-Serverless-Authorization'], undefined);
+  assert.equal(observed[0].headers['User-Agent'], `hkbuddy-v1-acceptance/${'a'.repeat(64)}`);
+  assert.equal(JSON.stringify(result).includes(TEST_ID_TOKEN), false);
 });
 
 test('nearest-rank threshold overflow or any invariant/count failure records a failed artifact', async (t) => {
@@ -863,7 +1000,10 @@ test('poll deadline aborts an in-flight fetch instead of waiting for the fetch d
 
   assert.equal(observation.settled, true);
   assert.equal(observation.status, 'fulfilled');
-  assert.deepEqual(observation.value, { ready: false, transcriptMs: null, durationBucketSeconds: null });
+  assert.deepEqual(observation.value, {
+    ready: false, transcriptMs: null, durationBucketSeconds: null,
+    requestStatus: 202, requestId: null, responseStatus: 0, responseRequestId: null,
+  });
   assert.equal(signals[1].aborted, true);
 });
 
@@ -907,6 +1047,9 @@ test('total latency command deadline is not downgraded to a Git-state error when
     environment: {
       V1_LOAD_TEST_CONFIRM: 'true', V1_RELEASE_COMMIT_SHA: COMMIT,
       V1_PUBLIC_ORIGIN: STABLE_ORIGIN, V1_CANDIDATE_ORIGIN: ORIGIN,
+      V1_SOURCE_ARCHIVE_SHA256: SOURCE_ARCHIVE_SHA256,
+      V1_CANDIDATE_IMAGE_DIGEST: CANDIDATE_IMAGE_DIGEST,
+      V1_CANDIDATE_REVISION: CANDIDATE_REVISION,
     },
     cwd: CWD,
     artifactDirectory: resolve('reports', 'latency-test'),
