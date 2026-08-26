@@ -11,6 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createDefaultGcloudExecutor } from './gcp-provision.js';
 import { containsForbiddenPersistedSecret } from './persisted-secret-contract.js';
 import {
+  createFinalMutationGuard,
   recoverTerminalFromReceipt,
   validateReconciliationPrefix,
 } from './release-reconciliation.js';
@@ -64,6 +65,7 @@ const RECEIPT_PHASES = Object.freeze([
   'build', 'migration', 'inventory', 'acceptance', 'collect', 'evidence', 'candidate',
   'readiness', 'workload', 'mobile',
 ]);
+const ACTION_RECEIPT_PHASES = new Set(['candidate-cleanup', 'promote', 'rollback']);
 const MOBILE_CHECK_IDS = Object.freeze([
   'first-visit',
   'response-language-mode-change',
@@ -1130,6 +1132,19 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     stableRevision, previousRevision, releaseSha,
     image, environment, bindings, probes,
   });
+  const semanticReleaseSpecSha256 = canonicalSha256({
+    acceptanceOutputs,
+    databaseSecretVersions,
+    evidence,
+    expectedJobs,
+    expectedMigrationJob,
+    previousImage,
+    previousImageDigest,
+    previousRevision,
+    candidateServiceSpec: controlledCandidateServiceSpec,
+    stableServiceSpec: controlledStableServiceSpec,
+    task8Evidence,
+  });
   const releaseIdentitySha256 = canonicalSha256({
     project: PROJECT,
     region: REGION,
@@ -1143,12 +1158,17 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     stableService: STABLE_SERVICE,
     trafficState: candidateTrafficState(),
     stableTrafficState,
+    databaseSecretVersions,
+    previousRevision,
+    previousImageDigest,
   });
   const releaseReceiptDirectory = join(dirname(input.sourceArchive), `${releaseSha}-receipts`);
-  const releaseReceiptPaths = Object.freeze(Object.fromEntries(RECEIPT_PHASES.map((receiptPhase, index) => [
-    receiptPhase,
-    join(releaseReceiptDirectory, `${String(index + 1).padStart(2, '0')}-${receiptPhase}.json`),
-  ])));
+  const releaseReceiptPaths = Object.freeze(Object.fromEntries(
+    RECEIPT_PHASES.map((receiptPhase, index) => [
+      receiptPhase,
+      join(releaseReceiptDirectory, `${String(index + 1).padStart(2, '0')}-${receiptPhase}.json`),
+    ]),
+  ));
   const jobDeployArgv = (contract) => [
     'run', 'jobs', 'deploy', contract.job, `--project=${PROJECT}`, `--region=${REGION}`,
     `--image=${contract.image}`, `--service-account=${contract.serviceAccount}`,
@@ -1195,6 +1215,10 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       'run', 'jobs', 'execute', MIGRATION_JOB, '--wait', `--project=${PROJECT}`,
       `--region=${REGION}`, '--format=json',
     ]),
+    operation('migration', 'migration-execution-readback', [
+      'run', 'jobs', 'executions', 'describe', '{validated-execution-id}',
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ]),
   ];
   operations.push(
     operation('inventory', 'inventory-publish:legacyInventory', [
@@ -1215,6 +1239,10 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       ]),
       operation('acceptance', `${key}-execute`, [
         'run', 'jobs', 'execute', contract.job, '--wait',
+        `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+      ]),
+      operation('acceptance', `${key}-execution-readback`, [
+        'run', 'jobs', 'executions', 'describe', '{validated-execution-id}',
         `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
       ]),
     );
@@ -1246,6 +1274,10 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
   for (const [key, output] of Object.entries(acceptanceOutputs)) {
     operations.push(operation('evidence', `evidence-output-delete:${key}`, [
       'storage', 'rm', `gs://${output.bucket}/${output.object}#${output.generation}`,
+      `--project=${PROJECT}`, '--format=json',
+    ]));
+    operations.push(operation('evidence', `evidence-output-delete-readback:${key}`, [
+      'storage', 'objects', 'list', `gs://${output.bucket}/${output.object}`,
       `--project=${PROJECT}`, '--format=json',
     ]));
   }
@@ -1531,6 +1563,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     stableServiceSpecPath,
     stableServiceSpec: controlledStableServiceSpec,
     acceptanceRunId,
+    semanticReleaseSpecSha256,
     releaseIdentitySha256,
     releaseReceiptDirectory,
     releaseReceiptPaths,
@@ -2395,6 +2428,47 @@ export function validateMigrationExecutionReceipt(value, { releaseSha } = {}) {
   });
 }
 
+export function validateCloudRunExecutionIdentity(value, { job } = {}) {
+  const name = value?.metadata?.name;
+  const labelledJob = value?.metadata?.labels?.['run.googleapis.com/job'];
+  const validName = typeof job === 'string' && /^[a-z][a-z0-9-]{0,62}$/.test(job)
+    && typeof name === 'string'
+    && new RegExp(`^${job}-[a-z0-9](?:[a-z0-9-]{0,48}[a-z0-9])?$`).test(name);
+  if (value?.apiVersion !== 'run.googleapis.com/v1' || value?.kind !== 'Execution'
+    || labelledJob !== job || !validName) {
+    throw new Error('Cloud Run execution identity is invalid');
+  }
+  return name;
+}
+
+export function validateReleaseJobExecutionReceipt(value, expected) {
+  const name = validateCloudRunExecutionIdentity(value, { job: expected?.job });
+  const taskCount = nonnegativeInteger(value?.spec?.taskCount);
+  const parallelism = nonnegativeInteger(value?.spec?.parallelism);
+  const status = value?.status;
+  const completed = Array.isArray(status?.conditions)
+    ? status.conditions.filter(({ type } = {}) => type === 'Completed') : [];
+  const completionTime = status?.completionTime;
+  if (!expected || taskCount !== expected.taskCount || parallelism !== expected.parallelism
+    || nonnegativeInteger(status?.succeededCount) !== expected.taskCount
+    || nonnegativeInteger(status?.failedCount ?? 0) !== 0
+    || nonnegativeInteger(status?.cancelledCount ?? 0) !== 0
+    || nonnegativeInteger(status?.retriedCount ?? 0) !== 0
+    || nonnegativeInteger(status?.runningCount ?? 0) !== 0
+    || completed.length !== 1 || completed[0]?.status !== 'True'
+    || typeof completionTime !== 'string' || !Number.isFinite(Date.parse(completionTime))) {
+    throw new Error('Cloud Run release Job execution receipt is invalid');
+  }
+  return Object.freeze({
+    name,
+    job: expected.job,
+    taskCount,
+    parallelism,
+    succeededCount: expected.taskCount,
+    completionTime,
+  });
+}
+
 export function validateEvidenceVersionReceipt(value, { secret, secretVersion } = {}) {
   const expectedName = `projects/${PROJECT}/secrets/${secret}/versions/${secretVersion}`;
   if (typeof secret !== 'string' || !NUMERIC_VERSION.test(String(secretVersion ?? ''))
@@ -3135,6 +3209,32 @@ function expectedAcceptanceJobs(plan) {
   ])));
 }
 
+function validateAcceptanceExecutionOutputs(executions, plan) {
+  if (!executions || typeof executions !== 'object' || Array.isArray(executions)
+    || !exactKeys(executions, Object.keys(plan.expectedJobs))) return false;
+  try {
+    for (const [key, expected] of Object.entries(plan.expectedJobs)) {
+      const value = executions[key];
+      if (!exactKeys(value, [
+        'name', 'job', 'taskCount', 'parallelism', 'succeededCount', 'completionTime',
+      ]) || value.job !== expected.job || value.taskCount !== expected.taskCount
+        || value.parallelism !== expected.parallelism
+        || value.succeededCount !== expected.taskCount
+        || validateCloudRunExecutionIdentity({
+          apiVersion: 'run.googleapis.com/v1',
+          kind: 'Execution',
+          metadata: {
+            name: value.name,
+            labels: { 'run.googleapis.com/job': value.job },
+          },
+        }, { job: expected.job }) !== value.name
+        || typeof value.completionTime !== 'string'
+        || !Number.isFinite(Date.parse(value.completionTime))) return false;
+    }
+  } catch { return false; }
+  return true;
+}
+
 function validateReceiptOutputs(phase, outputs, plan) {
   const expectedLabels = {
     'com.simplify.build-config-sha256': plan.buildConfigSha256,
@@ -3172,7 +3272,9 @@ function validateReceiptOutputs(phase, outputs, plan) {
       throw new Error('Release inventory receipt outputs are invalid');
     }
   } else if (phase === 'acceptance') {
-    if (!exact(outputs, { jobs: expectedAcceptanceJobs(plan) })) {
+    if (!exactKeys(outputs, ['jobs', 'executions'])
+      || !exact(outputs.jobs, expectedAcceptanceJobs(plan))
+      || !validateAcceptanceExecutionOutputs(outputs.executions, plan)) {
       throw new Error('Release acceptance receipt outputs are invalid');
     }
   } else if (phase === 'collect') {
@@ -3310,8 +3412,112 @@ async function loadReleaseReceiptFiles(plan, { through }) {
   return receipts;
 }
 
-async function loadExistingReleasePhaseReceipt(plan, phase) {
-  const filePath = plan?.releaseReceiptPaths?.[phase];
+function releaseActionReceiptOutputs(phase, plan) {
+  if (phase === 'candidate-cleanup') return Object.freeze({
+    candidateRevision: plan.candidateRevision,
+    candidateService: CANDIDATE_SERVICE,
+    imageDigest: plan.imageDigest,
+    state: 'candidate-absent',
+  });
+  if (phase === 'promote') return Object.freeze({
+    finalOperationId: plan.previousRevision === null
+      ? 'promote-public-service' : 'promote-traffic',
+    imageDigest: plan.imageDigest,
+    stableRevision: plan.stableRevision,
+    stableService: STABLE_SERVICE,
+    state: 'stable-public-100',
+  });
+  if (phase === 'rollback') return Object.freeze({
+    finalOperationId: 'rollback-traffic',
+    imageDigest: plan.previousImageDigest,
+    stableRevision: plan.previousRevision,
+    stableService: STABLE_SERVICE,
+    state: 'stable-prior-public-100',
+  });
+  throw new Error('Release action receipt phase is invalid');
+}
+
+export function releaseActionReceiptPath(plan, phase, attemptId) {
+  if (!ACTION_RECEIPT_PHASES.has(phase)
+    || !UUID.test(String(attemptId ?? ''))
+    || !isAbsoluteFile(plan?.releaseReceiptDirectory)) {
+    throw new Error('Release action receipt path is invalid');
+  }
+  return join(plan.releaseReceiptDirectory, `action-${phase}-${attemptId.toLowerCase()}.json`);
+}
+
+function actionOperationOutcomes(records, attemptId) {
+  if (!Array.isArray(records) || !UUID.test(String(attemptId ?? ''))) {
+    throw new Error('Release action journal is invalid');
+  }
+  const outcomes = records.filter((record) => (
+    record.attemptId === attemptId && record.recordType === 'checkpoint'
+  )).map((record) => Object.freeze({
+    operationId: record.operationId,
+    outcome: record.payload.outcome,
+    observationSha256: record.payload.observationSha256,
+    safeResult: structuredClone(record.payload.safeResult),
+  }));
+  if (outcomes.length < 1) throw new Error('Release action journal is incomplete');
+  return Object.freeze(outcomes);
+}
+
+function expectedActionReceiptCompleted(plan, phase, stateStore) {
+  const operationOutcomes = actionOperationOutcomes(stateStore.records, stateStore.attemptId);
+  const verifiedCleanupNoop = phase === 'candidate-cleanup'
+    && operationOutcomes.length === 1
+    && operationOutcomes[0].operationId === 'candidate-cleanup-delete'
+    && operationOutcomes[0].outcome === 'verified-noop'
+    && operationOutcomes[0].safeResult?.kind === 'resource'
+    && operationOutcomes[0].safeResult?.state === 'absent';
+  return verifiedCleanupNoop
+    ? ['candidate-cleanup-service-precheck', 'candidate-cleanup-absence-readback']
+    : expectedReceiptCompleted(plan, phase);
+}
+
+function createReleaseActionReceipt(phase, plan, completed, priorReceipts, stateStore) {
+  const expectedCompleted = stateStore && UUID.test(String(stateStore.attemptId ?? ''))
+    ? expectedActionReceiptCompleted(plan, phase, stateStore) : null;
+  if (!ACTION_RECEIPT_PHASES.has(phase) || !Array.isArray(priorReceipts)
+    || !exact(completed, expectedCompleted)
+    || !stateStore || !UUID.test(String(stateStore.attemptId ?? ''))
+    || stateStore.records?.at(-1)?.recordType !== 'checkpoint') {
+    throw new Error('Release action receipt is invalid');
+  }
+  const operationOutcomes = actionOperationOutcomes(stateStore.records, stateStore.attemptId);
+  return finalizeReleasePhaseReceipt({
+    schemaVersion: 1,
+    receiptType: 'action-outcome',
+    phase,
+    attemptId: stateStore.attemptId,
+    releaseSha: plan.releaseSha,
+    releaseIdentitySha256: plan.releaseIdentitySha256,
+    semanticReleaseSpecSha256: plan.semanticReleaseSpecSha256,
+    receiptHeadSha256: priorReceipts.at(-1)?.receiptSha256 ?? null,
+    checkpointRecordSha256: stateStore.records.at(-1).recordSha256,
+    mutationCount: operationOutcomes.length,
+    completed: [...completed],
+    operationOutcomes,
+    outputs: releaseActionReceiptOutputs(phase, plan),
+  });
+}
+
+function validateReleaseActionReceipt(receipt, phase, plan, priorReceipts, stateStore) {
+  const expected = createReleaseActionReceipt(
+    phase, plan, expectedActionReceiptCompleted(plan, phase, stateStore), priorReceipts, stateStore,
+  );
+  if (!exact(receipt, expected) || containsForbiddenPersistedSecret(receipt)) {
+    throw new Error('Release action receipt is invalid');
+  }
+  return true;
+}
+
+async function loadExistingReleasePhaseReceipt(
+  plan, phase, priorReceipts = [], actionContext = null,
+) {
+  const filePath = ACTION_RECEIPT_PHASES.has(phase)
+    ? releaseActionReceiptPath(plan, phase, actionContext?.attemptId)
+    : plan?.releaseReceiptPaths?.[phase];
   if (!filePath) return null;
   try {
     await lstat(filePath);
@@ -3319,13 +3525,42 @@ async function loadExistingReleasePhaseReceipt(plan, phase) {
     if (error?.code === 'ENOENT') return null;
     throw error;
   }
+  if (ACTION_RECEIPT_PHASES.has(phase)) {
+    assertReceiptIdempotencyMetadata(await lstat(filePath));
+    const bytes = await readFile(filePath);
+    const raw = bytes.toString('utf8');
+    if (!Buffer.from(raw).equals(bytes)) throw new Error('Release action receipt is invalid');
+    const receipt = JSON.parse(raw);
+    if (raw !== `${JSON.stringify(receipt, null, 2)}\n`) {
+      throw new Error('Release action receipt is invalid');
+    }
+    validateReleaseActionReceipt(receipt, phase, plan, priorReceipts, {
+      attemptId: actionContext?.attemptId,
+      records: actionContext?.records,
+    });
+    return receipt;
+  }
   const receipts = await loadReleaseReceiptFiles(plan, { through: phase });
   return receipts.at(-1);
 }
 
-async function persistReleaseReceipt(plan, receipt) {
-  const filePath = plan.releaseReceiptPaths[receipt.phase];
+export function assertReceiptIdempotencyMetadata(metadata) {
+  if (!metadata || typeof metadata.isFile !== 'function'
+    || typeof metadata.isSymbolicLink !== 'function'
+    || !metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error('Existing release receipt must be a regular non-symlink file');
+  }
+  return true;
+}
+
+export async function persistReleaseReceipt(plan, receipt) {
+  const filePath = receipt?.receiptType === 'action-outcome'
+    ? releaseActionReceiptPath(plan, receipt.phase, receipt.attemptId)
+    : plan.releaseReceiptPaths[receipt.phase];
   if (!filePath) throw new Error('Release receipt path is invalid');
+  if (containsForbiddenPersistedSecret(receipt)) {
+    throw new Error('Release receipt contains forbidden persisted secret material');
+  }
   try { await mkdir(plan.releaseReceiptDirectory); } catch (error) {
     if (error?.code !== 'EEXIST') throw error;
   }
@@ -3334,6 +3569,7 @@ async function persistReleaseReceipt(plan, receipt) {
     await writeAtomicCreateOnly(filePath, Buffer.from(contents));
   } catch (error) {
     if (!/exists/i.test(String(error?.message ?? ''))) throw error;
+    assertReceiptIdempotencyMetadata(await lstat(filePath));
     const existing = await readFile(filePath);
     if (!existing.equals(Buffer.from(contents))) throw new Error('Release receipt already exists with different bytes');
   }
@@ -3363,7 +3599,10 @@ function releasePhaseReceiptOutputs(phase, plan, context) {
       legacyInventory: plan.evidence.legacyInventory.secretVersion,
     }),
   });
-  if (phase === 'acceptance') return Object.freeze({ jobs: expectedAcceptanceJobs(plan) });
+  if (phase === 'acceptance') return Object.freeze({
+    jobs: expectedAcceptanceJobs(plan),
+    executions: Object.freeze({ ...context.acceptanceExecutionReceipts }),
+  });
   if (phase === 'collect') return Object.freeze({
     evidence: Object.freeze(Object.fromEntries(Object.entries(context.collectedEvidence).map(([key, value]) => [
       key, Object.freeze({ artifactSha256: value.artifactSha256, objectSha256: value.objectSha256 }),
@@ -3437,10 +3676,12 @@ function createReleasePhaseReceipt(phase, plan, completed, context, priorReceipt
   return receipt;
 }
 
-async function assertCollectionDestinationsAbsent(outputs) {
-  for (const { filePath } of Object.values(outputs)) {
+async function assertCollectionDestinationsAbsent(outputs, { permittedExistingKeys = [] } = {}) {
+  const permitted = new Set(permittedExistingKeys);
+  for (const [key, { filePath }] of Object.entries(outputs)) {
     try {
-      await lstat(filePath);
+      const metadata = await lstat(filePath);
+      if (permitted.has(key) && metadata.isFile() && !metadata.isSymbolicLink()) continue;
       throw new Error('destination exists');
     } catch (error) {
       if (error?.code !== 'ENOENT') throw new Error('Evidence collection destination is not empty');
@@ -3480,12 +3721,193 @@ function journalReconcileKind(id) {
   throw new Error('Release mutation has no reconciliation contract');
 }
 
-function journalOperationState(plan, member, state) {
+function mutationRetryPolicy(reconcileKind) {
+  return ['cloud-build-submit', 'cloud-run-job-execute', 'secret-version-add']
+    .includes(reconcileKind) ? 'never-repeat-without-correlation' : 'retry-exact-before-once';
+}
+
+function mutationSpec(plan, operationId) {
+  if (operationId === 'build-submit') return Object.freeze({
+    buildConfigSha256: plan.buildConfigSha256,
+    image: plan.image,
+    project: PROJECT,
+    region: REGION,
+    releaseSha: plan.releaseSha,
+    sourceArchiveSha256: plan.sourceArchiveSha256,
+  });
+  if (operationId === 'migration-deploy') return plan.expectedMigrationJob;
+  if (operationId === 'migration-execute') return Object.freeze({
+    job: MIGRATION_JOB, releaseSha: plan.releaseSha, terminalStatus: 'SUCCEEDED',
+  });
+  if (operationId.endsWith('-deploy')
+    && !['candidate-deploy', 'promote-stable-deploy'].includes(operationId)) {
+    return plan.expectedJobs[operationId.slice(0, -'-deploy'.length)];
+  }
+  if (operationId.endsWith('-execute')) {
+    const key = operationId.slice(0, -'-execute'.length);
+    return Object.freeze({
+      job: plan.expectedJobs[key]?.job,
+      releaseSha: plan.releaseSha,
+      terminalStatus: 'SUCCEEDED',
+    });
+  }
+  if (operationId.startsWith('inventory-publish:')
+    || operationId.startsWith('evidence-publish:')) {
+    const key = operationId.slice(operationId.indexOf(':') + 1);
+    return plan.evidence[key];
+  }
+  if (operationId.startsWith('evidence-collect-copy:')
+    || operationId.startsWith('evidence-output-delete:')) {
+    const key = operationId.slice(operationId.indexOf(':') + 1);
+    return Object.freeze({
+      evidence: plan.evidence[key],
+      object: plan.acceptanceOutputs[key],
+    });
+  }
+  if (operationId === 'candidate-deploy') return Object.freeze({
+    candidate: plan.expectedCandidate,
+    serviceSpecSha256: canonicalSha256(plan.candidateServiceSpec),
+  });
+  if (operationId === 'candidate-private-iam-grant') return Object.freeze({
+    member: `serviceAccount:${ACCEPTANCE_SERVICE_ACCOUNT}`,
+    policy: 'candidate-private',
+    role: 'roles/run.invoker',
+    service: CANDIDATE_SERVICE,
+  });
+  if (operationId === 'candidate-cleanup-delete') return Object.freeze({
+    candidateRevision: plan.candidateRevision,
+    image: plan.image,
+    service: CANDIDATE_SERVICE,
+  });
+  if (operationId === 'promote-stable-deploy') return Object.freeze({
+    service: STABLE_SERVICE,
+    serviceSpecSha256: canonicalSha256(plan.stableServiceSpec),
+    stableRevision: plan.stableRevision,
+  });
+  if (operationId === 'promote-public-service') return Object.freeze({
+    member: 'allUsers', policy: 'stable-public', role: 'roles/run.invoker',
+    service: STABLE_SERVICE,
+  });
+  if (operationId === 'promote-traffic') return Object.freeze({
+    percent: 100, revision: plan.stableRevision, service: STABLE_SERVICE,
+  });
+  if (operationId === 'rollback-traffic') return Object.freeze({
+    percent: 100, revision: plan.previousRevision, service: STABLE_SERVICE,
+  });
+  throw new Error('Release mutation has no semantic specification');
+}
+
+function mutationStateProjection(plan, operationId, state) {
+  const spec = mutationSpec(plan, operationId);
+  const specSha256 = canonicalSha256(spec);
+  const reconcileKind = journalReconcileKind(operationId);
+  const identity = Object.freeze({
+    operationId,
+    project: PROJECT,
+    region: REGION,
+    resourceSha256: canonicalSha256({ operationId, spec }),
+  });
+  if (state === 'before') return Object.freeze({
+    identity,
+    reconcileKind,
+    state: mutationRetryPolicy(reconcileKind) === 'never-repeat-without-correlation'
+      ? 'unattempted-without-authoritative-correlation' : 'authoritative-before',
+  });
+  return Object.freeze({
+    identity,
+    reconcileKind,
+    specSha256,
+    state: operationId === 'candidate-cleanup-delete'
+      || operationId.startsWith('evidence-output-delete:') ? 'absent' : 'applied',
+  });
+}
+
+export function releaseMutationPlanIdentity(plan, member) {
+  if (!plan || !member || !operationMayMutate(member.id)) {
+    throw new Error('Release mutation plan identity is invalid');
+  }
+  const reconcileKind = journalReconcileKind(member.id);
+  const finalPublicMutation = ['promote-public-service', 'promote-traffic', 'rollback-traffic']
+    .includes(member.id);
   return Object.freeze({
     operationId: member.id,
-    phase: member.phase,
-    releaseIdentitySha256: plan.releaseIdentitySha256,
-    state,
+    checkpointOperationId: journalCheckpointBoundary(member.id),
+    reconcileKind,
+    retryPolicy: mutationRetryPolicy(reconcileKind),
+    finalPublicMutation,
+    expectedBefore: mutationStateProjection(plan, member.id, 'before'),
+    expectedAfter: mutationStateProjection(plan, member.id, 'after'),
+    specSha256: canonicalSha256(mutationSpec(plan, member.id)),
+  });
+}
+
+function mutationSafeResult(plan, operationId, context) {
+  if (operationId === 'build-submit') {
+    const receipt = context.buildReceipt;
+    if (!receipt) throw new Error('Cloud Build safe result is unavailable');
+    return Object.freeze({
+      kind: 'build', buildId: receipt.buildId, receiptSha256: receipt.buildReceiptSha256,
+    });
+  }
+  if (operationId === 'migration-execute' || operationId.endsWith('-execute')) {
+    const receipt = operationId === 'migration-execute'
+      ? context.migrationExecutionReceipt
+      : context.acceptanceExecutionReceipts[operationId.slice(0, -'-execute'.length)];
+    if (!receipt?.name) throw new Error('Cloud Run execution safe result is unavailable');
+    return Object.freeze({ kind: 'execution', name: receipt.name, status: 'SUCCEEDED' });
+  }
+  if (operationId.startsWith('inventory-publish:')
+    || operationId.startsWith('evidence-publish:')) {
+    const key = operationId.slice(operationId.indexOf(':') + 1);
+    const expected = plan.evidence[key];
+    return Object.freeze({
+      kind: 'secret-version',
+      name: `projects/${PROJECT}/secrets/${expected.secret}`,
+      version: expected.secretVersion,
+    });
+  }
+  if (operationId.startsWith('evidence-collect-copy:')) {
+    const key = operationId.slice(operationId.indexOf(':') + 1);
+    const expected = plan.acceptanceOutputs[key];
+    const observed = context.collectedEvidence[key];
+    if (!observed) throw new Error('Collected object safe result is unavailable');
+    return Object.freeze({
+      kind: 'object',
+      bucketSha256: canonicalSha256(expected.bucket),
+      objectSha256: canonicalSha256(expected.object),
+      generation: expected.generation,
+      valueSha256: canonicalSha256(observed),
+    });
+  }
+  const absent = operationId === 'candidate-cleanup-delete'
+    || operationId.startsWith('evidence-output-delete:');
+  return Object.freeze({
+    kind: 'resource',
+    state: absent ? 'absent' : 'present',
+    identitySha256: canonicalSha256(mutationSpec(plan, operationId)),
+    valueSha256: canonicalSha256(absent ? { state: 'absent' } : context.observedReceipt),
+  });
+}
+
+function createReleaseMutationAdapter(plan, member, context) {
+  const identity = releaseMutationPlanIdentity(plan, member);
+  return Object.freeze({
+    ...identity,
+    readBefore(observed) {
+      if (observed === undefined) return identity.expectedBefore;
+      return Object.freeze({
+        ...identity.expectedBefore,
+        observationSha256: canonicalSha256(observed),
+      });
+    },
+    mutate: Object.freeze([...member.argv]),
+    readAfter() { return identity.expectedAfter; },
+    canonicalState(state, observed) {
+      return state === 'before' ? this.readBefore(observed) : this.readAfter(observed);
+    },
+    safeResult(observedReceipt) {
+      return mutationSafeResult(plan, member.id, { ...context(), observedReceipt });
+    },
   });
 }
 
@@ -3498,11 +3920,18 @@ function journalCheckpointBoundary(operationId) {
   if (operationId === 'promote-public-service') return 'promote-public-iam-readback';
   if (operationId === 'promote-traffic') return 'promote-readback';
   if (operationId === 'rollback-traffic') return 'rollback-readback';
+  if (operationId === 'migration-execute') return 'migration-execution-readback';
+  if (operationId.endsWith('-execute')) {
+    return operationId.replace(/-execute$/u, '-execution-readback');
+  }
   if (operationId.startsWith('inventory-publish:')) {
     return operationId.replace('inventory-publish:', 'inventory-readback:');
   }
   if (operationId.startsWith('evidence-publish:')) {
     return operationId.replace('evidence-publish:', 'evidence-readback:');
+  }
+  if (operationId.startsWith('evidence-output-delete:')) {
+    return operationId.replace('evidence-output-delete:', 'evidence-output-delete-readback:');
   }
   if (operationId.endsWith('-deploy')) return operationId.replace(/-deploy$/u, '-readback');
   return operationId;
@@ -3593,6 +4022,54 @@ function journalRestartObservation(member, plan) {
     ],
   };
   return { mode: 'blocked' };
+}
+
+async function readCandidateControlPlaneState(executor, plan) {
+  const service = await executor([
+    'run', 'services', 'describe', CANDIDATE_SERVICE,
+    `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+  ]);
+  const revision = await executor([
+    'run', 'revisions', 'describe', plan.candidateRevision,
+    `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+  ]);
+  const iam = await executor([
+    'run', 'services', 'get-iam-policy', CANDIDATE_SERVICE,
+    `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+  ]);
+  const artifact = await executor([
+    'artifacts', 'docker', 'images', 'describe', plan.image,
+    `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
+  ]);
+  const readbacks = { service, revision, iam, artifact };
+  validateCandidateControlPlaneReadbacks(readbacks, plan);
+  return readbacks;
+}
+
+async function readStableStagedControlPlaneState(executor, plan, { publicIam = false } = {}) {
+  const service = await executor([
+    'run', 'services', 'describe', STABLE_SERVICE,
+    `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+  ]);
+  validateStableStagedService(service, plan);
+  const revision = await executor([
+    'run', 'revisions', 'describe', plan.stableRevision,
+    `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+  ]);
+  validateStableRevisionReadback(revision, plan);
+  const artifact = await executor([
+    'artifacts', 'docker', 'images', 'describe', plan.image,
+    `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
+  ]);
+  validateCandidateArtifact(artifact, plan.image);
+  const iam = await executor([
+    'run', 'services', 'get-iam-policy', STABLE_SERVICE,
+    `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+  ]);
+  validateServiceIamReceipt(iam, {
+    policy: publicIam ? 'stable-public' : 'stable-private', requireEtag: true,
+  });
+  return Object.freeze({ service, revision, artifact, iam });
 }
 
 function parseArguments(argv, releaseSha) {
@@ -3945,6 +4422,7 @@ export async function runGcpRelease({
   }
   let priorReceipts = [];
   const receiptPhaseIndex = RECEIPT_PHASES.indexOf(selection.phase);
+  const receiptBackedPhase = receiptPhaseIndex >= 0 || ACTION_RECEIPT_PHASES.has(selection.phase);
   const task8Attestations = {};
   let workloadExecution = null;
   try {
@@ -3990,6 +4468,23 @@ export async function runGcpRelease({
     }
   }
   const mutationMembers = selected.filter(({ id }) => operationMayMutate(id));
+  const mutationPlanIdentities = mutationMembers.map((member) => (
+    releaseMutationPlanIdentity(plan, member)
+  ));
+  const finalPublicMutations = mutationPlanIdentities.filter(({ finalPublicMutation }) => (
+    finalPublicMutation
+  ));
+  if (finalPublicMutations.length > 1) {
+    return publish(writeOutput, 1, {
+      status: 'failed', code: 'RELEASE_STATE_INVALID', mutationPerformed: false,
+      releaseSha: plan.releaseSha, phase: selection.phase, completed: [],
+    });
+  }
+  const finalMutationGuard = finalPublicMutations.length === 1
+    ? createFinalMutationGuard({
+      finalOperationId: finalPublicMutations[0].operationId,
+      mutationOperationIds: mutationMembers.map(({ id }) => id),
+    }) : null;
   let stateStore = null;
   let journalMutationCount = 0;
   let releaseJournalAttemptId = null;
@@ -4009,8 +4504,11 @@ export async function runGcpRelease({
         releaseIdentitySha256: plan.releaseIdentitySha256,
         phase: selection.phase,
         phasePlanSha256: canonicalSha256({
+          releaseIdentitySha256: plan.releaseIdentitySha256,
+          semanticReleaseSpecSha256: plan.semanticReleaseSpecSha256,
           phase: selection.phase,
           operations: selected.map(({ id, argv: operationArgv }) => ({ id, argv: operationArgv })),
+          mutationContracts: mutationPlanIdentities,
         }),
         attemptId: releaseJournalAttemptId,
         receiptHeadSha256: priorReceipts.at(-1)?.receiptSha256 ?? null,
@@ -4038,6 +4536,10 @@ export async function runGcpRelease({
         ).length;
         existingJournalIntent = openJournalRecords.at(-1)?.recordType === 'intent'
           ? openJournalRecords.at(-1) : null;
+        if (finalMutationGuard && openJournalRecords.some((record) => (
+          record.recordType === 'intent'
+          && record.operationId === finalPublicMutations[0].operationId
+        ))) finalMutationGuard.afterOperation(finalPublicMutations[0].operationId);
         resumeOperationId = existingJournalIntent?.operationId
           ?? mutationMembers[journalMutationCount]?.id
           ?? null;
@@ -4050,15 +4552,25 @@ export async function runGcpRelease({
       });
     }
   }
-  if (hasOpenJournalAttempt && resumeOperationId === null && receiptPhaseIndex >= 0) {
+  let reconstructCheckpointedPhase = false;
+  if (hasOpenJournalAttempt && resumeOperationId === null && receiptBackedPhase) {
     let phaseReceipt;
     try {
       phaseReceipt = typeof loadPhaseReceipt === 'function'
-        ? await loadPhaseReceipt(plan, selection.phase, priorReceipts) : null;
+        ? await loadPhaseReceipt(plan, selection.phase, priorReceipts, {
+          attemptId: stateStore.attemptId,
+          records: stateStore.records,
+        }) : null;
       if (phaseReceipt !== null) {
-        validateReleaseReceiptChain([...priorReceipts, phaseReceipt], plan, {
-          through: selection.phase,
-        });
+        if (ACTION_RECEIPT_PHASES.has(selection.phase)) {
+          validateReleaseActionReceipt(
+            phaseReceipt, selection.phase, plan, priorReceipts, stateStore,
+          );
+        } else {
+          validateReleaseReceiptChain([...priorReceipts, phaseReceipt], plan, {
+            through: selection.phase,
+          });
+        }
       }
     } catch {
       await stateStore?.close().catch(() => undefined);
@@ -4096,6 +4608,7 @@ export async function runGcpRelease({
         });
       }
     }
+    reconstructCheckpointedPhase = true;
   }
   try {
     const task8Phases = ['promote', 'rollback'].includes(selection.phase)
@@ -4143,6 +4656,10 @@ export async function runGcpRelease({
   const promotionReadbacks = {};
   let buildReceipt = null;
   let migrationExecutionReceipt = null;
+  let migrationExecutionName = null;
+  const acceptanceExecutionNames = {};
+  const acceptanceExecutionReceipts = {};
+  const mutationBeforeObservations = new Map();
   let mutationAttempted = false;
   let pendingJournal = null;
   let promotionIamBaseline = null;
@@ -4208,8 +4725,73 @@ export async function runGcpRelease({
     }
   }
   try {
+    if (reconstructCheckpointedPhase) {
+      const checkpoint = openJournalRecords.at(-1);
+      if (ACTION_RECEIPT_PHASES.has(selection.phase)) {
+        if (checkpoint?.recordType !== 'checkpoint') {
+          throw new Error('Checkpointed action phase cannot reconstruct its outcome sidecar');
+        }
+      } else if (selection.phase !== 'build' || checkpoint?.recordType !== 'checkpoint'
+        || checkpoint.payload?.safeResult?.kind !== 'build') {
+        throw new Error('Checkpointed release phase cannot reconstruct its receipt');
+      } else {
+        const rawBuild = await executor([
+          'builds', 'describe', checkpoint.payload.safeResult.buildId,
+          `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+        ]);
+        buildReceipt = validateBuildReceipt(rawBuild, plan);
+        if (buildReceipt.buildId !== checkpoint.payload.safeResult.buildId
+          || buildReceipt.buildReceiptSha256 !== checkpoint.payload.safeResult.receiptSha256) {
+          throw new Error('Checkpointed build receipt differs from the authoritative build');
+        }
+      }
+    }
+    if (selection.phase === 'candidate'
+      && resumeOperationId === 'candidate-private-iam-grant') {
+      Object.assign(candidateReadbacks, await readCandidateControlPlaneState(executor, plan));
+    }
+    if (selection.phase === 'promote'
+      && resumeOperationId === 'promote-public-service') {
+      await readCandidateControlPlaneState(executor, plan);
+      await readStableStagedControlPlaneState(executor, plan, { publicIam: true });
+    }
+    if (selection.phase === 'promote'
+      && resumeOperationId === 'promote-stable-deploy'
+      && plan.previousRevision !== null) {
+      const authority = await executor([
+        'auth', 'list', '--filter=status:ACTIVE', '--format=json',
+      ]);
+      if (!Array.isArray(authority) || authority.length !== 1
+        || authority[0]?.account !== PROMOTION_AUTHORITY
+        || authority[0]?.status !== 'ACTIVE') {
+        throw new Error('Public promotion authority is not approved');
+      }
+      await readCandidateControlPlaneState(executor, plan);
+      const stableIam = await executor([
+        'run', 'services', 'get-iam-policy', STABLE_SERVICE,
+        `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+      ]);
+      validateServiceIamReceipt(stableIam, { policy: 'stable-public', requireEtag: true });
+      stablePublicIamBaseline = normalizeServiceIamPolicy(stableIam, { requireEtag: true });
+      const priorRevision = await executor([
+        'run', 'revisions', 'describe', plan.previousRevision,
+        `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+      ]);
+      validatePriorRevisionReadback(priorRevision, plan);
+      const priorArtifact = await executor([
+        'artifacts', 'docker', 'images', 'describe', plan.previousImage,
+        `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
+      ]);
+      validateCandidateArtifact(priorArtifact, plan.previousImage);
+    }
     if (selection.phase === 'collect') {
-      await assertCollectionDestinationsAbsent(plan.acceptanceOutputs);
+      const resumedCollectionKeys = openJournalRecords
+        .map(({ operationId }) => operationId)
+        .filter((operationId) => operationId?.startsWith('evidence-collect-copy:'))
+        .map((operationId) => operationId.slice(operationId.indexOf(':') + 1));
+      await assertCollectionDestinationsAbsent(plan.acceptanceOutputs, {
+        permittedExistingKeys: resumedCollectionKeys,
+      });
     } else if (selection.phase === 'inventory') {
       if (typeof verifyEvidence !== 'function') throw new Error('Evidence verifier is unavailable');
       await verifyEvidence({ legacyInventory: plan.evidence.legacyInventory }, { releaseSha: plan.releaseSha });
@@ -4238,6 +4820,7 @@ export async function runGcpRelease({
       activeOperationId = member.id;
       let journalIntent = null;
       let journalAfterSha256 = null;
+      let mutationAdapter = null;
       const restartingMutation = existingJournalIntent?.operationId === member.id;
       if (operationMayMutate(member.id)) {
         if (pendingJournal !== null) {
@@ -4245,8 +4828,16 @@ export async function runGcpRelease({
         }
         const mutationOrdinal = restartingMutation
           ? existingJournalIntent.payload.mutationOrdinal : journalMutationCount + 1;
-        const beforeState = journalOperationState(plan, member, 'before');
-        const afterState = journalOperationState(plan, member, 'after');
+        mutationAdapter = createReleaseMutationAdapter(plan, member, () => ({
+          acceptanceExecutionReceipts,
+          buildReceipt,
+          collectedEvidence,
+          migrationExecutionReceipt,
+        }));
+        const beforeState = mutationAdapter.canonicalState(
+          'before', mutationBeforeObservations.get(member.id),
+        );
+        const afterState = mutationAdapter.canonicalState('after');
         journalAfterSha256 = restartingMutation
           ? existingJournalIntent.payload.afterSha256 : canonicalSha256(afterState);
         if (restartingMutation) {
@@ -4255,6 +4846,7 @@ export async function runGcpRelease({
           restartAdoptions.add(member.id);
         } else {
           try {
+            finalMutationGuard?.beforeOperation(member.id);
             journalIntent = await stateStore.appendIntent({
               mutationOrdinal,
               operationAttemptId: createHash('sha256').update([
@@ -4265,18 +4857,23 @@ export async function runGcpRelease({
               beforeSha256: canonicalSha256(beforeState),
               afterSha256: journalAfterSha256,
             }, { operationId: member.id });
+            if (mutationAdapter.finalPublicMutation) {
+              finalMutationGuard?.afterOperation(member.id);
+            }
           } catch (error) {
             error.code = 'RELEASE_JOURNAL_WRITE_FAILED';
             throw error;
           }
         }
         journalMutationCount = mutationOrdinal;
-        pendingJournal = Object.freeze({
+        pendingJournal = {
+          adapter: mutationAdapter,
           afterSha256: journalAfterSha256,
           intent: journalIntent,
+          mutationReceipt: undefined,
           operationId: member.id,
           restarting: restartingMutation,
-        });
+        };
         if (!restartingMutation) mutationAttempted = true;
       }
       if (!restartingMutation && member.id === 'candidate-deploy') candidateDeployMutationAttempted = true;
@@ -4294,7 +4891,18 @@ export async function runGcpRelease({
             'builds', 'describe', buildReceipt?.buildId,
             `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
           ]
-          : member.argv;
+          : (member.id === 'migration-execution-readback'
+            ? [
+              'run', 'jobs', 'executions', 'describe', migrationExecutionName,
+              `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+            ]
+            : (selection.phase === 'acceptance' && member.id.endsWith('-execution-readback')
+              ? [
+                'run', 'jobs', 'executions', 'describe',
+                acceptanceExecutionNames[member.id.slice(0, -'-execution-readback'.length)],
+                `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+              ]
+              : member.argv));
         try {
           if (!restartingMutation) {
             receipt = await executor(operationArgv);
@@ -4429,12 +5037,39 @@ export async function runGcpRelease({
         if (!buildReceipt || !exact(readback, buildReceipt)) {
           throw new Error('Build readback differs from submission');
         }
+      } else if (restartingMutation && member.id === 'migration-deploy') {
+        validateReleaseJobReadback(receipt, plan.expectedMigrationJob);
+      } else if (restartingMutation && selection.phase === 'acceptance'
+        && member.id.endsWith('-deploy')) {
+        const key = member.id.slice(0, -'-deploy'.length);
+        validateReleaseJobReadback(receipt, plan.expectedJobs[key]);
       } else if (member.id === 'migration-readback') {
         validateReleaseJobReadback(receipt, plan.expectedMigrationJob);
+        mutationBeforeObservations.set('migration-execute', receipt);
       } else if (member.id === 'migration-execute') {
+        migrationExecutionName = validateCloudRunExecutionIdentity(receipt, {
+          job: MIGRATION_JOB,
+        });
+      } else if (member.id === 'migration-execution-readback') {
         migrationExecutionReceipt = validateMigrationExecutionReceipt(receipt, {
           releaseSha: plan.releaseSha,
         });
+        if (migrationExecutionReceipt.name !== migrationExecutionName) {
+          throw new Error('Cloud Run migration execution identity changed during readback');
+        }
+      } else if (selection.phase === 'acceptance' && member.id.endsWith('-execute')) {
+        const key = member.id.slice(0, -'-execute'.length);
+        acceptanceExecutionNames[key] = validateCloudRunExecutionIdentity(receipt, {
+          job: plan.expectedJobs[key]?.job,
+        });
+      } else if (selection.phase === 'acceptance'
+        && member.id.endsWith('-execution-readback')) {
+        const key = member.id.slice(0, -'-execution-readback'.length);
+        const execution = validateReleaseJobExecutionReceipt(receipt, plan.expectedJobs[key]);
+        if (execution.name !== acceptanceExecutionNames[key]) {
+          throw new Error('Cloud Run release Job execution identity changed during readback');
+        }
+        acceptanceExecutionReceipts[key] = execution;
       } else if (member.id === 'promote-authority-readback') {
         if (!Array.isArray(receipt) || receipt.length !== 1
           || receipt[0]?.account !== PROMOTION_AUTHORITY
@@ -4464,6 +5099,7 @@ export async function runGcpRelease({
         if (typeof writeStableSpec !== 'function' || await writeStableSpec(plan) !== true) {
           throw new Error('Stable Service YAML is unavailable');
         }
+        mutationBeforeObservations.set('promote-stable-deploy', receipt ?? { state: 'absent' });
       } else if (member.id === 'promote-stable-public-iam-precheck') {
         validateServiceIamReceipt(receipt, { policy: 'stable-public', requireEtag: true });
         stablePublicIamBaseline = normalizeServiceIamPolicy(receipt, { requireEtag: true });
@@ -4478,6 +5114,9 @@ export async function runGcpRelease({
       } else if (member.id === 'promote-stable-deploy'
         || member.id === 'promote-stable-staged-readback') {
         validateStableStagedService(receipt, plan);
+        if (member.id === 'promote-stable-staged-readback') {
+          mutationBeforeObservations.set('promote-traffic', receipt);
+        }
       } else if (member.id === 'promote-stable-revision-readback') {
         validateStableRevisionReadback(receipt, plan);
       } else if (member.id === 'promote-stable-artifact-readback') {
@@ -4485,6 +5124,7 @@ export async function runGcpRelease({
       } else if (member.id === 'promote-stable-private-iam-readback') {
         validateServiceIamReceipt(receipt, { policy: 'stable-private', requireEtag: true });
         promotionIamBaseline = normalizeServiceIamPolicy(receipt, { requireEtag: true });
+        mutationBeforeObservations.set('promote-public-service', receipt);
       } else if (member.id === 'promote-public-service') {
         if (restartingMutation) {
           validateServiceIamReceipt(receipt, { policy: 'stable-public', requireEtag: true });
@@ -4521,12 +5161,14 @@ export async function runGcpRelease({
           || await writeCandidateSpec(plan) !== true) {
           throw new Error('Candidate Service YAML is unavailable');
         }
+        mutationBeforeObservations.set('candidate-deploy', receipt ?? { state: 'absent' });
       } else if (member.id === 'candidate-spec-dry-run') {
         validateCandidateServiceSpecDryRun(receipt, plan);
       } else if (member.id === 'candidate-deploy') {
         validateCandidateService(receipt, plan.expectedCandidate);
       } else if (member.id === 'candidate-private-iam-baseline-readback') {
         validateServiceIamReceipt(receipt, { policy: 'stable-private', requireEtag: true });
+        mutationBeforeObservations.set('candidate-private-iam-grant', receipt);
       } else if (member.id === 'candidate-private-iam-grant') {
         validateServiceIamReceipt(receipt, { policy: 'candidate-private', requireEtag: true });
       } else if (member.id === 'candidate-private-iam-readback') {
@@ -4544,6 +5186,9 @@ export async function runGcpRelease({
         if (receipt === null && canonicalServiceAbsence) candidateCleanupState = 'already-absent';
         else if (receipt === null) throw new Error('Candidate service absence is unproven');
         else validateRecoveryPrecheck(receipt, plan, 'candidate-cleanup');
+        mutationBeforeObservations.set(
+          'candidate-cleanup-delete', receipt ?? { state: 'absent' },
+        );
       } else if (member.id === 'candidate-cleanup-revision-readback') {
         validateCandidateRevisionReadback(receipt, plan);
       } else if (member.id === 'candidate-cleanup-artifact-readback') {
@@ -4557,6 +5202,49 @@ export async function runGcpRelease({
         if (receipt !== null || !canonicalServiceAbsence) {
           throw new Error('Candidate service remains or absence is unproven after cleanup');
         }
+        if (candidateCleanupState === 'already-absent') {
+          const cleanupMutation = mutationMembers.find(
+            ({ id }) => id === 'candidate-cleanup-delete',
+          );
+          if (!cleanupMutation || stateStore === null || journalMutationCount !== 0) {
+            throw new Error('Verified cleanup no-op journal is unavailable');
+          }
+          try {
+            const adapter = createReleaseMutationAdapter(plan, cleanupMutation, () => ({
+              acceptanceExecutionReceipts,
+              buildReceipt,
+              collectedEvidence,
+              migrationExecutionReceipt,
+            }));
+            const mutationOrdinal = 1;
+            const beforeState = adapter.canonicalState(
+              'before', mutationBeforeObservations.get(cleanupMutation.id),
+            );
+            const afterState = adapter.canonicalState('after', { state: 'absent' });
+            const afterSha256 = canonicalSha256(afterState);
+            const intent = await stateStore.appendIntent({
+              mutationOrdinal,
+              operationAttemptId: createHash('sha256').update([
+                releaseJournalAttemptId, cleanupMutation.id, String(mutationOrdinal),
+              ].join('\0')).digest('hex').slice(0, 32),
+              commandSha256: canonicalSha256(cleanupMutation.argv),
+              reconcileKind: journalReconcileKind(cleanupMutation.id),
+              beforeSha256: canonicalSha256(beforeState),
+              afterSha256,
+            }, { operationId: cleanupMutation.id });
+            await stateStore.appendCheckpoint({
+              intentRecordSha256: intent.recordSha256,
+              classification: 'after',
+              outcome: 'verified-noop',
+              observationSha256: afterSha256,
+              safeResult: adapter.safeResult({ state: 'absent' }),
+            });
+            journalMutationCount = mutationOrdinal;
+          } catch (error) {
+            error.code = 'RELEASE_JOURNAL_WRITE_FAILED';
+            throw error;
+          }
+        }
         if (candidateCleanupState === null) candidateCleanupState = 'deleted';
       } else if (member.id === 'promote-traffic') {
         if (restartingMutation || responseLossRecoveries.includes(member.id)) {
@@ -4569,6 +5257,7 @@ export async function runGcpRelease({
         validatePromotedService(receipt, plan);
       } else if (member.id === 'rollback-service-precheck') {
         validateRecoveryPrecheck(receipt, plan, 'rollback');
+        mutationBeforeObservations.set('rollback-traffic', receipt);
       } else if (member.id === 'rollback-current-revision-readback') {
         validateStableRevisionReadback(receipt, plan);
       } else if (member.id === 'rollback-current-artifact-readback') {
@@ -4592,6 +5281,7 @@ export async function runGcpRelease({
       } else if (selection.phase === 'acceptance' && member.id.endsWith('-readback')) {
         const key = member.id.slice(0, -'-readback'.length);
         validateReleaseJobReadback(receipt, plan.expectedJobs[key]);
+        mutationBeforeObservations.set(`${key}-execute`, receipt);
       } else if (member.id.startsWith('evidence-collect-describe:')) {
         const key = member.id.slice(member.id.indexOf(':') + 1);
         collectedObjectReceipts.set(
@@ -4615,6 +5305,10 @@ export async function runGcpRelease({
           objectSha256: inspected.objectSha256,
           byteLength: inspected.byteLength,
         });
+      } else if (member.id.startsWith('evidence-output-delete-readback:')) {
+        if (!Array.isArray(receipt) || receipt.length !== 0) {
+          throw new Error('Acceptance evidence output remains after deletion');
+        }
       } else if (member.id === 'evidence-output-zero-readback') {
         if (!Array.isArray(receipt) || receipt.length !== 0) {
           throw new Error('Acceptance evidence output residue remains');
@@ -4630,17 +5324,28 @@ export async function runGcpRelease({
           throw new Error('Evidence version readback is not publication-bound');
         }
       }
+      if (pendingJournal !== null && pendingJournal.operationId === member.id) {
+        pendingJournal.mutationReceipt = structuredClone(receipt);
+      }
       if (pendingJournal !== null
         && journalCheckpointBoundary(pendingJournal.operationId) === member.id) {
         try {
+          const canonicalAfter = pendingJournal.adapter.canonicalState('after', receipt);
+          const observationSha256 = canonicalSha256(canonicalAfter);
+          if (observationSha256 !== pendingJournal.afterSha256) {
+            throw new Error('Authoritative mutation state differs from the durable intent');
+          }
+          const observedReceipt = ['candidate-deploy', 'promote-stable-deploy']
+            .includes(pendingJournal.operationId)
+            ? pendingJournal.mutationReceipt : receipt;
           await stateStore.appendCheckpoint({
             intentRecordSha256: pendingJournal.intent.recordSha256,
             classification: 'after',
             outcome: pendingJournal.restarting ? 'adopted-restart'
               : (responseLossRecoveries.includes(pendingJournal.operationId)
                 ? 'adopted-response-loss' : 'applied'),
-            observationSha256: pendingJournal.afterSha256,
-            safeResult: { kind: 'none' },
+            observationSha256,
+            safeResult: pendingJournal.adapter.safeResult(observedReceipt),
           });
           pendingJournal = null;
         } catch (error) {
@@ -4689,21 +5394,34 @@ export async function runGcpRelease({
   if (selection.phase === 'collect') publicReport.collectedEvidence = collectedEvidence;
   if (selection.phase === 'build') publicReport.buildReceipt = buildReceipt;
   if (selection.phase === 'migration') publicReport.migrationExecutionReceipt = migrationExecutionReceipt;
+  if (selection.phase === 'acceptance') {
+    publicReport.acceptanceExecutionReceipts = acceptanceExecutionReceipts;
+  }
   if (responseLossRecoveries.length > 0) {
     publicReport.responseLossRecoveries = responseLossRecoveries;
   }
   if (candidateCleanupState !== null) {
     publicReport.candidateCleanupState = candidateCleanupState;
   }
-  if (receiptPhaseIndex >= 0) {
+  if (receiptBackedPhase) {
     try {
-      const phaseReceipt = createReleasePhaseReceipt(
-        selection.phase,
-        plan,
-        completed,
-        { buildReceipt, migrationExecutionReceipt, collectedEvidence, workloadExecution },
-        priorReceipts,
-      );
+      const phaseReceipt = ACTION_RECEIPT_PHASES.has(selection.phase)
+        ? createReleaseActionReceipt(
+          selection.phase, plan, completed, priorReceipts, stateStore,
+        )
+        : createReleasePhaseReceipt(
+          selection.phase,
+          plan,
+          completed,
+          {
+            buildReceipt,
+            migrationExecutionReceipt,
+            acceptanceExecutionReceipts,
+            collectedEvidence,
+            workloadExecution,
+          },
+          priorReceipts,
+        );
       if (typeof persistReceipt !== 'function' || await persistReceipt(plan, phaseReceipt) !== true) {
         throw new Error('Release receipt persistence failed');
       }
@@ -4726,7 +5444,8 @@ export async function runGcpRelease({
             },
             mutationCount: journalMutationCount,
             responseLossOperationIds: stateStore.records
-              .filter((record) => record.recordType === 'checkpoint'
+              .filter((record) => record.attemptId === stateStore.attemptId
+                && record.recordType === 'checkpoint'
                 && ['adopted-response-loss', 'adopted-restart'].includes(record.payload.outcome))
               .map((record) => record.operationId),
           });

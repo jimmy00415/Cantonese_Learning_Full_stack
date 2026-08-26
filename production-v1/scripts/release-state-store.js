@@ -37,6 +37,7 @@ const TERMINAL_STATUSES = new Set(['phase-complete', 'phase-blocked']);
 const RECORD_TYPES = new Set(['intent', 'checkpoint', 'terminal']);
 const JOURNAL_NAME = /^(\d{8})-(intent|checkpoint|terminal)\.json$/;
 const TEMP_NAME = /^(\d{8}-(?:intent|checkpoint|terminal)\.json)\.tmp-([0-9a-f]{32})$/;
+const STALE_LOCK_NAME = /^\.release-state\.lock\.stale-([0-9a-f]{32})$/;
 const COMMON_KEYS = [
   'attemptId', 'createdAt', 'generation', 'operationId', 'payload', 'phase',
   'phasePlanSha256', 'previousRecordSha256', 'receiptHeadSha256', 'recordSha256',
@@ -322,6 +323,13 @@ async function assertNoSymlinkPath(target) {
   return canonical;
 }
 
+export function classifyDirectorySyncError(error, { platform = process.platform } = {}) {
+  if (platform === 'win32' && error?.code === 'EPERM') {
+    return 'windows-process-crash-boundary';
+  }
+  throw error;
+}
+
 async function syncDirectory(directory) {
   let handle;
   try {
@@ -329,11 +337,7 @@ async function syncDirectory(directory) {
     await handle.sync();
     return 'synced';
   } catch (error) {
-    if (process.platform === 'win32'
-      && ['EACCES', 'EBADF', 'EINVAL', 'EPERM'].includes(error?.code)) {
-      return 'windows-process-crash-boundary';
-    }
-    throw error;
+    return classifyDirectorySyncError(error);
   } finally {
     await handle?.close().catch(() => undefined);
   }
@@ -424,8 +428,20 @@ export async function recoverJournalTemp(stateDirectory) {
   try { record = JSON.parse(raw); } catch { throw new Error('Release journal temporary file is invalid'); }
   if (!Buffer.from(raw).equals(bytes)
     || raw !== `${JSON.stringify(record, null, 2)}\n`
-    || journalFileName(record) !== finalName
-    || record.generation !== records.length + 1) {
+    || journalFileName(record) !== finalName) {
+    throw new Error('Release journal temporary file is invalid');
+  }
+  const published = records.find((candidate) => journalFileName(candidate) === finalName);
+  if (published) {
+    const finalBytes = await readFile(finalPath);
+    if (!finalBytes.equals(bytes) || published.recordSha256 !== record.recordSha256) {
+      throw new Error('Release journal recovery target differs from temporary bytes');
+    }
+    await unlink(temporaryPath);
+    await syncDirectory(stateDirectory);
+    return finalName;
+  }
+  if (record.generation !== records.length + 1) {
     throw new Error('Release journal temporary file is invalid');
   }
   validateJournalRecords([...records, record]);
@@ -474,6 +490,33 @@ export async function acquireReleaseStateLock(stateDirectory, {
   }
   const lockPath = join(stateDirectory, '.release-state.lock');
   const bytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
+
+  const entries = await readdir(stateDirectory, { withFileTypes: true });
+  const staleArtifacts = entries.filter((entry) => STALE_LOCK_NAME.test(entry.name));
+  if (staleArtifacts.length > 1) throw new Error('Release-state lock recovery is ambiguous');
+  if (staleArtifacts.length === 1) {
+    const artifact = staleArtifacts[0];
+    if (!artifact.isFile()) throw new Error('Release-state lock recovery is invalid');
+    const artifactPath = join(stateDirectory, artifact.name);
+    let staleRecord;
+    let staleBytes;
+    try {
+      staleBytes = await readFile(artifactPath);
+      staleRecord = JSON.parse(staleBytes.toString('utf8'));
+      assertLockRecord(staleRecord);
+      if (!staleBytes.equals(Buffer.from(`${JSON.stringify(staleRecord, null, 2)}\n`))) {
+        throw new Error('noncanonical stale lock');
+      }
+    } catch {
+      throw new Error('Release-state lock recovery is invalid');
+    }
+    const staleAge = now().getTime() - Date.parse(staleRecord.createdAt);
+    if (staleRecord.host !== host || staleAge < staleAfterMs || isPidAlive(staleRecord.pid)) {
+      throw new Error('Release-state stale lock is active or belongs to another host');
+    }
+    await unlink(artifactPath);
+    await syncDirectory(stateDirectory);
+  }
 
   async function createLock() {
     const handle = await open(lockPath, 'wx', 0o600);

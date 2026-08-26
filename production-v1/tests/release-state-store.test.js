@@ -14,6 +14,7 @@ import {
   validateJournalRecords,
   writeAtomicCreateOnly,
 } from '../scripts/release-state-store.js';
+import { containsForbiddenPersistedSecret } from '../scripts/persisted-secret-contract.js';
 import {
   classifyReconciliation,
   classifyRestartDisposition,
@@ -175,11 +176,28 @@ test('one valid contiguous crash temp is recovered and every ambiguous temp set 
   assert.equal(JSON.parse(await readFile(join(stateDirectory, secondName), 'utf8')).recordSha256,
     records[1].recordSha256);
 
+  const identicalTemp = join(stateDirectory, `${secondName}.tmp-${'4'.repeat(32)}`);
+  await writeFile(identicalTemp, `${JSON.stringify(records[1], null, 2)}\n`);
+  assert.equal(await recoverJournalTemp(stateDirectory), secondName);
+  await assert.rejects(() => readFile(identicalTemp), { code: 'ENOENT' });
+
   const thirdName = journalFileName(records[2]);
   for (const suffix of ['2'.repeat(32), '3'.repeat(32)]) {
     await writeFile(join(stateDirectory, `${thirdName}.tmp-${suffix}`), `${JSON.stringify(records[2])}\n`);
   }
   await assert.rejects(() => recoverJournalTemp(stateDirectory), /temporary|ambiguous/i);
+});
+
+test('Windows directory-sync degradation accepts EPERM only', async () => {
+  const module = await import('../scripts/release-state-store.js');
+  assert.equal(module.classifyDirectorySyncError(
+    Object.assign(new Error('unsupported'), { code: 'EPERM' }), { platform: 'win32' },
+  ), 'windows-process-crash-boundary');
+  for (const code of ['EACCES', 'EBADF', 'EINVAL']) {
+    assert.throws(() => module.classifyDirectorySyncError(
+      Object.assign(new Error(code), { code }), { platform: 'win32' },
+    ), { code });
+  }
 });
 
 test('release-state lock permits only bounded dead same-host takeover', async (t) => {
@@ -206,6 +224,46 @@ test('release-state lock permits only bounded dead same-host takeover', async (t
     staleAfterMs: 60_000,
   });
   await reclaimed.release();
+});
+
+test('state-store open recovers one bounded stale-lock rename artifact', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hkbuddy-stale-lock-recovery-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const receiptDirectory = join(root, 'receipts');
+  const stateDirectory = join(receiptDirectory, 'state');
+  await mkdir(receiptDirectory);
+  await mkdir(stateDirectory);
+  await writeFile(join(stateDirectory, `.release-state.lock.stale-${'1'.repeat(32)}`), `${JSON.stringify({
+    schemaVersion: 1,
+    attemptId: '323e4567-e89b-42d3-a456-426614174000',
+    host: hostname(),
+    pid: 2_147_483_647,
+    createdAt: CREATED_AT,
+  }, null, 2)}\n`, { mode: 0o600 });
+
+  const store = await openReleaseStateStore({
+    receiptDirectory,
+    releaseSha: RELEASE_SHA,
+    releaseIdentitySha256: RELEASE_IDENTITY,
+    phase: 'candidate',
+    phasePlanSha256: PLAN_SHA,
+    attemptId: ATTEMPT_ID,
+    receiptHeadSha256: RECEIPT_HEAD,
+    now: () => new Date('2026-08-26T01:22:03.000Z'),
+    allowTemporaryState: true,
+  });
+  await store.close();
+});
+
+test('persisted-secret scanner rejects credential-key variants recursively', () => {
+  for (const value of [
+    { password: 'redacted-looking-but-forbidden' },
+    { nested: { apiKey: 'redacted-looking-but-forbidden' } },
+    { items: [{ client_secret: 'redacted-looking-but-forbidden' }] },
+    { clientSecret: 'redacted-looking-but-forbidden' },
+    { passphrase: 'redacted-looking-but-forbidden' },
+  ]) assert.equal(containsForbiddenPersistedSecret(value), true);
+  assert.equal(containsForbiddenPersistedSecret({ passwordSha256: 'a'.repeat(64) }), false);
 });
 
 test('state store appends one exact intent-checkpoint-terminal attempt', async (t) => {

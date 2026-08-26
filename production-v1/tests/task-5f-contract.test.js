@@ -154,6 +154,16 @@ function receiptOutputs(plan, phase) {
     jobs: Object.fromEntries(Object.entries(plan.expectedJobs).map(([key, value]) => [
       key, { image: value.image, serviceAccount: value.serviceAccount },
     ])),
+    executions: Object.fromEntries(Object.entries(plan.expectedJobs).map(([key, value]) => [
+      key, {
+        name: `${value.job}-release-001`,
+        job: value.job,
+        taskCount: value.taskCount,
+        parallelism: value.parallelism,
+        succeededCount: value.taskCount,
+        completionTime: '2026-08-26T08:00:00.000Z',
+      },
+    ])),
   };
   if (phase === 'collect') return {
     evidence: Object.fromEntries(['dependencyAcceptance', 'llmSmoke', 'asrSmoke', 'ttsSmoke'].map((key) => [
@@ -294,8 +304,40 @@ function stableService(plan, traffic = plan.expectedStable.traffic, annotation =
   return rawService({ service: STABLE_SERVICE, traffic, annotation });
 }
 
+function createTestStateStore({ attemptId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' } = {}) {
+  const records = [];
+  const append = (record) => {
+    const stored = {
+      ...structuredClone(record),
+      attemptId,
+      recordSha256: createHash('sha256')
+        .update(JSON.stringify({ sequence: records.length + 1, record }))
+        .digest('hex'),
+    };
+    records.push(stored);
+    return stored;
+  };
+  return {
+    attemptId,
+    records,
+    appendIntent: async (payload, { operationId } = {}) => append({
+      recordType: 'intent', operationId, payload,
+    }),
+    appendCheckpoint: async (payload) => append({
+      recordType: 'checkpoint',
+      operationId: records.findLast((record) => record.recordType === 'intent')?.operationId,
+      payload,
+    }),
+    appendTerminal: async (payload) => append({
+      recordType: 'terminal', operationId: null, payload,
+    }),
+    close: async () => undefined,
+  };
+}
+
 function releaseRunner(options) {
   return runGcpRelease({
+    openStateStore: async () => createTestStateStore(),
     persistReceipt: async () => true,
     verifyEvidence: async () => true,
     verifyTask8Evidence: async () => true,
@@ -529,6 +571,19 @@ test('candidate cleanup treats deletion as canonical absence and is receipt-boun
     ]);
     assert.equal(result.publicReport.candidateCleanupState, 'already-absent');
     assert.equal(result.publicReport.mutationPerformed, false);
+    assert.equal(result.publicReport.phaseReceipt.receiptType, 'action-outcome');
+    assert.equal(result.publicReport.phaseReceipt.mutationCount, 1);
+    assert.deepEqual(result.publicReport.phaseReceipt.operationOutcomes.map((outcome) => ({
+      operationId: outcome.operationId,
+      outcome: outcome.outcome,
+      kind: outcome.safeResult.kind,
+      state: outcome.safeResult.state,
+    })), [{
+      operationId: 'candidate-cleanup-delete',
+      outcome: 'verified-noop',
+      kind: 'resource',
+      state: 'absent',
+    }]);
   });
 
   await t.test('null delete with a still-present service fails closed', async () => {
