@@ -306,7 +306,7 @@ export function assertResourceContract(contract) {
     commandTransport: 'execFile-argv',
     secretTransport: 'authenticated-https-body',
     completePostCreateReadback: true,
-    unresolvedProjectIdPolicy: 'single-confirmed-create-probe',
+    unresolvedProjectIdPolicy: 'existing-project-required',
     noUserManagedServiceAccountKeys: true,
     stopOnForbidden: true,
     stopOnAlreadyExists: true,
@@ -696,46 +696,6 @@ export async function ensureExactResource({ id, mutate, read, create, compare, i
   return { id, status: 'created' };
 }
 
-export async function ensureProjectResource({ read, create, compare }) {
-  if (typeof read !== 'function' || typeof create !== 'function' || typeof compare !== 'function') {
-    throw commandError('RESOURCE_OPERATION_INVALID');
-  }
-  const current = await read();
-  if (current?.status === 'present') {
-    if (!compare(current.value)) throw commandError('RESOURCE_DRIFT');
-    return { id: 'project', status: 'unchanged' };
-  }
-  if (current?.status === 'absent') {
-    return ensureExactResource({
-      id: 'project', mutate: true, initialState: current, read, create, compare,
-    });
-  }
-  if (current?.status !== 'unknown' || current.code !== 'FORBIDDEN') {
-    throw commandError('RESOURCE_STATE_UNKNOWN');
-  }
-
-  try {
-    await create();
-  } catch (error) {
-    const code = classifyTransportError(error);
-    if (code === 'ALREADY_EXISTS') throw commandError('RESOURCE_COLLISION');
-    if (code === 'FORBIDDEN') throw commandError('PROJECT_CREATE_PROBE_FORBIDDEN');
-    let recovered;
-    try { recovered = await read(); } catch { throw commandError('PROJECT_CREATE_RESULT_AMBIGUOUS'); }
-    if (recovered?.status === 'present' && compare(recovered.value)) {
-      return { id: 'project', status: 'created-readback-recovered' };
-    }
-    throw commandError('PROJECT_CREATE_RESULT_AMBIGUOUS');
-  }
-
-  let readback;
-  try { readback = await read(); } catch { throw commandError('PROJECT_CREATE_RESULT_AMBIGUOUS'); }
-  if (readback?.status !== 'present' || !compare(readback.value)) {
-    throw commandError('PROJECT_CREATE_RESULT_AMBIGUOUS');
-  }
-  return { id: 'project', status: 'created-from-unresolved' };
-}
-
 export async function assertNoUserManagedServiceAccountKeys({ contract, gcloud }) {
   if (!contract || !Array.isArray(contract.resources?.serviceAccounts) || typeof gcloud !== 'function') {
     throw commandError('SERVICE_ACCOUNT_KEY_AUDIT_INVALID');
@@ -786,12 +746,13 @@ function managedIamScopes(contract) {
 }
 
 function assertManagedIamPolicies({
-  contract, projectNumber, policiesByScope, scopes, requireExpected,
+  contract, projectNumber, policiesByScope, scopes, requireExpected, enabledApis = null,
 }) {
   if (!contract || !/^\d{6,20}$/.test(String(projectNumber ?? ''))
     || (!policiesByScope || typeof policiesByScope !== 'object')
     || !Array.isArray(scopes) || scopes.length === 0
-    || typeof requireExpected !== 'boolean') {
+    || typeof requireExpected !== 'boolean'
+    || (enabledApis !== null && !(enabledApis instanceof Set))) {
     throw commandError('IAM_ALLOWLIST_MISMATCH');
   }
   const workloadMembers = new Set(contract.resources.serviceAccounts.map(
@@ -808,16 +769,38 @@ function assertManagedIamPolicies({
     scope: 'project', member: member.replace('__PROJECT_NUMBER__', String(projectNumber)),
     role, required,
   }));
+  const baseline = contract.project.protectedBindings.map(({ member, role }) => ({
+    scope: 'project', member, role,
+  }));
+  const serviceAgentApi = new Map([
+    ['roles/cloudbuild.serviceAgent', 'cloudbuild.googleapis.com'],
+    ['roles/artifactregistry.serviceAgent', 'artifactregistry.googleapis.com'],
+    ['roles/compute.serviceAgent', 'compute.googleapis.com'],
+    ['roles/servicenetworking.serviceAgent', 'servicenetworking.googleapis.com'],
+    ['roles/cloudsql.serviceAgent', 'sqladmin.googleapis.com'],
+    ['roles/run.serviceAgent', 'run.googleapis.com'],
+    ['roles/aiplatform.serviceAgent', 'aiplatform.googleapis.com'],
+    ['roles/speech.serviceAgent', 'speech.googleapis.com'],
+    ['roles/monitoring.notificationServiceAgent', 'monitoring.googleapis.com'],
+    ['roles/logging.serviceAgent', 'logging.googleapis.com'],
+    ['roles/cloudbuild.builds.builder', 'cloudbuild.googleapis.com'],
+    ['roles/compute.instanceGroupManagerServiceAgent', 'compute.googleapis.com'],
+  ]);
+  const permittedAutomatic = automatic.filter((binding) => (
+    enabledApis === null || !serviceAgentApi.has(binding.role) || enabledApis.has(serviceAgentApi.get(binding.role))
+  ));
   const required = [
+    ...baseline,
     ...configured,
-    ...automatic.filter((binding) => binding.required).map(({ required: ignored, ...binding }) => {
+    ...permittedAutomatic.filter((binding) => binding.required).map(({ required: ignored, ...binding }) => {
       void ignored;
       return binding;
     }),
   ];
   const allowedKeys = new Set([
     ...configured,
-    ...automatic.map(({ required: ignored, ...binding }) => {
+    ...baseline,
+    ...permittedAutomatic.map(({ required: ignored, ...binding }) => {
       void ignored;
       return binding;
     }),
@@ -854,16 +837,16 @@ function assertManagedIamPolicies({
   return true;
 }
 
-export function assertManagedIamPoliciesSubset({ contract, projectNumber, policiesByScope, scopes }) {
+export function assertManagedIamPoliciesSubset({ contract, projectNumber, policiesByScope, scopes, enabledApis = null }) {
   return assertManagedIamPolicies({
-    contract, projectNumber, policiesByScope, scopes, requireExpected: false,
+    contract, projectNumber, policiesByScope, scopes, requireExpected: false, enabledApis,
   });
 }
 
-export function assertExactManagedIamPolicies({ contract, projectNumber, policiesByScope }) {
+export function assertExactManagedIamPolicies({ contract, projectNumber, policiesByScope, enabledApis = null }) {
   return assertManagedIamPolicies({
     contract, projectNumber, policiesByScope,
-    scopes: managedIamScopes(contract), requireExpected: true,
+    scopes: managedIamScopes(contract), requireExpected: true, enabledApis,
   });
 }
 
@@ -911,6 +894,19 @@ export function assertCidrAvailable({
   ));
   if (allocatedConflict || routeConflict) {
     throw commandError('CIDR_OVERLAP');
+  }
+}
+
+function assertProjectWideCidrAvailability({ subnets, routes, addresses }) {
+  const inventory = { subnets: requireObjectList(subnets), routes: requireObjectList(routes), addresses: requireObjectList(addresses) };
+  const allNetworks = new Set([
+    ...inventory.subnets.map(({ network }) => network),
+    ...inventory.routes.map(({ network }) => network),
+    ...inventory.addresses.map(({ network }) => network),
+  ].filter(Boolean));
+  for (const network of allNetworks) {
+    assertCidrAvailable({ desired: '10.24.0.0/26', network, kind: 'subnet', ...inventory });
+    assertCidrAvailable({ desired: '10.25.0.0/16', network, kind: 'psa', ...inventory });
   }
 }
 
@@ -1042,9 +1038,9 @@ function sensitiveInputFor(id, { contract, controlPlane, randomBytes, secretVers
         instance: contract.resources.cloudSql.instance,
         database: contract.resources.cloudSql.database,
         appUser: 'hkbuddy_app',
-        appSecretVersion: secretVersions['hkbuddy-db-app-url'],
+        appSecretVersion: secretVersions[GCP_IDENTITY.secrets.dbAppUrl],
         migratorUser: 'hkbuddy_migrator',
-        migratorSecretVersion: secretVersions['hkbuddy-db-migrator-url'],
+        migratorSecretVersion: secretVersions[GCP_IDENTITY.secrets.dbMigratorUrl],
         appDatabaseRoles: ['pg_read_all_data', 'pg_write_all_data'],
         migratorDatabaseRoles: ['cloudsqlsuperuser'],
       }),
@@ -1134,6 +1130,7 @@ export async function runGcpProvision({
     || typeof plane.compare !== 'function'
     || typeof plane.auditUserManagedServiceAccountKeys !== 'function'
     || typeof plane.auditManagedIamPolicies !== 'function'
+    || typeof plane.auditPreMutationState !== 'function'
     || typeof plane.finalReadback !== 'function') {
     return publish(writeOutput, 1, {
       ...safeFailureReport('CONTROL_PLANE_INVALID', [], 'project'), mutationPerformed: false,
@@ -1142,6 +1139,14 @@ export async function runGcpProvision({
 
   const completed = [];
   const secretVersions = {};
+  try {
+    await plane.auditPreMutationState({ notificationChannel: selection.channel });
+  } catch (error) {
+    return publish(writeOutput, 1, {
+      ...safeFailureReport(error?.code ?? 'PRE_MUTATION_AUDIT_FAILED', [], 'pre-mutation-audit'),
+      mutationPerformed: false,
+    });
+  }
   for (const id of STATIC_EXPECTED_STEPS) {
     if (id === 'billing' || id === `secret-version:${GCP_IDENTITY.secrets.dbAppUrl}`) {
       const projectOnly = id === 'billing';
@@ -1274,8 +1279,10 @@ export class GcpControlPlane {
     return assertNoUserManagedServiceAccountKeys({ contract: this.contract, gcloud: this.gcloud });
   }
 
-  async auditManagedIamPolicies({ projectOnly = false } = {}) {
-    if (typeof projectOnly !== 'boolean') throw commandError('IAM_ALLOWLIST_MISMATCH');
+  async auditManagedIamPolicies({ projectOnly = false, enabledApis = null } = {}) {
+    if (typeof projectOnly !== 'boolean' || (enabledApis !== null && !(enabledApis instanceof Set))) {
+      throw commandError('IAM_ALLOWLIST_MISMATCH');
+    }
     const scopes = projectOnly ? ['project'] : managedIamScopes(this.contract);
     const policyEntries = await Promise.all(scopes.map(async (scope) => (
       [scope, await this.#iamPolicy(scope)]
@@ -1284,9 +1291,55 @@ export class GcpControlPlane {
       contract: this.contract,
       projectNumber: this.#projectNumber(),
       policiesByScope: new Map(policyEntries),
-      scopes,
+      scopes, enabledApis,
     });
     if (!projectOnly) await this.#auditCustomRoles();
+    return true;
+  }
+
+  async auditPreMutationState({ notificationChannel } = {}) {
+    const project = await this.read('project');
+    const billing = await this.read('billing');
+    if (project?.status !== 'present' || !this.compare('project', project.value)
+      || billing?.status !== 'present' || !this.compare('billing', billing.value)) {
+      throw commandError('SHARED_PROJECT_BASELINE_INVALID');
+    }
+    const enabled = requireObjectList(await this.#gcloud([
+      'services', 'list', '--enabled', `--project=${PROJECT}`, '--format=json',
+    ]));
+    const enabledApis = new Set(enabled.map(({ config, name }) => config?.name ?? name));
+    this.cache.set('apis', enabled);
+    await this.auditManagedIamPolicies({ projectOnly: true, enabledApis });
+
+    const [networks, subnets, routes, addresses, peerings] = await Promise.all([
+      this.#gcloud(['compute', 'networks', 'list', `--project=${PROJECT}`, '--format=json']),
+      this.#gcloud(['compute', 'networks', 'subnets', 'list', `--project=${PROJECT}`, '--format=json']),
+      this.#gcloud(['compute', 'routes', 'list', `--project=${PROJECT}`, '--format=json']),
+      this.#gcloud(['compute', 'addresses', 'list', '--global', `--project=${PROJECT}`, '--format=json']),
+      this.#gcloud(['services', 'vpc-peerings', 'list', `--project=${PROJECT}`, '--format=json']),
+    ]);
+    requireObjectList(networks);
+    const peeringInventory = requireObjectList(peerings);
+    const targetNetwork = `projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`;
+    if (peeringInventory.some((peering) => (
+      Array.isArray(peering?.reservedPeeringRanges)
+      && peering.reservedPeeringRanges.includes(GCP_IDENTITY.psaRange)
+      && !sameNetwork(peering.network, targetNetwork)
+    ))) throw commandError('RESOURCE_COLLISION');
+    assertProjectWideCidrAvailability({ subnets, routes, addresses });
+
+    const context = { notificationChannel, secretVersions: {} };
+    for (const id of STATIC_EXPECTED_STEPS) {
+      if (['project', 'billing', 'apis'].includes(id) || id.startsWith('iam:')) continue;
+      const current = await this.read(id, context);
+      if (id === 'notification-channel' && current?.status !== 'present') {
+        throw commandError('ALERT_CHANNEL_REQUIRED');
+      }
+      if (current?.status === 'unknown') throw commandError('RESOURCE_STATE_UNKNOWN');
+      if (current?.status === 'present' && !this.compare(id, current.value, context)) {
+        throw commandError('RESOURCE_COLLISION');
+      }
+    }
     return true;
   }
 
@@ -1405,7 +1458,7 @@ export class GcpControlPlane {
     }
     if (id === 'artifact-registry') {
       return { status: 'present', value: await this.#gcloud([
-        'artifacts', 'repositories', 'describe', 'hkbuddy', '--location=asia-east2',
+        'artifacts', 'repositories', 'describe', GCP_IDENTITY.repository, '--location=asia-east2',
         `--project=${PROJECT}`, '--format=json',
       ]) };
     }
@@ -1499,7 +1552,7 @@ export class GcpControlPlane {
       'services', 'enable', ...REQUIRED_APIS, `--project=${PROJECT}`, '--format=json',
     ]);
     if (id === 'artifact-registry') return this.#gcloud([
-      'artifacts', 'repositories', 'create', 'hkbuddy', '--repository-format=docker',
+      'artifacts', 'repositories', 'create', GCP_IDENTITY.repository, '--repository-format=docker',
       '--mode=standard-repository',
       '--location=asia-east2', '--description=Hong Kong Buddy production containers',
       `--project=${PROJECT}`, '--format=json',
@@ -1764,9 +1817,9 @@ export class GcpControlPlane {
 
   #compareSecretVersion(secretId, value, context) {
     if (!NUMERIC_VERSION.test(String(value.version ?? '')) || typeof value.secretValue !== 'string') return false;
-    if (secretId === 'hkbuddy-session-secret') return isCanonicalSecret(value.secretValue);
-    if (secretId === 'hkbuddy-db-app-url' || secretId === 'hkbuddy-db-migrator-url') {
-      const user = secretId === 'hkbuddy-db-app-url' ? 'hkbuddy_app' : 'hkbuddy_migrator';
+    if (secretId === GCP_IDENTITY.secrets.session) return isCanonicalSecret(value.secretValue);
+    if (secretId === GCP_IDENTITY.secrets.dbAppUrl || secretId === GCP_IDENTITY.secrets.dbMigratorUrl) {
+      const user = secretId === GCP_IDENTITY.secrets.dbAppUrl ? 'hkbuddy_app' : 'hkbuddy_migrator';
       let parsed;
       try { parsed = new URL(value.secretValue); } catch { return false; }
       let password;
@@ -1776,13 +1829,13 @@ export class GcpControlPlane {
         && parsed.port === '5432' && parsed.pathname === '/hkbuddy_v1'
         && parsed.search === '?sslmode=require' && !parsed.hash;
     }
-    if (secretId === 'hkbuddy-db-bootstrap-state') {
+    if (secretId === GCP_IDENTITY.secrets.bootstrap) {
       let receipt;
       try { receipt = JSON.parse(value.secretValue); } catch { return false; }
       return exact(receipt, {
         schemaVersion: 1, projectId: PROJECT, instance: GCP_IDENTITY.cloudSqlInstance, database: GCP_IDENTITY.database,
-        appUser: 'hkbuddy_app', appSecretVersion: context.secretVersions?.['hkbuddy-db-app-url'],
-        migratorUser: 'hkbuddy_migrator', migratorSecretVersion: context.secretVersions?.['hkbuddy-db-migrator-url'],
+        appUser: 'hkbuddy_app', appSecretVersion: context.secretVersions?.[GCP_IDENTITY.secrets.dbAppUrl],
+        migratorUser: 'hkbuddy_migrator', migratorSecretVersion: context.secretVersions?.[GCP_IDENTITY.secrets.dbMigratorUrl],
         appDatabaseRoles: ['pg_read_all_data', 'pg_write_all_data'],
         migratorDatabaseRoles: ['cloudsqlsuperuser'],
       });
@@ -1803,9 +1856,9 @@ export class GcpControlPlane {
     if (matches.length === 0) return { status: 'absent' };
     if (matches.length !== 1) return { status: 'present', value: { exact: false } };
     if (!this.createdUsers.has(user)) {
-      const marker = await this.#readSecretVersion('hkbuddy-db-bootstrap-state');
+      const marker = await this.#readSecretVersion(GCP_IDENTITY.secrets.bootstrap);
       if (marker.status !== 'present') return { status: 'unknown', code: 'DB_USER_BINDING_AMBIGUOUS' };
-      this.cache.set('secret-version:hkbuddy-db-bootstrap-state', marker.value);
+      this.cache.set(`secret-version:${GCP_IDENTITY.secrets.bootstrap}`, marker.value);
     }
     return { status: 'present', value: matches[0] };
   }

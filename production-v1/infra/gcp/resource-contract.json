@@ -633,7 +633,7 @@
     "commandTransport": "execFile-argv",
     "secretTransport": "authenticated-https-body",
     "completePostCreateReadback": true,
-    "unresolvedProjectIdPolicy": "single-confirmed-create-probe",
+    "unresolvedProjectIdPolicy": "existing-project-required",
     "noUserManagedServiceAccountKeys": true,
     "stopOnForbidden": true,
     "stopOnAlreadyExists": true,

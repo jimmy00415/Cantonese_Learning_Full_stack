@@ -14,7 +14,6 @@ import {
   createGcloudExecutor,
   createGcloudAuthenticatedRequest,
   ensureExactResource,
-  ensureProjectResource,
   loadResourceContract,
   monitoringGroupByField,
   runGcpProvision,
@@ -94,6 +93,14 @@ test('central identity fixes the shared billed project resource island without l
     'hkbuddy-dependency-acceptance', 'hkbuddy-llm-smoke', 'hkbuddy-asr-smoke',
     'hkbuddy-tts-smoke', 'hkbuddy-ios-voice-acceptance', 'hkbuddy-migrate',
   ]) assert.equal(serialized.includes(legacyIdentity), false, legacyIdentity);
+});
+
+test('executable provisioner contains no legacy Artifact Registry or secret discriminator', async () => {
+  const source = await readFile(new URL('../scripts/gcp-provision.js', import.meta.url), 'utf8');
+  for (const legacy of [
+    "'hkbuddy'", 'hkbuddy-session-secret', 'hkbuddy-db-app-url',
+    'hkbuddy-db-migrator-url', 'hkbuddy-db-bootstrap-state',
+  ]) assert.equal(source.includes(legacy), false, legacy);
 });
 
 test('shared-project control plane forbids project and billing mutations', async () => {
@@ -210,7 +217,7 @@ test('the executable contract fixes the isolated GCP topology and least-privileg
       .map(({ id, filter }) => [id, filter]),
     Object.entries(OFFICIAL_LOG_FILTERS),
   );
-  assert.equal(contract.safety.unresolvedProjectIdPolicy, 'single-confirmed-create-probe');
+  assert.equal(contract.safety.unresolvedProjectIdPolicy, 'existing-project-required');
   assert.equal(contract.safety.noUserManagedServiceAccountKeys, true);
   assert.equal(contract.iam.forbiddenWorkloadRoles.includes('roles/iam.serviceAccountTokenCreator'), true);
   assert.deepEqual(contract.iam.automaticProjectBindings, AUTOMATIC_PROJECT_BINDINGS);
@@ -678,74 +685,6 @@ test('ensureExactResource is dry-run safe, reads after create, and fails closed 
   });
 });
 
-test('the unresolved project ID path permits exactly one confirmed create probe and reads back ambiguity', async (t) => {
-  await t.test('403 is not absence but one fixed create probe can succeed', async () => {
-    let reads = 0;
-    let creates = 0;
-    const result = await ensureProjectResource({
-      read: async () => (++reads === 1
-        ? { status: 'unknown', code: 'FORBIDDEN' }
-        : { status: 'present', value: { exact: true } }),
-      create: async () => { creates += 1; },
-      compare: (value) => value.exact === true,
-    });
-    assert.deepEqual(result, { id: 'project', status: 'created-from-unresolved' });
-    assert.equal(reads, 2);
-    assert.equal(creates, 1);
-  });
-
-  await t.test('ALREADY_EXISTS stops as a collision without retry', async () => {
-    let creates = 0;
-    await assert.rejects(() => ensureProjectResource({
-      read: async () => ({ status: 'unknown', code: 'FORBIDDEN' }),
-      create: async () => {
-        creates += 1;
-        const error = new Error('already exists');
-        error.code = 'ALREADY_EXISTS';
-        throw error;
-      },
-      compare: () => false,
-    }), (error) => error.code === 'RESOURCE_COLLISION');
-    assert.equal(creates, 1);
-  });
-
-  await t.test('ambiguous create is accepted only after exact readback', async () => {
-    let reads = 0;
-    let creates = 0;
-    const result = await ensureProjectResource({
-      read: async () => (++reads === 1
-        ? { status: 'unknown', code: 'FORBIDDEN' }
-        : { status: 'present', value: { exact: true } }),
-      create: async () => { creates += 1; throw new Error('response lost'); },
-      compare: (value) => value.exact === true,
-    });
-    assert.deepEqual(result, { id: 'project', status: 'created-readback-recovered' });
-    assert.equal(creates, 1);
-  });
-
-  await t.test('permission and unresolved ambiguity fail closed', async () => {
-    for (const [createCode, expected] of [
-      ['FORBIDDEN', 'PROJECT_CREATE_PROBE_FORBIDDEN'],
-      ['TRANSPORT_AMBIGUOUS', 'PROJECT_CREATE_RESULT_AMBIGUOUS'],
-    ]) {
-      let reads = 0;
-      await assert.rejects(() => ensureProjectResource({
-        read: async () => {
-          reads += 1;
-          return { status: 'unknown', code: 'FORBIDDEN' };
-        },
-        create: async () => {
-          const error = new Error(createCode);
-          error.code = createCode;
-          throw error;
-        },
-        compare: () => false,
-      }), (error) => error.code === expected);
-      assert.equal(reads, createCode === 'FORBIDDEN' ? 1 : 2);
-    }
-  });
-});
-
 test('final key audit uses project-explicit argv and rejects every user-managed service-account key', async () => {
   const contract = await contractFixture();
   const calls = [];
@@ -818,11 +757,20 @@ function exactManagedIamPolicies(contract) {
       members: [binding.member.replace('__PROJECT_NUMBER__', PROJECT_NUMBER)],
     });
   }
+  for (const binding of contract.project.protectedBindings) {
+    policies.project.bindings.push({ role: binding.role, members: [binding.member] });
+  }
   for (const binding of contract.iam.automaticProjectBindings) {
     policies.project.bindings.push({
       role: binding.role,
       members: [binding.member.replace('__PROJECT_NUMBER__', PROJECT_NUMBER)],
     });
+  }
+  for (const policy of Object.values(policies)) {
+    policy.bindings = policy.bindings.filter((binding, index, bindings) => (
+      bindings.findIndex((candidate) => candidate.role === binding.role
+        && JSON.stringify(candidate.members) === JSON.stringify(binding.members)) === index
+    ));
   }
   return policies;
 }
@@ -893,6 +841,29 @@ test('managed IAM final readback is an exact per-scope allowlist and forbids wor
     policies.project.bindings = policies.project.bindings.filter(({ role }) => role !== 'roles/owner');
     assert.throws(
       () => assertExactManagedIamPolicies({ contract, projectNumber: PROJECT_NUMBER, policiesByScope: policies }),
+      (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
+    );
+  });
+
+  await t.test('all immutable shared-project baseline bindings are exact and allowed', () => {
+    for (const { member, role } of contract.project.protectedBindings) {
+      const policies = clone(exactPolicies);
+      policies.project.bindings = policies.project.bindings.filter((binding) => (
+        binding.role !== role || !binding.members.includes(member)
+      ));
+      assert.throws(
+        () => assertExactManagedIamPolicies({ contract, projectNumber: PROJECT_NUMBER, policiesByScope: policies }),
+        (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
+      );
+    }
+  });
+
+  await t.test('optional service-agent bindings are rejected before their owning API is enabled', () => {
+    assert.throws(
+      () => assertExactManagedIamPolicies({
+        contract, projectNumber: PROJECT_NUMBER, policiesByScope: exactPolicies,
+        enabledApis: new Set(['cloudbuild.googleapis.com']),
+      }),
       (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
     );
   });
@@ -1031,8 +1002,11 @@ test('Artifact Registry creation and readback require an exact writable standard
     request: async () => { throw new Error('REST must not run'); },
   });
   await plane.create('artifact-registry');
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].includes('--mode=standard-repository'), true);
+  assert.deepEqual(calls, [[
+    'artifacts', 'repositories', 'create', GCP_IDENTITY.repository, '--repository-format=docker',
+    '--mode=standard-repository', '--location=asia-east2',
+    '--description=Hong Kong Buddy production containers', `--project=${PROJECT}`, '--format=json',
+  ]]);
 });
 
 test('secret container readback rejects expiry, rotation, topics, CMEK, and label drift', async () => {
@@ -1042,11 +1016,11 @@ test('secret container readback rejects expiry, rotation, topics, CMEK, and labe
     request: async () => { throw new Error('REST must not run'); },
   });
   const secret = {
-    name: `projects/${PROJECT}/secrets/hkbuddy-session-secret`,
+    name: `projects/${PROJECT}/secrets/${GCP_IDENTITY.secrets.session}`,
     replication: { automatic: {} },
     labels: { application: 'hong-kong-buddy', environment: 'production-v1' },
   };
-  assert.equal(plane.compare('secret-container:hkbuddy-session-secret', secret), true);
+  assert.equal(plane.compare(`secret-container:${GCP_IDENTITY.secrets.session}`, secret), true);
   for (const drifted of [
     { ...secret, expireTime: '2026-09-01T00:00:00Z' },
     { ...secret, ttl: '86400s' },
@@ -1055,7 +1029,7 @@ test('secret container readback rejects expiry, rotation, topics, CMEK, and labe
     { ...secret, replication: { automatic: { customerManagedEncryption: { kmsKeyName: 'projects/foreign/locations/global/keyRings/x/cryptoKeys/y' } } } },
     { ...secret, labels: { ...secret.labels, unexpected: 'extra' } },
   ]) {
-    assert.equal(plane.compare('secret-container:hkbuddy-session-secret', drifted), false);
+    assert.equal(plane.compare(`secret-container:${GCP_IDENTITY.secrets.session}`, drifted), false);
   }
 });
 
@@ -1069,19 +1043,19 @@ test('existing generated secret values must be canonical base64url encodings of 
   const canonical = Buffer.alloc(32, 0x41).toString('base64url');
   const url = (user, password) => `postgresql://${user}:${encodeURIComponent(password)}@10.25.0.3:5432/hkbuddy_v1?sslmode=require`;
 
-  assert.equal(plane.compare('secret-version:hkbuddy-session-secret', {
+  assert.equal(plane.compare(`secret-version:${GCP_IDENTITY.secrets.session}`, {
     version: '1', secretValue: canonical,
   }), true);
-  assert.equal(plane.compare('secret-version:hkbuddy-session-secret', {
+  assert.equal(plane.compare(`secret-version:${GCP_IDENTITY.secrets.session}`, {
     version: '1', secretValue: 'A'.repeat(32),
   }), false);
-  assert.equal(plane.compare('secret-version:hkbuddy-db-app-url', {
+  assert.equal(plane.compare(`secret-version:${GCP_IDENTITY.secrets.dbAppUrl}`, {
     version: '1', secretValue: url('hkbuddy_app', canonical),
   }), true);
-  assert.equal(plane.compare('secret-version:hkbuddy-db-app-url', {
+  assert.equal(plane.compare(`secret-version:${GCP_IDENTITY.secrets.dbAppUrl}`, {
     version: '1', secretValue: url('hkbuddy_app', 'x'),
   }), false);
-  assert.equal(plane.compare('secret-version:hkbuddy-db-migrator-url', {
+  assert.equal(plane.compare(`secret-version:${GCP_IDENTITY.secrets.dbMigratorUrl}`, {
     version: '1', secretValue: url('hkbuddy_migrator', `${canonical}=`),
   }), false);
 });
@@ -1252,15 +1226,15 @@ test('paginated secret-version, alert-policy, and budget readbacks cannot hide d
         requests.push(input);
         if (input.url.includes(':access')) throw new Error('ambiguous versions must stop before access');
         if (input.url.includes('pageToken=second')) return {
-          versions: [{ name: `projects/${PROJECT}/secrets/hkbuddy-session-secret/versions/2`, state: 'ENABLED' }],
+          versions: [{ name: `projects/${PROJECT}/secrets/${GCP_IDENTITY.secrets.session}/versions/2`, state: 'ENABLED' }],
         };
         return {
-          versions: [{ name: `projects/${PROJECT}/secrets/hkbuddy-session-secret/versions/1`, state: 'ENABLED' }],
+          versions: [{ name: `projects/${PROJECT}/secrets/${GCP_IDENTITY.secrets.session}/versions/1`, state: 'ENABLED' }],
           nextPageToken: 'second',
         };
       },
     });
-    assert.deepEqual(await plane.read('secret-version:hkbuddy-session-secret'), {
+    assert.deepEqual(await plane.read(`secret-version:${GCP_IDENTITY.secrets.session}`), {
       status: 'present', value: { exact: false },
     });
     assert.equal(requests.length, 2);
@@ -1323,7 +1297,7 @@ test('malformed successful list responses are ambiguous and can never trigger du
         request: async (input) => { requests.push(input); return body; },
       });
       await assert.rejects(
-        () => plane.read('secret-version:hkbuddy-session-secret'),
+        () => plane.read(`secret-version:${GCP_IDENTITY.secrets.session}`),
         (error) => error.code === 'PAGINATION_AMBIGUOUS',
       );
       assert.equal(requests.every(({ method }) => method === 'GET'), true);
@@ -1406,6 +1380,13 @@ function preflightGcloud({
     if (args[0] === 'billing' && args[1] === 'projects') return {
       billingEnabled: true, billingAccountName: 'billingAccounts/01F9FD-24EA9B-A9232C',
     };
+    if (args[0] === 'compute' && args[1] === 'networks' && args.includes('list')) return [{
+      name: 'default', selfLink: `projects/${PROJECT}/global/networks/default`,
+    }];
+    if (args[0] === 'compute' && args[1] === 'networks' && args[2] === 'subnets') return [];
+    if (args[0] === 'compute' && ['routes', 'addresses'].includes(args[1])) return [];
+    if (args[0] === 'services' && args[1] === 'vpc-peerings') return [];
+    if (args[0] === 'iam' && ['service-accounts', 'roles'].includes(args[1]) && args.includes('list')) return [];
     if (args[0] === 'compute' && args[1] === 'networks') return {
       name: 'default', autoCreateSubnetworks: true,
     };
@@ -1447,7 +1428,7 @@ test('preflight is read-only, project-explicit, and requires the existing shared
     projectNumber: PROJECT_NUMBER, projectState: 'present',
     alertChannel: 'not-supplied', mutationPerformed: false,
   });
-  assert.equal(fixture.calls.length, 7);
+  assert.equal(fixture.calls.length, 14);
   assert.equal(fixture.calls.every((args) => args.includes(`--project=${PROJECT}`)), true);
   assert.equal(fixture.calls.some((args) => args.includes('create') || args.includes('enable') || args.includes('link')), false);
   assert.deepEqual(output, [`${JSON.stringify(result.publicReport)}\n`]);
@@ -1591,6 +1572,7 @@ class MemoryControlPlane {
   constructor({
     existing = [], unverifiedChannel = false, userManagedKey = false,
     finalReadbackFailure = null, iamSubsetFailure = null,
+    preMutationFailure = null,
   } = {}) {
     this.resources = new Map([...new Set(['project', 'billing', ...existing])].map((id) => {
       const value = { id, exact: true };
@@ -1604,6 +1586,7 @@ class MemoryControlPlane {
     this.userManagedKey = userManagedKey;
     this.finalReadbackFailure = finalReadbackFailure;
     this.iamSubsetFailure = iamSubsetFailure;
+    this.preMutationFailure = preMutationFailure;
     this.secrets = [];
   }
 
@@ -1651,6 +1634,15 @@ class MemoryControlPlane {
     if (this.iamSubsetFailure === stage) {
       const error = new Error('unexpected IAM entitlement');
       error.code = 'IAM_ALLOWLIST_MISMATCH';
+      throw error;
+    }
+  }
+
+  async auditPreMutationState() {
+    this.calls.push(['audit', 'pre-mutation-state']);
+    if (this.preMutationFailure) {
+      const error = new Error(this.preMutationFailure);
+      error.code = this.preMutationFailure;
       throw error;
     }
   }
@@ -1767,6 +1759,23 @@ test('confirmed provisioning creates every fixed step, performs post-create read
   assert.equal(plane.calls.some(([kind]) => kind === 'final-readback'), true);
 });
 
+test('exhaustive pre-mutation audit rejects managed collisions and network overlap before every write', async (t) => {
+  for (const code of ['RESOURCE_COLLISION', 'CIDR_OVERLAP', 'IAM_ALLOWLIST_MISMATCH']) {
+    await t.test(code, async () => {
+      const plane = new MemoryControlPlane({ preMutationFailure: code });
+      const result = await runGcpProvision({
+        argv: [`--confirm-project=${PROJECT}`, `--notification-channel=${CHANNEL}`],
+        contract: await contractFixture(), controlPlane: plane, writeOutput: () => undefined,
+      });
+      assert.equal(result.exitCode, 1);
+      assert.equal(result.publicReport.code, code);
+      assert.equal(result.publicReport.mutationPerformed, false);
+      assert.deepEqual(plane.calls.filter(([kind]) => kind === 'create'), []);
+      assert.deepEqual(plane.calls.filter(([kind]) => kind === 'audit'), [['audit', 'pre-mutation-state']]);
+    });
+  }
+});
+
 test('service-account key and mandatory final-readback gates prevent a false provisioning success', async (t) => {
   await t.test('channel verification and budget precede every costly topology, secret, or IAM mutation', async () => {
     for (const { argv, plane, expectedCode } of [
@@ -1821,7 +1830,7 @@ test('service-account key and mandatory final-readback gates prevent a false pro
     assert.equal(result.exitCode, 1);
     assert.equal(result.publicReport.code, 'USER_MANAGED_SERVICE_ACCOUNT_KEY');
     assert.equal(result.publicReport.resumeBoundary, 'service-account-key-audit');
-    const auditIndex = plane.calls.findIndex(([kind]) => kind === 'audit');
+    const auditIndex = plane.calls.findIndex(([, id]) => id === 'service-account-keys');
     assert.equal(auditIndex > 0, true);
     assert.equal(plane.calls.slice(auditIndex + 1).some(([kind]) => kind === 'create'), false);
     assert.equal(plane.calls.some(([kind, id]) => kind === 'create' && (

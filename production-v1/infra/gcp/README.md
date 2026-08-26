@@ -55,23 +55,25 @@ prints the planned fixed operation IDs. The mutating first-stage bootstrap is:
 npm run gcp:provision -- --confirm-project=motion-expert-hk-ltd-webpage
 ```
 
-That exact form creates or verifies only the project, billing, and API
-foundation, then stops at the required channel gate. After the operator creates
-and verifies the email channel, the mutating resume form is:
+That exact form first re-audits the immutable shared-project baseline and every
+managed-resource collision, then enables only the required APIs and stops at
+the required channel gate. After the operator creates and verifies the email
+channel, the mutating resume form is:
 
 ```text
 npm run gcp:provision -- --confirm-project=motion-expert-hk-ltd-webpage --notification-channel=projects/motion-expert-hk-ltd-webpage/notificationChannels/NUMERIC_ID
 ```
 
 No abbreviated confirmation, alternate project, extra flag, or legacy identity
-is accepted. Bootstrap is intentionally two-stage. The first confirmed run may
-create only the fixed project, billing link, and required API/service-identity
-foundation before it stops at `notification-channel`. The operator then creates
-the real email channel in that project and completes its external email
-verification. A rerun with the numeric verified channel creates and reads back
-the budget and alert policies before any VPC, HA Cloud SQL, storage, secret, or
-workload-IAM mutation. The script reports the exact resume boundary and never
-rolls back or deletes partial resources.
+is accepted. The project and its billing link must already exist and match the
+immutable shared baseline; neither is ever created, linked, patched, or adopted.
+Every confirmed run performs the complete read-only collision and network-CIDR
+audit before its first API enablement, create, POST, or IAM mutation. The
+operator then creates the real email channel in that project and completes its
+external email verification. A rerun with the numeric verified channel creates
+and reads back the budget and alert policies before any VPC, HA Cloud SQL,
+storage, secret, or workload-IAM mutation. The script reports the exact resume
+boundary and never rolls back or deletes partial resources.
 
 ## CLI launch on Windows
 
@@ -184,12 +186,9 @@ Each durable operation follows this sequence:
 3. create only when absent;
 4. read back and compare again.
 
-An inaccessible (`403`) resource is unknown, never absent. The only exception
-in behavior—not classification—is the target project ID after the separately
-recorded accessible-list and create-permission audit: dry-run reports
-`PROJECT_ID_UNRESOLVED` / `create-probe-required`, and the exact confirmation
-may issue one `projects.create` for the fixed ID. It never retries that create,
-chooses a new ID, or treats the 403 as absence. `ALREADY_EXISTS`, permission
+An inaccessible (`403`) resource is unknown, never absent. This includes the
+target shared project: a `403`, absence, wrong project number, or baseline drift
+fails closed and never creates or probes a project. `ALREADY_EXISTS`, permission
 failure, unresolved readback, a global bucket/project collision, immutable
 drift, wrong parent, public bucket
 principal, broad workload IAM, missing metric descriptor, or ambiguous result
