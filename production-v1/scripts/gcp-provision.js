@@ -459,7 +459,7 @@ function canonicalDescribeAbsence(argv, stderr) {
     ], `ERROR: (gcloud.secrets.describe) NOT_FOUND: Secret [projects/${PROJECT}/secrets/${secret}] not found.`]),
     ...Object.values(GCP_IDENTITY.jobs).map((job) => [[
       'run', 'jobs', 'describe', job, projectFlag, `--region=${GCP_IDENTITY.region}`, formatFlag,
-    ], `ERROR: (gcloud.run.jobs.describe) Job [${job}] could not be found.`]),
+    ], `ERROR: (gcloud.run.jobs.describe) Cannot find job [${job}].`]),
   ];
   return descriptors.some(([expectedArgv, expectedStderr]) => (
     exact(argv, expectedArgv) && stderr === expectedStderr
@@ -482,7 +482,7 @@ function classifyTransportError(error, argv = null) {
     `--project=${PROJECT}`, `--region=${GCP_IDENTITY.region}`, '--format=json',
   ]));
   if (describedService
-    && canonicalStderr === `ERROR: (gcloud.run.services.describe) Service [${describedService}] could not be found.`) {
+    && canonicalStderr === `ERROR: (gcloud.run.services.describe) Cannot find service [${describedService}]`) {
     return 'CLOUD_RUN_SERVICE_NOT_FOUND';
   }
   if (canonicalDescribeAbsence(argv, canonicalStderr)) return 'NOT_FOUND';
@@ -1028,12 +1028,59 @@ function canonicalCidr(value) {
 }
 
 function canonicalIpv6(value) {
-  if (typeof value !== 'string' || value.length < 2 || value.includes('[') || value.includes(']')) return false;
+  if (typeof value !== 'string' || value.length < 2 || value.includes('[')
+    || value.includes(']') || value.includes('.')) return false;
   try {
     return new URL(`http://[${value}]/`).hostname === `[${value}]`;
   } catch {
     return false;
   }
+}
+
+function ipv6Number(value) {
+  if (!canonicalIpv6(value)) return null;
+  const halves = value.split('::');
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(':') : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const missing = halves.length === 2 ? 8 - left.length - right.length : 0;
+  if ((halves.length === 1 && left.length !== 8)
+    || (halves.length === 2 && missing < 1)) return null;
+  const groups = [...left, ...Array(missing).fill('0'), ...right];
+  if (groups.length !== 8 || groups.some((group) => !/^[0-9a-f]{1,4}$/.test(group))) return null;
+  return groups.reduce((result, group) => (result << 16n) + BigInt(`0x${group}`), 0n);
+}
+
+function canonicalIpv6Cidr(value) {
+  if (typeof value !== 'string') return false;
+  const parts = value.split('/');
+  if (parts.length !== 2 || !canonicalIpv6(parts[0])
+    || !/^(?:0|[1-9]\d?|1[01]\d|12[0-8])$/.test(parts[1])) return false;
+  const numeric = ipv6Number(parts[0]);
+  const prefix = Number(parts[1]);
+  const hostBits = 128n - BigInt(prefix);
+  const hostMask = hostBits === 0n ? 0n : (1n << hostBits) - 1n;
+  return numeric !== null && (numeric & hostMask) === 0n;
+}
+
+function ipv6CidrContains(outer, inner) {
+  if (!canonicalIpv6Cidr(outer) || !canonicalIpv6Cidr(inner)) return false;
+  const [outerAddress, outerPrefixText] = outer.split('/');
+  const [innerAddress, innerPrefixText] = inner.split('/');
+  const outerPrefix = Number(outerPrefixText);
+  const innerPrefix = Number(innerPrefixText);
+  if (innerPrefix < outerPrefix) return false;
+  const hostBits = 128n - BigInt(outerPrefix);
+  const mask = hostBits === 0n ? (1n << 128n) - 1n
+    : ((1n << 128n) - 1n) ^ ((1n << hostBits) - 1n);
+  return (ipv6Number(outerAddress) & mask) === (ipv6Number(innerAddress) & mask);
+}
+
+function plainComputeRow(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return (prototype === Object.prototype || prototype === null)
+    && Object.values(value).every((member) => member !== null);
 }
 
 function exactAddressScope(item, regional) {
@@ -1052,8 +1099,12 @@ function exactSubnetworkRegion(item) {
   return item.subnetwork.startsWith(prefix) && COMPUTE_NAME.test(name);
 }
 
-function internalAddressCidr(item, networkLinks) {
+function internalAddressCidr(item, networkLinks, subnetsByLink) {
   if (item.addressType !== 'INTERNAL' || !INTERNAL_ADDRESS_STATUSES.has(item.status)) {
+    throw commandError('CIDR_AUDIT_INVALID');
+  }
+  if (item.ipVersion !== 'IPV4' || item.networkTier !== 'PREMIUM'
+    || Object.hasOwn(item, 'ipCollection') || Object.hasOwn(item, 'ipv6EndpointType')) {
     throw commandError('CIDR_AUDIT_INVALID');
   }
   const regionalSubnetworkSingle = INTERNAL_REGIONAL_SUBNETWORK_SINGLES.has(item.purpose);
@@ -1082,6 +1133,11 @@ function internalAddressCidr(item, networkLinks) {
     if (hasNetwork || !hasSubnetwork || !exactSubnetworkRegion(item)) {
       throw commandError('CIDR_AUDIT_INVALID');
     }
+    const subnet = subnetsByLink.get(item.subnetwork);
+    if (!subnet || subnet.region !== item.region
+      || !cidrContainedBy(`${item.address}/32`, subnet.ipCidrRange)) {
+      throw commandError('CIDR_AUDIT_INVALID');
+    }
   } else if (regionalSelectorFreeRange) {
     if (hasNetwork || hasSubnetwork) throw commandError('CIDR_AUDIT_INVALID');
   } else if (!hasNetwork || hasSubnetwork || !networkLinks.has(item.network)) {
@@ -1090,7 +1146,7 @@ function internalAddressCidr(item, networkLinks) {
   return `${item.address}/${prefixLength}`;
 }
 
-function validateExternalAddress(item) {
+function validateExternalAddress(item, subnetsByLink) {
   if (!INTERNAL_ADDRESS_STATUSES.has(item.status) || Object.hasOwn(item, 'network')) {
     throw commandError('CIDR_AUDIT_INVALID');
   }
@@ -1103,25 +1159,101 @@ function validateExternalAddress(item) {
   const hasPrefixLength = Object.hasOwn(item, 'prefixLength');
   const hasEndpointType = Object.hasOwn(item, 'ipv6EndpointType');
   const hasSubnetwork = Object.hasOwn(item, 'subnetwork');
+  const hasIpCollection = Object.hasOwn(item, 'ipCollection');
+  if (!['PREMIUM', 'STANDARD'].includes(item.networkTier)) {
+    throw commandError('CIDR_AUDIT_INVALID');
+  }
   if (item.ipVersion === 'IPV4') {
     if (!canonicalIpv4(item.address) || hasPrefixLength || hasEndpointType || hasSubnetwork) {
       throw commandError('CIDR_AUDIT_INVALID');
     }
+    if (!regional && item.networkTier !== 'PREMIUM') throw commandError('CIDR_AUDIT_INVALID');
+    if (hasIpCollection) {
+      const prefix = `${item.region}/publicDelegatedPrefixes/`;
+      const name = String(item.ipCollection).slice(prefix.length);
+      if (!regional || purposePresent || !String(item.ipCollection).startsWith(prefix)
+        || !COMPUTE_NAME.test(name)) throw commandError('CIDR_AUDIT_INVALID');
+    }
   } else if (item.ipVersion === 'IPV6') {
-    if (!canonicalIpv6(item.address)) throw commandError('CIDR_AUDIT_INVALID');
-    if (!regional && (hasPrefixLength || hasEndpointType || hasSubnetwork)) {
+    if (!canonicalIpv6(item.address) || purposePresent || hasIpCollection) {
       throw commandError('CIDR_AUDIT_INVALID');
     }
-    if (hasPrefixLength && item.prefixLength !== 96) throw commandError('CIDR_AUDIT_INVALID');
-    if (hasEndpointType && !['VM', 'NETLB'].includes(item.ipv6EndpointType)) {
-      throw commandError('CIDR_AUDIT_INVALID');
-    }
-    if (hasSubnetwork && !exactSubnetworkRegion(item)) throw commandError('CIDR_AUDIT_INVALID');
-    if (purposePresent && (hasPrefixLength || hasEndpointType || hasSubnetwork)) {
-      throw commandError('CIDR_AUDIT_INVALID');
+    if (!regional) {
+      if (hasPrefixLength || hasEndpointType || hasSubnetwork || item.networkTier !== 'PREMIUM') {
+        throw commandError('CIDR_AUDIT_INVALID');
+      }
+    } else {
+      if (!hasPrefixLength || item.prefixLength !== 96 || !hasEndpointType
+        || !['VM', 'NETLB'].includes(item.ipv6EndpointType)
+        || !hasSubnetwork || !exactSubnetworkRegion(item)
+        || !canonicalIpv6Cidr(`${item.address}/96`)) {
+        throw commandError('CIDR_AUDIT_INVALID');
+      }
+      const subnet = subnetsByLink.get(item.subnetwork);
+      const acceptedPurpose = item.ipv6EndpointType === 'NETLB'
+        ? subnet?.purpose === 'VM_AND_FR'
+        : ['VM_ONLY', 'VM_AND_FR'].includes(subnet?.purpose);
+      if (!subnet || subnet.region !== item.region || subnet.ipv6AccessType !== 'EXTERNAL'
+        || subnet.stackType !== 'IPV4_IPV6' || !acceptedPurpose
+        || !canonicalIpv6Cidr(subnet.externalIpv6Prefix)
+        || !ipv6CidrContains(subnet.externalIpv6Prefix, `${item.address}/96`)) {
+        throw commandError('CIDR_AUDIT_INVALID');
+      }
     }
   } else {
     throw commandError('CIDR_AUDIT_INVALID');
+  }
+  return true;
+}
+
+function validateComputeNetworksAndSubnets(networks, subnets) {
+  if (!Array.isArray(networks) || !Array.isArray(subnets)
+    || networks.some((item) => !plainComputeRow(item)
+      || typeof item.name !== 'string' || !COMPUTE_NAME.test(item.name)
+      || item.selfLink !== `${COMPUTE_NETWORK_PREFIX}${item.name}`)) {
+    throw commandError('CIDR_AUDIT_INVALID');
+  }
+  const networkLinks = new Set(networks.map(({ selfLink }) => selfLink));
+  if (networkLinks.size !== networks.length) throw commandError('CIDR_AUDIT_INVALID');
+  const subnetsByLink = new Map();
+  const subnetNames = new Set();
+  for (const item of subnets) {
+    if (!plainComputeRow(item) || typeof item.name !== 'string' || !COMPUTE_NAME.test(item.name)
+      || !networkLinks.has(item.network) || !canonicalCidr(item.ipCidrRange)
+      || typeof item.region !== 'string' || !COMPUTE_REGION.test(item.region)
+      || item.selfLink !== `${item.region}/subnetworks/${item.name}`
+      || subnetsByLink.has(item.selfLink) || subnetNames.has(item.name)) {
+      throw commandError('CIDR_AUDIT_INVALID');
+    }
+    if (Object.hasOwn(item, 'externalIpv6Prefix')
+      && !canonicalIpv6Cidr(item.externalIpv6Prefix)) throw commandError('CIDR_AUDIT_INVALID');
+    subnetsByLink.set(item.selfLink, item);
+    subnetNames.add(item.name);
+  }
+  return { networkLinks, subnetsByLink };
+}
+
+export function validateComputeAddressInventory({ addresses, networks, subnets } = {}) {
+  const { networkLinks, subnetsByLink } = validateComputeNetworksAndSubnets(networks, subnets);
+  if (!Array.isArray(addresses)) throw commandError('CIDR_AUDIT_INVALID');
+  const names = new Set();
+  const selfLinks = new Set();
+  for (const item of addresses) {
+    if (!plainComputeRow(item) || typeof item.name !== 'string' || !COMPUTE_NAME.test(item.name)
+      || typeof item.address !== 'string' || typeof item.selfLink !== 'string'
+      || !['INTERNAL', 'EXTERNAL'].includes(item.addressType)
+      || !['IPV4', 'IPV6'].includes(item.ipVersion)
+      || !INTERNAL_ADDRESS_STATUSES.has(item.status)
+      || (Object.hasOwn(item, 'kind') && item.kind !== 'compute#address')
+      || names.has(item.name) || selfLinks.has(item.selfLink)) {
+      throw commandError('CIDR_AUDIT_INVALID');
+    }
+    const regional = Object.hasOwn(item, 'region');
+    if (!exactAddressScope(item, regional)) throw commandError('CIDR_AUDIT_INVALID');
+    names.add(item.name);
+    selfLinks.add(item.selfLink);
+    if (item.addressType === 'INTERNAL') internalAddressCidr(item, networkLinks, subnetsByLink);
+    else validateExternalAddress(item, subnetsByLink);
   }
   return true;
 }
@@ -1154,36 +1286,14 @@ function canonicalNextHop(item, networkLinks) {
 function validateComputeInventory({ networks, subnets, routes, addresses }) {
   if (!Array.isArray(networks) || !Array.isArray(subnets)
     || !Array.isArray(routes) || !Array.isArray(addresses)) throw commandError('CIDR_AUDIT_INVALID');
-  if (networks.some((item) => !item || typeof item !== 'object' || Array.isArray(item)
-    || typeof item.name !== 'string' || !COMPUTE_NAME.test(item.name)
-    || item.selfLink !== `${COMPUTE_NETWORK_PREFIX}${item.name}`)) {
-    throw commandError('CIDR_AUDIT_INVALID');
-  }
-  const networkLinks = new Set(networks.map(({ selfLink }) => selfLink));
-  if (subnets.some((item) => !item || typeof item !== 'object' || Array.isArray(item)
-    || typeof item.name !== 'string' || !COMPUTE_NAME.test(item.name)
-    || !networkLinks.has(item.network) || !canonicalCidr(item.ipCidrRange)
-    || typeof item.region !== 'string' || !COMPUTE_REGION.test(item.region))) {
-    throw commandError('CIDR_AUDIT_INVALID');
-  }
+  const { networkLinks } = validateComputeNetworksAndSubnets(networks, subnets);
   if (routes.some((item) => !item || typeof item !== 'object' || Array.isArray(item)
     || typeof item.name !== 'string' || !COMPUTE_NAME.test(item.name)
     || !networkLinks.has(item.network) || !canonicalCidr(item.destRange)
     || !canonicalNextHop(item, networkLinks))) {
     throw commandError('CIDR_AUDIT_INVALID');
   }
-  if (addresses.some((item) => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)
-      || typeof item.name !== 'string' || !COMPUTE_NAME.test(item.name)
-      || typeof item.addressType !== 'string' || typeof item.status !== 'string') return true;
-    if (item.addressType === 'INTERNAL') {
-      internalAddressCidr(item, networkLinks);
-      return false;
-    }
-    if (item.addressType !== 'EXTERNAL') return true;
-    validateExternalAddress(item);
-    return false;
-  })) throw commandError('CIDR_AUDIT_INVALID');
+  validateComputeAddressInventory({ addresses, networks, subnets });
   return networkLinks;
 }
 
@@ -1245,6 +1355,23 @@ function apiForProvisionStep(id) {
   if (id === 'notification-channel' || id.startsWith('monitoring-policy:')) return 'monitoring.googleapis.com';
   if (id === 'budget') return 'billingbudgets.googleapis.com';
   return null;
+}
+
+export function validateServiceAccountIdentity(value, { email, displayName } = {}) {
+  const prototype = value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? Object.getPrototypeOf(value)
+    : undefined;
+  const exactName = `projects/${PROJECT}/serviceAccounts/${email}`;
+  if ((prototype !== Object.prototype && prototype !== null)
+    || typeof email !== 'string' || !/^[a-z0-9][a-z0-9._-]*@[a-z0-9.-]+$/.test(email)
+    || value.email !== email || value.name !== exactName || value.projectId !== PROJECT
+    || (Object.hasOwn(value, 'disabled') && value.disabled !== false)
+    || (displayName !== undefined && value.displayName !== displayName)
+    || (Object.hasOwn(value, 'oauth2ClientId') && !/^[1-9]\d*$/.test(value.oauth2ClientId))
+    || (Object.hasOwn(value, 'uniqueId') && !/^[1-9]\d*$/.test(value.uniqueId))) {
+    throw commandError('SERVICE_ACCOUNT_IDENTITY_INVALID');
+  }
+  return true;
 }
 
 function assertManagedIdentityInventory(items, expected, extractor, marker = /hkbuddy-v1-/i) {
@@ -2026,8 +2153,7 @@ export class GcpControlPlane {
         this.#gcloud(['iam', 'roles', 'list', `--project=${PROJECT}`, '--format=json']),
       ]);
       assertManagedIdentityInventory(serviceAccounts, this.contract.resources.serviceAccounts.map(({ id }) => id), (item) => {
-        if (typeof item.email !== 'string' || (item.name !== undefined
-          && item.name !== `projects/${PROJECT}/serviceAccounts/${item.email}`)) {
+        try { validateServiceAccountIdentity(item, { email: item?.email }); } catch {
           throw commandError('LIST_RESPONSE_AMBIGUOUS');
         }
         return item.email;
@@ -2154,10 +2280,12 @@ export class GcpControlPlane {
     }
     if (id.startsWith('service-account:')) {
       const account = this.contract.resources.serviceAccounts.find(({ id: name }) => name === id.slice('service-account:'.length));
-      return { status: 'present', value: await this.#gcloud([
+      const value = await this.#gcloud([
         'iam', 'service-accounts', 'describe', account.email,
         `--project=${PROJECT}`, '--format=json',
-      ]) };
+      ]);
+      validateServiceAccountIdentity(value, { email: account.email });
+      return { status: 'present', value };
     }
     if (id.startsWith('custom-role:')) {
       const role = this.#customRole(id.slice('custom-role:'.length));
@@ -2407,8 +2535,9 @@ export class GcpControlPlane {
     }
     if (id.startsWith('service-account:')) {
       const account = this.contract.resources.serviceAccounts.find(({ id: name }) => name === id.slice('service-account:'.length));
-      return value.email === account.email && value.displayName === account.displayName
-        && value.disabled !== true && !value.oauth2ClientId?.startsWith('key:');
+      return validateServiceAccountIdentity(value, {
+        email: account.email, displayName: account.displayName,
+      });
     }
     if (id.startsWith('custom-role:')) {
       const role = this.#customRole(id.slice('custom-role:'.length));
@@ -2439,12 +2568,19 @@ export class GcpControlPlane {
       && value.ipCidrRange === '10.24.0.0/26'
       && value.privateIpGoogleAccess === true
       && value.network === `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`;
-    if (id === 'psa-range') return value.name === GCP_IDENTITY.psaRange
-      && value.selfLink === `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/addresses/${GCP_IDENTITY.psaRange}`
-      && value.address === '10.25.0.0' && Number(value.prefixLength) === 16
-      && value.addressType === 'INTERNAL' && value.status === 'RESERVED'
-      && value.purpose === 'VPC_PEERING' && !Object.hasOwn(value, 'region')
-      && value.network === `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`;
+    if (id === 'psa-range') {
+      const network = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`;
+      validateComputeAddressInventory({
+        addresses: [value], networks: [{ name: GCP_IDENTITY.network, selfLink: network }], subnets: [],
+      });
+      return value.name === GCP_IDENTITY.psaRange
+        && value.selfLink === `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/addresses/${GCP_IDENTITY.psaRange}`
+        && value.address === '10.25.0.0' && value.prefixLength === 16
+        && value.addressType === 'INTERNAL' && value.ipVersion === 'IPV4'
+        && value.networkTier === 'PREMIUM' && value.status === 'RESERVED'
+        && value.purpose === 'VPC_PEERING' && !Object.hasOwn(value, 'region')
+        && value.network === network;
+    }
     if (id === 'psa-connection') {
       const ranges = value.reservedPeeringRanges ?? value.reservedPeeringRange ?? [];
       return value.service === 'servicenetworking.googleapis.com'

@@ -770,7 +770,7 @@ function stablePriorReadback(plan) {
   return {
     service: STABLE_SERVICE,
     invokerIamDisabled: false,
-    traffic: [{ revision: plan.previousRevision, percent: 100 }],
+    traffic: [{ revision: plan.previousRevision, tag: null, percent: 100 }],
   };
 }
 
@@ -778,7 +778,9 @@ function stableStagedReadback(plan) {
   return {
     service: STABLE_SERVICE,
     invokerIamDisabled: false,
-    traffic: plan.expectedStable.stagedTraffic.map(({ revision, percent }) => ({ revision, percent })),
+    traffic: plan.expectedStable.stagedTraffic.map(({ revision, tag, percent }) => ({
+      revision, tag, percent,
+    })),
   };
 }
 
@@ -786,8 +788,26 @@ function stablePromotedReadback(plan) {
   return {
     service: STABLE_SERVICE,
     invokerIamDisabled: false,
-    traffic: [{ revision: plan.stableRevision, percent: 100 }],
+    traffic: [{ revision: plan.stableRevision, tag: null, percent: 100 }],
   };
+}
+
+function trafficTargetAcknowledgement(revision) {
+  return [{
+    displayPercent: '100%',
+    displayRevisionId: revision,
+    displayTags: '',
+    key: revision,
+    latestRevision: false,
+    revisionName: revision,
+    serviceUrl: STABLE_ORIGIN,
+    specPercent: '100',
+    specTags: '-',
+    statusPercent: '100',
+    statusTags: '-',
+    tags: [],
+    urls: [],
+  }];
 }
 
 function candidatePrivateIam(etag = 'candidate-private') {
@@ -1693,8 +1713,8 @@ test('release orchestrator is dry-run first and executes only one exactly confir
     execute: async (argv) => {
       calls.push(argv);
       if (argv[1] === 'services' && argv[2] === 'describe') return rolledBack
-        ? { service: 'hkbuddy-v1-api', invokerIamDisabled: false, traffic: [{ revision: input.previousRevision, percent: 100 }] }
-        : { service: 'hkbuddy-v1-api', invokerIamDisabled: false, traffic: [{ revision: STABLE_REVISION, percent: 100 }] };
+        ? { service: 'hkbuddy-v1-api', invokerIamDisabled: false, traffic: [{ revision: input.previousRevision, tag: null, percent: 100 }] }
+        : { service: 'hkbuddy-v1-api', invokerIamDisabled: false, traffic: [{ revision: STABLE_REVISION, tag: null, percent: 100 }] };
       if (argv[1] === 'revisions') return argv[3] === input.previousRevision
         ? { revision: input.previousRevision, image: plan.previousImage }
         : structuredClone(plan.expectedStable);
@@ -1703,7 +1723,7 @@ test('release orchestrator is dry-run first and executes only one exactly confir
       };
       if (argv.includes('update-traffic')) {
         rolledBack = true;
-        return { service: 'hkbuddy-v1-api', invokerIamDisabled: false, traffic: [{ revision: input.previousRevision, percent: 100 }] };
+        return trafficTargetAcknowledgement(input.previousRevision);
       }
       if (argv.includes('get-iam-policy')) return {
         bindings: [{ role: 'roles/run.invoker', members: ['allUsers'] }],
@@ -1740,7 +1760,7 @@ test('rollback rejects a zero-percent candidate tag that remains reachable', asy
     service: 'hkbuddy-v1-api',
     invokerIamDisabled: false,
     traffic: [
-      { revision: input.previousRevision, percent: 100 },
+      { revision: input.previousRevision, tag: null, percent: 100 },
       { revision: REVISION, tag: CANDIDATE_TAG, percent: 0 },
     ],
   };
@@ -2234,14 +2254,16 @@ test('empty-host bootstrap is allowed only on canonical NOT_FOUND and creates a 
   }
 });
 
-test('first-release Service API default traffic normalizes to the exact private bootstrap state', () => {
+test('first-release Service API traffic requires explicit percent and an exact tag URL', () => {
   const plan = buildReleasePlan(releaseInput({ previousRevision: null, previousImageDigest: null }));
   assert.doesNotThrow(() => validateCandidateControlPlaneReadbacks({
     service: {
       apiVersion: 'serving.knative.dev/v1',
       kind: 'Service',
       metadata: { name: CANDIDATE_SERVICE },
-      status: { traffic: [{ revisionName: REVISION, tag: CANDIDATE_TAG }] },
+      status: { traffic: [{
+        revisionName: REVISION, tag: CANDIDATE_TAG, url: CANDIDATE_ORIGIN, percent: 100,
+      }] },
     },
     revision: structuredClone(plan.expectedCandidate),
     iam: candidatePrivateIam(),
@@ -2252,7 +2274,22 @@ test('first-release Service API default traffic normalizes to the exact private 
       apiVersion: 'serving.knative.dev/v1',
       kind: 'Service',
       metadata: { name: CANDIDATE_SERVICE },
-      status: { traffic: [{ revisionName: REVISION, tag: CANDIDATE_TAG, percent: 0 }] },
+      status: { traffic: [{
+        revisionName: REVISION, tag: CANDIDATE_TAG, url: CANDIDATE_ORIGIN, percent: 0,
+      }] },
+    },
+    revision: structuredClone(plan.expectedCandidate),
+    iam: candidatePrivateIam(),
+    artifact: { image: plan.expectedCandidate.image },
+  }, plan), /candidate service readback/i);
+  assert.throws(() => validateCandidateControlPlaneReadbacks({
+    service: {
+      apiVersion: 'serving.knative.dev/v1',
+      kind: 'Service',
+      metadata: { name: CANDIDATE_SERVICE },
+      status: { traffic: [{
+        revisionName: REVISION, tag: CANDIDATE_TAG, url: CANDIDATE_ORIGIN,
+      }] },
     },
     revision: structuredClone(plan.expectedCandidate),
     iam: candidatePrivateIam(),
@@ -3027,7 +3064,7 @@ test('real-shape migration, authenticated workload, and tag-free promotion share
       }
       if (argv.includes('update-traffic')) {
         currentStable = stablePromotedReadback(refreshedPlan);
-        return structuredClone(currentStable);
+        return trafficTargetAcknowledgement(refreshedPlan.stableRevision);
       }
       if (argv[1] === 'services' && argv[2] === 'describe') {
         if (argv[3] === CANDIDATE_SERVICE) return structuredClone(currentCandidate);
@@ -3041,7 +3078,7 @@ test('real-shape migration, authenticated workload, and tag-free promotion share
   });
   assert.equal(promotion.exitCode, 0, JSON.stringify(promotion.publicReport));
   assert.equal(postPromotionReadbacks, 1);
-  assert.deepEqual(currentStable.traffic, [{ revision: STABLE_REVISION, percent: 100 }]);
+  assert.deepEqual(currentStable.traffic, [{ revision: STABLE_REVISION, tag: null, percent: 100 }]);
   assert.equal(JSON.stringify(currentStable).includes(CANDIDATE_TAG), false);
   assert.deepEqual(currentCandidate, candidateServiceReadback(refreshedPlan));
   assert.equal(currentPolicy.bindings[0].members.includes('allUsers'), true);

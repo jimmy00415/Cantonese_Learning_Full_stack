@@ -266,8 +266,11 @@ function rawService({ service, traffic, annotation = 'false' }) {
     status: {
       traffic: traffic.map(({ revision, tag = null, percent }) => ({
         revisionName: revision,
-        ...(tag === null ? {} : { tag }),
-        ...(percent === undefined ? {} : { percent }),
+        ...(tag === null ? {} : {
+          tag,
+          url: `https://${tag}---${service}-${PROJECT_NUMBER}.${REGION}.run.app`,
+        }),
+        percent,
       })),
     },
   };
@@ -588,44 +591,62 @@ function addressAudit(addresses, desired = '10.250.0.0/24') {
     desired,
     network: NETWORK,
     networks: [{ name: GCP_IDENTITY.network, selfLink: NETWORK }],
-    subnets: [], routes: [], addresses,
+    subnets: [{
+      name: GCP_IDENTITY.subnet,
+      selfLink: SUBNETWORK,
+      network: NETWORK,
+      region: REGION_LINK,
+      ipCidrRange: '192.168.10.0/24',
+      externalIpv6Prefix: '2001:db8:2::/64',
+      ipv6AccessType: 'EXTERNAL',
+      stackType: 'IPV4_IPV6',
+      purpose: 'VM_AND_FR',
+    }],
+    routes: [], addresses,
   });
 }
 
 const INTERNAL_ADDRESSES = Object.freeze([
   ['DNS_RESOLVER', {
     name: 'dns-resolver', purpose: 'DNS_RESOLVER', address: '192.168.10.1',
-    addressType: 'INTERNAL', status: 'RESERVED', region: REGION_LINK, subnetwork: SUBNETWORK,
+    addressType: 'INTERNAL', ipVersion: 'IPV4', networkTier: 'PREMIUM',
+    status: 'RESERVED', region: REGION_LINK, subnetwork: SUBNETWORK,
     selfLink: regionalAddressLink('dns-resolver'),
   }],
   ['GCE_ENDPOINT', {
     name: 'gce-endpoint', purpose: 'GCE_ENDPOINT', address: '192.168.10.2',
-    addressType: 'INTERNAL', status: 'IN_USE', region: REGION_LINK, subnetwork: SUBNETWORK,
+    addressType: 'INTERNAL', ipVersion: 'IPV4', networkTier: 'PREMIUM',
+    status: 'IN_USE', region: REGION_LINK, subnetwork: SUBNETWORK,
     selfLink: regionalAddressLink('gce-endpoint'),
   }],
   ['SHARED_LOADBALANCER_VIP', {
     name: 'shared-vip', purpose: 'SHARED_LOADBALANCER_VIP', address: '192.168.10.3',
-    addressType: 'INTERNAL', status: 'RESERVED', region: REGION_LINK, subnetwork: SUBNETWORK,
+    addressType: 'INTERNAL', ipVersion: 'IPV4', networkTier: 'PREMIUM',
+    status: 'RESERVED', region: REGION_LINK, subnetwork: SUBNETWORK,
     selfLink: regionalAddressLink('shared-vip'),
   }],
   ['IPSEC_INTERCONNECT', {
     name: 'ipsec-range', purpose: 'IPSEC_INTERCONNECT', address: '192.168.20.0', prefixLength: 24,
-    addressType: 'INTERNAL', status: 'IN_USE', region: REGION_LINK, network: NETWORK,
+    addressType: 'INTERNAL', ipVersion: 'IPV4', networkTier: 'PREMIUM',
+    status: 'IN_USE', region: REGION_LINK, network: NETWORK,
     selfLink: regionalAddressLink('ipsec-range'),
   }],
   ['PRIVATE_SERVICE_CONNECT', {
     name: 'psc-endpoint', purpose: 'PRIVATE_SERVICE_CONNECT', address: '192.168.30.1',
-    addressType: 'INTERNAL', status: 'RESERVED', network: NETWORK,
+    addressType: 'INTERNAL', ipVersion: 'IPV4', networkTier: 'PREMIUM',
+    status: 'RESERVED', network: NETWORK,
     selfLink: globalAddressLink('psc-endpoint'),
   }],
   ['SERVERLESS', {
     name: 'serverless-range', purpose: 'SERVERLESS', address: '192.168.40.0', prefixLength: 24,
-    addressType: 'INTERNAL', status: 'RESERVED', region: REGION_LINK,
+    addressType: 'INTERNAL', ipVersion: 'IPV4', networkTier: 'PREMIUM',
+    status: 'RESERVED', region: REGION_LINK,
     selfLink: regionalAddressLink('serverless-range'),
   }],
   ['VPC_PEERING', {
     name: 'peering-range', purpose: 'VPC_PEERING', address: '192.168.50.0', prefixLength: 24,
-    addressType: 'INTERNAL', status: 'IN_USE', network: NETWORK,
+    addressType: 'INTERNAL', ipVersion: 'IPV4', networkTier: 'PREMIUM',
+    status: 'IN_USE', network: NETWORK,
     selfLink: globalAddressLink('peering-range'),
   }],
 ]);
@@ -671,33 +692,28 @@ test('all seven INTERNAL Address purposes bind exact host project identity and s
 const EXTERNAL_ADDRESSES = Object.freeze([
   ['ordinary regional IPv4', {
     name: 'external-v4-regional', address: '198.51.100.10', ipVersion: 'IPV4',
-    addressType: 'EXTERNAL', status: 'RESERVED', region: REGION_LINK,
+    addressType: 'EXTERNAL', networkTier: 'STANDARD', status: 'RESERVED', region: REGION_LINK,
     selfLink: regionalAddressLink('external-v4-regional'),
   }],
   ['ordinary global IPv4', {
     name: 'external-v4-global', address: '203.0.113.9', ipVersion: 'IPV4',
-    addressType: 'EXTERNAL', status: 'IN_USE',
+    addressType: 'EXTERNAL', networkTier: 'PREMIUM', status: 'IN_USE',
     selfLink: globalAddressLink('external-v4-global'),
-  }],
-  ['ordinary regional IPv6', {
-    name: 'external-v6-regional', address: '2001:db8::1', ipVersion: 'IPV6',
-    addressType: 'EXTERNAL', status: 'RESERVED', region: REGION_LINK,
-    selfLink: regionalAddressLink('external-v6-regional'),
   }],
   ['ordinary global IPv6', {
     name: 'external-v6-global', address: '2001:db8:1::', ipVersion: 'IPV6',
-    addressType: 'EXTERNAL', status: 'IN_USE',
+    addressType: 'EXTERNAL', networkTier: 'PREMIUM', status: 'IN_USE',
     selfLink: globalAddressLink('external-v6-global'),
   }],
   ['regional IPv6 endpoint range', {
     name: 'external-v6-endpoint', address: '2001:db8:2::', prefixLength: 96,
     ipVersion: 'IPV6', ipv6EndpointType: 'VM', subnetwork: SUBNETWORK,
-    addressType: 'EXTERNAL', status: 'RESERVED', region: REGION_LINK,
+    addressType: 'EXTERNAL', networkTier: 'STANDARD', status: 'RESERVED', region: REGION_LINK,
     selfLink: regionalAddressLink('external-v6-endpoint'),
   }],
   ['regional Cloud NAT output', {
     name: 'external-nat-auto', purpose: 'NAT_AUTO', address: '192.0.2.20', ipVersion: 'IPV4',
-    addressType: 'EXTERNAL', status: 'IN_USE', region: REGION_LINK,
+    addressType: 'EXTERNAL', networkTier: 'STANDARD', status: 'IN_USE', region: REGION_LINK,
     selfLink: regionalAddressLink('external-nat-auto'),
   }],
 ]);
@@ -709,9 +725,9 @@ test('complete legal EXTERNAL inventory is validated before exclusion from IPv4 
 
   const regionalV4 = EXTERNAL_ADDRESSES[0][1];
   const globalV4 = EXTERNAL_ADDRESSES[1][1];
-  const regionalV6 = EXTERNAL_ADDRESSES[2][1];
-  const endpointV6 = EXTERNAL_ADDRESSES[4][1];
-  const natAuto = EXTERNAL_ADDRESSES[5][1];
+  const globalV6 = EXTERNAL_ADDRESSES[2][1];
+  const endpointV6 = EXTERNAL_ADDRESSES[3][1];
+  const natAuto = EXTERNAL_ADDRESSES[4][1];
   const invalid = [
     ['RESERVING status', { ...regionalV4, status: 'RESERVING' }],
     ['unknown status', { ...regionalV4, status: 'UNKNOWN' }],
@@ -722,9 +738,16 @@ test('complete legal EXTERNAL inventory is validated before exclusion from IPv4 
     ['explicit null purpose', { ...regionalV4, purpose: null }],
     ['global NAT_AUTO', { ...natAuto, region: undefined, selfLink: globalAddressLink(natAuto.name) }],
     ['IPv4 reported as IPv6', { ...regionalV4, ipVersion: 'IPV6' }],
-    ['IPv6 reported as IPv4', { ...regionalV6, ipVersion: 'IPV4' }],
+    ['IPv6 reported as IPv4', { ...globalV6, ipVersion: 'IPV4' }],
     ['noncanonical IPv4', { ...regionalV4, address: '198.051.100.10' }],
-    ['noncanonical IPv6', { ...regionalV6, address: '2001:0db8:0:0:0:0:0:1' }],
+    ['noncanonical IPv6', { ...globalV6, address: '2001:0db8:0:0:0:0:0:1' }],
+    ['selector-free regional IPv6', {
+      ...globalV6,
+      name: 'external-v6-regional',
+      address: '2001:db8::1',
+      region: REGION_LINK,
+      selfLink: regionalAddressLink('external-v6-regional'),
+    }],
     ['IPv6 endpoint subnetwork region mismatch', { ...endpointV6, subnetwork: OTHER_SUBNETWORK }],
     ['unknown IPv6 endpoint type', { ...endpointV6, ipv6EndpointType: 'UNKNOWN' }],
     ['IPv4 with IPv6 prefix length', { ...regionalV4, prefixLength: 96 }],

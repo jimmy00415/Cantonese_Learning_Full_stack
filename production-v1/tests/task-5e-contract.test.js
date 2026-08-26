@@ -430,7 +430,14 @@ function addressAudit(addresses, desired = '10.250.0.0/24') {
     desired,
     network: NETWORK,
     networks: [{ name: GCP_IDENTITY.network, selfLink: NETWORK }],
-    subnets: [], routes: [], addresses,
+    subnets: [{
+      name: GCP_IDENTITY.subnet,
+      selfLink: SUBNETWORK,
+      network: NETWORK,
+      region: REGION_LINK,
+      ipCidrRange: '192.168.10.0/24',
+    }],
+    routes: [], addresses,
   });
 }
 
@@ -445,37 +452,44 @@ function globalAddressLink(name) {
 const LEGAL_INTERNAL_ADDRESSES = Object.freeze([
   ['DNS_RESOLVER', {
     name: 'dns-resolver', purpose: 'DNS_RESOLVER', address: '192.168.10.1',
-    addressType: 'INTERNAL', status: 'RESERVED', region: REGION_LINK, subnetwork: SUBNETWORK,
+    addressType: 'INTERNAL', ipVersion: 'IPV4', networkTier: 'PREMIUM',
+    status: 'RESERVED', region: REGION_LINK, subnetwork: SUBNETWORK,
     selfLink: regionalAddressLink('dns-resolver'),
   }],
   ['GCE_ENDPOINT', {
     name: 'gce-endpoint', purpose: 'GCE_ENDPOINT', address: '192.168.10.2',
-    addressType: 'INTERNAL', status: 'IN_USE', region: REGION_LINK, subnetwork: SUBNETWORK,
+    addressType: 'INTERNAL', ipVersion: 'IPV4', networkTier: 'PREMIUM',
+    status: 'IN_USE', region: REGION_LINK, subnetwork: SUBNETWORK,
     selfLink: regionalAddressLink('gce-endpoint'),
   }],
   ['SHARED_LOADBALANCER_VIP', {
     name: 'shared-vip', purpose: 'SHARED_LOADBALANCER_VIP', address: '192.168.10.3',
-    addressType: 'INTERNAL', status: 'RESERVED', region: REGION_LINK, subnetwork: SUBNETWORK,
+    addressType: 'INTERNAL', ipVersion: 'IPV4', networkTier: 'PREMIUM',
+    status: 'RESERVED', region: REGION_LINK, subnetwork: SUBNETWORK,
     selfLink: regionalAddressLink('shared-vip'),
   }],
   ['IPSEC_INTERCONNECT', {
     name: 'ipsec-range', purpose: 'IPSEC_INTERCONNECT', address: '192.168.20.0', prefixLength: 24,
-    addressType: 'INTERNAL', status: 'IN_USE', region: REGION_LINK, network: NETWORK,
+    addressType: 'INTERNAL', ipVersion: 'IPV4', networkTier: 'PREMIUM',
+    status: 'IN_USE', region: REGION_LINK, network: NETWORK,
     selfLink: regionalAddressLink('ipsec-range'),
   }],
   ['PRIVATE_SERVICE_CONNECT', {
     name: 'psc-endpoint', purpose: 'PRIVATE_SERVICE_CONNECT', address: '192.168.30.1',
-    addressType: 'INTERNAL', status: 'RESERVED', network: NETWORK,
+    addressType: 'INTERNAL', ipVersion: 'IPV4', networkTier: 'PREMIUM',
+    status: 'RESERVED', network: NETWORK,
     selfLink: globalAddressLink('psc-endpoint'),
   }],
   ['SERVERLESS', {
     name: 'serverless-range', purpose: 'SERVERLESS', address: '192.168.40.0', prefixLength: 24,
-    addressType: 'INTERNAL', status: 'RESERVED', region: REGION_LINK,
+    addressType: 'INTERNAL', ipVersion: 'IPV4', networkTier: 'PREMIUM',
+    status: 'RESERVED', region: REGION_LINK,
     selfLink: regionalAddressLink('serverless-range'),
   }],
   ['VPC_PEERING', {
     name: 'peering-range', purpose: 'VPC_PEERING', address: '192.168.50.0', prefixLength: 24,
-    addressType: 'INTERNAL', status: 'IN_USE', network: NETWORK,
+    addressType: 'INTERNAL', ipVersion: 'IPV4', networkTier: 'PREMIUM',
+    status: 'IN_USE', network: NETWORK,
     selfLink: globalAddressLink('peering-range'),
   }],
 ]);
@@ -494,7 +508,8 @@ test('IN_USE ranges participate in overlap while external NAT_AUTO is excluded',
   );
   assert.doesNotThrow(() => addressAudit([{
     name: 'external-nat-auto', purpose: 'NAT_AUTO', address: '10.250.0.1',
-    ipVersion: 'IPV4', addressType: 'EXTERNAL', status: 'IN_USE', region: REGION_LINK,
+    ipVersion: 'IPV4', networkTier: 'STANDARD', addressType: 'EXTERNAL',
+    status: 'IN_USE', region: REGION_LINK,
     selfLink: regionalAddressLink('external-nat-auto'),
   }]));
 });

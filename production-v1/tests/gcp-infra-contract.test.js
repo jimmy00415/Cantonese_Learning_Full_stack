@@ -565,7 +565,7 @@ test('gcloud classifies absence only for the exact canonical Cloud Run service d
 
   await assert.rejects(
     () => executorFor(
-      `ERROR: (gcloud.run.services.describe) Service [${GCP_IDENTITY.service}] could not be found.\n`,
+      `ERROR: (gcloud.run.services.describe) Cannot find service [${GCP_IDENTITY.service}]\n`,
     )(serviceDescribe),
     (error) => error.code === 'CLOUD_RUN_SERVICE_NOT_FOUND',
   );
@@ -574,9 +574,9 @@ test('gcloud classifies absence only for the exact canonical Cloud Run service d
     ['proxy 404', serviceDescribe, 'proxy returned 404 while discovering the endpoint'],
     ['auth NOT_FOUND', serviceDescribe, 'NOT_FOUND: credential discovery document was not found'],
     ['API path was not found', serviceDescribe, 'The requested API path was not found'],
-    ['wrong service', serviceDescribe.with(3, 'hkbuddy-v1-foreign'), `ERROR: (gcloud.run.services.describe) Service [${GCP_IDENTITY.service}] could not be found.\n`],
-    ['wrong project', serviceDescribe.with(4, '--project=foreign-project'), `ERROR: (gcloud.run.services.describe) Service [${GCP_IDENTITY.service}] could not be found.\n`],
-    ['wrong region', serviceDescribe.with(5, '--region=us-central1'), `ERROR: (gcloud.run.services.describe) Service [${GCP_IDENTITY.service}] could not be found.\n`],
+    ['wrong service', serviceDescribe.with(3, 'hkbuddy-v1-foreign'), `ERROR: (gcloud.run.services.describe) Cannot find service [${GCP_IDENTITY.service}]\n`],
+    ['wrong project', serviceDescribe.with(4, '--project=foreign-project'), `ERROR: (gcloud.run.services.describe) Cannot find service [${GCP_IDENTITY.service}]\n`],
+    ['wrong region', serviceDescribe.with(5, '--region=us-central1'), `ERROR: (gcloud.run.services.describe) Cannot find service [${GCP_IDENTITY.service}]\n`],
   ]) {
     await t.test(name, async () => {
       await assert.rejects(
@@ -643,7 +643,7 @@ test('gcloud classifies canonical absence only when describe argv and resource i
     {
       name: 'Cloud Run job',
       argv: ['run', 'jobs', 'describe', GCP_IDENTITY.jobs.migration, `--project=${PROJECT}`, '--region=asia-east2', '--format=json'],
-      stderr: `ERROR: (gcloud.run.jobs.describe) Job [${GCP_IDENTITY.jobs.migration}] could not be found.`,
+      stderr: `ERROR: (gcloud.run.jobs.describe) Cannot find job [${GCP_IDENTITY.jobs.migration}].`,
     },
   ];
 
@@ -691,7 +691,7 @@ test('real control-plane create-or-readback families receive canonical absence a
     ['bucket', `ERROR: (gcloud.storage.buckets.describe) HTTPError 404: The specified bucket [gs://${GCP_IDENTITY.bucket}] does not exist.`],
     ['build-source-bucket', `ERROR: (gcloud.storage.buckets.describe) HTTPError 404: The specified bucket [gs://${GCP_IDENTITY.buildSourceBucket}] does not exist.`],
     [`secret-container:${GCP_IDENTITY.secrets.session}`, `ERROR: (gcloud.secrets.describe) NOT_FOUND: Secret [projects/${PROJECT}/secrets/${GCP_IDENTITY.secrets.session}] not found.`],
-    [`job:${GCP_IDENTITY.jobs.migration}`, `ERROR: (gcloud.run.jobs.describe) Job [${GCP_IDENTITY.jobs.migration}] could not be found.`],
+    [`job:${GCP_IDENTITY.jobs.migration}`, `ERROR: (gcloud.run.jobs.describe) Cannot find job [${GCP_IDENTITY.jobs.migration}].`],
   ];
   for (const [id, stderr] of fixtures) {
     await t.test(id, async () => {
@@ -2665,20 +2665,25 @@ test('every internal RESERVED address family is canonical and participates in pr
   const contract = await contractFixture();
   const network = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/default`;
   const region = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/regions/asia-east2`;
+  const subnet = `${region}/subnetworks/default`;
   const base = {
     'compute networks list': [{ name: 'default', selfLink: network, autoCreateSubnetworks: true }],
-    'compute networks subnets': [], 'compute routes list': [],
+    'compute networks subnets': [{
+      name: 'default', selfLink: subnet, network, region, ipCidrRange: '10.24.0.0/26',
+    }],
+    'compute routes list': [],
   };
   const cases = [
     ['GCE_ENDPOINT single address overlap', {
       name: 'foreign-endpoint', purpose: 'GCE_ENDPOINT', address: '10.24.0.1',
-      addressType: 'INTERNAL', status: 'RESERVED', region,
-      subnetwork: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/regions/asia-east2/subnetworks/default`,
+      addressType: 'INTERNAL', ipVersion: 'IPV4', networkTier: 'PREMIUM',
+      status: 'RESERVED', region, subnetwork: subnet,
       selfLink: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/regions/asia-east2/addresses/foreign-endpoint`,
     }, 'CIDR_OVERLAP'],
     ['PRIVATE_SERVICE_CONNECT global single address overlap', {
       name: 'foreign-psc', purpose: 'PRIVATE_SERVICE_CONNECT', address: '10.25.0.1',
-      addressType: 'INTERNAL', status: 'RESERVED', network,
+      addressType: 'INTERNAL', ipVersion: 'IPV4', networkTier: 'PREMIUM',
+      status: 'RESERVED', network,
       selfLink: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/addresses/foreign-psc`,
     }, 'CIDR_OVERLAP'],
     ['unsupported internal purpose', {

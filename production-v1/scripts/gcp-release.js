@@ -149,6 +149,133 @@ function exact(left, right) {
   return JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
 }
 
+function trafficContractError() {
+  return new Error('Cloud Run traffic readback is invalid');
+}
+
+function exactTrafficService(value) {
+  if (![STABLE_SERVICE, CANDIDATE_SERVICE].includes(value)) throw trafficContractError();
+  return value;
+}
+
+function exactTrafficRevision(value, service) {
+  const pattern = service === CANDIDATE_SERVICE ? CANDIDATE_REVISION : STABLE_REVISION;
+  if (!pattern.test(String(value ?? ''))) throw trafficContractError();
+  return value;
+}
+
+function exactTrafficPercent(value) {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 100) throw trafficContractError();
+  return value;
+}
+
+function exactCandidateTag(value, revision, service) {
+  const suffix = String(revision).slice(-12);
+  if (service !== CANDIDATE_SERVICE || value !== `candidate-${suffix}`) {
+    throw trafficContractError();
+  }
+  return value;
+}
+
+function finalizeTrafficRows(rows) {
+  if (!Array.isArray(rows) || rows.length < 1) throw trafficContractError();
+  const revisions = new Set();
+  const tags = new Set();
+  let total = 0;
+  for (const row of rows) {
+    if (revisions.has(row.revision)) throw trafficContractError();
+    revisions.add(row.revision);
+    if (row.tag !== null) {
+      if (tags.has(row.tag)) throw trafficContractError();
+      tags.add(row.tag);
+    }
+    total += row.percent;
+  }
+  if (total !== 100) throw trafficContractError();
+  return rows.map((row) => ({ ...row })).sort((left, right) => (
+    right.percent - left.percent
+      || left.revision.localeCompare(right.revision)
+      || String(left.tag ?? '').localeCompare(String(right.tag ?? ''))
+  ));
+}
+
+export function normalizeControlledTraffic(value, { service } = {}) {
+  exactTrafficService(service);
+  if (!Array.isArray(value)) throw trafficContractError();
+  const rows = value.map((row) => {
+    const tagged = exactKeys(row, ['percent', 'revisionName', 'tag']);
+    if (!tagged && !exactKeys(row, ['percent', 'revisionName'])) throw trafficContractError();
+    const revision = exactTrafficRevision(row.revisionName, service);
+    const tag = tagged ? exactCandidateTag(row.tag, revision, service) : null;
+    return { revision, tag, percent: exactTrafficPercent(row.percent) };
+  });
+  return finalizeTrafficRows(rows);
+}
+
+export function normalizeInternalTraffic(value, { service } = {}) {
+  exactTrafficService(service);
+  if (!Array.isArray(value)) throw trafficContractError();
+  const rows = value.map((row) => {
+    if (!exactKeys(row, ['percent', 'revision', 'tag'])) throw trafficContractError();
+    const revision = exactTrafficRevision(row.revision, service);
+    const tag = row.tag === null ? null : exactCandidateTag(row.tag, revision, service);
+    return { revision, tag, percent: exactTrafficPercent(row.percent) };
+  });
+  return finalizeTrafficRows(rows);
+}
+
+export function normalizeCloudRunV1Traffic(value, { service } = {}) {
+  exactTrafficService(service);
+  if (!Array.isArray(value)) throw trafficContractError();
+  const rows = value.map((row) => {
+    const tagged = exactKeys(row, ['percent', 'revisionName', 'tag', 'url']);
+    if (!tagged && !exactKeys(row, ['percent', 'revisionName'])) throw trafficContractError();
+    const revision = exactTrafficRevision(row.revisionName, service);
+    const tag = tagged ? exactCandidateTag(row.tag, revision, service) : null;
+    if (tagged) {
+      const expectedUrl = `https://${tag}---${service}-${GCP_IDENTITY.projectNumber}.${REGION}.run.app`;
+      if (row.url !== expectedUrl) throw trafficContractError();
+    }
+    return { revision, tag, percent: exactTrafficPercent(row.percent) };
+  });
+  return finalizeTrafficRows(rows);
+}
+
+export function assertExactTraffic(value, { kind, service, expected } = {}) {
+  const normalize = {
+    controlled: normalizeControlledTraffic,
+    internal: normalizeInternalTraffic,
+    'raw-v1': normalizeCloudRunV1Traffic,
+  }[kind];
+  if (!normalize) throw trafficContractError();
+  const actualRows = normalize(value, { service });
+  const expectedRows = normalizeInternalTraffic(expected, { service });
+  if (!exact(actualRows, expectedRows)) throw trafficContractError();
+  return true;
+}
+
+export function validateTrafficTargetAcknowledgement(value, { revision, serviceUrl } = {}) {
+  const expected = [{
+    displayPercent: '100%',
+    displayRevisionId: revision,
+    displayTags: '',
+    key: revision,
+    latestRevision: false,
+    revisionName: revision,
+    serviceUrl,
+    specPercent: '100',
+    specTags: '-',
+    statusPercent: '100',
+    statusTags: '-',
+    tags: [],
+    urls: [],
+  }];
+  if (!STABLE_REVISION.test(String(revision ?? ''))
+    || serviceUrl !== `https://${STABLE_SERVICE}-${GCP_IDENTITY.projectNumber}.${REGION}.run.app`
+    || !exact(value, expected)) throw trafficContractError();
+  return true;
+}
+
 function canonicalSha256(value) {
   return createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
 }
@@ -1586,11 +1713,13 @@ function normalizeControlledServiceSpec(value) {
   if (value?.apiVersion !== 'serving.knative.dev/v1' || value?.kind !== 'Service'
     || typeof value?.metadata?.name !== 'string' || !Array.isArray(value?.spec?.traffic)
     || value.metadata.annotations?.[INVOKER_IAM_DISABLED_ANNOTATION] !== 'false') return null;
-  return normalizeCandidateService({
-    service: value.metadata.name,
-    traffic: value.spec.traffic,
-    invokerIamDisabled: false,
-  });
+  try {
+    return {
+      service: value.metadata.name,
+      invokerIamDisabled: false,
+      traffic: normalizeControlledTraffic(value.spec.traffic, { service: value.metadata.name }),
+    };
+  } catch { return null; }
 }
 
 function normalizeCandidateService(value) {
@@ -1600,7 +1729,6 @@ function normalizeCandidateService(value) {
   const raw = value?.apiVersion === 'serving.knative.dev/v1' && value?.kind === 'Service'
     && typeof value?.metadata?.name === 'string' && Array.isArray(rawTraffic);
   if (direct === raw) return null;
-  const traffic = direct ? value.traffic : rawTraffic;
   const service = direct ? value.service : value.metadata.name;
   const metadata = value?.metadata;
   const annotationsDefined = metadata && Object.hasOwn(metadata, 'annotations');
@@ -1628,17 +1756,15 @@ function normalizeCandidateService(value) {
     }
     invokerIamDisabled = false;
   }
-  return {
-    service,
-    invokerIamDisabled,
-    traffic: traffic.map((member) => ({
-      revision: member.revision ?? member.revisionName,
-      tag: member.tag ?? null,
-      percent: member.percent === undefined || member.percent === null
-        ? (traffic.length === 1 ? 100 : Number.NaN)
-        : Number(member.percent),
-    })),
-  };
+  try {
+    return {
+      service,
+      invokerIamDisabled,
+      traffic: direct
+        ? normalizeInternalTraffic(value.traffic, { service })
+        : normalizeCloudRunV1Traffic(rawTraffic, { service }),
+    };
+  } catch { return null; }
 }
 
 function validateCandidateService(value, expected) {
@@ -1675,13 +1801,10 @@ function validateStableRevisionReadback(value, plan) {
 function validateStableService(value, { previousRevision } = {}) {
   const normalized = normalizeCandidateService(value);
   if (!normalized || normalized.service !== STABLE_SERVICE
-    || normalized.invokerIamDisabled !== false
-    || normalized.traffic.some(({ tag }) => tag !== null)) {
+    || normalized.invokerIamDisabled !== false) {
     throw new Error('Cloud Run stable service readback is invalid');
   }
-  const active = normalized.traffic.filter(({ percent }) => percent > 0)
-    .map(({ revision, percent }) => ({ revision, percent }));
-  if (!exact(active, [{ revision: previousRevision, percent: 100 }])) {
+  if (!exact(normalized.traffic, [{ revision: previousRevision, tag: null, percent: 100 }])) {
     throw new Error('Cloud Run stable service readback is invalid');
   }
   return true;
@@ -1900,16 +2023,15 @@ export function validateServiceIamReceipt(value, {
 }
 
 export function validateTrafficReceipt(value, { revision } = {}) {
-  const traffic = value?.status?.traffic ?? value?.traffic;
   if (!(STABLE_REVISION.test(String(revision ?? ''))
-    || CANDIDATE_REVISION.test(String(revision ?? ''))) || !Array.isArray(traffic)) {
+    || CANDIDATE_REVISION.test(String(revision ?? '')))) {
     throw new Error('Cloud Run traffic readback is invalid');
   }
-  const active = traffic.filter(({ percent } = {}) => Number(percent) > 0).map((member) => ({
-    revision: member.revision ?? member.revisionName,
-    percent: Number(member.percent),
-  }));
-  if (!exact(active, [{ revision, percent: 100 }])) {
+  const normalized = normalizeCandidateService(value);
+  const service = CANDIDATE_REVISION.test(revision) ? CANDIDATE_SERVICE : STABLE_SERVICE;
+  const tag = service === CANDIDATE_SERVICE ? `candidate-${revision.slice(-12)}` : null;
+  if (!normalized || normalized.service !== service
+    || !exact(normalized.traffic, [{ revision, tag, percent: 100 }])) {
     throw new Error('Cloud Run traffic readback is invalid');
   }
   return true;
@@ -3803,7 +3925,12 @@ export async function runGcpRelease({
           throw new Error('Candidate service remains or absence is unproven after cleanup');
         }
         if (candidateCleanupState === null) candidateCleanupState = 'deleted';
-      } else if (member.id === 'promote-traffic' || member.id === 'promote-readback') {
+      } else if (member.id === 'promote-traffic') {
+        if (responseLossRecoveries.includes(member.id)) validatePromotedService(receipt, plan);
+        else validateTrafficTargetAcknowledgement(receipt, {
+          revision: plan.stableRevision, serviceUrl: plan.serviceOrigin,
+        });
+      } else if (member.id === 'promote-readback') {
         validatePromotedService(receipt, plan);
       } else if (member.id === 'rollback-service-precheck') {
         validateRecoveryPrecheck(receipt, plan, 'rollback');
@@ -3818,7 +3945,12 @@ export async function runGcpRelease({
       } else if (member.id === 'rollback-public-iam-precheck'
         || member.id === 'rollback-public-iam-readback') {
         validateServiceIamReceipt(receipt, { policy: 'stable-public', requireEtag: true });
-      } else if (member.id === 'rollback-traffic' || member.id === 'rollback-readback') {
+      } else if (member.id === 'rollback-traffic') {
+        if (responseLossRecoveries.includes(member.id)) validateCandidateCleanupService(receipt, plan);
+        else validateTrafficTargetAcknowledgement(receipt, {
+          revision: plan.previousRevision, serviceUrl: plan.serviceOrigin,
+        });
+      } else if (member.id === 'rollback-readback') {
         validateCandidateCleanupService(receipt, plan);
       } else if (selection.phase === 'acceptance' && member.id.endsWith('-readback')) {
         const key = member.id.slice(0, -'-readback'.length);
