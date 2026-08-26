@@ -87,11 +87,22 @@ const ACCEPTANCE_OUTPUTS = Object.freeze({
 function task8Entry(phase, stableTrafficState) {
   const digit = { readiness: '7', workload: '8', mobile: '9' }[phase];
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     filePath: `C:\\release\\${phase}.json`,
     artifactSha256: digit.repeat(64), objectSha256: digit.repeat(64),
     candidateService: CANDIDATE_SERVICE, stableService: STABLE_SERVICE,
     trafficState: 'candidate-service-private-100', stableTrafficState,
+    privacyProofs: Object.fromEntries(['start', 'end'].map((boundary, index) => [boundary, {
+      schemaVersion: 3,
+      filePath: `C:\\release\\${phase}-${boundary}-privacy.json`,
+      artifactSha256: String(index + 1).repeat(64),
+      objectSha256: String(index + 3).repeat(64),
+      boundarySha256: String(index + 5).repeat(64),
+      observedAt: boundary === 'start'
+        ? '2026-08-26T08:00:00.000Z' : '2026-08-26T08:10:00.000Z',
+      expiresAt: boundary === 'start'
+        ? '2026-08-26T08:05:00.000Z' : '2026-08-26T08:15:00.000Z',
+    }])),
   };
 }
 
@@ -207,6 +218,7 @@ function receiptOutputs(plan, phase) {
     candidateRevision: plan.candidateRevision,
     candidateService: CANDIDATE_SERVICE,
     imageDigest: plan.imageDigest,
+    privacyProofs: structuredClone(plan.task8Evidence[phase].privacyProofs),
     stableService: STABLE_SERVICE,
     stableTrafficState: plan.expectedStable.initialTrafficState,
     trafficState: 'candidate-service-private-100',
@@ -254,7 +266,10 @@ function receiptChain(plan, through) {
 
 function privateCandidateIam() {
   return {
-    bindings: [{ role: 'roles/run.invoker', members: ['user:admin@motionexp.com'] }],
+    bindings: [{
+      role: 'roles/run.servicesInvoker',
+      members: [`serviceAccount:${GCP_IDENTITY.serviceAccounts.acceptance}`],
+    }],
     etag: 'candidate-private', version: 1,
   };
 }

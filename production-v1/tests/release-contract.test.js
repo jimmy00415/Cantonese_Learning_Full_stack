@@ -70,7 +70,7 @@ const STABLE_REVISION = `${STABLE_SERVICE}-${RELEASE_SHA.slice(0, 12)}`;
 const STABLE_ORIGIN = `https://${STABLE_SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app`;
 const CANDIDATE_ROOT = `https://${CANDIDATE_SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app`;
 const CANDIDATE_ORIGIN = `https://${CANDIDATE_TAG}---${CANDIDATE_SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app`;
-const QA_SUBJECT_SHA256 = createHash('sha256').update('admin@motionexp.com').digest('hex');
+const QA_SUBJECT_SHA256 = createHash('sha256').update(ACCEPTANCE_SA).digest('hex');
 const IMAGE_SCRIPTS = Object.freeze([
   'scripts/image-release-contract.js',
   'scripts/provider-smoke.js',
@@ -133,6 +133,45 @@ const ACCEPTANCE_OUTPUTS = Object.freeze({
   }),
 });
 
+function task8PrivacyProofReference(phase, boundary) {
+  const digit = {
+    readiness: { start: 'a', end: 'b' },
+    workload: { start: 'c', end: 'd' },
+    mobile: { start: 'e', end: 'f' },
+  }[phase][boundary];
+  const observedAt = boundary === 'start'
+    ? '2026-08-26T08:00:00.000Z' : '2026-08-26T08:10:00.000Z';
+  const expiresAt = boundary === 'start'
+    ? '2026-08-26T08:05:00.000Z' : '2026-08-26T08:15:00.000Z';
+  return {
+    schemaVersion: 3,
+    filePath: `C:\\release\\${phase}-${boundary}-privacy.json`,
+    artifactSha256: digit.repeat(64),
+    objectSha256: digit.repeat(64),
+    boundarySha256: digit.repeat(64),
+    observedAt,
+    expiresAt,
+  };
+}
+
+function task8Entry(phase, stableTrafficState) {
+  const digit = { readiness: '7', workload: '8', mobile: '9' }[phase];
+  return {
+    schemaVersion: 3,
+    filePath: `C:\\release\\${phase}.json`,
+    artifactSha256: digit.repeat(64),
+    objectSha256: digit.repeat(64),
+    candidateService: CANDIDATE_SERVICE,
+    stableService: STABLE_SERVICE,
+    trafficState: 'candidate-service-private-100',
+    stableTrafficState,
+    privacyProofs: {
+      start: task8PrivacyProofReference(phase, 'start'),
+      end: task8PrivacyProofReference(phase, 'end'),
+    },
+  };
+}
+
 function releaseInput(overrides = {}) {
   const previousRevision = Object.hasOwn(overrides, 'previousRevision')
     ? overrides.previousRevision : `${STABLE_SERVICE}-111111111111`;
@@ -148,26 +187,9 @@ function releaseInput(overrides = {}) {
     databaseSecretVersions: { app: '7', migrator: '8', session: '9' },
     acceptanceRunId: ACCEPTANCE_RUN_ID,
     acceptanceOutputs: ACCEPTANCE_OUTPUTS,
-    task8Evidence: {
-      readiness: {
-        schemaVersion: 2, filePath: 'C:\\release\\readiness.json',
-        artifactSha256: '7'.repeat(64), objectSha256: '7'.repeat(64),
-        candidateService: CANDIDATE_SERVICE, stableService: STABLE_SERVICE,
-        trafficState: 'candidate-service-private-100', stableTrafficState,
-      },
-      workload: {
-        schemaVersion: 2, filePath: 'C:\\release\\workload.json',
-        artifactSha256: '8'.repeat(64), objectSha256: '8'.repeat(64),
-        candidateService: CANDIDATE_SERVICE, stableService: STABLE_SERVICE,
-        trafficState: 'candidate-service-private-100', stableTrafficState,
-      },
-      mobile: {
-        schemaVersion: 2, filePath: 'C:\\release\\mobile.json',
-        artifactSha256: '9'.repeat(64), objectSha256: '9'.repeat(64),
-        candidateService: CANDIDATE_SERVICE, stableService: STABLE_SERVICE,
-        trafficState: 'candidate-service-private-100', stableTrafficState,
-      },
-    },
+    task8Evidence: Object.fromEntries(['readiness', 'workload', 'mobile'].map((phase) => [
+      phase, task8Entry(phase, stableTrafficState),
+    ])),
     legacyInventory: EVIDENCE.legacyInventory,
     evidence: EVIDENCE,
     previousRevision,
@@ -829,6 +851,7 @@ function fixtureReceiptOutputs(plan, phase) {
     candidateRevision: plan.candidateRevision,
     candidateService: CANDIDATE_SERVICE,
     imageDigest: plan.imageDigest,
+    privacyProofs: structuredClone(plan.task8Evidence[phase].privacyProofs),
     stableService: STABLE_SERVICE,
     stableTrafficState: plan.expectedStable.initialTrafficState,
     trafficState: 'candidate-service-private-100',
@@ -1009,7 +1032,10 @@ function trafficTargetAcknowledgement(revision) {
 
 function candidatePrivateIam(etag = 'candidate-private') {
   return {
-    bindings: [{ role: 'roles/run.invoker', members: ['user:admin@motionexp.com'] }],
+    bindings: [{
+      role: 'roles/run.servicesInvoker',
+      members: [`serviceAccount:${GCP_IDENTITY.serviceAccounts.acceptance}`],
+    }],
     etag,
     version: 1,
   };
@@ -1385,13 +1411,19 @@ test('candidate phase feeds raw Service JSON through gcloud 553-compatible secre
       if (argv.includes('get-iam-policy')) return !iamGranted
         ? { bindings: [], etag: 'candidate-private-baseline', version: 1 }
         : {
-          bindings: [{ role: 'roles/run.invoker', members: ['user:admin@motionexp.com'] }],
+          bindings: [{
+            role: 'roles/run.servicesInvoker',
+            members: [`serviceAccount:${ACCEPTANCE_SA}`],
+          }],
           etag: 'candidate-private-granted', version: 1,
         };
       if (argv.includes('add-iam-policy-binding')) {
         iamGranted = true;
         return {
-          bindings: [{ role: 'roles/run.invoker', members: ['user:admin@motionexp.com'] }],
+          bindings: [{
+            role: 'roles/run.servicesInvoker',
+            members: [`serviceAccount:${ACCEPTANCE_SA}`],
+          }],
           etag: 'candidate-private-granted', version: 1,
         };
       }
@@ -1409,7 +1441,10 @@ test('candidate phase feeds raw Service JSON through gcloud 553-compatible secre
     revision: structuredClone(plan.expectedCandidate),
     artifact: { image: plan.expectedCandidate.image },
     iam: {
-      bindings: [{ role: 'roles/run.invoker', members: ['user:admin@motionexp.com'] }],
+      bindings: [{
+        role: 'roles/run.servicesInvoker',
+        members: [`serviceAccount:${ACCEPTANCE_SA}`],
+      }],
       etag: 'candidate-private-granted', version: 1,
     },
   }, plan));
@@ -2956,7 +2991,9 @@ test('all-checkpoint candidate restart reconstructs exact private Service and IA
       service,
     }],
     ['candidate-private-iam-grant', 'cloud-run-service-iam', {
-      bindings: [{ members: ['user:admin@motionexp.com'], role: 'roles/run.invoker' }],
+      bindings: [{
+        members: [`serviceAccount:${ACCEPTANCE_SA}`], role: 'roles/run.servicesInvoker',
+      }],
       kind: 'cloud-run-service-iam',
       service: CANDIDATE_SERVICE,
     }],
@@ -3204,7 +3241,10 @@ test('confirmed candidate fails closed unless every control-plane readback match
     },
     revision: structuredClone(plan.expectedCandidate),
     iam: {
-      bindings: [{ role: 'roles/run.invoker', members: ['user:admin@motionexp.com'] }],
+      bindings: [{
+        role: 'roles/run.servicesInvoker',
+        members: [`serviceAccount:${ACCEPTANCE_SA}`],
+      }],
       etag: 'Bw-candidate=',
       version: 1,
     },

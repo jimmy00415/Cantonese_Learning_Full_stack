@@ -20,6 +20,13 @@ const CANDIDATE_REVISION = `${GCP_IDENTITY.candidateService}-${'c'.repeat(12)}`;
 const CANDIDATE_TAG = `candidate-${'c'.repeat(12)}`;
 const CANDIDATE_TAG_URL = `https://${CANDIDATE_TAG}---${GCP_IDENTITY.candidateService}-${PROJECT_NUMBER}.${REGION}.run.app`;
 const STABLE_URL = `https://${GCP_IDENTITY.service}-${PROJECT_NUMBER}.${REGION}.run.app`;
+const RELEASE_SHA = 'a'.repeat(40);
+const IMAGE_DIGEST = `sha256:${'d'.repeat(64)}`;
+const PRIVACY_NOW = '2026-08-27T08:00:00.000Z';
+const ACCEPTANCE_SERVICE_ACCOUNT = GCP_IDENTITY.serviceAccounts.acceptance;
+const CANDIDATE_RESOURCE = `//run.googleapis.com/projects/${PROJECT}/locations/${REGION}/services/${GCP_IDENTITY.candidateService}`;
+const CANDIDATE_IMAGE = `${REGION}-docker.pkg.dev/${PROJECT}/${GCP_IDENTITY.repository}/hkbuddy-v1-api@${IMAGE_DIGEST}`;
+const RUN_REQUEST_LOG = `projects/${PROJECT}/logs/run.googleapis.com%2Frequests`;
 
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 
@@ -530,4 +537,1017 @@ test('release archive freezes the exact raw Cloud Build Git blob beside the arch
   );
   assert.deepEqual(await readFile(result.buildConfig), rawBuildConfig);
   assert.equal(result.buildConfig.startsWith(repositoryRoot), false);
+});
+
+function privacyProofReference(id, observedAt) {
+  const expiresAt = new Date(Date.parse(observedAt) + 5 * 60_000).toISOString();
+  return {
+    schemaVersion: 3,
+    filePath: `C:\\release\\privacy-${id}.json`,
+    artifactSha256: id.repeat(64),
+    objectSha256: id.repeat(64),
+    boundarySha256: id.repeat(64),
+    observedAt,
+    expiresAt,
+  };
+}
+
+function task8V3Entry(phase) {
+  const start = privacyProofReference(phase === 'readiness' ? '1' : phase === 'workload' ? '3' : '5', PRIVACY_NOW);
+  const end = privacyProofReference(
+    phase === 'readiness' ? '2' : phase === 'workload' ? '4' : '6',
+    new Date(Date.parse(PRIVACY_NOW) + 60_000).toISOString(),
+  );
+  return {
+    schemaVersion: 3,
+    filePath: `C:\\release\\${phase}.json`,
+    artifactSha256: phase === 'readiness' ? '7'.repeat(64) : phase === 'workload' ? '8'.repeat(64) : '9'.repeat(64),
+    objectSha256: phase === 'readiness' ? 'a'.repeat(64) : phase === 'workload' ? 'b'.repeat(64) : 'c'.repeat(64),
+    candidateService: GCP_IDENTITY.candidateService,
+    stableService: GCP_IDENTITY.service,
+    trafficState: 'candidate-service-private-100',
+    stableTrafficState: 'stable-prior-100',
+    privacyProofs: { start, end },
+  };
+}
+
+test('Task 8 schema v3 locators bind exact start and end privacy proofs', () => {
+  const { assertTask8Evidence } = releaseContract;
+  assert.equal(typeof assertTask8Evidence, 'function');
+  const valid = {
+    readiness: task8V3Entry('readiness'),
+    workload: task8V3Entry('workload'),
+    mobile: task8V3Entry('mobile'),
+  };
+  assert.deepEqual(assertTask8Evidence(valid, {
+    stableTrafficState: 'stable-prior-100',
+  }), valid);
+
+  for (const mutate of [
+    (value) => { value.readiness.schemaVersion = 2; },
+    (value) => { delete value.workload.privacyProofs.start; },
+    (value) => { value.mobile.privacyProofs.end.expiresAt = value.mobile.privacyProofs.end.observedAt; },
+    (value) => { value.mobile.privacyProofs.end.boundarySha256 = 'x'.repeat(64); },
+    (value) => { value.readiness.privacyProofs.extra = value.readiness.privacyProofs.start; },
+    (value) => { value.workload.privacyProofs.start.authorization = 'Bearer forbidden'; },
+  ]) {
+    const candidate = structuredClone(valid);
+    mutate(candidate);
+    assert.throws(() => assertTask8Evidence(candidate, {
+      stableTrafficState: 'stable-prior-100',
+    }), /GCP release contract is invalid/);
+  }
+});
+
+test('candidate private invocation is acceptance-SA-only and never grants token creation', () => {
+  const { candidatePrivateInvokerBinding } = releaseContract;
+  assert.equal(typeof candidatePrivateInvokerBinding, 'function');
+  assert.deepEqual(candidatePrivateInvokerBinding(), {
+    member: `serviceAccount:${ACCEPTANCE_SERVICE_ACCOUNT}`,
+    role: 'roles/run.servicesInvoker',
+  });
+  const serialized = JSON.stringify(candidatePrivateInvokerBinding());
+  assert.equal(serialized.includes('admin@motionexp.com'), false);
+  assert.equal(serialized.includes('serviceAccountOpenIdTokenCreator'), false);
+  assert.equal(serialized.includes('serviceAccountTokenCreator'), false);
+});
+
+function basePrivacyBinding() {
+  const binding = {
+    projectId: PROJECT,
+    projectNumber: PROJECT_NUMBER,
+    organizationId: GCP_IDENTITY.organizationId,
+    region: REGION,
+    releaseSha: RELEASE_SHA,
+    imageDigest: IMAGE_DIGEST,
+    image: CANDIDATE_IMAGE,
+    candidateService: GCP_IDENTITY.candidateService,
+    candidateRevision: `${GCP_IDENTITY.candidateService}-${RELEASE_SHA.slice(0, 12)}`,
+    candidateTag: `candidate-${RELEASE_SHA.slice(0, 12)}`,
+    candidateOrigin: `https://candidate-${RELEASE_SHA.slice(0, 12)}---${GCP_IDENTITY.candidateService}-${PROJECT_NUMBER}.${REGION}.run.app`,
+    candidateAudience: `https://${GCP_IDENTITY.candidateService}-${PROJECT_NUMBER}.${REGION}.run.app`,
+    acceptanceServiceAccount: ACCEPTANCE_SERVICE_ACCOUNT,
+    operator: 'admin@motionexp.com',
+  };
+  binding.expectedCandidate = expectedPrivacyCandidate(binding);
+  return binding;
+}
+
+function expectedPrivacyCandidate(binding) {
+  const probe = (path) => ({
+    path, port: 8080, initialDelaySeconds: 0, timeoutSeconds: 1,
+    periodSeconds: 10, failureThreshold: 3,
+  });
+  return {
+    project: binding.projectId,
+    region: binding.region,
+    service: binding.candidateService,
+    invokerIamDisabled: false,
+    revision: binding.candidateRevision,
+    tag: binding.candidateTag,
+    image: binding.image,
+    serviceAccount: GCP_IDENTITY.serviceAccounts.runtime,
+    executionEnvironment: 'gen2',
+    cpu: 2,
+    memory: '1Gi',
+    concurrency: 40,
+    minInstances: 1,
+    maxInstances: 1,
+    cpuThrottling: false,
+    startupCpuBoost: true,
+    timeoutSeconds: 60,
+    network: GCP_IDENTITY.network,
+    subnet: GCP_IDENTITY.subnet,
+    vpcEgress: 'private-ranges-only',
+    environment: {
+      NODE_ENV: 'production',
+      V1_RELEASE_COMMIT_SHA: binding.releaseSha,
+    },
+    secretEnvironment: {},
+    secretMounts: {},
+    probes: {
+      startup: probe('/api/health/ready'),
+      liveness: probe('/api/health/live'),
+      readiness: probe('/api/health/ready'),
+    },
+    traffic: [{ revision: binding.candidateRevision, tag: binding.candidateTag, percent: 100 }],
+    trafficState: 'candidate-service-private-100',
+  };
+}
+
+function privacyRuntimeAnnotations(expected) {
+  return {
+    'run.googleapis.com/execution-environment': expected.executionEnvironment,
+    'run.googleapis.com/network-interfaces': JSON.stringify([{
+      network: expected.network, subnetwork: expected.subnet,
+    }]),
+    'run.googleapis.com/vpc-access-egress': expected.vpcEgress,
+    'autoscaling.knative.dev/minScale': String(expected.minInstances),
+    'autoscaling.knative.dev/maxScale': String(expected.maxInstances),
+    'run.googleapis.com/cpu-throttling': String(expected.cpuThrottling),
+    'run.googleapis.com/startup-cpu-boost': String(expected.startupCpuBoost),
+  };
+}
+
+function privacyRuntimeSpec(expected) {
+  const probe = ({ path, port, initialDelaySeconds, timeoutSeconds, periodSeconds, failureThreshold }) => ({
+    httpGet: { path, port }, initialDelaySeconds, timeoutSeconds, periodSeconds, failureThreshold,
+  });
+  return {
+    serviceAccountName: expected.serviceAccount,
+    containerConcurrency: expected.concurrency,
+    timeoutSeconds: `${expected.timeoutSeconds}s`,
+    containers: [{
+      image: expected.image,
+      resources: { limits: { cpu: String(expected.cpu), memory: expected.memory } },
+      env: Object.entries(expected.environment).map(([name, value]) => ({ name, value })),
+      startupProbe: probe(expected.probes.startup),
+      livenessProbe: probe(expected.probes.liveness),
+      readinessProbe: probe(expected.probes.readiness),
+    }],
+  };
+}
+
+function privacyServiceReadback(binding) {
+  const expected = binding.expectedCandidate;
+  return {
+    apiVersion: 'serving.knative.dev/v1',
+    kind: 'Service',
+    metadata: {
+      name: binding.candidateService,
+      namespace: binding.projectNumber,
+      labels: { 'cloud.googleapis.com/location': binding.region },
+      annotations: {
+        'run.googleapis.com/ingress': 'all',
+        'run.googleapis.com/ingress-status': 'all',
+        'run.googleapis.com/invoker-iam-disabled': 'false',
+      },
+    },
+    spec: {
+      template: {
+        metadata: { name: binding.candidateRevision, annotations: privacyRuntimeAnnotations(expected) },
+        spec: privacyRuntimeSpec(expected),
+      },
+      traffic: [{ revisionName: binding.candidateRevision, percent: 100, tag: binding.candidateTag }],
+    },
+    status: {
+      conditions: [{ type: 'Ready', status: 'True' }],
+      latestCreatedRevisionName: binding.candidateRevision,
+      latestReadyRevisionName: binding.candidateRevision,
+      traffic: [{
+        revisionName: binding.candidateRevision,
+        percent: 100,
+        tag: binding.candidateTag,
+        url: binding.candidateOrigin,
+      }],
+      url: binding.candidateAudience,
+    },
+  };
+}
+
+function privacyRevisionReadback(binding) {
+  const expected = binding.expectedCandidate;
+  return {
+    apiVersion: 'serving.knative.dev/v1',
+    kind: 'Revision',
+    metadata: {
+      name: binding.candidateRevision,
+      namespace: binding.projectNumber,
+      labels: {
+        'cloud.googleapis.com/location': binding.region,
+        'serving.knative.dev/configuration': binding.candidateService,
+        'serving.knative.dev/service': binding.candidateService,
+      },
+      annotations: privacyRuntimeAnnotations(expected),
+    },
+    spec: privacyRuntimeSpec(expected),
+    status: {
+      conditions: [{ type: 'Ready', status: 'True' }],
+      imageDigest: binding.image,
+      containerStatuses: [{ imageDigest: binding.image }],
+    },
+  };
+}
+
+function privacyArtifactReadback(binding) {
+  return {
+    image_summary: {
+      digest: binding.imageDigest,
+      fully_qualified_digest: binding.image,
+      registry: `${binding.region}-docker.pkg.dev`,
+      repository: `${binding.region}-docker.pkg.dev/${binding.projectId}/${GCP_IDENTITY.repository}`,
+    },
+  };
+}
+
+function jwtFor(payload, {
+  header = { alg: 'RS256', typ: 'JWT', kid: 'kid-20260827' },
+  signature = Buffer.alloc(32, 7).toString('base64url'),
+} = {}) {
+  const encode = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  return `${encode(header)}.${encode(payload)}.${signature}`;
+}
+
+function fakeHeaders(entries = {}) {
+  const values = new Map(Object.entries(entries).map(([key, value]) => [key.toLowerCase(), value]));
+  return { get: (name) => values.get(String(name).toLowerCase()) ?? null };
+}
+
+function privacyFixtures(binding = basePrivacyBinding()) {
+  const servicePolicy = {
+    version: 1,
+    etag: 'BwYAAA==',
+    bindings: [{
+      role: 'roles/run.servicesInvoker',
+      members: [`serviceAccount:${binding.acceptanceServiceAccount}`],
+    }],
+  };
+  const projectPolicy = { version: 1, etag: 'BwYAAQ==' };
+  const organizationPolicy = { version: 1, etag: 'BwYABQ==' };
+  const organization = {
+    name: `organizations/${binding.organizationId}`,
+    displayName: 'motionexp.com',
+    lifecycleState: 'ACTIVE',
+  };
+  const project = {
+    projectId: binding.projectId,
+    projectNumber: binding.projectNumber,
+    lifecycleState: 'ACTIVE',
+    parent: { type: 'organization', id: binding.organizationId },
+  };
+  const role = {
+    name: 'roles/run.servicesInvoker',
+    stage: 'GA',
+    deleted: false,
+    includedPermissions: ['run.routes.invoke'],
+  };
+  const tokenPrerequisite = {
+    version: 1,
+    etag: 'BwYABg==',
+    bindings: [{
+      role: 'roles/iam.serviceAccountOpenIdTokenCreator',
+      members: [`user:${binding.operator}`],
+    }],
+  };
+  const effectivePolicy = {
+    policyResults: [{
+      fullResourceName: CANDIDATE_RESOURCE,
+      policies: [
+        { attachedResource: CANDIDATE_RESOURCE, policy: servicePolicy },
+        {
+          attachedResource: `//cloudresourcemanager.googleapis.com/projects/${binding.projectNumber}`,
+          policy: projectPolicy,
+        },
+        {
+          attachedResource: `//cloudresourcemanager.googleapis.com/organizations/${binding.organizationId}`,
+          policy: organizationPolicy,
+        },
+      ],
+    }],
+  };
+  const analysis = (kind) => ({
+    fullyExplored: true,
+    mainAnalysis: {
+      analysisQuery: {
+        scope: `organizations/${binding.organizationId}`,
+        identitySelector: { identity: 'allUsers' },
+        resourceSelector: { fullResourceName: CANDIDATE_RESOURCE },
+        ...(kind === 'permission'
+          ? { accessSelector: { permissions: ['run.routes.invoke'] } }
+          : { options: { expandRoles: true } }),
+      },
+      fullyExplored: true,
+      analysisResults: [],
+      nonCriticalErrors: [],
+    },
+  });
+  const troubleshooter = {
+    access: 'GRANTED',
+    explainedPolicies: [{
+      access: 'NOT_GRANTED',
+      fullResourceName: `//cloudresourcemanager.googleapis.com/projects/${binding.projectNumber}`,
+      relevance: 'HEURISTIC_RELEVANCE',
+      bindingExplanations: [],
+    }, {
+      access: 'GRANTED',
+      fullResourceName: CANDIDATE_RESOURCE,
+      relevance: 'HIGH',
+      bindingExplanations: [{
+        access: 'GRANTED',
+        relevance: 'HIGH',
+        role: 'roles/run.servicesInvoker',
+        rolePermission: 'INCLUDED',
+        memberships: {
+          [`serviceAccount:${binding.acceptanceServiceAccount}`]: {
+            membership: 'INCLUDED', relevance: 'HIGH',
+          },
+        },
+      }],
+    }],
+  };
+  const nowSeconds = Math.floor(Date.parse(PRIVACY_NOW) / 1_000);
+  const token = jwtFor({
+    iss: 'https://accounts.google.com',
+    aud: binding.candidateAudience,
+    sub: '123456789012345678901',
+    email: binding.acceptanceServiceAccount,
+    email_verified: true,
+    iat: nowSeconds - 10,
+    exp: nowSeconds + 3_590,
+    azp: '123456789012-acceptance.apps.googleusercontent.com',
+  });
+  return {
+    project, organization, servicePolicy, projectPolicy, organizationPolicy, role,
+    roleDefinitions: { 'roles/run.servicesInvoker': role },
+    folders: {}, tokenPrerequisite, effectivePolicy,
+    analyses: { permission: analysis('permission'), expandedRoles: analysis('expandedRoles') },
+    troubleshooter, token,
+    service: privacyServiceReadback(binding),
+    revision: privacyRevisionReadback(binding),
+    artifact: privacyArtifactReadback(binding),
+    logEmptyPolls: 1,
+    mutateLogEntry: () => undefined,
+  };
+}
+
+function effectivePolicyFor(fixtures, binding) {
+  const policies = [
+    { attachedResource: CANDIDATE_RESOURCE, policy: fixtures.servicePolicy },
+    {
+      attachedResource: `//cloudresourcemanager.googleapis.com/projects/${binding.projectNumber}`,
+      policy: fixtures.projectPolicy,
+    },
+  ];
+  let parent = `${fixtures.project.parent.type}s/${fixtures.project.parent.id}`;
+  while (parent.startsWith('folders/')) {
+    const folderId = parent.slice('folders/'.length);
+    const folder = fixtures.folders[folderId];
+    assert.ok(folder, `missing effective-policy folder ${folderId}`);
+    policies.push({
+      attachedResource: `//cloudresourcemanager.googleapis.com/folders/${folderId}`,
+      policy: folder.policy,
+    });
+    parent = folder.descriptor.parent;
+  }
+  policies.push({
+    attachedResource: `//cloudresourcemanager.googleapis.com/organizations/${binding.organizationId}`,
+    policy: fixtures.organizationPolicy,
+  });
+  return { policyResults: [{ fullResourceName: CANDIDATE_RESOURCE, policies }] };
+}
+
+function createPrivacyHarness({ mutate = () => undefined } = {}) {
+  const binding = basePrivacyBinding();
+  const fixtures = privacyFixtures(binding);
+  mutate(fixtures, binding);
+  const calls = [];
+  const tokenCalls = [];
+  const logRequests = [];
+  const logPolls = new Map();
+  const executor = async (argv) => {
+    calls.push([...argv]);
+    const command = argv.join(' ');
+    if (command.startsWith('projects describe ')) return structuredClone(fixtures.project);
+    if (command.startsWith(`run services get-iam-policy ${binding.candidateService}`)) {
+      return structuredClone(fixtures.servicePolicy);
+    }
+    if (command.startsWith(`projects get-iam-policy ${binding.projectId}`)) {
+      return structuredClone(fixtures.projectPolicy);
+    }
+    if (command.startsWith(`organizations get-iam-policy ${binding.organizationId}`)) {
+      return structuredClone(fixtures.organizationPolicy);
+    }
+    if (command.startsWith(`organizations describe ${binding.organizationId}`)) {
+      return structuredClone(fixtures.organization);
+    }
+    if (command.startsWith('resource-manager folders describe ')) {
+      const folderId = argv[3];
+      if (!fixtures.folders[folderId]) throw new Error('unknown folder');
+      return structuredClone(fixtures.folders[folderId].descriptor);
+    }
+    if (command.startsWith('resource-manager folders get-iam-policy ')) {
+      const folderId = argv[3];
+      if (!fixtures.folders[folderId]) throw new Error('unknown folder');
+      return structuredClone(fixtures.folders[folderId].policy);
+    }
+    if (command.startsWith(`iam service-accounts get-iam-policy ${binding.acceptanceServiceAccount}`)) {
+      return structuredClone(fixtures.tokenPrerequisite);
+    }
+    if (command.startsWith('iam roles describe ')) {
+      const positional = argv[3];
+      const projectFlag = argv.find((member) => member.startsWith('--project='));
+      const organizationFlag = argv.find((member) => member.startsWith('--organization='));
+      const roleName = projectFlag
+        ? `projects/${projectFlag.slice('--project='.length)}/roles/${positional}`
+        : organizationFlag
+          ? `organizations/${organizationFlag.slice('--organization='.length)}/roles/${positional}`
+          : positional;
+      const definition = fixtures.roleDefinitions[roleName];
+      if (!definition) throw new Error('role unavailable');
+      return structuredClone(definition);
+    }
+    if (command.startsWith('asset get-effective-iam-policy ')) return structuredClone(fixtures.effectivePolicy);
+    if (command.startsWith('asset analyze-iam-policy ')) {
+      const permission = argv.includes('--permissions=run.routes.invoke');
+      const expandedRoles = argv.includes('--expand-roles');
+      assert.notEqual(permission, expandedRoles, 'analysis must choose exactly one query mode');
+      const value = structuredClone(permission
+        ? fixtures.analyses.permission : fixtures.analyses.expandedRoles);
+      value.mainAnalysis.analysisQuery.identitySelector.identity = argv
+        .find((member) => member.startsWith('--identity='))
+        .slice('--identity='.length);
+      return value;
+    }
+    if (command.startsWith('policy-troubleshoot iam ')) return structuredClone(fixtures.troubleshooter);
+    if (command.startsWith(`run services describe ${binding.candidateService}`)) {
+      return structuredClone(fixtures.service);
+    }
+    if (command.startsWith(`run revisions describe ${binding.candidateRevision}`)) {
+      assert.equal(argv.includes('--service'), false);
+      return structuredClone(fixtures.revision);
+    }
+    if (command.startsWith(`artifacts docker images describe ${binding.image}`)) {
+      return structuredClone(fixtures.artifact);
+    }
+    if (command.startsWith('auth print-identity-token ')) {
+      throw new Error('identity token must not use the JSON executor');
+    }
+    if (command.startsWith('logging read ')) {
+      const filter = argv[2];
+      assert.equal(filter.includes(`logName=\"${RUN_REQUEST_LOG}\"`), true);
+      assert.equal(filter.includes(`timestamp>=\"2026-08-27T07:59:30.000Z\"`), true);
+      assert.equal(filter.includes(`timestamp<=\"2026-08-27T08:05:00.000Z\"`), true);
+      assert.equal(argv.includes('--freshness=5m'), false);
+      assert.equal(argv.includes('--limit=2'), true);
+      const trace = /trace=\"projects\/[^/]+\/traces\/([0-9a-f]{32})\"/.exec(filter)?.[1];
+      const probe = logRequests.find((entry) => entry.traceId === trace);
+      assert.ok(probe, 'log query must bind one issued probe trace');
+      const attempts = (logPolls.get(trace) ?? 0) + 1;
+      logPolls.set(trace, attempts);
+      if (attempts <= fixtures.logEmptyPolls) return [];
+      const entry = {
+        insertId: `insert-${probe.kind}`,
+        logName: RUN_REQUEST_LOG,
+        severity: 'INFO',
+        timestamp: PRIVACY_NOW,
+        trace: `projects/${PROJECT}/traces/${trace}`,
+        spanId: '0123456789abcdef',
+        traceSampled: true,
+        resource: {
+          type: 'cloud_run_revision',
+          labels: {
+            configuration_name: binding.candidateService,
+            project_id: PROJECT,
+            location: REGION,
+            service_name: GCP_IDENTITY.candidateService,
+            revision_name: binding.candidateRevision,
+          },
+        },
+        httpRequest: {
+          requestMethod: 'GET',
+          requestUrl: `${binding.candidateOrigin}/api/health/live`,
+          status: probe.kind === 'anonymous' ? 403 : 200,
+          userAgent: probe.userAgent,
+          latency: '0.012345678s',
+          protocol: 'HTTP/1.1',
+          remoteIp: '203.0.113.7',
+          serverIp: '10.24.0.2',
+          requestSize: '123',
+          responseSize: '456',
+        },
+      };
+      fixtures.mutateLogEntry(entry, probe);
+      return [entry];
+    }
+    throw new Error(`unexpected privacy command: ${command}`);
+  };
+  const tokenExecutor = async (argv) => {
+    tokenCalls.push([...argv]);
+    return fixtures.token;
+  };
+  const fetch = async (url, options) => {
+    const traceId = String(options.headers['X-Cloud-Trace-Context']).split('/')[0];
+    const kind = Object.hasOwn(options.headers, 'Authorization') ? 'authenticated' : 'anonymous';
+    logRequests.push({ kind, traceId, userAgent: options.headers['User-Agent'] });
+    assert.equal(url, `${binding.candidateOrigin}/api/health/live`);
+    assert.equal(options.method, 'GET');
+    assert.equal(options.redirect, 'manual');
+    assert.equal(options.credentials, 'omit');
+    assert.equal(Object.hasOwn(options.headers, 'Cookie'), false);
+    if (kind === 'anonymous') {
+      assert.equal(Object.hasOwn(options.headers, 'Authorization'), false);
+      return {
+        status: 403,
+        headers: fakeHeaders(),
+        json: async () => { throw new Error('anonymous body must not be consumed'); },
+      };
+    }
+    assert.equal(options.headers.Authorization, `Bearer ${fixtures.token}`);
+    return {
+      status: 200,
+      headers: fakeHeaders({ 'content-type': 'application/json; charset=utf-8' }),
+      json: async () => ({
+        data: { status: 'ok', version: '0.1.0' },
+        error: null,
+        requestId: '123e4567-e89b-42d3-a456-426614174000',
+      }),
+    };
+  };
+  let nonceIndex = 0;
+  const nonce = () => `nonce-${++nonceIndex}`;
+  return {
+    binding, fixtures, calls, tokenCalls, logRequests, logPolls,
+    executor, tokenExecutor, fetch, nonce,
+    sleep: async () => undefined,
+  };
+}
+
+test('privacy command plan is read-only and hard-gates exact live prerequisites', async () => {
+  const { createCandidatePrivacyCommandPlan } = await import('../scripts/candidate-privacy-proof.js');
+  const binding = basePrivacyBinding();
+  const plan = createCandidatePrivacyCommandPlan(binding);
+  assert.equal(plan.candidateResource, CANDIDATE_RESOURCE);
+  assert.deepEqual(plan.tokenPrerequisite, [
+    'iam', 'service-accounts', 'get-iam-policy', ACCEPTANCE_SERVICE_ACCOUNT,
+    `--project=${PROJECT}`, '--format=json',
+  ]);
+  assert.deepEqual(plan.token, [
+    'auth', 'print-identity-token', 'admin@motionexp.com',
+    `--impersonate-service-account=${ACCEPTANCE_SERVICE_ACCOUNT}`,
+    `--audiences=${binding.candidateAudience}`, '--include-email', '--quiet',
+  ]);
+  assert.deepEqual(plan.assetEffectiveIam, [
+    'asset', 'get-effective-iam-policy', `--scope=organizations/${GCP_IDENTITY.organizationId}`,
+    `--names=${CANDIDATE_RESOURCE}`, '--billing-project=tech-demo-433408',
+    '--format=json',
+  ]);
+  assert.deepEqual(plan.assetAnalyses, Object.fromEntries(
+    ['allUsers', 'allAuthenticatedUsers'].map((principal) => [principal, {
+      permission: [
+        'asset', 'analyze-iam-policy', `--organization=${GCP_IDENTITY.organizationId}`,
+        `--full-resource-name=${CANDIDATE_RESOURCE}`, `--identity=${principal}`,
+        '--permissions=run.routes.invoke', '--show-response',
+        '--billing-project=tech-demo-433408', '--format=json', '--quiet',
+      ],
+      expandedRoles: [
+        'asset', 'analyze-iam-policy', `--organization=${GCP_IDENTITY.organizationId}`,
+        `--full-resource-name=${CANDIDATE_RESOURCE}`, `--identity=${principal}`,
+        '--expand-roles', '--show-response',
+        '--billing-project=tech-demo-433408', '--format=json', '--quiet',
+      ],
+    }]),
+  ));
+  for (const pair of Object.values(plan.assetAnalyses)) {
+    assert.equal(pair.permission.includes('--expand-roles'), false);
+    assert.equal(pair.expandedRoles.some((member) => member.startsWith('--permissions=')), false);
+    assert.equal(pair.permission.some((member) => member.startsWith('--project=')), false);
+    assert.equal(pair.expandedRoles.some((member) => member.startsWith('--project=')), false);
+  }
+  assert.deepEqual(plan.controlPlane, {
+    service: [
+      'run', 'services', 'describe', binding.candidateService,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ],
+    revision: [
+      'run', 'revisions', 'describe', binding.candidateRevision,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ],
+    artifact: [
+      'artifacts', 'docker', 'images', 'describe', binding.image,
+      `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
+    ],
+  });
+  assert.deepEqual(plan.hierarchy.organizationDescribe, [
+    'organizations', 'describe', GCP_IDENTITY.organizationId, '--format=json',
+  ]);
+  assert.deepEqual(plan.troubleshooter, [
+    'policy-troubleshoot', 'iam', CANDIDATE_RESOURCE,
+    `--principal-email=${ACCEPTANCE_SERVICE_ACCOUNT}`, '--permission=run.routes.invoke',
+    `--project=${PROJECT}`, '--format=json',
+  ]);
+  const serialized = JSON.stringify(plan);
+  assert.equal(/\b(?:add|set|update|create|enable|disable|delete)-?iam-policy-binding\b/i.test(serialized), false);
+  assert.equal(serialized.includes('serviceAccountTokenCreator'), false);
+});
+
+test('identity-token transport reads exactly one raw JWT line without using the JSON executor', async () => {
+  const {
+    createCandidatePrivacyCommandPlan,
+    createIdentityTokenExecutor,
+  } = await import('../scripts/candidate-privacy-proof.js');
+  const binding = basePrivacyBinding();
+  const plan = createCandidatePrivacyCommandPlan(binding);
+  const token = privacyFixtures(binding).token;
+  const invocations = [];
+  const tokenExecutor = createIdentityTokenExecutor({
+    executable: 'python.exe',
+    prefixArgs: ['D:/gcloud/lib/gcloud.py'],
+    execFile: async (executable, argv, options) => {
+      invocations.push({ executable, argv, options });
+      return { stdout: `${token}\r\n`, stderr: '' };
+    },
+  });
+  assert.equal(await tokenExecutor(plan.token), token);
+  assert.deepEqual(invocations, [{
+    executable: 'python.exe',
+    argv: ['D:/gcloud/lib/gcloud.py', ...plan.token],
+    options: { encoding: 'utf8', maxBuffer: 64 * 1024, windowsHide: true },
+  }]);
+
+  for (const stdout of [token, ` ${token}\n`, `${token}\n\n`, `${token}\nextra\n`]) {
+    const invalid = createIdentityTokenExecutor({
+      executable: 'python.exe',
+      execFile: async () => ({ stdout, stderr: '' }),
+    });
+    await assert.rejects(() => invalid(plan.token), /Candidate privacy proof failed/);
+  }
+  const transportError = createIdentityTokenExecutor({
+    executable: 'python.exe',
+    execFile: async () => { throw new Error(`provider leaked ${token}`); },
+  });
+  await assert.rejects(() => transportError(plan.token), (error) => (
+    error.message === 'Candidate privacy proof failed' && !error.message.includes(token)
+  ));
+});
+
+test('controlled privacy producer proves inherited IAM, both edges, and exact logs without persisting credentials', async () => {
+  const {
+    finalizeCandidatePrivacyProof,
+    runCandidatePrivacyProof,
+    validateCandidatePrivacyProof,
+  } = await import('../scripts/candidate-privacy-proof.js');
+  const harness = createPrivacyHarness();
+  const proof = await runCandidatePrivacyProof({
+    binding: harness.binding,
+    executor: harness.executor,
+    tokenExecutor: harness.tokenExecutor,
+    fetch: harness.fetch,
+    now: () => new Date(PRIVACY_NOW),
+    nonce: harness.nonce,
+    sleep: harness.sleep,
+  });
+  assert.equal(proof.schemaVersion, 3);
+  assert.equal(proof.result, 'pass');
+  assert.equal(proof.occurredAt, PRIVACY_NOW);
+  assert.equal(proof.expiresAt, '2026-08-27T08:05:00.000Z');
+  assert.equal(proof.binding.candidateResource, CANDIDATE_RESOURCE);
+  assert.equal(proof.identity.invokerMember, `serviceAccount:${ACCEPTANCE_SERVICE_ACCOUNT}`);
+  assert.equal(proof.identity.invokerRole, 'roles/run.servicesInvoker');
+  assert.equal(proof.identity.tokenCreatorPrerequisite, 'roles/iam.serviceAccountOpenIdTokenCreator');
+  assert.equal(proof.controlPlane.stable, true);
+  assert.equal(proof.controlPlane.beforeSha256, proof.controlPlane.afterSha256);
+  assert.equal(proof.cloudAsset.analyses.allUsers.fullyExplored, true);
+  assert.equal(proof.cloudAsset.analyses.allAuthenticatedUsers.resultCount, 0);
+  assert.equal(proof.edge.anonymous.status, 403);
+  assert.equal(proof.edge.authenticated.status, 200);
+  assert.notEqual(proof.edge.anonymous.traceSha256, proof.edge.authenticated.traceSha256);
+  assert.equal(validateCandidatePrivacyProof(proof, {
+    binding: harness.binding,
+    now: new Date(PRIVACY_NOW),
+  }), true);
+  assert.deepEqual(finalizeCandidatePrivacyProof(proof), proof);
+  const serialized = JSON.stringify(proof);
+  assert.equal(serialized.includes(harness.fixtures.token), false);
+  assert.equal(serialized.includes('Bearer '), false);
+  assert.equal(serialized.includes('Authorization'), false);
+  assert.equal(serialized.includes('Cookie'), false);
+  assert.equal(serialized.includes('rawHeaders'), false);
+  assert.equal(releaseContract.containsForbiddenPersistedSecret(proof), false);
+  assert.equal(harness.logRequests.length, 2);
+  assert.equal(harness.tokenCalls.length, 1);
+  assert.equal(harness.calls.some((argv) => argv[0] === 'auth'), false);
+  assert.equal([...harness.logPolls.values()].every((count) => count === 2), true);
+});
+
+test('privacy producer traverses two folders and resolves predefined, project, and organization roles exactly', async () => {
+  const { runCandidatePrivacyProof } = await import('../scripts/candidate-privacy-proof.js');
+  const harness = createPrivacyHarness({ mutate: (fixtures, binding) => {
+    fixtures.project.parent = { type: 'folder', id: '1001' };
+    fixtures.folders = {
+      1001: {
+        descriptor: { name: 'folders/1001', parent: 'folders/1002', lifecycleState: 'ACTIVE' },
+        policy: {
+          version: 3,
+          etag: 'BwYAAw==',
+          bindings: [{ role: 'roles/logging.viewer', members: ['allUsers'] }],
+        },
+      },
+      1002: {
+        descriptor: {
+          name: 'folders/1002',
+          parent: `organizations/${binding.organizationId}`,
+          lifecycleState: 'ACTIVE',
+        },
+        policy: { version: 1, etag: 'BwYABA==' },
+      },
+    };
+    fixtures.projectPolicy.bindings = [{
+      role: `projects/${binding.projectId}/roles/hkbuddyPublicMetadataReader`,
+      members: ['allUsers'],
+    }];
+    fixtures.organizationPolicy.bindings = [{
+      role: `organizations/${binding.organizationId}/roles/hkbuddyPublicMetadataReader`,
+      members: ['allAuthenticatedUsers'],
+    }];
+    fixtures.roleDefinitions = {
+      'roles/logging.viewer': {
+        name: 'roles/logging.viewer', stage: 'GA', deleted: false,
+        includedPermissions: ['logging.logEntries.list'],
+      },
+      [`projects/${binding.projectId}/roles/hkbuddyPublicMetadataReader`]: {
+        name: `projects/${binding.projectId}/roles/hkbuddyPublicMetadataReader`,
+        stage: 'GA', deleted: false, includedPermissions: ['resourcemanager.projects.get'],
+      },
+      [`organizations/${binding.organizationId}/roles/hkbuddyPublicMetadataReader`]: {
+        name: `organizations/${binding.organizationId}/roles/hkbuddyPublicMetadataReader`,
+        stage: 'GA', deleted: false, includedPermissions: ['resourcemanager.projects.get'],
+      },
+    };
+    fixtures.effectivePolicy = effectivePolicyFor(fixtures, binding);
+    for (const analysis of Object.values(fixtures.analyses)) {
+      delete analysis.mainAnalysis.analysisResults;
+      delete analysis.mainAnalysis.nonCriticalErrors;
+    }
+    fixtures.analyses.expandedRoles.mainAnalysis.analysisResults = [{
+      accessControlLists: [{ accesses: [{ permission: 'logging.logEntries.list' }] }],
+    }];
+  } });
+  const proof = await runCandidatePrivacyProof({
+    binding: harness.binding, executor: harness.executor, tokenExecutor: harness.tokenExecutor,
+    fetch: harness.fetch, now: () => new Date(PRIVACY_NOW), nonce: harness.nonce,
+    sleep: harness.sleep,
+  });
+  assert.equal(proof.result, 'pass');
+  for (const folderId of ['1001', '1002']) {
+    assert.equal(harness.calls.filter((argv) => argv.join(' ').startsWith(
+      `resource-manager folders describe ${folderId}`,
+    )).length, 2);
+    assert.equal(harness.calls.filter((argv) => argv.join(' ').startsWith(
+      `resource-manager folders get-iam-policy ${folderId}`,
+    )).length, 2);
+  }
+  assert.equal(harness.calls.some((argv) => argv.join(' ') === 'iam roles describe roles/logging.viewer --format=json'), true);
+  assert.equal(harness.calls.some((argv) => argv.join(' ') === (
+    `iam roles describe hkbuddyPublicMetadataReader --project=${PROJECT} --format=json`
+  )), true);
+  assert.equal(harness.calls.some((argv) => argv.join(' ') === (
+    `iam roles describe hkbuddyPublicMetadataReader --organization=${GCP_IDENTITY.organizationId} --format=json`
+  )), true);
+});
+
+test('privacy producer accepts allowlisted IAM audit config and harmless server-managed readback drift', async () => {
+  const { runCandidatePrivacyProof } = await import('../scripts/candidate-privacy-proof.js');
+  const harness = createPrivacyHarness({ mutate: (fixtures, binding) => {
+    fixtures.projectPolicy.auditConfigs = [{
+      service: 'allServices',
+      auditLogConfigs: [{ logType: 'ADMIN_READ', exemptedMembers: [] }],
+    }];
+    fixtures.effectivePolicy = effectivePolicyFor(fixtures, binding);
+    let resourceVersion = 0;
+    Object.defineProperty(fixtures.service.metadata, 'resourceVersion', {
+      enumerable: true,
+      get: () => String(++resourceVersion),
+    });
+    let revisionGeneration = 0;
+    Object.defineProperty(fixtures.revision.metadata, 'generation', {
+      enumerable: true,
+      get: () => ++revisionGeneration,
+    });
+  } });
+  const proof = await runCandidatePrivacyProof({
+    binding: harness.binding,
+    executor: harness.executor,
+    tokenExecutor: harness.tokenExecutor,
+    fetch: harness.fetch,
+    now: () => new Date(PRIVACY_NOW),
+    nonce: harness.nonce,
+    sleep: harness.sleep,
+  });
+  assert.equal(proof.result, 'pass');
+  assert.equal(proof.controlPlane.beforeSha256, proof.controlPlane.afterSha256);
+});
+
+test('privacy producer fails closed on incomplete effective policy, inherited public invoke, edge, or log drift', async (t) => {
+  const { runCandidatePrivacyProof } = await import('../scripts/candidate-privacy-proof.js');
+  const cases = [
+    ['unstable hierarchy etag', (fixtures) => {
+      let reads = 0;
+      Object.defineProperty(fixtures.projectPolicy, 'etag', {
+        enumerable: true,
+        get: () => (++reads > 1 ? 'BwYACQ==' : 'BwYAAQ=='),
+      });
+    }],
+    ['folder cycle', (fixtures) => {
+      fixtures.project.parent = { type: 'folder', id: '1001' };
+      fixtures.folders = {
+        1001: {
+          descriptor: { name: 'folders/1001', parent: 'folders/1002', lifecycleState: 'ACTIVE' },
+          policy: { version: 1, etag: 'BwYAAw==' },
+        },
+        1002: {
+          descriptor: { name: 'folders/1002', parent: 'folders/1001', lifecycleState: 'ACTIVE' },
+          policy: { version: 1, etag: 'BwYABA==' },
+        },
+      };
+    }],
+    ['foreign organization ancestor', (fixtures) => {
+      fixtures.project.parent = { type: 'folder', id: '1001' };
+      fixtures.folders = {
+        1001: {
+          descriptor: { name: 'folders/1001', parent: 'organizations/999999999999', lifecycleState: 'ACTIVE' },
+          policy: { version: 1, etag: 'BwYAAw==' },
+        },
+      };
+    }],
+    ['missing OpenID token prerequisite', (fixtures) => { fixtures.tokenPrerequisite.bindings = []; }],
+    ['IAM policy unknown top-level key', (fixtures) => { fixtures.projectPolicy.unknown = true; }],
+    ['IAM policy duplicate member', (fixtures) => {
+      fixtures.projectPolicy.bindings = [{
+        role: 'roles/logging.viewer', members: ['allUsers', 'allUsers'],
+      }];
+    }],
+    ['IAM policy malformed condition', (fixtures) => {
+      fixtures.projectPolicy.version = 3;
+      fixtures.projectPolicy.bindings = [{
+        role: 'roles/logging.viewer', members: ['allUsers'],
+        condition: { title: 'bad', expression: 'true', unknown: 'drift' },
+      }];
+    }],
+    ['legacy folder lifecycle enum', (fixtures) => {
+      fixtures.project.parent = { type: 'folder', id: '1001' };
+      fixtures.folders = {
+        1001: {
+          descriptor: {
+            name: 'folders/1001', parent: `organizations/${GCP_IDENTITY.organizationId}`,
+            lifecycleState: 'FOLDER_ACTIVE',
+          },
+          policy: { version: 1, etag: 'BwYAAw==' },
+        },
+      };
+    }],
+    ['inherited conditional public invoke', (fixtures) => {
+      fixtures.organizationPolicy.bindings = [{
+        role: 'roles/run.servicesInvoker', members: ['allUsers'],
+        condition: { title: 'still-public', expression: 'request.time < timestamp("2030-01-01T00:00:00Z")' },
+      }];
+    }],
+    ['unresolvable custom role', (fixtures) => {
+      fixtures.projectPolicy.bindings = [{
+        role: `projects/${PROJECT}/roles/unavailableRole`, members: ['allUsers'],
+      }];
+    }],
+    ['mismatched custom role response name', (fixtures) => {
+      const roleName = `projects/${PROJECT}/roles/publicMetadataReader`;
+      fixtures.projectPolicy.bindings = [{ role: roleName, members: ['allUsers'] }];
+      fixtures.roleDefinitions[roleName] = {
+        name: `projects/${PROJECT}/roles/foreignName`, stage: 'GA', deleted: false,
+        includedPermissions: ['resourcemanager.projects.get'],
+      };
+    }],
+    ['effective IAM omits project policy', (fixtures) => {
+      fixtures.effectivePolicy.policyResults[0].policies.splice(1, 1);
+    }],
+    ['effective IAM adds foreign policy', (fixtures) => {
+      fixtures.effectivePolicy.policyResults[0].policies.push({
+        attachedResource: '//cloudresourcemanager.googleapis.com/projects/999999999999',
+        policy: { version: 1, etag: 'BwYAZA==' },
+      });
+    }],
+    ['incomplete Asset analysis', (fixtures) => {
+      fixtures.analyses.permission.mainAnalysis.fullyExplored = false;
+    }],
+    ['permission Asset query scope drift', (fixtures) => {
+      fixtures.analyses.permission.mainAnalysis.analysisQuery.scope = 'organizations/999999999999';
+    }],
+    ['expanded-role Asset query lacks expansion', (fixtures) => {
+      fixtures.analyses.expandedRoles.mainAnalysis.analysisQuery.options.expandRoles = false;
+    }],
+    ['unrequested impersonation analysis result', (fixtures) => {
+      fixtures.analyses.permission.serviceAccountImpersonationAnalysis = {
+        fullyExplored: true, analysisResults: [{}], nonCriticalErrors: [],
+      };
+    }],
+    ['permission Asset analysis result', (fixtures) => {
+      fixtures.analyses.permission.mainAnalysis.analysisResults = [{}];
+    }],
+    ['expanded-role Asset invoke result', (fixtures) => {
+      fixtures.analyses.expandedRoles.mainAnalysis.analysisResults = [{
+        accessControlLists: [{ accesses: [{ permission: 'run.routes.invoke' }] }],
+      }];
+    }],
+    ['ambiguous Troubleshooter', (fixtures) => { fixtures.troubleshooter.access = 'UNKNOWN'; }],
+    ['Troubleshooter lacks high-relevance grant witness', (fixtures) => {
+      fixtures.troubleshooter.explainedPolicies[1].bindingExplanations[0].relevance = 'NORMAL';
+    }],
+    ['Troubleshooter conditional ambiguity', (fixtures) => {
+      fixtures.troubleshooter.explainedPolicies[1].bindingExplanations[0].condition = {
+        evaluationState: 'TRUE',
+      };
+    }],
+    ['invalid token audience', (fixtures, binding) => {
+      const nowSeconds = Math.floor(Date.parse(PRIVACY_NOW) / 1_000);
+      fixtures.token = jwtFor({
+        iss: 'https://accounts.google.com', aud: 'https://foreign.example',
+        sub: '123456789012345678901', email: binding.acceptanceServiceAccount,
+        email_verified: true, iat: nowSeconds - 10, exp: nowSeconds + 3_590,
+      });
+    }],
+    ['invalid token header', (fixtures) => {
+      const claims = JSON.parse(Buffer.from(fixtures.token.split('.')[1], 'base64url').toString('utf8'));
+      fixtures.token = jwtFor(claims, { header: { alg: 'HS256', typ: 'JWT', kid: 'kid' } });
+    }],
+    ['missing token signature', (fixtures) => {
+      const claims = JSON.parse(Buffer.from(fixtures.token.split('.')[1], 'base64url').toString('utf8'));
+      fixtures.token = jwtFor(claims, { signature: '' });
+    }],
+    ['token lifetime exceeds one-hour envelope', (fixtures) => {
+      const claims = JSON.parse(Buffer.from(fixtures.token.split('.')[1], 'base64url').toString('utf8'));
+      claims.exp = claims.iat + 3_701;
+      fixtures.token = jwtFor(claims);
+    }],
+    ['request log payload', (fixtures) => {
+      fixtures.logEmptyPolls = 0;
+      fixtures.mutateLogEntry = (entry) => { entry.jsonPayload = { message: 'forbidden' }; };
+    }],
+    ['request log operation metadata', (fixtures) => {
+      fixtures.logEmptyPolls = 0;
+      fixtures.mutateLogEntry = (entry) => { entry.operation = { id: 'foreign' }; };
+    }],
+    ['request log error metadata', (fixtures) => {
+      fixtures.logEmptyPolls = 0;
+      fixtures.mutateLogEntry = (entry) => { entry.errorGroups = [{ id: 'foreign' }]; };
+    }],
+    ['request log configuration drift', (fixtures) => {
+      fixtures.logEmptyPolls = 0;
+      fixtures.mutateLogEntry = (entry) => {
+        entry.resource.labels.configuration_name = 'foreign-configuration';
+      };
+    }],
+    ['candidate service ingress drift', (fixtures) => {
+      fixtures.service.metadata.annotations['run.googleapis.com/ingress'] = 'internal';
+    }],
+    ['candidate service not ready', (fixtures) => {
+      fixtures.service.status.conditions[0].status = 'False';
+    }],
+    ['candidate revision project drift', (fixtures) => {
+      fixtures.revision.metadata.namespace = '999999999999';
+    }],
+    ['candidate revision container-status unknown field', (fixtures) => {
+      fixtures.revision.status.containerStatuses[0].unknown = true;
+    }],
+  ];
+  for (const [name, mutate] of cases) {
+    await t.test(name, async () => {
+      const harness = createPrivacyHarness({ mutate });
+      await assert.rejects(() => runCandidatePrivacyProof({
+        binding: harness.binding,
+        executor: harness.executor,
+        tokenExecutor: harness.tokenExecutor,
+        fetch: harness.fetch,
+        now: () => new Date(PRIVACY_NOW),
+        nonce: harness.nonce,
+        sleep: harness.sleep,
+      }), /Candidate privacy proof failed/);
+    });
+  }
 });

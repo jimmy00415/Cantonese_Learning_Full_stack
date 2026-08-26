@@ -42,6 +42,7 @@ const RUNTIME_SERVICE_ACCOUNT = GCP_IDENTITY.serviceAccounts.runtime;
 const MIGRATOR_SERVICE_ACCOUNT = GCP_IDENTITY.serviceAccounts.migrator;
 const ACCEPTANCE_SERVICE_ACCOUNT = GCP_IDENTITY.serviceAccounts.acceptance;
 const PROMOTION_AUTHORITY = 'admin@motionexp.com';
+const CANDIDATE_INVOKER_ROLE = 'roles/run.servicesInvoker';
 const OCI_SOURCE = 'https://github.com/jimmy00415/Cantonese_Learning_Full_stack';
 const INVOKER_IAM_DISABLED_ANNOTATION = 'run.googleapis.com/invoker-iam-disabled';
 const RELEASE_SHA = /^[0-9a-f]{40}$/;
@@ -292,23 +293,54 @@ function isAbsoluteFile(value) {
     && !/[\u0000\r\n]/.test(value);
 }
 
-function assertTask8Evidence(value, { stableTrafficState } = {}) {
+function assertPrivacyProofReference(value) {
+  const observedAt = Date.parse(value?.observedAt);
+  const expiresAt = Date.parse(value?.expiresAt);
+  if (!exactKeys(value, [
+    'artifactSha256', 'boundarySha256', 'expiresAt', 'filePath', 'objectSha256',
+    'observedAt', 'schemaVersion',
+  ])
+    || value.schemaVersion !== 3
+    || !isAbsoluteFile(value.filePath)
+    || !DIGEST.test(String(value.artifactSha256 ?? ''))
+    || !DIGEST.test(String(value.objectSha256 ?? ''))
+    || !DIGEST.test(String(value.boundarySha256 ?? ''))
+    || !Number.isFinite(observedAt) || !Number.isFinite(expiresAt)
+    || expiresAt - observedAt !== 5 * 60_000
+    || containsForbiddenPersistedSecret(value)) throw releaseContractError();
+  return Object.freeze({ ...value });
+}
+
+export function assertTask8Evidence(value, { stableTrafficState } = {}) {
   if (!exactKeys(value, ['mobile', 'readiness', 'workload'])) throw releaseContractError();
   return Object.freeze(Object.fromEntries(Object.entries(value).map(([key, entry]) => {
     if (!exactKeys(entry, [
       'artifactSha256', 'candidateService', 'filePath', 'objectSha256', 'schemaVersion',
-      'stableService', 'stableTrafficState', 'trafficState',
+      'privacyProofs', 'stableService', 'stableTrafficState', 'trafficState',
     ])
-      || entry.schemaVersion !== 2
+      || entry.schemaVersion !== 3
       || !isAbsoluteFile(entry.filePath)
       || !DIGEST.test(String(entry.artifactSha256 ?? ''))
       || !DIGEST.test(String(entry.objectSha256 ?? ''))
       || entry.candidateService !== CANDIDATE_SERVICE
       || entry.stableService !== STABLE_SERVICE
       || entry.trafficState !== 'candidate-service-private-100'
-      || entry.stableTrafficState !== stableTrafficState) throw releaseContractError();
-    return [key, Object.freeze({ ...entry })];
+      || entry.stableTrafficState !== stableTrafficState
+      || !exactKeys(entry.privacyProofs, ['end', 'start'])) throw releaseContractError();
+    const start = assertPrivacyProofReference(entry.privacyProofs.start);
+    const end = assertPrivacyProofReference(entry.privacyProofs.end);
+    if (Date.parse(end.observedAt) < Date.parse(start.observedAt)) throw releaseContractError();
+    return [key, Object.freeze({
+      ...entry, privacyProofs: Object.freeze({ start, end }),
+    })];
   })));
+}
+
+export function candidatePrivateInvokerBinding() {
+  return Object.freeze({
+    member: `serviceAccount:${ACCEPTANCE_SERVICE_ACCOUNT}`,
+    role: CANDIDATE_INVOKER_ROLE,
+  });
 }
 
 async function sha256File(filePath) {
@@ -941,7 +973,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     authenticated: true,
     audience: candidateServiceOrigin,
     issuer: 'https://accounts.google.com',
-    subjectSha256: createHash('sha256').update(PROMOTION_AUTHORITY).digest('hex'),
+    subjectSha256: createHash('sha256').update(ACCEPTANCE_SERVICE_ACCOUNT).digest('hex'),
     taggedUrl: candidateOrigin,
   });
   const effectiveImageDigest = input.imageDigest ?? `sha256:${'0'.repeat(64)}`;
@@ -1318,7 +1350,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     ]),
     operation('candidate', 'candidate-private-iam-grant', [
       'run', 'services', 'add-iam-policy-binding', CANDIDATE_SERVICE,
-      `--member=user:${PROMOTION_AUTHORITY}`, '--role=roles/run.invoker',
+      `--member=serviceAccount:${ACCEPTANCE_SERVICE_ACCOUNT}`, `--role=${CANDIDATE_INVOKER_ROLE}`,
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
     operation('candidate', 'candidate-private-iam-readback', [
@@ -2278,7 +2310,7 @@ export function validateServiceIamReceipt(value, {
   if (policy !== null) {
     const expectedBindings = {
       'candidate-private': [{
-        role: 'roles/run.invoker', members: [`user:${PROMOTION_AUTHORITY}`],
+        role: CANDIDATE_INVOKER_ROLE, members: [`serviceAccount:${ACCEPTANCE_SERVICE_ACCOUNT}`],
       }],
       'stable-private': [],
       'stable-public': [{ role: 'roles/run.invoker', members: ['allUsers'] }],
@@ -3321,7 +3353,7 @@ function validateReceiptOutputs(phase, outputs, plan) {
     const expected = plan.task8Evidence[phase];
     const baseKeys = [
       'artifactSha256', 'candidateOrigin', 'candidateRevision', 'candidateService', 'imageDigest',
-      'objectSha256', 'stableService', 'stableTrafficState', 'trafficState',
+      'objectSha256', 'privacyProofs', 'stableService', 'stableTrafficState', 'trafficState',
     ];
     const expectedKeys = phase === 'mobile' ? [...baseKeys, 'access', 'viewport']
       : phase === 'workload' ? [...baseKeys, 'execution'] : baseKeys;
@@ -3340,6 +3372,7 @@ function validateReceiptOutputs(phase, outputs, plan) {
       || outputs.candidateService !== CANDIDATE_SERVICE || outputs.stableService !== STABLE_SERVICE
       || outputs.trafficState !== candidateTrafficState(plan)
       || outputs.stableTrafficState !== plan.expectedStable.initialTrafficState
+      || !exact(outputs.privacyProofs, expected.privacyProofs)
       || outputs.imageDigest !== plan.imageDigest
       || (phase === 'workload' && (!exactKeys(outputs.execution, [
         'acceptanceWindowId', 'attemptId', 'networkWitnessSha256', 'observedRequestCount',
@@ -3641,6 +3674,7 @@ function releasePhaseReceiptOutputs(phase, plan, context) {
       candidateRevision: plan.candidateRevision,
       candidateService: CANDIDATE_SERVICE,
       imageDigest: plan.imageDigest,
+      privacyProofs: plan.task8Evidence[phase].privacyProofs,
       stableService: STABLE_SERVICE,
       stableTrafficState: plan.expectedStable.initialTrafficState,
       trafficState: candidateTrafficState(plan),
@@ -3776,7 +3810,7 @@ function mutationSpec(plan, operationId) {
   if (operationId === 'candidate-private-iam-grant') return Object.freeze({
     member: `serviceAccount:${ACCEPTANCE_SERVICE_ACCOUNT}`,
     policy: 'candidate-private',
-    role: 'roles/run.invoker',
+    role: CANDIDATE_INVOKER_ROLE,
     service: CANDIDATE_SERVICE,
   });
   if (operationId === 'candidate-cleanup-delete') return Object.freeze({
@@ -3890,7 +3924,8 @@ function plannedMutationAfterObservation(plan, operationId) {
   });
   if (operationId === 'candidate-private-iam-grant') return Object.freeze({
     bindings: Object.freeze([Object.freeze({
-      members: Object.freeze([`user:${PROMOTION_AUTHORITY}`]), role: 'roles/run.invoker',
+      members: Object.freeze([`serviceAccount:${ACCEPTANCE_SERVICE_ACCOUNT}`]),
+      role: CANDIDATE_INVOKER_ROLE,
     })]),
     kind: 'cloud-run-service-iam',
     service: CANDIDATE_SERVICE,
@@ -4081,6 +4116,7 @@ function receiptPhaseSemanticSpec(plan, phase) {
       candidateService: CANDIDATE_SERVICE,
       evidenceContract: Object.freeze({
         filePath: evidence.filePath,
+        privacyProofs: evidence.privacyProofs,
         schemaVersion: evidence.schemaVersion,
         stableService: evidence.stableService,
         stableTrafficState: evidence.stableTrafficState,
