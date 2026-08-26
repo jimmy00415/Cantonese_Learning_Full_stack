@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { validateCanonicalWav } from '../src/media/canonical-wav.js';
 export { decodeCanonicalMp3, validateCanonicalMp3 } from '../src/media/canonical-mp3.js';
 import { decodeCanonicalMp3 } from '../src/media/canonical-mp3.js';
+import { createDefaultGcloudTextExecutor } from './gcp-provision.js';
 
 const execFileAsync = promisify(execFile);
 const PROJECT = 'hkbuddy-prod-v1-20260826';
@@ -199,21 +200,24 @@ function authenticatedAccess(token, { audience, taggedUrl, now }) {
   });
 }
 
-export async function mintGcloudIdentityToken({ audience, signal, executeFile = execFileAsync } = {}) {
+export async function mintGcloudIdentityToken({
+  audience, signal, executeFile = execFileAsync, environment = process.env,
+} = {}) {
   if (typeof audience !== 'string' || !audience.startsWith('https://') || signal?.aborted) {
     throw new Error('identity token request is invalid');
   }
-  const result = await executeFile('gcloud', [
+  const executeGcloud = createDefaultGcloudTextExecutor({ environment, execFile: executeFile });
+  const stdout = await executeGcloud([
     'auth', 'print-identity-token', `--audiences=${audience}`, `--account=${QA_PRINCIPAL}`, '--quiet',
-  ], { encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024, signal });
-  const token = String(result?.stdout ?? '').trim();
+  ], { maxBuffer: 32 * 1024, signal });
+  const token = stdout.trim();
   if (!token || /[\r\n\s]/.test(token)) throw new Error('identity token response is invalid');
   return token;
 }
 
-async function defaultReadControlPlaneReceipts({
+export async function readGcloudControlPlaneReceipts({
   acceptanceWindowId, candidateOrigin, candidateRevision, occurredAt,
-}, { signal, executeFile = execFileAsync } = {}) {
+}, { signal, executeFile = execFileAsync, environment = process.env } = {}) {
   const userAgent = `hkbuddy-v1-acceptance/${acceptanceWindowId}`;
   const filter = [
     'resource.type="cloud_run_revision"',
@@ -228,10 +232,11 @@ async function defaultReadControlPlaneReceipts({
     `httpRequest.userAgent="${userAgent}"`,
     `timestamp>="${occurredAt}"`,
   ].join(' AND ');
-  const result = await executeFile('gcloud', [
+  const executeGcloud = createDefaultGcloudTextExecutor({ environment, execFile: executeFile });
+  const stdout = await executeGcloud([
     'logging', 'read', filter, `--project=${PROJECT}`, '--order=asc', '--limit=201', '--format=json',
-  ], { encoding: 'utf8', windowsHide: true, maxBuffer: 4 * 1024 * 1024, signal });
-  const parsed = JSON.parse(String(result?.stdout ?? ''));
+  ], { maxBuffer: 4 * 1024 * 1024, signal });
+  const parsed = JSON.parse(stdout);
   if (!Array.isArray(parsed)) throw new Error('control-plane workload receipts are invalid');
   return parsed;
 }
@@ -1370,7 +1375,7 @@ export async function runLatencyAcceptance({
   inspectGit = inspectGitState,
   loadAsrFixtures = defaultLoadAsrFixtures,
   mintIdentityToken = mintGcloudIdentityToken,
-  readControlPlaneReceipts = defaultReadControlPlaneReceipts,
+  readControlPlaneReceipts = readGcloudControlPlaneReceipts,
   requester = null,
   fetchImpl = globalThis.fetch,
   randomUUID = systemRandomUUID,

@@ -414,6 +414,89 @@ exit 0 (line-ending warnings only)
 No GCP mutation, build submission, Job execution, deployment, IAM change, or
 traffic change was performed during this third follow-up.
 
+### Fourth independent-review follow-up
+
+The fourth review confirmed two remaining release-trust failures. On the target
+Windows host, Node could neither execute the bare `gcloud` name nor the
+`gcloud.cmd` shim through `execFile`. More importantly, a caller-supplied
+schema-4 artifact plus 200 matching text request logs could still be promoted
+without the release controller witnessing any ASR, TTS, delivery, grounding,
+or timing traffic. Both findings were preserved as RED before production code
+changed:
+
+```text
+node --test tests/latency-acceptance.test.js
+72 tests: 70 pass, 2 fail, 0 skip, exit 1
+- identity-token mint still invoked bare gcloud
+- Cloud Logging read did not use the shared Windows launcher
+
+node --test tests/release-contract.test.js
+39 tests: 36 pass, 3 fail, 0 skip, exit 1
+- a pre-existing complete-looking artifact plus 200 logs was accepted
+- the workload phase never invoked the controlled runner
+- a writer-only run with zero witnessed ASR/TTS/semantic traffic lacked the new fail-closed result
+```
+
+The Windows launcher is now one shared argv-only contract. Both token minting
+and Logging reads resolve the current SDK's bundled `python.exe` plus
+`gcloud.py`, set `shell: false`, retain the bounded output limit and abort
+signal, and classify transport failures without persisting token stdout. The
+regression exercises the real installed Windows path resolver while replacing
+only the final process call; it verifies the exact executable/argv and that no
+token, Authorization header, or Bearer value enters captured command data.
+
+The confirmed `workload` phase now accepts only an unresolved all-zero workload
+digest sentinel whose target path does not exist. It invokes the frozen
+`runLatencyAcceptance` implementation itself with release-controller-owned
+candidate, archive, image, revision, and absolute ASR-manifest inputs. The
+runner's final artifact writer is captured only in memory. No caller-supplied
+artifact is read, and no evidence or phase receipt is published until the
+runner returns its exact passing result.
+
+The controller independently wraps the same-origin HTTP transport without
+retaining request headers. It binds the captured raw record to 21 session
+requests, 200 unique ordered text correlations, at least 231 delivery reads,
+30 exact ASR upload identities, 20 timing-window reads, 31 exact TTS message
+bindings, and 30 complete media HEAD/range/full triples. Status codes, unique
+IDs, the release-bound acceptance window, raw semantic recomputation, and the
+fresh 200-entry Cloud Logging trace set must all agree. A writer-only constants
+artifact therefore fails before Logging access, local evidence publication,
+or receipt creation.
+
+Only after every controlled and control-plane check passes are the exact bytes
+written create-only and re-read through the independent Task 8 validator. The
+workload receipt binds the attempt UUID, acceptance window, network-witness
+digest, observed request count, artifact digest, object digest, candidate
+revision/origin, and image digest. A later phase uses a manifest refreshed with
+those observed digests. Promotion also compares the freshly revalidated
+artifact window with the predecessor receipt before its first control-plane
+call. Receipt persistence failure removes the create-only artifact and proves
+the target absent so a failed attempt cannot be replayed as input.
+
+Fresh fourth-follow-up verification:
+
+```text
+node --test tests/latency-acceptance.test.js tests/release-contract.test.js tests/gcp-infra-contract.test.js
+260 tests: 260 pass, 0 fail, 0 skip, exit 0
+
+npm.cmd test
+1461 tests: 1460 pass, 0 fail, 1 approved real-PostgreSQL skip, exit 0
+
+npm.cmd run check
+exit 0
+
+npm.cmd run security:dependencies
+DEPENDENCY_SECURITY_EXCEPTION_REVIEWED, exit 0
+
+node --check scripts/gcp-provision.js
+node --check scripts/gcp-release.js
+node --check scripts/production-latency-workload.js
+all exit 0
+
+git diff --check
+exit 0 (line-ending warnings only)
+```
+
 No GCP mutation, build submission, Job execution, deployment, IAM change, or
 traffic change was performed during this remediation.
 

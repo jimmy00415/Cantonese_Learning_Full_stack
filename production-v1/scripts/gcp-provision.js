@@ -542,7 +542,7 @@ export function createGcloudAuthenticatedRequest({
   return request;
 }
 
-function defaultGcloudLaunch(environment = process.env) {
+export function resolveDefaultGcloudLaunch(environment = process.env) {
   const configuredPython = environment.V1_GCP_PYTHON_EXECUTABLE;
   const configuredGcloud = environment.V1_GCLOUD_PY_PATH;
   if (configuredPython || configuredGcloud) {
@@ -563,12 +563,35 @@ function defaultGcloudLaunch(environment = process.env) {
 }
 
 export function createDefaultGcloudExecutor({ environment = process.env } = {}) {
-  return createGcloudExecutor(defaultGcloudLaunch(environment));
+  return createGcloudExecutor(resolveDefaultGcloudLaunch(environment));
+}
+
+export function createDefaultGcloudTextExecutor({
+  environment = process.env,
+  execFile = execFileAsync,
+} = {}) {
+  const { executable, prefixArgs } = resolveDefaultGcloudLaunch(environment);
+  if (typeof execFile !== 'function') throw new Error('gcloud executor configuration is invalid');
+  return async (argv, { signal, maxBuffer = 1024 * 1024 } = {}) => {
+    const args = [...safeArgv(prefixArgs), ...safeArgv(argv)];
+    if (!Number.isSafeInteger(maxBuffer) || maxBuffer < 1 || maxBuffer > 4 * 1024 * 1024) {
+      throw new Error('gcloud text output limit is invalid');
+    }
+    let result;
+    try {
+      result = await execFile(executable, args, {
+        encoding: 'utf8', maxBuffer, windowsHide: true, shell: false, signal,
+      });
+    } catch (cause) {
+      throw commandError(classifyTransportError(cause));
+    }
+    return String(result?.stdout ?? '');
+  };
 }
 
 export function createDefaultGcloudAuthenticatedRequest({ environment = process.env, account } = {}) {
   return createGcloudAuthenticatedRequest({
-    ...defaultGcloudLaunch(environment), account, environment,
+    ...resolveDefaultGcloudLaunch(environment), account, environment,
   });
 }
 

@@ -15,6 +15,7 @@ import {
   LATENCY_ACCEPTANCE_CONTRACT,
   finalizeLatencyAcceptanceRecord,
   normalizeControlPlaneTurnReceipts,
+  runLatencyAcceptance,
 } from './production-latency-workload.js';
 
 const PROJECT = 'hkbuddy-prod-v1-20260826';
@@ -2435,13 +2436,30 @@ function validateReceiptOutputs(phase, outputs, plan) {
   } else if (['readiness', 'workload', 'mobile'].includes(phase)) {
     const expected = plan.task8Evidence[phase];
     const baseKeys = ['artifactSha256', 'candidateOrigin', 'candidateRevision', 'imageDigest', 'objectSha256'];
-    const expectedKeys = phase === 'mobile' ? [...baseKeys, 'access', 'viewport'] : baseKeys;
+    const expectedKeys = phase === 'mobile' ? [...baseKeys, 'access', 'viewport']
+      : phase === 'workload' ? [...baseKeys, 'execution'] : baseKeys;
+    const unresolvedWorkload = phase === 'workload'
+      && expected.artifactSha256 === '0'.repeat(64)
+      && expected.objectSha256 === '0'.repeat(64);
     if (!exactKeys(outputs, expectedKeys)
-      || outputs.artifactSha256 !== expected.artifactSha256
-      || outputs.objectSha256 !== expected.objectSha256
+      || (!unresolvedWorkload && outputs.artifactSha256 !== expected.artifactSha256)
+      || (!unresolvedWorkload && outputs.objectSha256 !== expected.objectSha256)
+      || !DIGEST.test(String(outputs.artifactSha256 ?? ''))
+      || !DIGEST.test(String(outputs.objectSha256 ?? ''))
+      || (unresolvedWorkload && (outputs.artifactSha256 === '0'.repeat(64)
+        || outputs.objectSha256 === '0'.repeat(64)))
       || outputs.candidateOrigin !== plan.candidateOrigin
       || outputs.candidateRevision !== plan.candidateRevision
       || outputs.imageDigest !== plan.imageDigest
+      || (phase === 'workload' && (!exactKeys(outputs.execution, [
+        'acceptanceWindowId', 'attemptId', 'networkWitnessSha256', 'observedRequestCount',
+      ])
+        || !DIGEST.test(String(outputs.execution.acceptanceWindowId ?? ''))
+        || !UUID.test(String(outputs.execution.attemptId ?? ''))
+        || !DIGEST.test(String(outputs.execution.networkWitnessSha256 ?? ''))
+        || !Number.isSafeInteger(outputs.execution.observedRequestCount)
+        || outputs.execution.observedRequestCount < 500
+        || outputs.execution.observedRequestCount > 5_000))
       || (phase === 'mobile' && !exact(outputs.access, plan.candidateAccess))
       || (phase === 'mobile' && !exact(outputs.viewport, { width: 390, height: 844 }))) {
       throw new Error('Task 8 release receipt outputs are invalid');
@@ -2557,12 +2575,15 @@ function releasePhaseReceiptOutputs(phase, plan, context) {
     trafficPercent: 0,
   });
   if (['readiness', 'workload', 'mobile'].includes(phase)) {
+    const evidence = phase === 'workload' && context.workloadExecution
+      ? context.workloadExecution.evidence : plan.task8Evidence[phase];
     return Object.freeze({
-      artifactSha256: plan.task8Evidence[phase].artifactSha256,
-      objectSha256: plan.task8Evidence[phase].objectSha256,
+      artifactSha256: evidence.artifactSha256,
+      objectSha256: evidence.objectSha256,
       candidateOrigin: plan.candidateOrigin,
       candidateRevision: plan.candidateRevision,
       imageDigest: plan.imageDigest,
+      ...(phase === 'workload' ? { execution: context.workloadExecution?.execution } : {}),
       ...(phase === 'mobile' ? {
         access: plan.candidateAccess,
         viewport: Object.freeze({ width: 390, height: 844 }),
@@ -2648,6 +2669,224 @@ function workloadLoggingReadArgv(attestation) {
   ];
 }
 
+function requestHeader(headers, name) {
+  if (!headers) return null;
+  if (typeof headers.get === 'function') return headers.get(name);
+  if (Array.isArray(headers)) {
+    const matches = headers.filter(([key]) => String(key).toLowerCase() === name.toLowerCase());
+    return matches.length === 1 ? String(matches[0][1]) : null;
+  }
+  const matches = Object.entries(headers)
+    .filter(([key]) => key.toLowerCase() === name.toLowerCase());
+  return matches.length === 1 ? String(matches[0][1]) : null;
+}
+
+function createControlledWorkloadFetch(fetchImpl, plan, ledger) {
+  if (typeof fetchImpl !== 'function' || !Array.isArray(ledger)) {
+    throw new Error('Controlled workload fetch is unavailable');
+  }
+  return async (input, init = {}) => {
+    const rawUrl = input instanceof URL ? input.href
+      : typeof input === 'string' ? input : input?.url;
+    const url = new URL(rawUrl);
+    if (url.origin !== plan.candidateOrigin || url.username || url.password || ledger.length >= 5_000) {
+      throw new Error('Controlled workload request is outside the candidate boundary');
+    }
+    const method = String(init?.method ?? input?.method ?? 'GET').toUpperCase();
+    if (!/^(?:GET|HEAD|POST)$/.test(method)) throw new Error('Controlled workload method is invalid');
+    const response = await fetchImpl(input, init);
+    const status = Number(response?.status);
+    if (!Number.isSafeInteger(status) || status < 100 || status > 599) {
+      throw new Error('Controlled workload response is invalid');
+    }
+    const path = `${url.pathname}${url.search}`;
+    const authorization = requestHeader(init?.headers, 'Authorization');
+    const entry = {
+      sequence: ledger.length + 1,
+      method,
+      path,
+      status,
+      authenticated: typeof authorization === 'string'
+        && /^Bearer [^\s]{40,16384}$/.test(authorization),
+      acceptanceUserAgent: requestHeader(init?.headers, 'User-Agent'),
+      ...(method === 'POST' && url.pathname === '/api/v1/messages' ? {
+        correlationId: requestHeader(init?.headers, 'X-Acceptance-Correlation-Id'),
+      } : {}),
+      ...(method === 'POST' && url.pathname === '/api/v1/voice/transcriptions' ? {
+        uploadId: requestHeader(init?.headers, 'X-Client-Upload-Id'),
+      } : {}),
+      ...(url.pathname.startsWith('/api/v1/media/') ? {
+        range: requestHeader(init?.headers, 'Range') === 'bytes=0-3',
+      } : {}),
+    };
+    ledger.push(Object.freeze(entry));
+    return response;
+  };
+}
+
+function exactStringSet(values, expected) {
+  return Array.isArray(values) && Array.isArray(expected)
+    && values.length === expected.length
+    && new Set(values).size === values.length
+    && exact([...values].sort(), [...expected].sort());
+}
+
+function validateControlledWorkloadNetwork(ledger, record) {
+  if (!Array.isArray(ledger) || ledger.length < 500 || ledger.length > 5_000
+    || ledger.some((entry, index) => entry.sequence !== index + 1)
+    || containsForbiddenPersistedSecret(ledger)) {
+    throw new Error('Controlled workload network witness is invalid');
+  }
+  const matches = (method, path) => ledger.filter((entry) => (
+    entry.method === method && entry.path === path
+  ));
+  const sessions = matches('POST', '/api/v1/session');
+  const textPosts = matches('POST', '/api/v1/messages');
+  const messageReads = matches('GET', '/api/v1/messages?after=0');
+  const asrPosts = matches('POST', '/api/v1/voice/transcriptions');
+  const timingPath = `/api/v1/acceptance/timings?windowId=${record.rawReceipts.acceptanceWindowId}`;
+  const timingReads = matches('GET', timingPath);
+  const expectedCorrelations = record.rawReceipts.textTurns.map(({ correlationId }) => correlationId);
+  const expectedUploads = record.rawReceipts.asrRequests.map(({ bindingId }) => bindingId);
+  const expectedTtsIds = record.rawReceipts.ttsRequests.map(({ bindingId }) => bindingId);
+  const expectedUserAgent = `hkbuddy-v1-acceptance/${record.rawReceipts.acceptanceWindowId}`;
+  const ttsStatus = ledger.filter(({ method, path }) => (
+    method === 'GET' && /^\/api\/v1\/messages\/[^/?]{1,128}\/audio\/status$/.test(path)
+  ));
+  const observedTtsIds = [...new Set(ttsStatus.map(({ path }) => path.split('/')[4]))];
+  const media = ledger.filter(({ path }) => path.startsWith('/api/v1/media/'));
+  const mediaPaths = [...new Set(media.map(({ path }) => path))];
+  const mediaComplete = mediaPaths.length === 30 && mediaPaths.every((path) => {
+    const values = media.filter((entry) => entry.path === path);
+    return values.length === 3
+      && values.some(({ method, status }) => method === 'HEAD' && status === 200)
+      && values.some(({ method, status, range }) => method === 'GET' && status === 206 && range === true)
+      && values.some(({ method, status, range }) => method === 'GET' && status === 200 && range === false);
+  });
+  const checks = [
+    ['AUTHENTICATION', ledger.every(({ authenticated, acceptanceUserAgent }) => (
+      authenticated === true && acceptanceUserAgent === expectedUserAgent
+    ))],
+    ['SESSION', sessions.length === 21 && sessions.every(({ status }) => [200, 201].includes(status))],
+    ['TEXT', textPosts.length === 200 && textPosts.every(({ status }) => status === 202)
+      && exactStringSet(textPosts.map(({ correlationId }) => correlationId), expectedCorrelations)],
+    ['DELIVERY', messageReads.length >= 231 && messageReads.every(({ status }) => status === 200)],
+    ['ASR', asrPosts.length === 30 && asrPosts.every(({ status }) => [200, 201, 202].includes(status))
+      && exactStringSet(asrPosts.map(({ uploadId }) => uploadId), expectedUploads)],
+    ['TIMING', timingReads.length === 20 && timingReads.every(({ status }) => status === 200)],
+    ['TTS_BINDING', exactStringSet(observedTtsIds, expectedTtsIds)],
+    ['TTS_READY', expectedTtsIds.every((id) => ttsStatus.some(({ path, status }) => (
+      path === `/api/v1/messages/${id}/audio/status` && status === 200
+    )))],
+    ['MEDIA', mediaComplete],
+  ];
+  const failed = checks.find(([, pass]) => !pass);
+  if (failed) {
+    const error = new Error('Controlled workload network witness is invalid');
+    error.code = `WORKLOAD_CONTROLLED_NETWORK_${failed[0]}_INVALID`;
+    throw error;
+  }
+  return Object.freeze({
+    observedRequestCount: ledger.length,
+    networkWitnessSha256: canonicalSha256(ledger),
+  });
+}
+
+async function assertControlledWorkloadTargetAbsent(entry) {
+  try {
+    await lstat(entry.filePath);
+    throw new Error('Controlled workload target already exists');
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  return true;
+}
+
+async function executeControlledWorkload(plan, {
+  environment, executeWorkload, workloadFetch, randomUUID, now,
+}) {
+  const entry = plan.task8Evidence.workload;
+  if (entry.artifactSha256 !== '0'.repeat(64) || entry.objectSha256 !== '0'.repeat(64)) {
+    const error = new Error('Pre-existing workload evidence is forbidden');
+    error.code = 'WORKLOAD_PREBUILT_EVIDENCE_FORBIDDEN';
+    throw error;
+  }
+  await assertControlledWorkloadTargetAbsent(entry);
+  const fixtureManifest = environment?.V1_LATENCY_ASR_FIXTURE_MANIFEST;
+  const attemptId = typeof randomUUID === 'function' ? randomUUID() : null;
+  if (!UUID.test(String(attemptId ?? '')) || !isAbsoluteFile(fixtureManifest)
+    || !fixtureManifest.toLowerCase().endsWith('.json')
+    || typeof executeWorkload !== 'function' || typeof workloadFetch !== 'function') {
+    throw new Error('Controlled workload execution input is invalid');
+  }
+  let capture = null;
+  const ledger = [];
+  const fetchImpl = createControlledWorkloadFetch(workloadFetch, plan, ledger);
+  const result = await executeWorkload({
+    argv: [
+      '--candidate-origin', plan.candidateOrigin,
+      '--asr-manifest', fixtureManifest,
+      '--confirm-approved-candidate',
+    ],
+    environment: {
+      ...environment,
+      V1_LOAD_TEST_CONFIRM: 'true',
+      V1_RELEASE_COMMIT_SHA: plan.releaseSha,
+      V1_PUBLIC_ORIGIN: plan.serviceOrigin,
+      V1_CANDIDATE_ORIGIN: plan.candidateOrigin,
+      V1_SOURCE_ARCHIVE_SHA256: plan.sourceArchiveSha256,
+      V1_CANDIDATE_IMAGE_DIGEST: plan.imageDigest,
+      V1_CANDIDATE_REVISION: plan.candidateRevision,
+    },
+    cwd: APP_ROOT,
+    artifactDirectory: dirname(entry.filePath),
+    now,
+    fetchImpl,
+    writeArtifact: async (value) => {
+      if (capture !== null || !value || typeof value.contents !== 'string'
+        || !value.record || typeof value.filePath !== 'string') {
+        throw new Error('Controlled workload artifact capture is invalid');
+      }
+      capture = Object.freeze({ ...value });
+    },
+    writeOutput: () => undefined,
+  });
+  if (result?.exitCode !== 0 || result?.publicReport?.code !== 'LATENCY_ACCEPTANCE_PASSED'
+    || !capture || result.publicReport.artifactSha256 !== capture.record.artifactSha256
+    || capture.filePath !== join(dirname(entry.filePath), `${plan.releaseSha}-${capture.record.artifactSha256}.json`)
+    || capture.contents !== `${JSON.stringify(capture.record, null, 2)}\n`
+    || containsForbiddenPersistedSecret(capture.record)) {
+    throw new Error('Controlled workload did not produce exact passing evidence');
+  }
+  let attestation;
+  try { attestation = validateLatencyAcceptanceRecord(capture.record, plan, now()); } catch (error) {
+    error.code = 'WORKLOAD_CONTROLLED_ARTIFACT_INVALID';
+    throw error;
+  }
+  let witness;
+  try { witness = validateControlledWorkloadNetwork(ledger, capture.record); } catch (error) {
+    error.code ??= 'WORKLOAD_CONTROLLED_NETWORK_INVALID';
+    throw error;
+  }
+  const contents = Buffer.from(capture.contents);
+  const evidence = Object.freeze({
+    filePath: entry.filePath,
+    artifactSha256: capture.record.artifactSha256,
+    objectSha256: createHash('sha256').update(contents).digest('hex'),
+  });
+  return Object.freeze({
+    attestation,
+    contents,
+    evidence,
+    execution: Object.freeze({
+      acceptanceWindowId: attestation.acceptanceWindowId,
+      attemptId: attemptId.toLowerCase(),
+      networkWitnessSha256: witness.networkWitnessSha256,
+      observedRequestCount: witness.observedRequestCount,
+    }),
+  });
+}
+
 function publish(writeOutput, exitCode, publicReport) {
   writeOutput(`${JSON.stringify(publicReport)}\n`);
   return { exitCode, publicReport };
@@ -2664,6 +2903,8 @@ export async function runGcpRelease({
   writeCandidateSpec = writeCandidateServiceSpecFile,
   writeIamRestorePolicy = writePromotionIamRestorePolicyFile,
   removeIamRestorePolicy = removePromotionIamRestorePolicyFile,
+  executeWorkload = runLatencyAcceptance,
+  workloadFetch = globalThis.fetch,
   randomUUID = systemRandomUUID,
   loadReceipts = loadReleaseReceiptFiles,
   persistReceipt = persistReleaseReceipt,
@@ -2714,6 +2955,7 @@ export async function runGcpRelease({
   let priorReceipts = [];
   const receiptPhaseIndex = RECEIPT_PHASES.indexOf(selection.phase);
   const task8Attestations = {};
+  let workloadExecution = null;
   try {
     if (selection.phase === 'promote') {
       if (typeof loadReceipts !== 'function') throw new Error('receipt loader unavailable');
@@ -2731,10 +2973,30 @@ export async function runGcpRelease({
       releaseSha: plan.releaseSha, phase: selection.phase, completed: [],
     });
   }
+  if (selection.phase === 'workload') {
+    try {
+      workloadExecution = await executeControlledWorkload(plan, {
+        environment, executeWorkload, workloadFetch, randomUUID, now,
+      });
+      task8Attestations.workload = workloadExecution.attestation;
+    } catch (error) {
+      return publish(writeOutput, 1, {
+        status: 'failed',
+        code: [
+          'WORKLOAD_PREBUILT_EVIDENCE_FORBIDDEN',
+          'WORKLOAD_CONTROLLED_ARTIFACT_INVALID',
+          'WORKLOAD_CONTROLLED_NETWORK_INVALID',
+        ].includes(error?.code) || String(error?.code ?? '').startsWith('WORKLOAD_CONTROLLED_NETWORK_')
+          ? error.code : 'WORKLOAD_CONTROLLED_EXECUTION_INVALID',
+        mutationPerformed: false,
+        releaseSha: plan.releaseSha, phase: selection.phase, completed: [],
+      });
+    }
+  }
   try {
     const task8Phases = selection.phase === 'promote'
       ? ['readiness', 'workload', 'mobile']
-      : (['readiness', 'workload', 'mobile'].includes(selection.phase) ? [selection.phase] : []);
+      : (['readiness', 'mobile'].includes(selection.phase) ? [selection.phase] : []);
     for (const phase of task8Phases) {
       if (typeof verifyTask8Evidence !== 'function') {
         throw new Error('Task 8 evidence verification failed');
@@ -2745,6 +3007,12 @@ export async function runGcpRelease({
         throw new Error('Task 8 evidence verification failed');
       }
       task8Attestations[phase] = verified;
+      if (selection.phase === 'promote' && phase === 'workload' && verified !== true) {
+        const receipt = priorReceipts.find((value) => value.phase === 'workload');
+        if (receipt?.outputs?.execution?.acceptanceWindowId !== verified.acceptanceWindowId) {
+          throw new Error('Workload execution receipt differs from fresh evidence');
+        }
+      }
     }
   } catch {
     return publish(writeOutput, 1, {
@@ -2775,6 +3043,7 @@ export async function runGcpRelease({
   let promotionIamBaseline = null;
   let promotionIamMutationAttempted = false;
   let promotionTrafficMutationAttempted = false;
+  let workloadArtifactPublished = false;
   if (task8Attestations.workload && task8Attestations.workload !== true) {
     try {
       const attestation = task8Attestations.workload;
@@ -2791,6 +3060,33 @@ export async function runGcpRelease({
     } catch {
       return publish(writeOutput, 1, {
         status: 'failed', code: 'WORKLOAD_CONTROL_PLANE_INVALID', mutationPerformed: false,
+        releaseSha: plan.releaseSha, phase: selection.phase, completed: [],
+      });
+    }
+  }
+  if (selection.phase === 'workload') {
+    try {
+      await assertControlledWorkloadTargetAbsent(workloadExecution.evidence);
+      await writeFile(workloadExecution.evidence.filePath, workloadExecution.contents, { flag: 'wx' });
+      workloadArtifactPublished = true;
+      const verified = await validateTask8EvidenceArtifact(
+        workloadExecution.evidence, 'workload', plan, { now: now() },
+      );
+      if (!exact(verified, workloadExecution.attestation)) {
+        throw new Error('Published workload evidence differs from controlled execution');
+      }
+    } catch {
+      let cleanupFailed = false;
+      if (workloadArtifactPublished) {
+        try {
+          await rm(workloadExecution.evidence.filePath);
+          await assertControlledWorkloadTargetAbsent(workloadExecution.evidence);
+        } catch { cleanupFailed = true; }
+      }
+      return publish(writeOutput, 1, {
+        status: 'failed',
+        code: cleanupFailed ? 'WORKLOAD_EVIDENCE_CLEANUP_FAILED' : 'WORKLOAD_EVIDENCE_PUBLISH_FAILED',
+        mutationPerformed: false,
         releaseSha: plan.releaseSha, phase: selection.phase, completed: [],
       });
     }
@@ -3055,7 +3351,7 @@ export async function runGcpRelease({
         selection.phase,
         plan,
         completed,
-        { buildReceipt, migrationExecutionReceipt, collectedEvidence },
+        { buildReceipt, migrationExecutionReceipt, collectedEvidence, workloadExecution },
         priorReceipts,
       );
       if (typeof persistReceipt !== 'function' || await persistReceipt(plan, phaseReceipt) !== true) {
@@ -3063,8 +3359,16 @@ export async function runGcpRelease({
       }
       publicReport.phaseReceipt = phaseReceipt;
     } catch {
+      let cleanupFailed = false;
+      if (selection.phase === 'workload' && workloadArtifactPublished) {
+        try {
+          await rm(workloadExecution.evidence.filePath);
+          await assertControlledWorkloadTargetAbsent(workloadExecution.evidence);
+        } catch { cleanupFailed = true; }
+      }
       return publish(writeOutput, 1, {
-        status: 'failed', code: 'RELEASE_RECEIPT_WRITE_FAILED',
+        status: 'failed', code: cleanupFailed
+          ? 'WORKLOAD_EVIDENCE_CLEANUP_FAILED' : 'RELEASE_RECEIPT_WRITE_FAILED',
         mutationPerformed: mutationAttempted,
         releaseSha: plan.releaseSha, phase: selection.phase, completed,
       });

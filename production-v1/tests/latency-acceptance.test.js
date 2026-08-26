@@ -6,6 +6,7 @@ import { basename, join, resolve } from 'node:path';
 import test from 'node:test';
 
 import { canonicalMp3Fixture } from './fixtures/canonical-mp3-fixture.js';
+import * as latencyWorkload from '../scripts/production-latency-workload.js';
 
 import {
   LATENCY_ACCEPTANCE_CONTRACT,
@@ -344,12 +345,40 @@ test('private candidate authentication mints the exact audience-bound gcloud ID 
   });
   assert.equal(token, TEST_ID_TOKEN);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].file, 'gcloud');
+  assert.equal(calls[0].file,
+    'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\platform\\bundledpython\\python.exe');
   assert.deepEqual(calls[0].argv, [
+    'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\lib\\gcloud.py',
     'auth', 'print-identity-token', `--audiences=${STABLE_ORIGIN}`,
     '--account=admin@motionexp.com', '--quiet',
   ]);
   assert.equal(calls[0].options.windowsHide, true);
+  assert.equal(calls[0].options.shell, false);
+  assert.equal(JSON.stringify(calls).includes(TEST_ID_TOKEN), false);
+});
+
+test('Cloud Logging read uses the same real Windows bundled-Python launcher without a shell', async () => {
+  const calls = [];
+  const result = await latencyWorkload.readGcloudControlPlaneReceipts({
+    acceptanceWindowId: 'a'.repeat(64),
+    candidateOrigin: ORIGIN,
+    candidateRevision: CANDIDATE_REVISION,
+    occurredAt: NOW.toISOString(),
+  }, {
+    executeFile: async (file, argv, options) => {
+      calls.push({ file, argv, options });
+      return { stdout: '[]\n', stderr: '' };
+    },
+  });
+  assert.deepEqual(result, []);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].file,
+    'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\platform\\bundledpython\\python.exe');
+  assert.equal(calls[0].argv[0],
+    'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\lib\\gcloud.py');
+  assert.deepEqual(calls[0].argv.slice(1, 3), ['logging', 'read']);
+  assert.equal(calls[0].options.shell, false);
+  assert.equal(JSON.stringify(calls).includes('Authorization'), false);
   assert.equal(JSON.stringify(calls).includes(TEST_ID_TOKEN), false);
 });
 

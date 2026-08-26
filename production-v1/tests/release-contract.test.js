@@ -416,6 +416,40 @@ function controlPlaneLogEntries(record) {
   }));
 }
 
+async function exerciseControlledWorkloadNetwork(fetchImpl, record) {
+  const invoke = (path, method = 'GET', headers = {}) => fetchImpl(
+    new URL(path, CANDIDATE_ORIGIN), { method, headers: {
+      ...headers,
+      Authorization: `Bearer ${'a'.repeat(80)}`,
+      'User-Agent': `hkbuddy-v1-acceptance/${record.rawReceipts.acceptanceWindowId}`,
+    } },
+  );
+  for (let index = 0; index < 21; index += 1) await invoke('/api/v1/session', 'POST');
+  for (let index = 0; index < 200; index += 1) {
+    await invoke('/api/v1/messages', 'POST', {
+      'X-Acceptance-Correlation-Id': record.rawReceipts.textTurns[index].correlationId,
+    });
+  }
+  for (let index = 0; index < 231; index += 1) await invoke('/api/v1/messages?after=0');
+  for (let index = 0; index < 30; index += 1) {
+    await invoke('/api/v1/voice/transcriptions', 'POST', {
+      'X-Client-Upload-Id': record.rawReceipts.asrRequests[index].bindingId,
+    });
+  }
+  for (let index = 0; index < 20; index += 1) {
+    await invoke(`/api/v1/acceptance/timings?windowId=${record.rawReceipts.acceptanceWindowId}`);
+  }
+  for (const item of record.rawReceipts.ttsRequests) {
+    await invoke(`/api/v1/messages/${item.bindingId}/audio/status`);
+  }
+  for (let index = 0; index < 30; index += 1) {
+    const path = `/api/v1/media/media-${String(index).padStart(2, '0')}`;
+    await invoke(path, 'HEAD');
+    await invoke(path, 'GET', { Range: 'bytes=0-3' });
+    await invoke(path);
+  }
+}
+
 function realV1JobReadback(expected) {
   const environment = Object.entries(expected.environment).map(([name, value]) => ({ name, value }));
   const secretEnvironment = Object.entries(expected.secretEnvironment).map(([name, value]) => ({
@@ -530,6 +564,14 @@ function fixtureReceiptOutputs(plan, phase) {
     candidateRevision: plan.candidateRevision,
     imageDigest: plan.imageDigest,
   };
+  if (phase === 'workload') {
+    output.execution = {
+      acceptanceWindowId: createHash('sha256').update('acceptance-window').digest('hex'),
+      attemptId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      networkWitnessSha256: createHash('sha256').update('network-witness').digest('hex'),
+      observedRequestCount: 592,
+    };
+  }
   if (phase === 'mobile') {
     output.access = structuredClone(plan.candidateAccess);
     output.viewport = { width: 390, height: 844 };
@@ -2021,7 +2063,7 @@ test('promotion revalidates every Task 8 artifact before any control-plane call'
   assert.equal(result.publicReport.mutationPerformed, false);
 });
 
-test('workload Task 8 gate independently verifies the complete 200-turn acceptance record', async (t) => {
+test('workload phase rejects every pre-existing artifact even with a complete-looking record and 200 matching logs', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'hkbuddy-workload-gate-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   let artifactIndex = 0;
@@ -2039,11 +2081,13 @@ test('workload Task 8 gate independently verifies the complete 200-turn acceptan
     const input = releaseInput({
       task8Evidence: { ...releaseInput().task8Evidence, workload },
     });
-    return runGcpReleaseImpl({
+    let controlledExecutions = 0;
+    const result = await runGcpReleaseImpl({
       argv: ['--phase=workload', `--confirm-release=${RELEASE_SHA}`],
       input,
       loadReceipts: async (plan, { through }) => fixtureReceiptChain(plan, through),
       persistReceipt: async () => true,
+      executeWorkload: async () => { controlledExecutions += 1; throw new Error('must remain inert'); },
       execute: async (argv) => {
         assert.deepEqual(argv.slice(0, 2), ['logging', 'read']);
         return controlPlaneLogEntries(finalized);
@@ -2051,15 +2095,20 @@ test('workload Task 8 gate independently verifies the complete 200-turn acceptan
       now: () => new Date('2026-08-26T08:05:00.000Z'),
       writeOutput: () => undefined,
     });
+    return { result, controlledExecutions };
   };
 
   const valid = validWorkloadAcceptanceRecord();
-  assert.equal((await runRecord(valid)).exitCode, 0);
+  const prebuilt = await runRecord(valid);
+  assert.equal(prebuilt.result.exitCode, 1);
+  assert.equal(prebuilt.result.publicReport.code, 'WORKLOAD_PREBUILT_EVIDENCE_FORBIDDEN');
+  assert.equal(prebuilt.result.publicReport.mutationPerformed, false);
+  assert.equal(prebuilt.controlledExecutions, 0);
 
   const syntheticSummary = structuredClone(valid);
   delete syntheticSummary.rawReceipts;
   syntheticSummary.artifactSha256 = finalizeLatencyAcceptanceRecord(syntheticSummary).artifactSha256;
-  const syntheticRejected = await runRecord(syntheticSummary);
+  const syntheticRejected = (await runRecord(syntheticSummary)).result;
   assert.equal(syntheticRejected.exitCode, 1,
     'aggregate-only evidence must not certify a workload with zero HTTP turns');
 
@@ -2110,11 +2159,167 @@ test('workload Task 8 gate independently verifies the complete 200-turn acceptan
     ['duplicate control-plane request with recomputed receipts digest', duplicatedControlPlane],
     ['reordered raw turns with recomputed receipts digest', reorderedTurns],
   ]) {
-    const rejected = await runRecord(record);
+    const rejected = (await runRecord(record)).result;
     assert.equal(rejected.exitCode, 1, name);
-    assert.equal(rejected.publicReport.code, 'TASK8_EVIDENCE_INVALID', name);
+    assert.equal(rejected.publicReport.code, 'WORKLOAD_PREBUILT_EVIDENCE_FORBIDDEN', name);
     assert.equal(rejected.publicReport.mutationPerformed, false, name);
   }
+});
+
+test('workload receipt is created only by one controlled immutable run with witnessed text ASR TTS and timing traffic', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'hkbuddy-controlled-workload-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const workloadPath = join(directory, 'workload.json');
+  const fixtureManifestPath = join(directory, 'asr-fixtures.json');
+  const base = releaseInput();
+  const input = releaseInput({
+    task8Evidence: {
+      ...base.task8Evidence,
+      workload: {
+        filePath: workloadPath,
+        artifactSha256: '0'.repeat(64),
+        objectSha256: '0'.repeat(64),
+      },
+    },
+  });
+  const plan = buildReleasePlan(input);
+  const record = validWorkloadAcceptanceRecord();
+  assert.equal(new Set(record.rawReceipts.textTurns.map(({ correlationId }) => correlationId)).size, 200);
+  assert.equal(new Set(record.rawReceipts.asrRequests.map(({ bindingId }) => bindingId)).size, 30);
+  assert.equal(new Set(record.rawReceipts.ttsRequests.map(({ bindingId }) => bindingId)).size, 31);
+  const contents = `${JSON.stringify(record, null, 2)}\n`;
+  const attemptId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  let persisted = null;
+  let runnerCalls = 0;
+  let publishedBeforeRunnerCompleted = false;
+  let runnerCompleted = false;
+  const result = await runGcpReleaseImpl({
+    argv: ['--phase=workload', `--confirm-release=${RELEASE_SHA}`], input,
+    environment: { V1_LATENCY_ASR_FIXTURE_MANIFEST: fixtureManifestPath },
+    randomUUID: () => attemptId,
+    loadReceipts: async (_releasePlan, { through }) => fixtureReceiptChain(plan, through),
+    executeWorkload: async (options) => {
+      runnerCalls += 1;
+      assert.deepEqual(options.argv, [
+        '--candidate-origin', CANDIDATE_ORIGIN,
+        '--asr-manifest', fixtureManifestPath,
+        '--confirm-approved-candidate',
+      ]);
+      assert.equal(options.environment.V1_LOAD_TEST_CONFIRM, 'true');
+      assert.equal(options.environment.V1_RELEASE_COMMIT_SHA, RELEASE_SHA);
+      assert.equal(options.environment.V1_SOURCE_ARCHIVE_SHA256, SOURCE_SHA);
+      assert.equal(options.environment.V1_CANDIDATE_IMAGE_DIGEST, IMAGE_DIGEST);
+      assert.equal(options.environment.V1_CANDIDATE_REVISION, REVISION);
+      await exerciseControlledWorkloadNetwork(options.fetchImpl, record);
+      await options.writeArtifact({
+        filePath: join(directory, `${RELEASE_SHA}-${record.artifactSha256}.json`), contents, record,
+      });
+      runnerCompleted = true;
+      return {
+        exitCode: 0,
+        publicReport: { status: 'recorded', code: 'LATENCY_ACCEPTANCE_PASSED', artifactSha256: record.artifactSha256 },
+      };
+    },
+    workloadFetch: async (url, options = {}) => {
+      const path = new URL(url).pathname;
+      const status = path === '/api/v1/messages' && options.method === 'POST' ? 202
+        : path === '/api/v1/voice/transcriptions' && options.method === 'POST' ? 202
+          : options.headers?.Range === 'bytes=0-3' ? 206 : 200;
+      return { status };
+    },
+    execute: async (argv) => {
+      assert.deepEqual(argv.slice(0, 2), ['logging', 'read']);
+      return controlPlaneLogEntries(record);
+    },
+    persistReceipt: async (_releasePlan, receipt) => {
+      publishedBeforeRunnerCompleted = !runnerCompleted;
+      persisted = structuredClone(receipt);
+      return true;
+    },
+    now: () => new Date('2026-08-26T08:05:00.000Z'),
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  assert.equal(runnerCalls, 1);
+  assert.equal(publishedBeforeRunnerCompleted, false);
+  assert.equal((await readFile(workloadPath, 'utf8')), contents);
+  assert.equal(persisted.outputs.artifactSha256, record.artifactSha256);
+  assert.equal(persisted.outputs.objectSha256,
+    createHash('sha256').update(contents).digest('hex'));
+  assert.equal(persisted.outputs.execution.attemptId, attemptId);
+  assert.equal(persisted.outputs.execution.acceptanceWindowId,
+    record.rawReceipts.acceptanceWindowId);
+  assert.match(persisted.outputs.execution.networkWitnessSha256, /^[0-9a-f]{64}$/);
+  assert.equal(JSON.stringify(persisted).includes('Authorization'), false);
+  assert.equal(JSON.stringify(persisted).includes('Bearer'), false);
+});
+
+test('valid-looking constants and 200 request logs cannot create a receipt without witnessed ASR TTS and semantic traffic', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'hkbuddy-unwitnessed-workload-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const base = releaseInput();
+  const input = releaseInput({
+    task8Evidence: {
+      ...base.task8Evidence,
+      workload: {
+        filePath: join(directory, 'workload.json'),
+        artifactSha256: '0'.repeat(64),
+        objectSha256: '0'.repeat(64),
+      },
+    },
+  });
+  const plan = buildReleasePlan(input);
+  const record = validWorkloadAcceptanceRecord();
+  const contents = `${JSON.stringify(record, null, 2)}\n`;
+  let persisted = false;
+  const calls = [];
+  const result = await runGcpReleaseImpl({
+    argv: ['--phase=workload', `--confirm-release=${RELEASE_SHA}`], input,
+    environment: { V1_LATENCY_ASR_FIXTURE_MANIFEST: join(directory, 'fixtures.json') },
+    loadReceipts: async (_releasePlan, { through }) => fixtureReceiptChain(plan, through),
+    executeWorkload: async ({ writeArtifact }) => {
+      await writeArtifact({
+        filePath: join(directory, `${RELEASE_SHA}-${record.artifactSha256}.json`), contents, record,
+      });
+      return {
+        exitCode: 0,
+        publicReport: { status: 'recorded', code: 'LATENCY_ACCEPTANCE_PASSED', artifactSha256: record.artifactSha256 },
+      };
+    },
+    workloadFetch: async () => ({ status: 200 }),
+    execute: async (argv) => { calls.push(argv); return controlPlaneLogEntries(record); },
+    persistReceipt: async () => { persisted = true; return true; },
+    now: () => new Date('2026-08-26T08:05:00.000Z'),
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.publicReport.code, 'WORKLOAD_CONTROLLED_NETWORK_INVALID');
+  assert.equal(result.publicReport.mutationPerformed, false);
+  assert.equal(persisted, false);
+  assert.deepEqual(calls, []);
+});
+
+test('promotion rejects a fresh workload execution-window mismatch before any control-plane mutation', async () => {
+  const input = releaseInput();
+  const plan = buildReleasePlan(input);
+  const calls = [];
+  const result = await runGcpReleaseImpl({
+    argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`], input,
+    loadReceipts: async () => fixtureReceiptChain(plan, 'mobile'),
+    verifyTask8Evidence: async (_entry, phase) => phase === 'workload' ? {
+      acceptanceWindowId: 'f'.repeat(64),
+      candidateOrigin: CANDIDATE_ORIGIN,
+      candidateRevision: REVISION,
+      controlPlaneRequests: [],
+      expectedTraceIds: [],
+    } : true,
+    execute: async (argv) => { calls.push(argv); return {}; },
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.publicReport.code, 'TASK8_EVIDENCE_INVALID');
+  assert.equal(result.publicReport.mutationPerformed, false);
+  assert.deepEqual(calls, []);
 });
 
 test('real-shape migration, authenticated workload, and tag-free promotion share one receipt chain', async (t) => {
@@ -2123,15 +2328,15 @@ test('real-shape migration, authenticated workload, and tag-free promotion share
   const workloadRecord = validWorkloadAcceptanceRecord();
   const workloadBytes = `${JSON.stringify(workloadRecord, null, 2)}\n`;
   const workloadPath = join(directory, 'workload.json');
-  await writeFile(workloadPath, workloadBytes);
+  const fixtureManifestPath = join(directory, 'asr-fixtures.json');
   const base = releaseInput();
   const input = releaseInput({
     task8Evidence: {
       ...base.task8Evidence,
       workload: {
         filePath: workloadPath,
-        artifactSha256: workloadRecord.artifactSha256,
-        objectSha256: createHash('sha256').update(workloadBytes).digest('hex'),
+        artifactSha256: '0'.repeat(64),
+        objectSha256: '0'.repeat(64),
       },
     },
   });
@@ -2182,8 +2387,32 @@ test('real-shape migration, authenticated workload, and tag-free promotion share
 
   const workload = await runGcpReleaseImpl({
     argv: ['--phase=workload', `--confirm-release=${RELEASE_SHA}`], input,
+    environment: { V1_LATENCY_ASR_FIXTURE_MANIFEST: fixtureManifestPath },
+    randomUUID: () => 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
     loadReceipts: async () => structuredClone(receipts),
     persistReceipt,
+    executeWorkload: async (options) => {
+      await exerciseControlledWorkloadNetwork(options.fetchImpl, workloadRecord);
+      await options.writeArtifact({
+        filePath: join(directory, `${RELEASE_SHA}-${workloadRecord.artifactSha256}.json`),
+        contents: workloadBytes,
+        record: workloadRecord,
+      });
+      return {
+        exitCode: 0,
+        publicReport: {
+          status: 'recorded', code: 'LATENCY_ACCEPTANCE_PASSED',
+          artifactSha256: workloadRecord.artifactSha256,
+        },
+      };
+    },
+    workloadFetch: async (url, options = {}) => {
+      const path = new URL(url).pathname;
+      const status = path === '/api/v1/messages' && options.method === 'POST' ? 202
+        : path === '/api/v1/voice/transcriptions' && options.method === 'POST' ? 202
+          : options.headers?.Range === 'bytes=0-3' ? 206 : 200;
+      return { status };
+    },
     execute: async (argv) => {
       assert.deepEqual(argv.slice(0, 2), ['logging', 'read']);
       return controlPlaneLogEntries(workloadRecord);
@@ -2191,17 +2420,29 @@ test('real-shape migration, authenticated workload, and tag-free promotion share
     now: () => new Date('2026-08-26T08:05:00.000Z'),
     writeOutput: () => undefined,
   });
-  assert.equal(workload.exitCode, 0);
+  assert.equal(workload.exitCode, 0, JSON.stringify(workload.publicReport));
+
+  const refreshedInput = releaseInput({
+    task8Evidence: {
+      ...base.task8Evidence,
+      workload: {
+        filePath: workloadPath,
+        artifactSha256: workloadRecord.artifactSha256,
+        objectSha256: createHash('sha256').update(workloadBytes).digest('hex'),
+      },
+    },
+  });
+  const refreshedPlan = buildReleasePlan(refreshedInput);
 
   receipts.push(finalizeReleasePhaseReceipt({
     schemaVersion: 1,
     phase: 'mobile',
     sequence: receipts.length + 1,
-    releaseSha: plan.releaseSha,
-    releaseIdentitySha256: plan.releaseIdentitySha256,
+    releaseSha: refreshedPlan.releaseSha,
+    releaseIdentitySha256: refreshedPlan.releaseIdentitySha256,
     previousReceiptSha256: receipts.at(-1).receiptSha256,
-    completed: plan.operations.filter((member) => member.phase === 'mobile').map(({ id }) => id),
-    outputs: fixtureReceiptOutputs(plan, 'mobile'),
+    completed: refreshedPlan.operations.filter((member) => member.phase === 'mobile').map(({ id }) => id),
+    outputs: fixtureReceiptOutputs(refreshedPlan, 'mobile'),
   }));
 
   let currentService = {
@@ -2217,7 +2458,7 @@ test('real-shape migration, authenticated workload, and tag-free promotion share
   };
   let postPromotionReadbacks = 0;
   const promotion = await runGcpReleaseImpl({
-    argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`], input,
+    argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`], input: refreshedInput,
     loadReceipts: async () => structuredClone(receipts),
     verifyTask8Evidence: async (_entry, phase) => phase === 'workload' ? {
       acceptanceWindowId: workloadRecord.rawReceipts.acceptanceWindowId,
