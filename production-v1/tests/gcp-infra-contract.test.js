@@ -22,6 +22,7 @@ import { runGcpPreflight } from '../scripts/gcp-preflight.js';
 import { GCP_IDENTITY } from '../src/gcp-identity.js';
 
 const CONTRACT_URL = new URL('../infra/gcp/resource-contract.json', import.meta.url);
+const OPERATOR_README_URL = new URL('../infra/gcp/README.md', import.meta.url);
 const PROJECT = GCP_IDENTITY.projectId;
 const PROJECT_NUMBER = GCP_IDENTITY.projectNumber;
 const CHANNEL = `projects/${PROJECT_NUMBER}/notificationChannels/123456789`;
@@ -179,6 +180,36 @@ test('executable provisioner contains no legacy Artifact Registry or secret disc
     "'hkbuddy'", 'hkbuddy-session-secret', 'hkbuddy-db-app-url',
     'hkbuddy-db-migrator-url', 'hkbuddy-db-bootstrap-state',
   ]) assert.equal(source.includes(legacy), false, legacy);
+});
+
+test('Tasks 1-2 operator documentation uses every executable V1 identity and no obsolete unversioned identity', async () => {
+  const readme = await readFile(OPERATOR_README_URL, 'utf8');
+  const requiredIdentities = [
+    GCP_IDENTITY.service, GCP_IDENTITY.repository, GCP_IDENTITY.bucket,
+    GCP_IDENTITY.cloudSqlInstance, GCP_IDENTITY.database, GCP_IDENTITY.network,
+    GCP_IDENTITY.subnet, GCP_IDENTITY.psaRange,
+    ...Object.values(GCP_IDENTITY.serviceAccounts),
+    ...Object.values(GCP_IDENTITY.secrets),
+    ...Object.values(GCP_IDENTITY.jobs),
+  ];
+  for (const identity of requiredIdentities) {
+    assert.equal(readme.includes(identity), true, `missing operator identity: ${identity}`);
+  }
+
+  const obsoleteIdentities = [
+    'hkbuddy', 'hkbuddy-api', 'hkbuddy-pg', 'hkbuddy-prod-vpc', 'hkbuddy-ae2-run',
+    'hkbuddy-google-managed-services', 'hkbuddy-runtime', 'hkbuddy-build',
+    'hkbuddy-migrator', 'hkbuddy-deployer', 'hkbuddy-acceptance', 'hkbuddy-migrate',
+    'hkbuddy-db-app-url', 'hkbuddy-db-migrator-url', 'hkbuddy-session-secret',
+    'hkbuddy-db-bootstrap-state',
+    'hkbuddy-legacy-inventory', 'hkbuddy-dependency-acceptance', 'hkbuddy-llm-smoke',
+    'hkbuddy-asr-smoke', 'hkbuddy-tts-smoke', 'hkbuddy-ios-voice-acceptance',
+  ];
+  for (const identity of obsoleteIdentities) {
+    const escaped = identity.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    assert.doesNotMatch(readme, new RegExp(`(?<![a-z0-9_-])${escaped}(?![a-z0-9_-])`, 'i'), identity);
+  }
+  assert.match(readme, /earlier `USD 300` draft/, 'the explicit historical budget context remains allowed');
 });
 
 test('shared-project control plane forbids project and billing mutations', async () => {
@@ -649,7 +680,7 @@ test('CIDR audit validates complete Compute rows before filtering and requires p
     ...exact,
     routes: [{
       name: 'foreign-default', network, destRange: '0.0.0.0/0',
-      nextHopGateway: 'https://www.googleapis.com/compute/v1/projects/foreign/global/gateways/default-internet-gateway',
+      nextHopGateway: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/gateways/custom-gateway`,
     }],
   }), (error) => error.code === 'CIDR_OVERLAP');
 });
@@ -2242,6 +2273,62 @@ test('Compute rejects noncanonical resource names URIs regions IPv4 and prefix s
       assert.equal(fixture.gcloudCalls.some((args) => args.includes('enable') || args.includes('create')), false);
       assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
     });
+  }
+});
+
+test('project-qualified Compute route next hops reject every foreign project before mutation', async (t) => {
+  const contract = await contractFixture();
+  const network = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/default`;
+  const foreign = 'https://www.googleapis.com/compute/v1/projects/foreign-project';
+  const cases = [
+    ['gateway', { nextHopGateway: `${foreign}/global/gateways/default-internet-gateway` }],
+    ['instance', { nextHopInstance: `${foreign}/zones/asia-east2-a/instances/foreign-instance` }],
+    ['VPN tunnel', { nextHopVpnTunnel: `${foreign}/regions/asia-east2/vpnTunnels/foreign-tunnel` }],
+    ['ILB forwarding rule', { nextHopIlb: `${foreign}/regions/asia-east2/forwardingRules/foreign-ilb` }],
+    ['network', { nextHopNetwork: `${foreign}/global/networks/foreign-network` }],
+  ];
+  for (const [name, nextHop] of cases) {
+    await t.test(name, async () => {
+      const fixture = assetAuditControlPlane({
+        contract, assets: [], enabledApis: ['iam.googleapis.com', 'compute.googleapis.com'],
+        gcloudRows: {
+          'compute networks list': [{ name: 'default', selfLink: network, autoCreateSubnetworks: true }],
+          'compute networks subnets': [],
+          'compute routes list': [{
+            name: `foreign-${name.toLowerCase().replaceAll(' ', '-')}`, network,
+            destRange: '192.168.1.0/24', ...nextHop,
+          }],
+          'compute addresses list': [],
+        },
+      });
+      await assert.rejects(
+        () => fixture.plane.auditPreMutationState(),
+        (error) => error.code === 'CIDR_AUDIT_INVALID',
+      );
+      assert.equal(fixture.gcloudCalls.some((args) => args.includes('enable') || args.includes('create')), false);
+      assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+    });
+  }
+});
+
+test('every exact-host Compute route next-hop family remains valid', () => {
+  const network = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/default`;
+  const host = `https://www.googleapis.com/compute/v1/projects/${PROJECT}`;
+  const cases = [
+    { nextHopGateway: `${host}/global/gateways/default-internet-gateway` },
+    { nextHopInstance: `${host}/zones/asia-east2-a/instances/host-instance` },
+    { nextHopVpnTunnel: `${host}/regions/asia-east2/vpnTunnels/host-tunnel` },
+    { nextHopIlb: `${host}/regions/asia-east2/forwardingRules/host-ilb` },
+    { nextHopNetwork: network },
+    { nextHopIp: '192.168.100.1' },
+    { nextHopPeering: 'host-peering' },
+  ];
+  for (const [index, nextHop] of cases.entries()) {
+    assert.doesNotThrow(() => assertCidrAvailable({
+      desired: '10.24.0.0/26', network,
+      networks: [{ name: 'default', selfLink: network }], subnets: [], addresses: [],
+      routes: [{ name: `host-route-${index}`, network, destRange: `192.168.${index}.0/24`, ...nextHop }],
+    }));
   }
 });
 

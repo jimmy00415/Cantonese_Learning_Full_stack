@@ -19,6 +19,34 @@ island and never adopts, updates, or deletes a non-V1 resource.
 - Cloud SQL transport: `sslmode=require`, with instance-side
   `ENCRYPTED_ONLY`
 
+### Exact provisioned identities
+
+The Tasks 1–2 operator boundary uses only these executable V1 identities:
+
+- Cloud Run service: `hkbuddy-v1-api`
+- Artifact Registry Docker repository: `hkbuddy-v1`
+- media bucket: `hkbuddy-v1-582852715831-media`
+- Cloud SQL instance/database: `hkbuddy-v1-pg` / `hkbuddy_v1`
+- VPC/subnet/PSA range: `hkbuddy-v1-vpc` /
+  `hkbuddy-v1-ae2-run` / `hkbuddy-v1-google-services`
+- service accounts:
+  `hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com`,
+  `hkbuddy-v1-build@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com`,
+  `hkbuddy-v1-migrator@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com`,
+  `hkbuddy-v1-deployer@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com`,
+  and
+  `hkbuddy-v1-acceptance@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com`
+- generated/bootstrap Secret containers: `hkbuddy-v1-db-app-url`,
+  `hkbuddy-v1-db-migrator-url`, `hkbuddy-v1-session-secret`, and
+  `hkbuddy-v1-db-bootstrap-state`
+- evidence Secret containers: `hkbuddy-v1-legacy-inventory`,
+  `hkbuddy-v1-dependency-acceptance`, `hkbuddy-v1-llm-smoke`,
+  `hkbuddy-v1-asr-smoke`, `hkbuddy-v1-tts-smoke`, and
+  `hkbuddy-v1-ios-voice-acceptance`
+- Cloud Run Jobs: `hkbuddy-v1-migrate`,
+  `hkbuddy-v1-dependency-acceptance`, `hkbuddy-v1-llm-smoke`,
+  `hkbuddy-v1-asr-smoke`, and `hkbuddy-v1-tts-smoke`
+
 ### Read-only Cloud Asset inventory consumer
 
 The host does not enable Cloud Asset API. Before any provisioning write, the
@@ -162,9 +190,14 @@ step; verified provenance; successful image/corpus and OCI-label checks; one
 Build ID; the archive hash; and the final digest. A missing, failed, expired, or
 drifted dependency gate is a failed build receipt. `inventory` publishes and
 reads back the legacy inventory's one planned
-numeric Secret version. `acceptance` runs the dependency Job as
-`hkbuddy-acceptance` and the LLM/ASR/TTS Jobs as `hkbuddy-runtime`; every Job is
-digest-pinned and its exact service account is read back before execution. Each
+numeric Secret version. `acceptance` runs the `hkbuddy-v1-dependency-acceptance`
+Job as
+`hkbuddy-v1-acceptance@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com`
+and the `hkbuddy-v1-llm-smoke`, `hkbuddy-v1-asr-smoke`, and
+`hkbuddy-v1-tts-smoke` Jobs as
+`hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com`;
+every Job is digest-pinned and its exact service account is read back before
+execution. Each
 Job creates one private, release/run-scoped GCS JSON object with an
 overwrite-preventing generation precondition. `collect` first describes one
 exact numeric generation, downloads only that generation to the planned local
@@ -233,8 +266,9 @@ hard failure. Any
 extra managed workload binding, conditional replacement, or missing binding
 fails the run. Workload principals may never receive
 `roles/iam.serviceAccountTokenCreator`; the only such binding is the expected
-Google-managed Cloud Build service agent on `hkbuddy-build`. The Cloud Build
-service agent's automatically managed project-level
+Google-managed Cloud Build service agent on
+`hkbuddy-v1-build@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com`.
+The Cloud Build service agent's automatically managed project-level
 `roles/cloudbuild.serviceAgent` grant is separately required and is never
 re-created by this script. Exact official service-agent member/role pairs for
 the enabled or used APIs are permitted if Google materializes them; arbitrary
@@ -247,7 +281,7 @@ project-level `roles/editor` is not allowed.
 Cloud SQL is created through the supported SQL Admin v1 `instances.insert`
 request because the installed GA Cloud SDK cannot bind the named PSA allocation
 on its create command. The request sets
-`settings.ipConfiguration.allocatedIpRange=hkbuddy-google-managed-services`,
+`settings.ipConfiguration.allocatedIpRange=hkbuddy-v1-google-services`,
 private IP only, `ENCRYPTED_ONLY`, HA, backup/PITR/WAL retention, retained and
 final backups, and deletion protection in one reviewed body. Its long-running
 operation must finish successfully before the complete instance readback is
@@ -284,18 +318,24 @@ access to the application URL and session secret only; the migrator gets access
 to the migrator URL only.
 
 The base provisioning pass also creates six empty evidence containers:
-`hkbuddy-legacy-inventory`, `hkbuddy-dependency-acceptance`,
-`hkbuddy-llm-smoke`, `hkbuddy-asr-smoke`, `hkbuddy-tts-smoke`, and
-`hkbuddy-ios-voice-acceptance`. It creates no version in those containers.
+`hkbuddy-v1-legacy-inventory`, `hkbuddy-v1-dependency-acceptance`,
+`hkbuddy-v1-llm-smoke`, `hkbuddy-v1-asr-smoke`, `hkbuddy-v1-tts-smoke`, and
+`hkbuddy-v1-ios-voice-acceptance`. It creates no version in those containers.
 The frozen-release task adds exactly one accepted numeric version to each and
 mounts it read-only; startup validation remains fail closed. Runtime receives
 secret-scoped accessor grants for these six containers so no project-wide
 Secret Manager access is needed.
 
-The deployer can act as `hkbuddy-runtime`, `hkbuddy-migrator`,
-`hkbuddy-build`, and `hkbuddy-acceptance` only through service-account-scoped
+The
+`hkbuddy-v1-deployer@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com`
+deployer can act as
+`hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com`,
+`hkbuddy-v1-migrator@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com`,
+`hkbuddy-v1-build@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com`, and
+`hkbuddy-v1-acceptance@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com`
+only through service-account-scoped
 `roles/iam.serviceAccountUser` bindings. There is no project-wide `actAs`
-grant. The build identity writes only to the `hkbuddy` repository and project
+grant. The build identity writes only to the `hkbuddy-v1` repository and project
 logs; the deployer reads only that repository and has `roles/run.developer`.
 The acceptance identity is DB/GCS-only: it can read the app and migrator URL
 Secret containers, exercise and clean up private bucket objects, and write
@@ -305,8 +345,10 @@ Job can attest the bucket's exact production project number; it receives no
 bucket-list or storage-admin role. It has no Vertex AI, STT, TTS,
 runtime-serving, or evidence
 Secret-version publishing role. Provider and voice smoke jobs instead run as
-the exact `hkbuddy-runtime` serving identity; every job readback must record the
-attached identity before its evidence can be accepted.
+the exact
+`hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com`
+serving identity; every job readback must record the attached identity before
+its evidence can be accepted.
 
 Final readback also lists user-managed keys for all five service accounts and
 fails if any exist. Runtime provider access is via Cloud Run application

@@ -911,7 +911,6 @@ function canonicalNextHop(item, networkLinks) {
   const entries = Object.entries(item).filter(([key]) => key.startsWith('nextHop'));
   if (entries.length !== 1 || typeof entries[0][1] !== 'string') return false;
   const [kind, value] = entries[0];
-  const project = '[a-z][a-z0-9-]{4,28}[a-z0-9]';
   const name = '[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?';
   const region = '[a-z]+(?:-[a-z]+)+[1-9]\\d*';
   const zone = '[a-z]+(?:-[a-z0-9]+)+-[a-z]';
@@ -919,16 +918,16 @@ function canonicalNextHop(item, networkLinks) {
   if (kind === 'nextHopNetwork') return networkLinks.has(value);
   if (kind === 'nextHopPeering') return COMPUTE_NAME.test(value);
   if (kind === 'nextHopGateway') {
-    return new RegExp(`^https://www\\.googleapis\\.com/compute/v1/projects/${project}/global/gateways/${name}$`).test(value);
+    return new RegExp(`^https://www\\.googleapis\\.com/compute/v1/projects/${PROJECT}/global/gateways/${name}$`).test(value);
   }
   if (kind === 'nextHopInstance') {
-    return new RegExp(`^https://www\\.googleapis\\.com/compute/v1/projects/${project}/zones/${zone}/instances/${name}$`).test(value);
+    return new RegExp(`^https://www\\.googleapis\\.com/compute/v1/projects/${PROJECT}/zones/${zone}/instances/${name}$`).test(value);
   }
   if (kind === 'nextHopVpnTunnel') {
-    return new RegExp(`^https://www\\.googleapis\\.com/compute/v1/projects/${project}/regions/${region}/vpnTunnels/${name}$`).test(value);
+    return new RegExp(`^https://www\\.googleapis\\.com/compute/v1/projects/${PROJECT}/regions/${region}/vpnTunnels/${name}$`).test(value);
   }
   if (kind === 'nextHopIlb') {
-    return new RegExp(`^https://www\\.googleapis\\.com/compute/v1/projects/${project}/regions/${region}/forwardingRules/${name}$`).test(value);
+    return new RegExp(`^https://www\\.googleapis\\.com/compute/v1/projects/${PROJECT}/regions/${region}/forwardingRules/${name}$`).test(value);
   }
   return false;
 }
