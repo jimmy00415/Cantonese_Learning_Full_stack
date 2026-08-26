@@ -241,7 +241,14 @@ export async function* withIngressDeadlines(source, {
           removeAbortListener = () => signal.removeEventListener('abort', onAbort);
         });
       let result;
-      try { result = await Promise.race([iterator.next(), timed, aborted]); } finally {
+      try {
+        result = await Promise.race([iterator.next(), timed, aborted]);
+      } catch (error) {
+        if (signal?.aborted) {
+          throw signal.reason ?? workError('VOICE_UPLOAD_ABORTED', 408, true);
+        }
+        throw error;
+      } finally {
         clearTimeout(timer);
         removeAbortListener();
       }

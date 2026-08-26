@@ -2428,6 +2428,34 @@ test('voice ingress idle and absolute deadlines release the source with the stab
   }
 });
 
+test('voice ingress gives an observed upload abort precedence over a simultaneous stream reset', async () => {
+  const { withIngressDeadlines } = await import('../src/services/voice.js');
+  const abortReason = Object.assign(new Error('upload disconnected'), {
+    code: 'VOICE_UPLOAD_ABORTED', status: 408, retryable: true,
+  });
+  const streamReset = Object.assign(new Error('aborted'), { code: 'ECONNRESET' });
+  const controller = new AbortController();
+  let released = false;
+  const source = {
+    [Symbol.asyncIterator]() {
+      return {
+        next: () => Promise.reject(streamReset),
+        return: async () => { released = true; return { done: true }; },
+      };
+    },
+  };
+  controller.abort(abortReason);
+
+  const bounded = withIngressDeadlines(source, {
+    idleMs: 100,
+    absoluteMs: 1_000,
+    signal: controller.signal,
+  });
+
+  await assert.rejects(bounded.next(), (error) => error === abortReason);
+  assert.equal(released, true);
+});
+
 test('active ingress is spooled under its own idle and absolute clocks before the media-write deadline starts', async (t) => {
   const { createVoiceService } = await import('../src/services/voice.js');
   const { directory, store } = await createStore(t, 'hb-v1-ingress-spool-');
