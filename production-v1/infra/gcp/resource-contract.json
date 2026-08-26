@@ -5,12 +5,15 @@
     "displayName": "Motion Expert HK LTD Webpage",
     "organizationId": "797368190621",
     "billingAccountId": "01F9FD-24EA9B-A9232C",
+    "projectNumber": "582852715831",
     "mode": "existing-billed-shared",
     "assetInventory": {
       "consumerProjectId": "tech-demo-433408",
       "mode": "read-only-cloud-asset-quota-consumer",
       "scope": "projects/motion-expert-hk-ltd-webpage",
-      "limit": 1000
+      "pageSize": 500,
+      "readMask": "name,assetType,project,displayName,description,location,labels,parentFullResourceName,parentAssetType,state",
+      "orderBy": "assetType,name"
     },
     "protectedBindings": [
       {
@@ -260,6 +263,12 @@
     "monitoring": {
       "notificationChannel": {
         "required": true,
+        "displayName": "HK Buddy V1 operations",
+        "ownershipLabels": {
+          "application": "hong_kong_buddy",
+          "environment": "production_v1",
+          "hkbuddy_contract": "operations"
+        },
         "mustBeEnabled": true,
         "requiredType": "email",
         "requiredVerificationStatus": "VERIFIED"
@@ -358,7 +367,7 @@
       "currency": "HKD",
       "amount": 2300,
       "calendarPeriod": "MONTH",
-      "projectFilter": "projects/motion-expert-hk-ltd-webpage",
+      "projectFilter": "projects/582852715831",
       "thresholds": [
         {
           "percent": 0.5,

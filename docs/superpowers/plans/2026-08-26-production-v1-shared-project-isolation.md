@@ -17,7 +17,7 @@
 - Every managed GCP resource is namespaced `hkbuddy-v1-*`, except database `hkbuddy_v1` and database users scoped inside `hkbuddy-v1-pg`.
 - Project creation, billing-link changes, project display-name/label changes, default-VPC changes, unrelated IAM changes, resource adoption, destructive repair, and cross-project mutation are forbidden.
 - `tech-demo-433408` is an immutable read-only Cloud Asset quota consumer only:
-  `asset search-all-resources --scope=projects/motion-expert-hk-ltd-webpage --billing-project=tech-demo-433408 --project=motion-expert-hk-ltd-webpage --limit=1000 --format=json` must complete before host mutation and never authorizes a consumer-project write.
+  `asset search-all-resources --scope=projects/motion-expert-hk-ltd-webpage --billing-project=tech-demo-433408 --project=motion-expert-hk-ltd-webpage --page-size=500 --read-mask=name,assetType,project,displayName,description,location,labels,parentFullResourceName,parentAssetType,state --order-by=assetType,name --format=json` must auto-page to completion before host mutation and never authorizes a consumer-project write.
 - The selected project shares billing, quota, API enablement, audit logs, and project IAM; runtime data, network, identity, secrets, images, jobs, evidence, and release state remain dedicated.
 - All implementation follows red-green-refactor TDD. Cloud mutation is forbidden until focused tests, full tests, checks, security gate, diff check, clean commit, and two independent reviews pass.
 - Candidate deploys at zero stable traffic. Public invocation and stable traffic are promotion actions after real production acceptance.
@@ -442,7 +442,7 @@ complete Google verification before continuing. Then run:
 
 ```powershell
 $env:V1_NOTIFICATION_CHANNEL = gcloud.cmd monitoring channels list --project=motion-expert-hk-ltd-webpage --filter="displayName='HK Buddy V1 operations' AND type='email'" --format="value(name)" --limit=1
-if (-not ($env:V1_NOTIFICATION_CHANNEL -match '^projects/motion-expert-hk-ltd-webpage/notificationChannels/[1-9]\d*$')) { throw 'Verified HK Buddy V1 notification channel is unavailable' }
+if (-not ($env:V1_NOTIFICATION_CHANNEL -match '^projects/582852715831/notificationChannels/[1-9]\d*$')) { throw 'Verified HK Buddy V1 notification channel is unavailable' }
 npm run gcp:provision -- --confirm-project=motion-expert-hk-ltd-webpage "--notification-channel=$env:V1_NOTIFICATION_CHANNEL"
 ```
 

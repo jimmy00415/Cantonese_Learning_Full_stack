@@ -92,13 +92,22 @@ the default Compute service account.
 
 The host's disabled Cloud Asset API is not a reason to skip its pre-mutation
 inventory. The immutable contract names `tech-demo-433408` as a read-only
-Cloud Asset quota consumer. The sole cross-project exception is the bounded
+Cloud Asset quota consumer. The sole cross-project exception is the exhaustive,
+auto-paginated
 host request `asset search-all-resources --scope=projects/motion-expert-hk-ltd-webpage
 --billing-project=tech-demo-433408 --project=motion-expert-hk-ltd-webpage
---limit=1000 --format=json`; it authorizes no consumer-project mutation. The
+--page-size=500 --read-mask=name,assetType,project,displayName,description,location,labels,parentFullResourceName,parentAssetType,state
+--order-by=assetType,name --format=json`; it authorizes no consumer-project mutation. The
 control plane runs it before API enablement, creates, REST POSTs, or IAM writes
-and rejects unavailable, malformed, wrong-project, foreign namespace, or
+and rejects unavailable, overflowed/truncated, malformed, wrong-project, foreign namespace, or
 legacy executable-alias inventory.
+
+Cloud Asset acceptance is type-specific: canonical full name, asset type,
+numeric project authority, parent type/name, location, and metadata shape must
+agree. Only release-compatible Cloud Run revisions named
+`hkbuddy-v1-api-<12 lowercase hex>` beneath the exact service and Docker image
+digests for `hkbuddy-v1-api@sha256:<64 lowercase hex>` beneath the exact
+`hkbuddy-v1` repository are accepted descendants.
 
 Before the first write, the control plane must prove all of the following in one
 fresh preflight:

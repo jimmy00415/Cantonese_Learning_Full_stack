@@ -17,8 +17,16 @@ const BILLING_ACCOUNT = GCP_IDENTITY.billingAccountId;
 export const REQUIRED_OPERATOR_ACCOUNT = 'admin@motionexp.com';
 const CONTRACT_PATH = fileURLToPath(new URL('../infra/gcp/resource-contract.json', import.meta.url));
 const NUMERIC_VERSION = /^[1-9]\d*$/;
-const CHANNEL_NAME = new RegExp(`^projects/${PROJECT}/notificationChannels/[1-9]\\d*$`);
+const CHANNEL_NAME = new RegExp(`^projects/${PROJECT_NUMBER}/notificationChannels/[1-9]\\d*$`);
 const SAFE_ARGUMENT = /^[^\u0000\r\n]*$/;
+const ASSET_PROJECT = `projects/${PROJECT_NUMBER}`;
+const ASSET_PROJECT_PARENT = `//cloudresourcemanager.googleapis.com/projects/${PROJECT_NUMBER}`;
+const ASSET_PROJECT_TYPE = 'cloudresourcemanager.googleapis.com/Project';
+const ASSET_READ_MASK = 'name,assetType,project,displayName,description,location,labels,parentFullResourceName,parentAssetType,state';
+const ASSET_MAX_BUFFER = 16 * 1024 * 1024;
+const OWNERSHIP_LABELS = Object.freeze({
+  application: 'hong_kong_buddy', environment: 'production_v1', hkbuddy_contract: 'operations',
+});
 const REQUIRED_APIS = Object.freeze([
   'cloudresourcemanager.googleapis.com', 'serviceusage.googleapis.com',
   'cloudbilling.googleapis.com', 'billingbudgets.googleapis.com',
@@ -32,7 +40,8 @@ const REQUIRED_APIS = Object.freeze([
 ]);
 const REQUIRED_MONITORING = Object.freeze({
   notificationChannel: {
-    required: true, mustBeEnabled: true, requiredType: 'email',
+    required: true, displayName: 'HK Buddy V1 operations', ownershipLabels: OWNERSHIP_LABELS,
+    mustBeEnabled: true, requiredType: 'email',
     requiredVerificationStatus: 'VERIFIED',
   },
   metricTypes: [
@@ -176,12 +185,15 @@ export function assertResourceContract(contract) {
     displayName: 'Motion Expert HK LTD Webpage',
     organizationId: ORGANIZATION,
     billingAccountId: BILLING_ACCOUNT,
+    projectNumber: PROJECT_NUMBER,
     mode: 'existing-billed-shared',
     assetInventory: {
       consumerProjectId: GCP_IDENTITY.assetInventoryConsumerProjectId,
       mode: 'read-only-cloud-asset-quota-consumer',
       scope: `projects/${PROJECT}`,
-      limit: 1000,
+      pageSize: 500,
+      readMask: ASSET_READ_MASK,
+      orderBy: 'assetType,name',
     },
     protectedBindings: [
       { member: 'user:admin@motionexp.com', role: 'roles/owner' },
@@ -278,7 +290,7 @@ export function assertResourceContract(contract) {
   ]);
   requireExact(resources?.budget, {
     displayName: 'Hong Kong Buddy Production V1 monthly guard', currency: 'HKD',
-    amount: 2300, calendarPeriod: 'MONTH', projectFilter: `projects/${PROJECT}`,
+    amount: 2300, calendarPeriod: 'MONTH', projectFilter: ASSET_PROJECT,
     thresholds: [
       { percent: 0.5, basis: 'CURRENT_SPEND' },
       { percent: 0.8, basis: 'CURRENT_SPEND' },
@@ -386,12 +398,15 @@ export function createGcloudExecutor({ executable, prefixArgs = [], execFile = e
   if (typeof executable !== 'string' || !executable
     || !Array.isArray(prefixArgs) || prefixArgs.some((value) => typeof value !== 'string')
     || typeof execFile !== 'function') throw new Error('gcloud executor configuration is invalid');
-  return async (argv) => {
+  return async (argv, { maxBuffer = 1024 * 1024 } = {}) => {
     const args = [...safeArgv(prefixArgs), ...safeArgv(argv)];
+    if (!Number.isSafeInteger(maxBuffer) || maxBuffer < 1 || maxBuffer > 32 * 1024 * 1024) {
+      throw new Error('gcloud output limit is invalid');
+    }
     let result;
     try {
       result = await execFile(executable, args, {
-        encoding: 'utf8', maxBuffer: 1024 * 1024, windowsHide: true,
+        encoding: 'utf8', maxBuffer, windowsHide: true,
       });
     } catch (cause) {
       const error = commandError(classifyTransportError(cause));
@@ -872,12 +887,52 @@ function sameNetwork(value, expected) {
 }
 
 export function assertCidrAvailable({
-  desired, network, subnets, routes, addresses, kind = 'subnet',
+  desired, network, networks, subnets, routes, addresses, kind = 'subnet',
 }) {
   if (typeof desired !== 'string' || typeof network !== 'string'
     || !['subnet', 'psa'].includes(kind)
     || !Array.isArray(subnets) || !Array.isArray(routes) || !Array.isArray(addresses)) {
     throw commandError('CIDR_AUDIT_INVALID');
+  }
+  const strict = networks !== undefined;
+  const canonicalNetwork = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/`;
+  const canonicalRegion = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/regions/`;
+  const canonicalDefaultGateway = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/gateways/default-internet-gateway`;
+  const canonicalCidr = (value) => {
+    const bounds = cidrBounds(value);
+    return bounds !== null && bounds[0] === ipv4Number(String(value).split('/')[0]);
+  };
+  if (!canonicalCidr(desired)) throw commandError('CIDR_AUDIT_INVALID');
+  if (strict) {
+    if (!Array.isArray(networks) || networks.some((item) => (
+      !item || typeof item !== 'object' || Array.isArray(item)
+      || typeof item.name !== 'string' || !/^[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?$/.test(item.name)
+      || item.selfLink !== `${canonicalNetwork}${item.name}`
+    ))) throw commandError('CIDR_AUDIT_INVALID');
+    const networkLinks = new Set(networks.map(({ selfLink }) => selfLink));
+    if (!networkLinks.has(network)) throw commandError('CIDR_AUDIT_INVALID');
+    if (subnets.some((item) => !item || typeof item.name !== 'string'
+      || !networkLinks.has(item.network) || !canonicalCidr(item.ipCidrRange)
+      || typeof item.region !== 'string' || !item.region.startsWith(canonicalRegion))) {
+      throw commandError('CIDR_AUDIT_INVALID');
+    }
+    if (routes.some((item) => !item || typeof item.name !== 'string'
+      || !networkLinks.has(item.network) || !canonicalCidr(item.destRange)
+      || !Object.entries(item).some(([key, value]) => key.startsWith('nextHop') && typeof value === 'string' && value.length > 0))) {
+      throw commandError('CIDR_AUDIT_INVALID');
+    }
+    if (addresses.some((item) => {
+      if (!item || typeof item.name !== 'string' || typeof item.addressType !== 'string'
+        || typeof item.status !== 'string') return true;
+      if (item.purpose === 'VPC_PEERING') {
+        return !networkLinks.has(item.network) || item.addressType !== 'INTERNAL'
+          || typeof item.address !== 'string' || !Number.isInteger(Number(item.prefixLength))
+          || !canonicalCidr(`${item.address}/${item.prefixLength}`) || Object.hasOwn(item, 'region');
+      }
+      return Object.hasOwn(item, 'region') && (
+        typeof item.region !== 'string' || !item.region.startsWith(canonicalRegion)
+      );
+    })) throw commandError('CIDR_AUDIT_INVALID');
   }
   const targetSubnets = subnets
     .filter((item) => sameNetwork(item?.network, network))
@@ -886,7 +941,7 @@ export function assertCidrAvailable({
     .filter((item) => sameNetwork(item?.network, network))
     .filter(({ destRange, nextHopGateway }) => !(
       destRange === '0.0.0.0/0'
-      && String(nextHopGateway).endsWith('/global/gateways/default-internet-gateway')
+      && nextHopGateway === canonicalDefaultGateway
     ))
     .map(({ destRange }) => destRange);
   const targetAddresses = addresses
@@ -904,13 +959,12 @@ export function assertCidrAvailable({
   }
 }
 
-function assertProjectWideCidrAvailability({ subnets, routes, addresses }) {
-  const inventory = { subnets: requireObjectList(subnets), routes: requireObjectList(routes), addresses: requireObjectList(addresses) };
-  const allNetworks = new Set([
-    ...inventory.subnets.map(({ network }) => network),
-    ...inventory.routes.map(({ network }) => network),
-    ...inventory.addresses.map(({ network }) => network),
-  ].filter(Boolean));
+function assertProjectWideCidrAvailability({ networks, subnets, routes, addresses }) {
+  const inventory = {
+    networks: requireObjectList(networks), subnets: requireObjectList(subnets),
+    routes: requireObjectList(routes), addresses: requireObjectList(addresses),
+  };
+  const allNetworks = new Set(inventory.networks.map(({ selfLink }) => selfLink));
   for (const network of allNetworks) {
     assertCidrAvailable({ desired: '10.24.0.0/26', network, kind: 'subnet', ...inventory });
     assertCidrAvailable({ desired: '10.25.0.0/16', network, kind: 'psa', ...inventory });
@@ -930,41 +984,189 @@ function apiForProvisionStep(id) {
   return null;
 }
 
-function assertNoForeignManagedIdentity(items, expected, prefix = 'hkbuddy-v1-') {
+function assertManagedIdentityInventory(items, expected, extractor, marker = /hkbuddy-v1-/i) {
   const permitted = new Set(expected);
   for (const item of requireObjectList(items)) {
-    const raw = String(item?.email ?? item?.name ?? '');
-    const name = raw.split('/').at(-1).split('@')[0];
-    if (name.startsWith(prefix) && !permitted.has(name)) throw commandError('RESOURCE_COLLISION');
+    const raw = extractor(item);
+    if (typeof raw !== 'string' || raw.length === 0) throw commandError('LIST_RESPONSE_AMBIGUOUS');
+    const name = raw.replace(/^gs:\/\//, '').split('/').at(-1).split('@')[0];
+    const text = [raw, item.displayName, item.description, item.metadata?.name]
+      .filter((value) => typeof value === 'string').join(' ');
+    if (marker.test(text) && !permitted.has(name)) throw commandError('RESOURCE_COLLISION');
   }
 }
 
+function assertMonitoringInventory(policies, channels) {
+  const expectedPolicies = new Map(REQUIRED_MONITORING.policies.map((policy) => [policy.displayName, policy]));
+  const seenPolicies = new Set();
+  for (const policy of requireObjectList(policies)) {
+    if (!new RegExp(`^projects/${PROJECT_NUMBER}/alertPolicies/[1-9]\\d*$`).test(policy?.name ?? '')) {
+      throw commandError('LIST_RESPONSE_AMBIGUOUS');
+    }
+    if (typeof policy.displayName !== 'string' || (policy.userLabels !== undefined
+      && (!policy.userLabels || typeof policy.userLabels !== 'object' || Array.isArray(policy.userLabels)))) {
+      throw commandError('LIST_RESPONSE_AMBIGUOUS');
+    }
+    const marker = policy.userLabels?.hkbuddy_contract;
+    const managed = /\bhk buddy v1\b/i.test(policy.displayName ?? '') || typeof marker === 'string';
+    if (!managed) continue;
+    const definition = expectedPolicies.get(policy.displayName);
+    if (!definition || marker !== definition.id.replaceAll('-', '_')
+      || !exact(policy.userLabels, {
+        application: 'hong_kong_buddy', environment: 'production_v1', hkbuddy_contract: marker,
+      })) throw commandError('RESOURCE_COLLISION');
+    if (seenPolicies.has(definition.id)) throw commandError('RESOURCE_COLLISION');
+    seenPolicies.add(definition.id);
+  }
+  let managedChannels = 0;
+  for (const channel of requireObjectList(channels)) {
+    if (!new RegExp(`^projects/${PROJECT_NUMBER}/notificationChannels/[1-9]\\d*$`).test(channel?.name ?? '')) {
+      throw commandError('LIST_RESPONSE_AMBIGUOUS');
+    }
+    if (typeof channel.displayName !== 'string' || typeof channel.type !== 'string'
+      || typeof channel.enabled !== 'boolean' || typeof channel.verificationStatus !== 'string'
+      || (channel.userLabels !== undefined && (!channel.userLabels
+        || typeof channel.userLabels !== 'object' || Array.isArray(channel.userLabels)))) {
+      throw commandError('LIST_RESPONSE_AMBIGUOUS');
+    }
+    const managed = /\bhk buddy v1\b/i.test(channel.displayName ?? '')
+      || channel.userLabels?.application === OWNERSHIP_LABELS.application;
+    if (managed && (channel.displayName !== REQUIRED_MONITORING.notificationChannel.displayName
+      || !exact(channel.userLabels, OWNERSHIP_LABELS) || channel.type !== 'email'
+      || channel.enabled !== true || channel.verificationStatus !== 'VERIFIED')) {
+      throw commandError('RESOURCE_COLLISION');
+    }
+    if (managed) managedChannels += 1;
+  }
+  if (managedChannels > 1) throw commandError('RESOURCE_COLLISION');
+}
+
+function assertBudgetInventory(budgets, projectNumber) {
+  for (const budget of requireObjectList(budgets)) {
+    if (!new RegExp(`^billingAccounts/${BILLING_ACCOUNT}/budgets/[A-Za-z0-9_-]+$`).test(budget?.name ?? '')) {
+      throw commandError('LIST_RESPONSE_AMBIGUOUS');
+    }
+    if (typeof budget.displayName !== 'string' || !budget.budgetFilter
+      || typeof budget.budgetFilter !== 'object' || Array.isArray(budget.budgetFilter)) {
+      throw commandError('LIST_RESPONSE_AMBIGUOUS');
+    }
+    if (/^Hong Kong Buddy Production V1/i.test(budget.displayName ?? '')
+      && (budget.displayName !== 'Hong Kong Buddy Production V1 monthly guard'
+        || !exact(budget.budgetFilter, { projects: [`projects/${projectNumber}`], calendarPeriod: 'MONTH' }))) {
+      throw commandError('RESOURCE_COLLISION');
+    }
+  }
+}
+
+function cloudAssetMetadataIsValid(asset) {
+  const optionalStrings = ['displayName', 'description', 'location', 'state'];
+  if (!asset || typeof asset !== 'object' || Array.isArray(asset)
+    || typeof asset.name !== 'string' || !asset.name.startsWith('//')
+    || typeof asset.assetType !== 'string' || asset.assetType.length < 3
+    || typeof asset.project !== 'string'
+    || typeof asset.parentFullResourceName !== 'string' || !asset.parentFullResourceName.startsWith('//')
+    || typeof asset.parentAssetType !== 'string' || asset.parentAssetType.length < 3
+    || optionalStrings.some((field) => Object.hasOwn(asset, field) && typeof asset[field] !== 'string')) return false;
+  if (Object.hasOwn(asset, 'labels') && (
+    !asset.labels || typeof asset.labels !== 'object' || Array.isArray(asset.labels)
+      || Object.values(asset.labels).some((value) => typeof value !== 'string')
+  )) return false;
+  return true;
+}
+
+function exactAsset({ asset, assetType, name, location, parent = ASSET_PROJECT_PARENT, parentAssetType = ASSET_PROJECT_TYPE }) {
+  return asset.assetType === assetType && asset.name === name && asset.location === location
+    && asset.parentFullResourceName === parent && asset.parentAssetType === parentAssetType;
+}
+
+function exactTopLevelManagedAsset(asset) {
+  const serviceAccountDisplays = {
+    'hkbuddy-v1-runtime': 'Hong Kong Buddy Cloud Run runtime',
+    'hkbuddy-v1-build': 'Hong Kong Buddy Cloud Build',
+    'hkbuddy-v1-migrator': 'Hong Kong Buddy database migrator',
+    'hkbuddy-v1-deployer': 'Hong Kong Buddy release deployer',
+    'hkbuddy-v1-acceptance': 'Hong Kong Buddy dependency acceptance',
+  };
+  const serviceAccounts = new Map(Object.values(GCP_IDENTITY.serviceAccounts).map((email) => [
+    `//iam.googleapis.com/projects/${PROJECT}/serviceAccounts/${email}`, serviceAccountDisplays[email.split('@')[0]],
+  ]));
+  const secrets = new Set(Object.values(GCP_IDENTITY.secrets).map((id) => `//secretmanager.googleapis.com/projects/${PROJECT}/secrets/${id}`));
+  const jobs = new Set(Object.values(GCP_IDENTITY.jobs).map((id) => `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/jobs/${id}`));
+  if (exactAsset({ asset, assetType: 'run.googleapis.com/Service', name: `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/services/${GCP_IDENTITY.service}`, location: 'asia-east2' })) return asset.displayName === undefined || asset.displayName === GCP_IDENTITY.service;
+  if (exactAsset({ asset, assetType: 'artifactregistry.googleapis.com/Repository', name: `//artifactregistry.googleapis.com/projects/${PROJECT}/locations/asia-east2/repositories/${GCP_IDENTITY.repository}`, location: 'asia-east2' })) return asset.displayName === undefined || asset.displayName === GCP_IDENTITY.repository;
+  if (exactAsset({ asset, assetType: 'storage.googleapis.com/Bucket', name: `//storage.googleapis.com/${GCP_IDENTITY.bucket}`, location: 'asia-east2' })) return true;
+  if (exactAsset({ asset, assetType: 'sqladmin.googleapis.com/Instance', name: `//sqladmin.googleapis.com/projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}`, location: 'asia-east2' })) return true;
+  if (exactAsset({ asset, assetType: 'compute.googleapis.com/Network', name: `//compute.googleapis.com/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`, location: 'global' })) return true;
+  if (exactAsset({ asset, assetType: 'compute.googleapis.com/Subnetwork', name: `//compute.googleapis.com/projects/${PROJECT}/regions/asia-east2/subnetworks/${GCP_IDENTITY.subnet}`, location: 'asia-east2' })) return true;
+  if (exactAsset({ asset, assetType: 'compute.googleapis.com/Address', name: `//compute.googleapis.com/projects/${PROJECT}/global/addresses/${GCP_IDENTITY.psaRange}`, location: 'global' })) return true;
+  if (exactAsset({ asset, assetType: 'servicenetworking.googleapis.com/Connection', name: `//servicenetworking.googleapis.com/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`, location: 'global' })) return true;
+  if (serviceAccounts.has(asset.name) && exactAsset({ asset, assetType: 'iam.googleapis.com/ServiceAccount', name: asset.name, location: 'global' })) return asset.displayName === undefined || asset.displayName === serviceAccounts.get(asset.name);
+  if (secrets.has(asset.name) && exactAsset({ asset, assetType: 'secretmanager.googleapis.com/Secret', name: asset.name, location: 'global' })) return true;
+  if (jobs.has(asset.name) && exactAsset({ asset, assetType: 'run.googleapis.com/Job', name: asset.name, location: 'asia-east2' })) return true;
+  return REQUIRED_CUSTOM_ROLES.some(({ id }) => exactAsset({ asset, assetType: 'iam.googleapis.com/Role', name: `//iam.googleapis.com/projects/${PROJECT}/roles/${id}`, location: 'global' }));
+}
+
+function exactManagedDescendantAsset(asset) {
+  const service = `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/services/${GCP_IDENTITY.service}`;
+  const repository = `//artifactregistry.googleapis.com/projects/${PROJECT}/locations/asia-east2/repositories/${GCP_IDENTITY.repository}`;
+  if (asset.assetType === 'run.googleapis.com/Revision') {
+    const prefix = `${service}/revisions/${GCP_IDENTITY.service}-`;
+    return asset.name.startsWith(prefix) && /^[0-9a-f]{12}$/.test(asset.name.slice(prefix.length))
+      && asset.location === 'asia-east2' && asset.parentFullResourceName === service
+      && asset.parentAssetType === 'run.googleapis.com/Service';
+  }
+  if (asset.assetType === 'artifactregistry.googleapis.com/DockerImage') {
+    const prefix = `${repository}/dockerImages/${GCP_IDENTITY.service}@sha256:`;
+    return asset.name.startsWith(prefix) && /^[0-9a-f]{64}$/.test(asset.name.slice(prefix.length))
+      && asset.location === 'asia-east2' && asset.parentFullResourceName === repository
+      && asset.parentAssetType === 'artifactregistry.googleapis.com/Repository';
+  }
+  return false;
+}
+
+function exactManagedGeneratedAsset(asset) {
+  const labels = asset.labels ?? {};
+  if (asset.assetType === 'monitoring.googleapis.com/AlertPolicy') {
+    const policy = REQUIRED_MONITORING.policies.find(({ displayName }) => displayName === asset.displayName);
+    return Boolean(policy) && new RegExp(`^//monitoring\\.googleapis\\.com/projects/${PROJECT_NUMBER}/alertPolicies/[1-9]\\d*$`).test(asset.name)
+      && asset.location === 'global' && asset.parentFullResourceName === ASSET_PROJECT_PARENT
+      && asset.parentAssetType === ASSET_PROJECT_TYPE
+      && exact(labels, { application: 'hong_kong_buddy', environment: 'production_v1', hkbuddy_contract: policy.id.replaceAll('-', '_') });
+  }
+  if (asset.assetType === 'monitoring.googleapis.com/NotificationChannel') {
+    return asset.displayName === REQUIRED_MONITORING.notificationChannel.displayName
+      && new RegExp(`^//monitoring\\.googleapis\\.com/projects/${PROJECT_NUMBER}/notificationChannels/[1-9]\\d*$`).test(asset.name)
+      && asset.location === 'global' && asset.parentFullResourceName === ASSET_PROJECT_PARENT
+      && asset.parentAssetType === ASSET_PROJECT_TYPE && exact(labels, OWNERSHIP_LABELS);
+  }
+  return false;
+}
+
+function assetHasManagedMarker(asset) {
+  const text = [asset.name, asset.displayName, asset.description, asset.parentFullResourceName,
+    ...Object.entries(asset.labels ?? {}).flat()]
+    .filter((value) => typeof value === 'string').join(' ');
+  return /hkbuddy-v1-|hkbuddyv1|\bhk buddy v1\b|\bhong kong buddy production v1\b/i.test(text);
+}
+
 function assertCloudAssetInventory(assets) {
-  if (!Array.isArray(assets) || assets.length > 1000 || assets.some((asset) => (
-    !asset || typeof asset !== 'object' || Array.isArray(asset)
-      || typeof asset.name !== 'string' || typeof asset.assetType !== 'string'
-  ))) throw commandError('CLOUD_ASSET_INVENTORY_AMBIGUOUS');
-  if (assets.some((asset) => asset.project !== `projects/${PROJECT}`)) {
+  if (!Array.isArray(assets) || assets.some((asset) => !cloudAssetMetadataIsValid(asset))) {
+    throw commandError('CLOUD_ASSET_INVENTORY_AMBIGUOUS');
+  }
+  if (assets.some((asset) => asset.project !== ASSET_PROJECT)) {
     throw commandError('CLOUD_ASSET_INVENTORY_WRONG_PROJECT');
   }
-  const permitted = new Set([
-    GCP_IDENTITY.service, GCP_IDENTITY.repository, GCP_IDENTITY.bucket,
-    GCP_IDENTITY.cloudSqlInstance, GCP_IDENTITY.database, GCP_IDENTITY.network,
-    GCP_IDENTITY.subnet, GCP_IDENTITY.psaRange,
-    ...Object.values(GCP_IDENTITY.serviceAccounts).map((email) => email.split('@')[0]),
-    ...Object.values(GCP_IDENTITY.secrets), ...Object.values(GCP_IDENTITY.jobs),
-    ...REQUIRED_CUSTOM_ROLES.map(({ id }) => id),
-  ]);
   for (const asset of assets) {
-    const text = [asset.name, asset.displayName, asset.description, asset.location]
-      .filter((value) => typeof value === 'string').join(' ');
-    for (const identity of text.match(/hkbuddy-v1-[a-z0-9-]+/gi) ?? []) {
-      if (!permitted.has(identity)) throw commandError('RESOURCE_COLLISION');
-    }
-    for (const identity of text.match(/hkbuddyV1[A-Za-z0-9]+/g) ?? []) {
-      if (!permitted.has(identity)) throw commandError('RESOURCE_COLLISION');
-    }
+    const text = [asset.name, asset.displayName, asset.description].filter((value) => typeof value === 'string').join(' ');
     if (/hkbuddy-(?:prod|pilot|api|pg|runtime|build|migrator|deployer|acceptance)(?:[-_a-z0-9]*)?/i.test(text)) {
+      throw commandError('RESOURCE_COLLISION');
+    }
+    const managedDescendantParent = asset.parentFullResourceName
+      === `//artifactregistry.googleapis.com/projects/${PROJECT}/locations/asia-east2/repositories/${GCP_IDENTITY.repository}`
+      || asset.parentFullResourceName
+      === `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/services/${GCP_IDENTITY.service}`;
+    if ((assetHasManagedMarker(asset) || managedDescendantParent) && !exactTopLevelManagedAsset(asset)
+      && !exactManagedDescendantAsset(asset) && !exactManagedGeneratedAsset(asset)) {
       throw commandError('RESOURCE_COLLISION');
     }
   }
@@ -1380,10 +1582,10 @@ export class GcpControlPlane {
         this.#gcloud(['compute', 'networks', 'list', `--project=${PROJECT}`, '--format=json']),
         this.#gcloud(['compute', 'networks', 'subnets', 'list', `--project=${PROJECT}`, '--format=json']),
         this.#gcloud(['compute', 'routes', 'list', `--project=${PROJECT}`, '--format=json']),
-        this.#gcloud(['compute', 'addresses', 'list', '--global', `--project=${PROJECT}`, '--format=json']),
+        this.#gcloud(['compute', 'addresses', 'list', `--project=${PROJECT}`, '--format=json']),
       ]);
       const networkInventory = requireObjectList(networks);
-      assertProjectWideCidrAvailability({ subnets, routes, addresses });
+      assertProjectWideCidrAvailability({ networks, subnets, routes, addresses });
       if (enabledApis.has('servicenetworking.googleapis.com')) {
         const peeringLists = await Promise.all(networkInventory.map(({ name }) => this.#gcloud([
           'services', 'vpc-peerings', 'list', `--network=${name}`, '--service=servicenetworking.googleapis.com',
@@ -1440,9 +1642,9 @@ export class GcpControlPlane {
     try { return this.#compare(id, value, context); } catch { return false; }
   }
 
-  async #gcloud(args) {
+  async #gcloud(args, options) {
     if (!args.includes(`--project=${PROJECT}`)) throw commandError('PROJECT_FLAG_REQUIRED');
-    return this.gcloud(args);
+    return this.gcloud(args, options);
   }
 
   async #rest(input) {
@@ -1476,7 +1678,7 @@ export class GcpControlPlane {
 
   #projectNumber() {
     const project = this.cache.get('project');
-    const value = String(project?.projectNumber ?? project?.name?.split('/').at(-1) ?? '');
+    const value = String(project?.projectNumber ?? '');
     if (!/^\d{6,20}$/.test(value)) throw commandError('PROJECT_NUMBER_UNAVAILABLE');
     return value;
   }
@@ -1514,58 +1716,83 @@ export class GcpControlPlane {
         this.#gcloud(['iam', 'service-accounts', 'list', `--project=${PROJECT}`, '--format=json']),
         this.#gcloud(['iam', 'roles', 'list', `--project=${PROJECT}`, '--format=json']),
       ]);
-      assertNoForeignManagedIdentity(serviceAccounts, this.contract.resources.serviceAccounts.map(({ id }) => id));
-      assertNoForeignManagedIdentity(roles, this.contract.resources.customRoles.map(({ id }) => id), 'hkbuddyV1');
+      assertManagedIdentityInventory(serviceAccounts, this.contract.resources.serviceAccounts.map(({ id }) => id), (item) => {
+        if (typeof item.email !== 'string' || (item.name !== undefined
+          && item.name !== `projects/${PROJECT}/serviceAccounts/${item.email}`)) {
+          throw commandError('LIST_RESPONSE_AMBIGUOUS');
+        }
+        return item.email;
+      });
+      assertManagedIdentityInventory(roles, this.contract.resources.customRoles.map(({ id }) => id), (item) => {
+        if (typeof item.name !== 'string'
+          || (item.name.includes('hkbuddyV1') && !item.name.startsWith(`projects/${PROJECT}/roles/`))) {
+          throw commandError('LIST_RESPONSE_AMBIGUOUS');
+        }
+        return item.name;
+      }, /hkbuddyV1/i);
     }
     if (enabledApis.has('artifactregistry.googleapis.com')) {
       const repositories = await this.#gcloud([
         'artifacts', 'repositories', 'list', '--location=asia-east2', `--project=${PROJECT}`, '--format=json',
       ]);
-      assertNoForeignManagedIdentity(repositories, [GCP_IDENTITY.repository]);
+      assertManagedIdentityInventory(repositories, [GCP_IDENTITY.repository], (item) => {
+        if (typeof item.name !== 'string' || (item.name.includes('hkbuddy-v1')
+          && !item.name.startsWith(`projects/${PROJECT}/locations/asia-east2/repositories/`))) {
+          throw commandError('LIST_RESPONSE_AMBIGUOUS');
+        }
+        return item.name;
+      });
     }
     if (enabledApis.has('sqladmin.googleapis.com')) {
       const instances = await this.#gcloud(['sql', 'instances', 'list', `--project=${PROJECT}`, '--format=json']);
-      assertNoForeignManagedIdentity(instances, [GCP_IDENTITY.cloudSqlInstance]);
+      assertManagedIdentityInventory(instances, [GCP_IDENTITY.cloudSqlInstance], (item) => {
+        if (typeof item.name !== 'string' || (item.name.includes('hkbuddy-v1')
+          && item.project !== undefined && item.project !== PROJECT)) throw commandError('LIST_RESPONSE_AMBIGUOUS');
+        return item.name;
+      });
     }
     if (enabledApis.has('secretmanager.googleapis.com')) {
       const secrets = await this.#gcloud(['secrets', 'list', `--project=${PROJECT}`, '--format=json']);
-      assertNoForeignManagedIdentity(secrets, this.contract.resources.secrets.map(({ id }) => id));
+      assertManagedIdentityInventory(secrets, this.contract.resources.secrets.map(({ id }) => id), (item) => {
+        if (typeof item.name !== 'string' || (item.name.includes('hkbuddy-v1')
+          && !item.name.startsWith(`projects/${PROJECT}/secrets/`))) throw commandError('LIST_RESPONSE_AMBIGUOUS');
+        return item.name;
+      });
     }
     if (enabledApis.has('storage.googleapis.com')) {
       const buckets = await this.#gcloud(['storage', 'buckets', 'list', `--project=${PROJECT}`, '--format=json']);
-      assertNoForeignManagedIdentity(buckets, [GCP_IDENTITY.bucket]);
+      assertManagedIdentityInventory(buckets, [GCP_IDENTITY.bucket], ({ name }) => name);
     }
     if (enabledApis.has('compute.googleapis.com')) {
       const [networks, subnets, addresses] = await Promise.all([
         this.#gcloud(['compute', 'networks', 'list', `--project=${PROJECT}`, '--format=json']),
         this.#gcloud(['compute', 'networks', 'subnets', 'list', `--project=${PROJECT}`, '--format=json']),
-        this.#gcloud(['compute', 'addresses', 'list', '--global', `--project=${PROJECT}`, '--format=json']),
+        this.#gcloud(['compute', 'addresses', 'list', `--project=${PROJECT}`, '--format=json']),
       ]);
-      assertNoForeignManagedIdentity(networks, [GCP_IDENTITY.network]);
-      assertNoForeignManagedIdentity(subnets, [GCP_IDENTITY.subnet]);
-      assertNoForeignManagedIdentity(addresses, [GCP_IDENTITY.psaRange]);
+      assertManagedIdentityInventory(networks, [GCP_IDENTITY.network], ({ name }) => name);
+      assertManagedIdentityInventory(subnets, [GCP_IDENTITY.subnet], ({ name }) => name);
+      assertManagedIdentityInventory(addresses, [GCP_IDENTITY.psaRange], ({ name }) => name);
     }
     if (enabledApis.has('run.googleapis.com')) {
       const [services, jobs] = await Promise.all([
         this.#gcloud(['run', 'services', 'list', '--region=asia-east2', `--project=${PROJECT}`, '--format=json']),
         this.#gcloud(['run', 'jobs', 'list', '--region=asia-east2', `--project=${PROJECT}`, '--format=json']),
       ]);
-      assertNoForeignManagedIdentity(services, [GCP_IDENTITY.service]);
-      assertNoForeignManagedIdentity(jobs, Object.values(GCP_IDENTITY.jobs));
+      assertManagedIdentityInventory(services, [GCP_IDENTITY.service], (item) => item.metadata?.name ?? item.name);
+      assertManagedIdentityInventory(jobs, Object.values(GCP_IDENTITY.jobs), (item) => item.metadata?.name ?? item.name);
     }
     if (enabledApis.has('monitoring.googleapis.com')) {
       const [policies, channels] = await Promise.all([
         this.#listAll({ url: `https://monitoring.googleapis.com/v3/projects/${PROJECT}/alertPolicies?pageSize=1000`, itemKey: 'alertPolicies' }),
         this.#listAll({ url: `https://monitoring.googleapis.com/v3/projects/${PROJECT}/notificationChannels?pageSize=1000`, itemKey: 'notificationChannels' }),
       ]);
-      assertNoForeignManagedIdentity(policies, this.contract.resources.monitoring.policies.map(({ id }) => id));
-      assertNoForeignManagedIdentity(channels, []);
+      assertMonitoringInventory(policies, channels);
     }
     if (enabledApis.has('billingbudgets.googleapis.com')) {
       const budgets = await this.#listAll({
         url: `https://billingbudgets.googleapis.com/v1/billingAccounts/${BILLING_ACCOUNT}/budgets?pageSize=100`, itemKey: 'budgets',
       });
-      assertNoForeignManagedIdentity(budgets, [this.contract.resources.budget.displayName]);
+      assertBudgetInventory(budgets, this.#projectNumber());
     }
   }
 
@@ -1575,8 +1802,9 @@ export class GcpControlPlane {
       assets = await this.#gcloud([
         'asset', 'search-all-resources', `--scope=projects/${PROJECT}`,
         `--billing-project=${GCP_IDENTITY.assetInventoryConsumerProjectId}`,
-        `--project=${PROJECT}`, '--limit=1000', '--format=json',
-      ]);
+        `--project=${PROJECT}`, '--page-size=500', `--read-mask=${ASSET_READ_MASK}`,
+        '--order-by=assetType,name', '--format=json',
+      ], { maxBuffer: ASSET_MAX_BUFFER });
     } catch (error) {
       throw commandError('CLOUD_ASSET_INVENTORY_UNAVAILABLE');
     }
@@ -1647,9 +1875,18 @@ export class GcpControlPlane {
         '--service=servicenetworking.googleapis.com', `--project=${PROJECT}`, '--format=json',
       ]);
       const listing = requireObjectList(values);
-      const value = listing.find(({ service }) => service === 'servicenetworking.googleapis.com')
-        ?? listing[0];
-      return value ? { status: 'present', value } : { status: 'absent' };
+      if (listing.some((value) => typeof value.service !== 'string'
+        || typeof value.network !== 'string'
+        || !Array.isArray(value.reservedPeeringRanges)
+        || value.reservedPeeringRanges.some((range) => typeof range !== 'string'))) {
+        throw commandError('LIST_RESPONSE_AMBIGUOUS');
+      }
+      const targetNetwork = `projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`;
+      const matches = listing.filter(({ service, network }) => (
+        service === 'servicenetworking.googleapis.com' && network === targetNetwork
+      ));
+      if (matches.length > 1) throw commandError('LIST_RESPONSE_AMBIGUOUS');
+      return matches.length === 1 ? { status: 'present', value: matches[0] } : { status: 'absent' };
     }
     if (id === 'cloud-sql-instance') {
       const raw = await this.#gcloud([
@@ -1875,7 +2112,9 @@ export class GcpControlPlane {
       && value.purpose === 'VPC_PEERING' && value.network?.endsWith(`/networks/${GCP_IDENTITY.network}`);
     if (id === 'psa-connection') {
       const ranges = value.reservedPeeringRanges ?? value.reservedPeeringRange ?? [];
-      return ranges.includes(GCP_IDENTITY.psaRange);
+      return value.service === 'servicenetworking.googleapis.com'
+        && value.network === `projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`
+        && exact(ranges, [GCP_IDENTITY.psaRange]);
     }
     if (id === 'cloud-sql-instance') return this.#compareCloudSql(value);
     if (id === 'database') return value.name === GCP_IDENTITY.database && value.instance === GCP_IDENTITY.cloudSqlInstance
@@ -1893,6 +2132,8 @@ export class GcpControlPlane {
     if (id.startsWith('db-user:')) return this.#compareDatabaseUser(id.slice('db-user:'.length), value);
     if (id.startsWith('iam:')) return value.exact === true;
     if (id === 'notification-channel') return value.name === context.notificationChannel
+      && value.displayName === REQUIRED_MONITORING.notificationChannel.displayName
+      && exact(value.userLabels, OWNERSHIP_LABELS)
       && value.type === 'email' && value.enabled === true
       && value.verificationStatus === 'VERIFIED';
     if (id.startsWith('monitoring-policy:')) return value.exact === true;
@@ -2195,6 +2436,7 @@ export class GcpControlPlane {
   }
 
   #policyMatches(policyId, actual) {
+    if (!new RegExp(`^projects/${PROJECT_NUMBER}/alertPolicies/[1-9]\\d*$`).test(actual?.name ?? '')) return false;
     const expected = this.#policyBody(policyId, this.notificationChannel);
     const projected = {
       displayName: actual.displayName, combiner: actual.combiner, enabled: actual.enabled,
@@ -2274,6 +2516,7 @@ export class GcpControlPlane {
   }
 
   #budgetMatches(actual) {
+    if (!new RegExp(`^billingAccounts/${BILLING_ACCOUNT}/budgets/[A-Za-z0-9_-]+$`).test(actual?.name ?? '')) return false;
     const expected = this.#budgetBody(this.notificationChannel);
     const notification = actual.notificationsRule ?? {};
     const projected = {
@@ -2296,16 +2539,17 @@ export class GcpControlPlane {
   }
 
   async #assertCidrAvailable(desired, kind) {
-    const [subnets, routes, addresses] = await Promise.all([
+    const [networks, subnets, routes, addresses] = await Promise.all([
+      this.#gcloud(['compute', 'networks', 'list', `--project=${PROJECT}`, '--format=json']),
       this.#gcloud(['compute', 'networks', 'subnets', 'list', `--project=${PROJECT}`, '--format=json']),
       this.#gcloud(['compute', 'routes', 'list', `--project=${PROJECT}`, '--format=json']),
-      this.#gcloud(['compute', 'addresses', 'list', '--global', `--project=${PROJECT}`, '--format=json']),
+      this.#gcloud(['compute', 'addresses', 'list', `--project=${PROJECT}`, '--format=json']),
     ]);
     assertCidrAvailable({
       desired,
       kind,
-      network: `projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`,
-      subnets: requireObjectList(subnets), routes: requireObjectList(routes),
+      network: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`,
+      networks: requireObjectList(networks), subnets: requireObjectList(subnets), routes: requireObjectList(routes),
       addresses: requireObjectList(addresses),
     });
   }

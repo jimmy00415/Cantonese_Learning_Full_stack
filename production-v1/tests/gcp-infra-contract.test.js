@@ -23,8 +23,13 @@ import { GCP_IDENTITY } from '../src/gcp-identity.js';
 
 const CONTRACT_URL = new URL('../infra/gcp/resource-contract.json', import.meta.url);
 const PROJECT = GCP_IDENTITY.projectId;
-const CHANNEL = `projects/${PROJECT}/notificationChannels/123456789`;
 const PROJECT_NUMBER = GCP_IDENTITY.projectNumber;
+const CHANNEL = `projects/${PROJECT_NUMBER}/notificationChannels/123456789`;
+const NUMERIC_CHANNEL = CHANNEL;
+const ASSET_PROJECT = `projects/${PROJECT_NUMBER}`;
+const ASSET_PROJECT_PARENT = `//cloudresourcemanager.googleapis.com/projects/${PROJECT_NUMBER}`;
+const ASSET_PROJECT_TYPE = 'cloudresourcemanager.googleapis.com/Project';
+const ASSET_READ_MASK = 'name,assetType,project,displayName,description,location,labels,parentFullResourceName,parentAssetType,state';
 const ACCEPTANCE_BUCKET_METADATA_ROLE = Object.freeze({
   id: 'hkbuddyV1AcceptanceBucketMetadataReader',
   name: `projects/${PROJECT}/roles/hkbuddyV1AcceptanceBucketMetadataReader`,
@@ -66,6 +71,69 @@ async function contractFixture() {
   return JSON.parse(await readFile(CONTRACT_URL, 'utf8'));
 }
 
+function cloudAsset(overrides = {}) {
+  return {
+    name: `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/services/${GCP_IDENTITY.service}`,
+    assetType: 'run.googleapis.com/Service',
+    project: ASSET_PROJECT,
+    displayName: GCP_IDENTITY.service,
+    description: '',
+    location: 'asia-east2',
+    labels: {},
+    parentFullResourceName: ASSET_PROJECT_PARENT,
+    parentAssetType: ASSET_PROJECT_TYPE,
+    state: 'ACTIVE',
+    ...overrides,
+  };
+}
+
+function protectedProjectPolicy(contract) {
+  return {
+    bindings: contract.project.protectedBindings.map(({ role, member }) => ({ role, members: [member] })),
+  };
+}
+
+function notFound() {
+  return Object.assign(new Error('not found'), { code: 'NOT_FOUND' });
+}
+
+function assetAuditControlPlane({ contract, assets, enabledApis = ['iam.googleapis.com', 'serviceusage.googleapis.com'], gcloudRows = {}, restRows = {} }) {
+  const gcloudCalls = [];
+  const restCalls = [];
+  const plane = new GcpControlPlane({
+    contract,
+    notificationChannel: NUMERIC_CHANNEL,
+    gcloud: async (args) => {
+      gcloudCalls.push(args);
+      if (args[0] === 'projects' && args[1] === 'describe') return {
+        projectId: PROJECT, projectNumber: PROJECT_NUMBER, parent: { id: GCP_IDENTITY.organizationId },
+        name: 'Motion Expert HK LTD Webpage', labels: {}, lifecycleState: 'ACTIVE',
+      };
+      if (args[0] === 'billing' && args[1] === 'projects') return {
+        billingEnabled: true, billingAccountName: `billingAccounts/${GCP_IDENTITY.billingAccountId}`,
+      };
+      if (args[0] === 'projects' && args[1] === 'get-iam-policy') return protectedProjectPolicy(contract);
+      if (args[0] === 'asset') {
+        if (assets instanceof Error) throw assets;
+        return assets;
+      }
+      if (args[0] === 'services' && args[1] === 'list') return enabledApis.map((name) => ({ config: { name } }));
+      const key = args.slice(0, 3).join(' ');
+      if (Object.hasOwn(gcloudRows, key)) return gcloudRows[key];
+      if (args[0] === 'iam' && args.includes('list')) return [];
+      throw notFound();
+    },
+    request: async (input) => {
+      restCalls.push(input);
+      for (const [needle, value] of Object.entries(restRows)) {
+        if (input.url.includes(needle)) return typeof value === 'function' ? value(input) : value;
+      }
+      throw notFound();
+    },
+  });
+  return { plane, gcloudCalls, restCalls };
+}
+
 test('central identity fixes the shared billed project resource island without legacy cloud identities', async () => {
   const contract = await contractFixture();
 
@@ -86,8 +154,11 @@ test('central identity fixes the shared billed project resource island without l
     consumerProjectId: 'tech-demo-433408',
     mode: 'read-only-cloud-asset-quota-consumer',
     scope: 'projects/motion-expert-hk-ltd-webpage',
-    limit: 1000,
+    pageSize: 500,
+    readMask: ASSET_READ_MASK,
+    orderBy: 'assetType,name',
   });
+  assert.equal(contract.project.projectNumber, PROJECT_NUMBER);
 
   const serialized = JSON.stringify({ identity: GCP_IDENTITY, contract });
   for (const legacyIdentity of [
@@ -137,12 +208,15 @@ test('the executable contract fixes the isolated GCP topology and least-privileg
     displayName: 'Motion Expert HK LTD Webpage',
     organizationId: GCP_IDENTITY.organizationId,
     billingAccountId: GCP_IDENTITY.billingAccountId,
+    projectNumber: PROJECT_NUMBER,
     mode: 'existing-billed-shared',
     assetInventory: {
       consumerProjectId: GCP_IDENTITY.assetInventoryConsumerProjectId,
       mode: 'read-only-cloud-asset-quota-consumer',
       scope: `projects/${PROJECT}`,
-      limit: 1000,
+      pageSize: 500,
+      readMask: ASSET_READ_MASK,
+      orderBy: 'assetType,name',
     },
     protectedBindings: [
       { member: 'user:admin@motionexp.com', role: 'roles/owner' },
@@ -159,6 +233,15 @@ test('the executable contract fixes the isolated GCP topology and least-privileg
     repository: GCP_IDENTITY.repository, format: 'DOCKER', mode: 'STANDARD_REPOSITORY',
     location: 'asia-east2', description: 'Hong Kong Buddy production containers',
   });
+  assert.deepEqual(contract.resources.monitoring.notificationChannel, {
+    required: true,
+    displayName: 'HK Buddy V1 operations',
+    ownershipLabels: { application: 'hong_kong_buddy', environment: 'production_v1', hkbuddy_contract: 'operations' },
+    mustBeEnabled: true,
+    requiredType: 'email',
+    requiredVerificationStatus: 'VERIFIED',
+  });
+  assert.equal(contract.resources.budget.projectFilter, `projects/${PROJECT_NUMBER}`);
   assert.deepEqual(contract.resources.customRoles, [ACCEPTANCE_BUCKET_METADATA_ROLE]);
   assert.equal(
     EXPECTED_PROVISION_STEPS.includes('custom-role:hkbuddyV1AcceptanceBucketMetadataReader'),
@@ -217,7 +300,7 @@ test('the executable contract fixes the isolated GCP topology and least-privileg
   });
   assert.deepEqual(contract.resources.budget, {
     displayName: 'Hong Kong Buddy Production V1 monthly guard', currency: 'HKD',
-    amount: 2300, calendarPeriod: 'MONTH', projectFilter: `projects/${PROJECT}`,
+    amount: 2300, calendarPeriod: 'MONTH', projectFilter: `projects/${PROJECT_NUMBER}`,
     thresholds: [
       { percent: 0.5, basis: 'CURRENT_SPEND' },
       { percent: 0.8, basis: 'CURRENT_SPEND' },
@@ -378,6 +461,30 @@ test('gcloud execution is argv-only and rejects values that could disclose a sec
   );
 });
 
+test('exhaustive inventory gets a bounded invocation-specific output capacity and overflow fails closed', async () => {
+  const calls = [];
+  const executor = createGcloudExecutor({
+    executable: 'python.exe', prefixArgs: ['C:/gcloud/lib/gcloud.py'],
+    execFile: async (_executable, _args, options) => {
+      calls.push(options);
+      const error = new Error('stdout maxBuffer length exceeded');
+      error.code = 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
+      throw error;
+    },
+  });
+  await assert.rejects(
+    () => executor(['asset', 'search-all-resources', `--project=${PROJECT}`], { maxBuffer: 16 * 1024 * 1024 }),
+    (error) => error.code === 'TRANSPORT_AMBIGUOUS',
+  );
+  assert.deepEqual(calls, [{
+    encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, windowsHide: true,
+  }]);
+  await assert.rejects(
+    () => executor(['asset', 'search-all-resources', `--project=${PROJECT}`], { maxBuffer: 64 * 1024 * 1024 }),
+    /output limit is invalid/,
+  );
+});
+
 test('authenticated HTTPS control-plane identity is resolved without exposing its token', async () => {
   const seen = [];
   const request = createAuthenticatedRequest({
@@ -520,6 +627,33 @@ test('CIDR audit ignores only the target VPC system default route and blocks rea
   }));
 });
 
+test('CIDR audit validates complete Compute rows before filtering and requires project network authority', () => {
+  const network = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`;
+  const networks = [{ name: GCP_IDENTITY.network, selfLink: network }];
+  const exact = {
+    desired: '10.25.0.0/16', kind: 'psa', network, networks,
+    subnets: [], routes: [], addresses: [],
+  };
+  const malformed = [
+    { ...exact, networks: [{ name: GCP_IDENTITY.network }] },
+    { ...exact, subnets: [{ name: 'foreign-subnet', network: null, ipCidrRange: '10.25.1.0/24', region: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/regions/asia-east2` }] },
+    { ...exact, routes: [{ name: 'foreign-route', network: null, destRange: '10.25.1.0/24', nextHopVpnTunnel: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/regions/asia-east2/vpnTunnels/foreign` }] },
+    { ...exact, addresses: [{ name: 'foreign-psa', purpose: 'VPC_PEERING', address: '10.25.0.0', prefixLength: 16 }] },
+    { ...exact, addresses: [{ name: 'foreign-psa', purpose: 'VPC_PEERING', network, address: '10.25.0.1', prefixLength: 16, addressType: 'INTERNAL', status: 'RESERVED' }] },
+    { ...exact, subnets: [{ name: 'foreign-subnet', network: `${network}-missing`, ipCidrRange: '10.25.1.0/24', region: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/regions/asia-east2` }] },
+  ];
+  for (const input of malformed) {
+    assert.throws(() => assertCidrAvailable(input), (error) => error.code === 'CIDR_AUDIT_INVALID');
+  }
+  assert.throws(() => assertCidrAvailable({
+    ...exact,
+    routes: [{
+      name: 'foreign-default', network, destRange: '0.0.0.0/0',
+      nextHopGateway: 'https://www.googleapis.com/compute/v1/projects/foreign/global/gateways/default-internet-gateway',
+    }],
+  }), (error) => error.code === 'CIDR_OVERLAP');
+});
+
 test('monitoring aggregation groups Cloud Run and Cloud SQL metrics by their real resource label', () => {
   assert.equal(monitoringGroupByField('run.googleapis.com/request_count'), 'resource.label.service_name');
   assert.equal(monitoringGroupByField('cloudsql.googleapis.com/database/cpu/utilization'), 'resource.label.database_id');
@@ -639,6 +773,83 @@ test('monitoring policy identity matches the marker-or-display-name union before
     assert.deepEqual(await plane.read('monitoring-policy:sql-backup-failure'), {
       status: 'present', value: { exact: false },
     });
+  });
+});
+
+test('Monitoring and Billing readbacks bind generated IDs to exact numeric parents and ownership markers', async (t) => {
+  const contract = await contractFixture();
+  const definition = contract.resources.monitoring.policies.find(({ id }) => id === 'sql-backup-failure');
+  const exactPolicy = {
+    name: `projects/${PROJECT_NUMBER}/alertPolicies/123456789`,
+    displayName: definition.displayName,
+    combiner: 'OR', enabled: true, notificationChannels: [NUMERIC_CHANNEL],
+    userLabels: { application: 'hong_kong_buddy', environment: 'production_v1', hkbuddy_contract: 'sql_backup_failure' },
+    conditions: [{ displayName: definition.displayName, conditionMatchedLog: { filter: definition.filter } }],
+    alertStrategy: { notificationRateLimit: { period: '300s' }, autoClose: '604800s' },
+  };
+  const channel = {
+    name: NUMERIC_CHANNEL, displayName: 'HK Buddy V1 operations', type: 'email', enabled: true,
+    verificationStatus: 'VERIFIED', labels: { email_address: 'operations@example.test' },
+    userLabels: { application: 'hong_kong_buddy', environment: 'production_v1', hkbuddy_contract: 'operations' },
+  };
+  const exactBudget = {
+    name: `billingAccounts/${GCP_IDENTITY.billingAccountId}/budgets/123456789`,
+    displayName: 'Hong Kong Buddy Production V1 monthly guard',
+    budgetFilter: { projects: [ASSET_PROJECT], calendarPeriod: 'MONTH' },
+    amount: { specifiedAmount: { currencyCode: 'HKD', units: '2300' } },
+    thresholdRules: [
+      { thresholdPercent: 0.5, spendBasis: 'CURRENT_SPEND' },
+      { thresholdPercent: 0.8, spendBasis: 'CURRENT_SPEND' },
+      { thresholdPercent: 1, spendBasis: 'CURRENT_SPEND' },
+      { thresholdPercent: 1, spendBasis: 'FORECASTED_SPEND' },
+    ],
+    notificationsRule: { monitoringNotificationChannels: [NUMERIC_CHANNEL] },
+  };
+
+  await t.test('alert policy', async () => {
+    for (const [name, expected] of [
+      [exactPolicy.name, true],
+      [`projects/999999999999/alertPolicies/123456789`, false],
+    ]) {
+      const plane = new GcpControlPlane({
+        contract, notificationChannel: NUMERIC_CHANNEL,
+        gcloud: async () => { throw new Error('gcloud must not run'); },
+        request: async () => ({ alertPolicies: [{ ...exactPolicy, name }] }),
+      });
+      assert.deepEqual(await plane.read('monitoring-policy:sql-backup-failure'), {
+        status: 'present', value: { exact: expected },
+      });
+    }
+  });
+
+  await t.test('notification channel', async () => {
+    for (const [value, expected] of [
+      [channel, true],
+      [{ ...channel, displayName: 'HK Buddy V1 foreign operations' }, false],
+      [{ ...channel, userLabels: { ...channel.userLabels, hkbuddy_contract: 'foreign' } }, false],
+    ]) {
+      const plane = new GcpControlPlane({
+        contract, notificationChannel: NUMERIC_CHANNEL,
+        gcloud: async () => { throw new Error('gcloud must not run'); },
+        request: async () => value,
+      });
+      const readback = await plane.read('notification-channel', { notificationChannel: NUMERIC_CHANNEL });
+      assert.equal(readback.status, 'present');
+      assert.equal(plane.compare('notification-channel', readback.value, { notificationChannel: NUMERIC_CHANNEL }), expected);
+    }
+  });
+
+  await t.test('budget', async () => {
+    const plane = new GcpControlPlane({
+      contract, notificationChannel: NUMERIC_CHANNEL,
+      gcloud: async (args) => {
+        if (args[0] === 'projects') return { projectId: PROJECT, projectNumber: PROJECT_NUMBER };
+        throw new Error('unexpected gcloud');
+      },
+      request: async () => ({ budgets: [{ ...exactBudget, name: `billingAccounts/FOREIGN/budgets/123456789` }] }),
+    });
+    await plane.read('project');
+    assert.deepEqual(await plane.read('budget'), { status: 'present', value: { exact: false } });
   });
 });
 
@@ -1172,6 +1383,7 @@ test('bucket insert request contains only writable exact controls and readback i
 
 test('budget readback normalizes an omitted default-false notification field', async () => {
   const budget = {
+    name: `billingAccounts/${GCP_IDENTITY.billingAccountId}/budgets/123`,
     displayName: 'Hong Kong Buddy Production V1 monthly guard',
     budgetFilter: { projects: ['projects/123456789012'], calendarPeriod: 'MONTH' },
     amount: { specifiedAmount: { currencyCode: 'HKD', units: '2300' } },
@@ -1202,6 +1414,24 @@ test('budget readback normalizes an omitted default-false notification field', a
   await plane.read('project');
   const readback = await plane.read('budget');
   assert.deepEqual(readback, { status: 'present', value: { exact: true } });
+});
+
+test('budget authority never infers a project number from project name fields', async () => {
+  const requests = [];
+  const plane = new GcpControlPlane({
+    contract: await contractFixture(), notificationChannel: NUMERIC_CHANNEL,
+    gcloud: async (args) => {
+      if (args[0] === 'projects') return { projectId: PROJECT, name: `projects/${PROJECT_NUMBER}` };
+      throw new Error('unexpected gcloud');
+    },
+    request: async (input) => { requests.push(input); return {}; },
+  });
+  await plane.read('project');
+  await assert.rejects(
+    () => plane.create('budget', { notificationChannel: NUMERIC_CHANNEL }),
+    (error) => error.code === 'PROJECT_NUMBER_UNAVAILABLE',
+  );
+  assert.deepEqual(requests, []);
 });
 
 test('budget pagination respects the Billing Budgets API maximum page size', async () => {
@@ -1373,6 +1603,37 @@ test('every non-paginated list readback rejects malformed shapes before any crea
   }
 });
 
+test('PSA connection readback selects only the exact service network and range and rejects duplicates', async () => {
+  const targetNetwork = `projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`;
+  const exactConnection = {
+    service: 'servicenetworking.googleapis.com', network: targetNetwork,
+    reservedPeeringRanges: [GCP_IDENTITY.psaRange],
+  };
+  for (const [listing, expected] of [
+    [[
+      { service: 'other.googleapis.com', network: targetNetwork, reservedPeeringRanges: ['foreign'] },
+      exactConnection,
+    ], { status: 'present', value: exactConnection }],
+    [[{ service: 'other.googleapis.com', network: targetNetwork, reservedPeeringRanges: ['foreign'] }], { status: 'absent' }],
+  ]) {
+    const plane = new GcpControlPlane({
+      contract: await contractFixture(), notificationChannel: NUMERIC_CHANNEL,
+      gcloud: async () => listing,
+      request: async () => { throw new Error('REST must not run'); },
+    });
+    assert.deepEqual(await plane.read('psa-connection'), expected);
+  }
+  const duplicatePlane = new GcpControlPlane({
+    contract: await contractFixture(), notificationChannel: NUMERIC_CHANNEL,
+    gcloud: async () => [exactConnection, { ...exactConnection }],
+    request: async () => { throw new Error('REST must not run'); },
+  });
+  await assert.rejects(
+    () => duplicatePlane.read('psa-connection'),
+    (error) => error.code === 'LIST_RESPONSE_AMBIGUOUS',
+  );
+});
+
 function preflightGcloud({
   projectPresent = true, forbidden = false, billingCurrency = 'HKD',
   activeAccount = 'admin@motionexp.com',
@@ -1540,7 +1801,8 @@ test('real control plane completes the no-channel discovery stage with only API 
   assert.deepEqual(calls.find((args) => args[0] === 'asset' && args[1] === 'search-all-resources'), [
     'asset', 'search-all-resources', `--scope=projects/${PROJECT}`,
     `--billing-project=${GCP_IDENTITY.assetInventoryConsumerProjectId}`,
-    `--project=${PROJECT}`, '--limit=1000', '--format=json',
+    `--project=${PROJECT}`, '--page-size=500', `--read-mask=${ASSET_READ_MASK}`,
+    '--order-by=assetType,name', '--format=json',
   ]);
   assert.equal(calls.some((args) => args.includes(`--project=${GCP_IDENTITY.assetInventoryConsumerProjectId}`)), false);
   assert.deepEqual(calls.filter((args) => args.includes('enable')).map((args) => args.slice(0, 2)), [['services', 'enable']]);
@@ -1565,6 +1827,9 @@ test('real Cloud Asset audit fails closed before host mutation for disabled-serv
   };
   const targetProject = `projects/${PROJECT}`;
   const unavailable = Object.assign(new Error('Cloud Asset API is disabled'), { code: 'FORBIDDEN' });
+  const overflow = Object.assign(new Error('stdout maxBuffer length exceeded'), {
+    code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+  });
   const cases = [
     ...[
       ['Cloud Run service', 'run.googleapis.com/Service', `//run.googleapis.com/${targetProject}/locations/asia-east2/services/hkbuddy-v1-foreign`],
@@ -1574,15 +1839,20 @@ test('real Cloud Asset audit fails closed before host mutation for disabled-serv
       ['bucket', 'storage.googleapis.com/Bucket', '//storage.googleapis.com/hkbuddy-v1-foreign'],
       ['secret', 'secretmanager.googleapis.com/Secret', `//secretmanager.googleapis.com/${targetProject}/secrets/hkbuddy-v1-foreign`],
       ['custom role', 'iam.googleapis.com/Role', `//iam.googleapis.com/${targetProject}/roles/hkbuddyV1Foreign`],
-    ].map(([family, assetType, name]) => [`disabled-service foreign ${family} alias`, [{
-      name, assetType, project: targetProject, displayName: family === 'custom role' ? 'hkbuddyV1Foreign' : 'hkbuddy-v1-foreign',
-    }], 'RESOURCE_COLLISION']),
+    ].map(([family, assetType, name]) => [`disabled-service foreign ${family} alias`, [cloudAsset({
+      name, assetType, project: ASSET_PROJECT,
+      displayName: family === 'custom role' ? 'hkbuddyV1Foreign' : 'hkbuddy-v1-foreign',
+      location: family === 'custom role' ? 'global' : 'asia-east2',
+    })], 'RESOURCE_COLLISION']),
     ['ambiguous asset payload', [{ name: 'missing-asset-type', project: targetProject }], 'CLOUD_ASSET_INVENTORY_AMBIGUOUS'],
     ['wrong project asset', [{
       name: '//run.googleapis.com/projects/foreign/locations/asia-east2/services/hkbuddy-v1-foreign',
-      assetType: 'run.googleapis.com/Service', project: 'projects/foreign', displayName: 'hkbuddy-v1-foreign',
+      assetType: 'run.googleapis.com/Service', project: 'projects/999999999999', displayName: 'hkbuddy-v1-foreign',
+      parentFullResourceName: '//cloudresourcemanager.googleapis.com/projects/999999999999',
+      parentAssetType: ASSET_PROJECT_TYPE, location: 'asia-east2', labels: {}, state: 'ACTIVE',
     }], 'CLOUD_ASSET_INVENTORY_WRONG_PROJECT'],
     ['Cloud Asset unavailable', unavailable, 'CLOUD_ASSET_INVENTORY_UNAVAILABLE'],
+    ['Cloud Asset output overflow', overflow, 'CLOUD_ASSET_INVENTORY_UNAVAILABLE'],
   ];
   for (const [name, assets, code] of cases) {
     await t.test(name, async () => {
@@ -1603,12 +1873,214 @@ test('real Cloud Asset audit fails closed before host mutation for disabled-serv
       assert.deepEqual(calls.find((args) => args[0] === 'asset'), [
         'asset', 'search-all-resources', `--scope=projects/${PROJECT}`,
         `--billing-project=${GCP_IDENTITY.assetInventoryConsumerProjectId}`,
-        `--project=${PROJECT}`, '--limit=1000', '--format=json',
+        `--project=${PROJECT}`, '--page-size=500', `--read-mask=${ASSET_READ_MASK}`,
+        '--order-by=assetType,name', '--format=json',
       ]);
       assert.equal(calls.some((args) => args.includes('enable') || args.includes('create')
         || args.includes('add-iam-policy-binding') || args.includes('set-iam-policy')
         || args.includes('remove-iam-policy-binding')), false);
       assert.deepEqual(restCalls, []);
+    });
+  }
+});
+
+test('Cloud Asset retrieval is exhaustive and exactly 1000 valid rows cannot imply truncation', async () => {
+  const contract = await contractFixture();
+  const assets = Array.from({ length: 1_000 }, (_unused, index) => cloudAsset({
+    name: `//compute.googleapis.com/projects/${PROJECT}/zones/asia-east2-a/disks/unrelated-${index}`,
+    assetType: 'compute.googleapis.com/Disk',
+    displayName: `unrelated-${index}`,
+    location: 'asia-east2-a',
+  }));
+  const fixture = assetAuditControlPlane({ contract, assets });
+  await fixture.plane.auditPreMutationState();
+  const argv = fixture.gcloudCalls.find((args) => args[0] === 'asset');
+  assert.equal(argv.includes('--limit=1000'), false);
+  assert.deepEqual(argv, [
+    'asset', 'search-all-resources', `--scope=projects/${PROJECT}`,
+    `--billing-project=${GCP_IDENTITY.assetInventoryConsumerProjectId}`,
+    `--project=${PROJECT}`, '--page-size=500', `--read-mask=${ASSET_READ_MASK}`,
+    '--order-by=assetType,name', '--format=json',
+  ]);
+  assert.equal(fixture.gcloudCalls.some((args) => args.includes('enable') || args.includes('create')), false);
+  assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+});
+
+test('Cloud Asset managed identities require exact type name numeric project parent location and metadata shapes', async (t) => {
+  const contract = await contractFixture();
+  const exactService = cloudAsset();
+  const cases = [
+    ['expected service token on Secret type', cloudAsset({
+      name: `//secretmanager.googleapis.com/projects/${PROJECT}/secrets/${GCP_IDENTITY.service}`,
+      assetType: 'secretmanager.googleapis.com/Secret',
+    })],
+    ['malformed full name', cloudAsset({ name: `projects/${PROJECT}/locations/asia-east2/services/${GCP_IDENTITY.service}` })],
+    ['wrong service prefix', cloudAsset({ name: `//evil.googleapis.com/projects/${PROJECT}/locations/asia-east2/services/${GCP_IDENTITY.service}` })],
+    ['wrong project segment', cloudAsset({ name: `//run.googleapis.com/projects/foreign/locations/asia-east2/services/${GCP_IDENTITY.service}` })],
+    ['missing parent', { ...exactService, parentFullResourceName: undefined }],
+    ['wrong parent', cloudAsset({ parentFullResourceName: '//cloudresourcemanager.googleapis.com/projects/999999999999' })],
+    ['wrong parent type', cloudAsset({ parentAssetType: 'run.googleapis.com/Service' })],
+    ['wrong location', cloudAsset({ location: 'us-central1' })],
+    ['case variant custom role', cloudAsset({
+      name: `//iam.googleapis.com/projects/${PROJECT}/roles/HkbuddyV1AcceptanceBucketMetadataReader`,
+      assetType: 'iam.googleapis.com/Role', displayName: 'HkbuddyV1AcceptanceBucketMetadataReader',
+      location: 'global',
+    })],
+  ];
+  for (const [name, asset] of cases) {
+    await t.test(name, async () => {
+      const fixture = assetAuditControlPlane({ contract, assets: [asset] });
+      await assert.rejects(
+        () => fixture.plane.auditPreMutationState(),
+        (error) => ['RESOURCE_COLLISION', 'CLOUD_ASSET_INVENTORY_AMBIGUOUS'].includes(error.code),
+      );
+      assert.equal(fixture.gcloudCalls.some((args) => args.includes('enable') || args.includes('create')), false);
+      assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+    });
+  }
+
+  for (const [field, value] of [
+    ['displayName', 1], ['description', []], ['location', {}], ['labels', []], ['state', false],
+  ]) {
+    await t.test(`malformed optional ${field}`, async () => {
+      const fixture = assetAuditControlPlane({ contract, assets: [cloudAsset({ [field]: value })] });
+      await assert.rejects(
+        () => fixture.plane.auditPreMutationState(),
+        (error) => error.code === 'CLOUD_ASSET_INVENTORY_AMBIGUOUS',
+      );
+    });
+  }
+});
+
+test('post-deployment Cloud Run revision and Docker image descendants remain preflight-idempotent only under exact ancestors', async (t) => {
+  const contract = await contractFixture();
+  const serviceName = `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/services/${GCP_IDENTITY.service}`;
+  const repositoryName = `//artifactregistry.googleapis.com/projects/${PROJECT}/locations/asia-east2/repositories/${GCP_IDENTITY.repository}`;
+  const revision = cloudAsset({
+    name: `${serviceName}/revisions/${GCP_IDENTITY.service}-abcdef123456`,
+    assetType: 'run.googleapis.com/Revision',
+    displayName: `${GCP_IDENTITY.service}-abcdef123456`,
+    parentFullResourceName: serviceName,
+    parentAssetType: 'run.googleapis.com/Service',
+  });
+  const image = cloudAsset({
+    name: `${repositoryName}/dockerImages/${GCP_IDENTITY.service}@sha256:${'a'.repeat(64)}`,
+    assetType: 'artifactregistry.googleapis.com/DockerImage',
+    displayName: `${GCP_IDENTITY.service}@sha256:${'a'.repeat(64)}`,
+    parentFullResourceName: repositoryName,
+    parentAssetType: 'artifactregistry.googleapis.com/Repository',
+  });
+  const exact = [
+    cloudAsset(),
+    cloudAsset({
+      name: repositoryName, assetType: 'artifactregistry.googleapis.com/Repository',
+      displayName: GCP_IDENTITY.repository,
+    }),
+    revision, image,
+  ];
+  const accepted = assetAuditControlPlane({ contract, assets: exact });
+  await accepted.plane.auditPreMutationState();
+
+  for (const [name, asset] of [
+    ['revision foreign parent', { ...revision, parentFullResourceName: `${serviceName}-foreign` }],
+    ['revision wrong type', { ...revision, assetType: 'run.googleapis.com/Job' }],
+    ['revision wrong region', { ...revision, name: revision.name.replace('asia-east2', 'us-central1'), location: 'us-central1' }],
+    ['revision wrong project', { ...revision, name: revision.name.replace(`/projects/${PROJECT}/`, '/projects/foreign/') }],
+    ['revision incompatible name', { ...revision, name: `${serviceName}/revisions/${GCP_IDENTITY.service}-latest`, displayName: `${GCP_IDENTITY.service}-latest` }],
+    ['image foreign parent', { ...image, parentFullResourceName: `${repositoryName}-foreign` }],
+    ['image wrong type', { ...image, assetType: 'artifactregistry.googleapis.com/Repository' }],
+    ['image wrong region', { ...image, name: image.name.replace('asia-east2', 'us-central1'), location: 'us-central1' }],
+    ['image wrong project', { ...image, name: image.name.replace(`/projects/${PROJECT}/`, '/projects/foreign/') }],
+    ['image incompatible package', { ...image, name: image.name.replace(GCP_IDENTITY.service, 'foreign-image'), displayName: 'foreign-image' }],
+  ]) {
+    await t.test(name, async () => {
+      const fixture = assetAuditControlPlane({ contract, assets: [asset] });
+      await assert.rejects(() => fixture.plane.auditPreMutationState(), (error) => error.code === 'RESOURCE_COLLISION');
+      assert.equal(fixture.gcloudCalls.some((args) => args.includes('enable') || args.includes('create')), false);
+      assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+    });
+  }
+});
+
+test('enabled inventory rejects foreign managed display markers and malformed KRM identities before mutation', async (t) => {
+  const contract = await contractFixture();
+  const cases = [
+    {
+      name: 'alert policy foreign display with generated ID', enabledApis: ['iam.googleapis.com', 'monitoring.googleapis.com'],
+      restRows: { '/alertPolicies': { alertPolicies: [{ name: `projects/${PROJECT_NUMBER}/alertPolicies/1`, displayName: 'HK Buddy V1 foreign policy', userLabels: {} }] }, '/notificationChannels': { notificationChannels: [] } },
+    },
+    {
+      name: 'notification channel foreign display with generated ID', enabledApis: ['iam.googleapis.com', 'monitoring.googleapis.com'],
+      restRows: { '/alertPolicies': { alertPolicies: [] }, '/notificationChannels': { notificationChannels: [{ name: `projects/${PROJECT_NUMBER}/notificationChannels/1`, displayName: 'HK Buddy V1 foreign operations', type: 'email', enabled: true, verificationStatus: 'VERIFIED', userLabels: {} }] } },
+    },
+    {
+      name: 'budget foreign display with generated ID', enabledApis: ['iam.googleapis.com', 'billingbudgets.googleapis.com'],
+      restRows: { '/budgets': { budgets: [{ name: `billingAccounts/${GCP_IDENTITY.billingAccountId}/budgets/1`, displayName: 'Hong Kong Buddy Production V1 foreign guard', budgetFilter: { projects: [ASSET_PROJECT] } }] } },
+    },
+    {
+      name: 'malformed KRM Cloud Run identity', enabledApis: ['iam.googleapis.com', 'run.googleapis.com'],
+      gcloudRows: { 'run services list': [{ metadata: {} }], 'run jobs list': [] },
+    },
+    {
+      name: 'foreign KRM Cloud Run identity', enabledApis: ['iam.googleapis.com', 'run.googleapis.com'],
+      gcloudRows: { 'run services list': [{ metadata: { name: 'hkbuddy-v1-foreign' } }], 'run jobs list': [] },
+    },
+  ];
+  for (const fixtureCase of cases) {
+    await t.test(fixtureCase.name, async () => {
+      const fixture = assetAuditControlPlane({
+        contract, assets: [], enabledApis: fixtureCase.enabledApis,
+        gcloudRows: fixtureCase.gcloudRows, restRows: fixtureCase.restRows,
+      });
+      await assert.rejects(
+        () => fixture.plane.auditPreMutationState(),
+        (error) => ['RESOURCE_COLLISION', 'LIST_RESPONSE_AMBIGUOUS'].includes(error.code),
+      );
+      assert.equal(fixture.gcloudCalls.some((args) => args.includes('enable') || args.includes('create')), false);
+      assert.equal(fixture.restCalls.every(({ method }) => method === 'GET'), true);
+    });
+  }
+});
+
+test('real Compute inventory validates malformed rows and includes regional addresses before every mutation', async (t) => {
+  const contract = await contractFixture();
+  const network = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/default`;
+  const networkRow = { name: 'default', selfLink: network, autoCreateSubnetworks: true };
+  const region = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/regions/asia-east2`;
+  const cases = [
+    ['subnet missing network', {
+      'compute networks list': [networkRow],
+      'compute networks subnets': [{ name: 'foreign-subnet', ipCidrRange: '10.25.1.0/24', region }],
+      'compute routes list': [], 'compute addresses list': [],
+    }, 'CIDR_AUDIT_INVALID'],
+    ['route missing network', {
+      'compute networks list': [networkRow], 'compute networks subnets': [],
+      'compute routes list': [{ name: 'foreign-route', destRange: '10.25.1.0/24', nextHopVpnTunnel: `${region}/vpnTunnels/foreign` }],
+      'compute addresses list': [],
+    }, 'CIDR_AUDIT_INVALID'],
+    ['PSA address missing network', {
+      'compute networks list': [networkRow], 'compute networks subnets': [], 'compute routes list': [],
+      'compute addresses list': [{ name: 'foreign-psa', purpose: 'VPC_PEERING', address: '10.25.0.0', prefixLength: 16, addressType: 'INTERNAL', status: 'RESERVED' }],
+    }, 'CIDR_AUDIT_INVALID'],
+    ['regional PSA overlap remains visible', {
+      'compute networks list': [networkRow], 'compute networks subnets': [], 'compute routes list': [],
+      'compute addresses list': [{
+        name: 'foreign-psa', purpose: 'VPC_PEERING', network, address: '10.25.0.0', prefixLength: 16,
+        addressType: 'INTERNAL', status: 'RESERVED', region,
+      }],
+    }, 'CIDR_AUDIT_INVALID'],
+  ];
+  for (const [name, gcloudRows, code] of cases) {
+    await t.test(name, async () => {
+      const fixture = assetAuditControlPlane({
+        contract, assets: [], enabledApis: ['iam.googleapis.com', 'compute.googleapis.com'], gcloudRows,
+      });
+      await assert.rejects(() => fixture.plane.auditPreMutationState(), (error) => error.code === code);
+      const addressCalls = fixture.gcloudCalls.filter((args) => args[0] === 'compute' && args[1] === 'addresses' && args.includes('list'));
+      assert.equal(addressCalls.length > 0, true);
+      assert.equal(addressCalls.some((args) => args.includes('--global')), false);
+      assert.equal(fixture.gcloudCalls.some((args) => args.includes('enable') || args.includes('create')), false);
+      assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
     });
   }
 });
@@ -1636,7 +2108,11 @@ test('preflight verifies an enabled target-project Monitoring channel and fails 
       getRestPrincipal: async () => 'admin@motionexp.com',
       request: async (input) => {
         requests.push(input);
-        return { name: CHANNEL, type: 'email', enabled: true, verificationStatus: 'VERIFIED' };
+        return {
+          name: CHANNEL, displayName: 'HK Buddy V1 operations',
+          userLabels: { application: 'hong_kong_buddy', environment: 'production_v1', hkbuddy_contract: 'operations' },
+          type: 'email', enabled: true, verificationStatus: 'VERIFIED',
+        };
       },
       writeOutput: () => undefined,
     });
@@ -1652,7 +2128,11 @@ test('preflight verifies an enabled target-project Monitoring channel and fails 
       contract: await contractFixture(),
       gcloud: fixture.gcloud,
       getRestPrincipal: async () => 'admin@motionexp.com',
-      request: async () => ({ name: CHANNEL, type: 'email', enabled: true, verificationStatus: 'UNVERIFIED' }),
+      request: async () => ({
+        name: CHANNEL, displayName: 'HK Buddy V1 operations',
+        userLabels: { application: 'hong_kong_buddy', environment: 'production_v1', hkbuddy_contract: 'operations' },
+        type: 'email', enabled: true, verificationStatus: 'UNVERIFIED',
+      }),
       writeOutput: () => undefined,
     });
     assert.equal(result.exitCode, 1);
@@ -1664,7 +2144,11 @@ test('preflight verifies an enabled target-project Monitoring channel and fails 
     const result = await runGcpPreflight({
       argv: [`--notification-channel=${CHANNEL}`], contract: await contractFixture(),
       gcloud: fixture.gcloud, getRestPrincipal: async () => 'admin@motionexp.com',
-      request: async () => ({ name: CHANNEL, type: 'sms', enabled: true, verificationStatus: 'VERIFIED' }),
+      request: async () => ({
+        name: CHANNEL, displayName: 'HK Buddy V1 operations',
+        userLabels: { application: 'hong_kong_buddy', environment: 'production_v1', hkbuddy_contract: 'operations' },
+        type: 'sms', enabled: true, verificationStatus: 'VERIFIED',
+      }),
       writeOutput: () => undefined,
     });
     assert.equal(result.exitCode, 1);

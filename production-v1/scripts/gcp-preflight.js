@@ -15,7 +15,7 @@ const PROJECT = GCP_IDENTITY.projectId;
 const PROJECT_NUMBER = GCP_IDENTITY.projectNumber;
 const ORGANIZATION = GCP_IDENTITY.organizationId;
 const BILLING_ACCOUNT = GCP_IDENTITY.billingAccountId;
-const CHANNEL_NAME = new RegExp(`^projects/${PROJECT}/notificationChannels/[1-9]\\d*$`);
+const CHANNEL_NAME = /^projects\/582852715831\/notificationChannels\/[1-9]\d*$/;
 
 function publish(writeOutput, exitCode, publicReport) {
   writeOutput(`${JSON.stringify(publicReport)}\n`);
@@ -202,6 +202,13 @@ export async function runGcpPreflight({
         }));
       }
       if (channel?.name !== selection.notificationChannel
+        || channel?.displayName !== selectedContract.resources.monitoring.notificationChannel.displayName
+        || !channel?.userLabels
+        || Object.keys(channel.userLabels).length !== Object.keys(
+          selectedContract.resources.monitoring.notificationChannel.ownershipLabels,
+        ).length
+        || !Object.entries(selectedContract.resources.monitoring.notificationChannel.ownershipLabels)
+          .every(([key, value]) => channel.userLabels[key] === value)
         || channel?.type !== 'email' || channel?.enabled !== true
         || channel?.verificationStatus !== 'VERIFIED') {
         return publish(writeOutput, 1, safeFailure('ALERT_CHANNEL_UNVERIFIED', {

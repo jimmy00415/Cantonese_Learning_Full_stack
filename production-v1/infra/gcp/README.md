@@ -22,16 +22,16 @@ island and never adopts, updates, or deletes a non-V1 resource.
 ### Read-only Cloud Asset inventory consumer
 
 The host does not enable Cloud Asset API. Before any provisioning write, the
-control plane therefore performs one bounded JSON inventory read of the host
+control plane therefore performs one exhaustive, auto-paginated JSON inventory read of the host
 using `tech-demo-433408` strictly as the Cloud Asset quota consumer:
 
 ```text
-gcloud asset search-all-resources --scope=projects/motion-expert-hk-ltd-webpage --billing-project=tech-demo-433408 --project=motion-expert-hk-ltd-webpage --limit=1000 --format=json
+gcloud asset search-all-resources --scope=projects/motion-expert-hk-ltd-webpage --billing-project=tech-demo-433408 --project=motion-expert-hk-ltd-webpage --page-size=500 --read-mask=name,assetType,project,displayName,description,location,labels,parentFullResourceName,parentAssetType,state --order-by=assetType,name --format=json
 ```
 
 `tech-demo-433408` is never a deployment host and is never the target of API
 enablement, resource, billing, IAM, or REST mutation. Malformed, unavailable,
-wrong-project, or foreign managed-namespace inventory fails closed before a
+truncated/overflowed, wrong-project, or foreign managed-namespace inventory fails closed before a
 host mutation.
 
 The complete identities, APIs, IAM bindings, probes, backup controls, alert
@@ -55,10 +55,12 @@ mismatch fails before mutation.
 An optional existing target-project Monitoring channel can be checked with:
 
 ```text
-npm run gcp:preflight -- --notification-channel=projects/motion-expert-hk-ltd-webpage/notificationChannels/NUMERIC_ID
+npm run gcp:preflight -- --notification-channel=projects/582852715831/notificationChannels/NUMERIC_ID
 ```
 
-The channel must have `type=email`, be enabled, and have
+The channel must have display name `HK Buddy V1 operations`, exact ownership
+labels `application=hong_kong_buddy`, `environment=production_v1`, and
+`hkbuddy_contract=operations`, have `type=email`, be enabled, and have
 `verificationStatus=VERIFIED`. Billing Budgets does not accept an arbitrary
 Monitoring channel type. A missing, disabled, inaccessible, non-email, or
 unverified channel is not treated as usable.
@@ -76,7 +78,7 @@ the required channel gate. After the operator creates and verifies the email
 channel, the mutating resume form is:
 
 ```text
-npm run gcp:provision -- --confirm-project=motion-expert-hk-ltd-webpage --notification-channel=projects/motion-expert-hk-ltd-webpage/notificationChannels/NUMERIC_ID
+npm run gcp:provision -- --confirm-project=motion-expert-hk-ltd-webpage --notification-channel=projects/582852715831/notificationChannels/NUMERIC_ID
 ```
 
 No abbreviated confirmation, alternate project, extra flag, or legacy identity
