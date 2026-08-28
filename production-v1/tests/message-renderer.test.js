@@ -60,6 +60,8 @@ test('message renderer calls the official URL allowlist and renders safe source 
   });
 
   const nodes = all(element);
+  assert.equal(element.dataset.messageId, 'assistant-1');
+  assert.equal(element.dataset.groundingStatus, 'verified');
   const source = nodes.find((node) => node.className === 'source-card');
   const card = nodes.find((node) => node.className === 'action-card');
   assert.equal(source.href, 'https://ito.hkbu.edu.hk/services/mfa');
@@ -123,6 +125,8 @@ test('message renderer distinguishes an unconfirmed send from an accepted answer
 
   const unconfirmedNodes = all(unconfirmed);
   const failedNodes = all(acceptedFailure);
+  assert.equal(unconfirmed.dataset.clientMessageId, 'client-1');
+  assert.equal(acceptedFailure.dataset.clientMessageId, 'client-1');
   assert.equal(unconfirmedNodes.find((node) => node.className === 'message-state').textContent, 'Send not confirmed');
   assert.equal(unconfirmedNodes.find((node) => node.className === 'retry-message').hidden, false);
   assert.equal(failedNodes.find((node) => node.className === 'message-state').textContent, 'Reply could not be completed');

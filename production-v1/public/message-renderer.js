@@ -89,6 +89,12 @@ export function createMessageElement(document, message, {
   const role = message?.role === 'user' ? 'user' : 'assistant';
   const article = element(document, 'article', `message-row message-row--${role}`);
   article.dataset.messageId = String(message?.id ?? '');
+  if (typeof message?.clientMessageId === 'string' && message.clientMessageId.length <= 128) {
+    article.dataset.clientMessageId = message.clientMessageId;
+  }
+  if (role === 'assistant' && ['verified', 'unverified'].includes(message?.groundingStatus)) {
+    article.dataset.groundingStatus = message.groundingStatus;
+  }
 
   const avatar = element(document, 'img', 'profile-avatar message-avatar');
   avatar.src = '/assets/ai-senior-avatar-128.png';

@@ -130,6 +130,7 @@ export function inspectPngEvidence(value) {
       const green = decoded.pixels[offset + 1];
       const blue = decoded.pixels[offset + 2];
       const alpha = decoded.channels === 4 ? decoded.pixels[offset + 3] : 255;
+      if (alpha !== 255) throw invalid();
       const key = `${red},${green},${blue},${alpha}`;
       counts.set(key, (counts.get(key) ?? 0) + 1);
       const luminance = (0.2126 * red) + (0.7152 * green) + (0.0722 * blue);
@@ -140,7 +141,8 @@ export function inspectPngEvidence(value) {
       mean += delta / samples;
       sumSquaredDelta += delta * (luminance - mean);
     }
-    const dominantCount = Math.max(...counts.values());
+    let dominantCount = 0;
+    for (const count of counts.values()) dominantCount = Math.max(dominantCount, count);
     const dominantRatio = dominantCount / samples;
     const result = Object.freeze({
       width: decoded.width,

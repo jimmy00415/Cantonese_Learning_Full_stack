@@ -184,7 +184,6 @@ export function createVoiceRouter({
       const { session } = await resolveSession(request);
       if (!UUID.test(request.params.messageId ?? '')) throw voiceError(404, 'NOT_FOUND');
       const message = await store.getOwnedAssistantMessage({ sessionId: session.id, messageId: request.params.messageId });
-      if (message.replyMode !== 'voice') throw voiceError(404, 'NOT_FOUND');
       assertVoiceOutputCapability(config, now());
       const result = await service.generateAssistantAudio({
         sessionId: session.id, messageId: request.params.messageId, signal: disconnect.signal,

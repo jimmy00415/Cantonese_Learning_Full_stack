@@ -1370,7 +1370,7 @@ export class PostgresStore {
       const messageResult = await client.query(`
         SELECT * FROM messages
         WHERE id = $1 AND session_id = $2
-          AND role = 'assistant' AND status = 'delivered' AND reply_mode = 'voice'
+          AND role = 'assistant' AND status = 'delivered'
         FOR UPDATE
       `, [messageId, sessionId]);
       if (messageResult.rowCount !== 1 || kind !== 'assistant_voice') return { status: 'conflict' };
@@ -1528,7 +1528,7 @@ export class PostgresStore {
       LEFT JOIN media_generations g
         ON g.owner_message_id = m.id AND g.kind = 'assistant_voice'
       WHERE m.role = 'assistant' AND m.status = 'delivered'
-        AND m.reply_mode = 'voice' AND m.media_id IS NULL
+        AND m.media_id IS NULL
         AND (
           g.id IS NULL
           OR (g.state = 'failed' AND g.retryable = TRUE)

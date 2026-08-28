@@ -909,7 +909,7 @@ export class AtomicFileStore {
       this.#activeSession(snapshot, sessionId);
       const message = snapshot.messages.find((item) => (
         item.id === messageId && item.sessionId === sessionId
-        && item.role === 'assistant' && item.status === 'delivered' && item.replyMode === 'voice'
+        && item.role === 'assistant' && item.status === 'delivered'
       ));
       if (!message || kind !== 'assistant_voice') return noChange({ status: 'conflict' });
       const timestamp = nowIso(now);
@@ -1024,7 +1024,7 @@ export class AtomicFileStore {
     return this.#read((snapshot) => clone(snapshot.messages
       .filter((message) => (
         message.role === 'assistant' && message.status === 'delivered'
-        && message.replyMode === 'voice' && !message.mediaId
+        && !message.mediaId
         && (() => {
           const generation = snapshot.mediaGenerations.find((item) => (
             item.ownerMessageId === message.id && item.kind === 'assistant_voice'

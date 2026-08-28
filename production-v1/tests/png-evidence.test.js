@@ -35,8 +35,11 @@ function paeth(left, up, upperLeft) {
     ? left : (upDistance <= upperLeftDistance ? up : upperLeft);
 }
 
-function png({ width = 390, height = 844, solid = false, filterOverride = null, seed = 0 } = {}) {
-  const channels = 3;
+function png({
+  width = 390, height = 844, solid = false, filterOverride = null, seed = 0,
+  colorType = 2, transparentPixel = null, highColor = false,
+} = {}) {
+  const channels = colorType === 6 ? 4 : 3;
   const stride = width * channels;
   const rows = [];
   let previous = Buffer.alloc(stride);
@@ -44,9 +47,12 @@ function png({ width = 390, height = 844, solid = false, filterOverride = null, 
     const pixels = Buffer.alloc(stride);
     for (let x = 0; x < width; x += 1) {
       const offset = x * channels;
-      pixels[offset] = solid ? 80 : (x * 17 + y * 3 + seed * 19) % 256;
-      pixels[offset + 1] = solid ? 80 : (x * 5 + y * 11 + seed * 23) % 256;
-      pixels[offset + 2] = solid ? 80 : (x * 13 + y * 7 + seed * 29) % 256;
+      pixels[offset] = solid ? 80 : highColor ? x & 0xff : (x * 17 + y * 3 + seed * 19) % 256;
+      pixels[offset + 1] = solid ? 80 : highColor ? y & 0xff : (x * 5 + y * 11 + seed * 23) % 256;
+      pixels[offset + 2] = solid ? 80 : highColor
+        ? (((x >> 8) << 4) | (y >> 8)) : (x * 13 + y * 7 + seed * 29) % 256;
+      if (channels === 4) pixels[offset + 3] = transparentPixel === 'all'
+        || (transparentPixel && x === transparentPixel.x && y === transparentPixel.y) ? 0 : 255;
     }
     const filter = filterOverride ?? y % 5;
     const encoded = Buffer.alloc(stride);
@@ -68,7 +74,7 @@ function png({ width = 390, height = 844, solid = false, filterOverride = null, 
   header.writeUInt32BE(width, 0);
   header.writeUInt32BE(height, 4);
   header[8] = 8;
-  header[9] = 2;
+  header[9] = colorType;
   return Buffer.concat([
     SIGNATURE,
     chunk('IHDR', header),
@@ -131,6 +137,17 @@ test('PNG evidence rejects malformed structure, dimensions, low information, fil
     ['invalid-filter', invalidFilter],
     ['inflate-overflow', overflow],
   ]) assert.throws(() => inspectPngEvidence(bytes), /PNG evidence is invalid/, name);
+});
+
+test('PNG evidence requires fully opaque RGBA pixels and handles a high-color screenshot iteratively', () => {
+  assert.throws(() => inspectPngEvidence(png({ colorType: 6, transparentPixel: 'all' })),
+    /PNG evidence is invalid/);
+  assert.throws(() => inspectPngEvidence(png({
+    colorType: 6, transparentPixel: { x: 389, y: 843 },
+  })), /PNG evidence is invalid/);
+  const highColor = inspectPngEvidence(png({ highColor: true }));
+  assert.equal(highColor.colorCount, 390 * 844);
+  assert.equal(highColor.dominantRatio, 1 / (390 * 844));
 });
 
 test('four screenshot evidence items must have unique encoded and decoded pixels', () => {

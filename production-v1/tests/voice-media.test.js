@@ -3795,7 +3795,7 @@ test('candidate-controlled TTS provider rejection preserves canonical text and e
   );
 });
 
-test('text-mode assistant audio is rejected before HTTP provider work and by the atomic claim fence', async (t) => {
+test('delivered text-mode assistant can opt in to audio while retaining the atomic ownership fence', async (t) => {
   let ttsCalls = 0;
   const { baseUrl, origin, store, mediaStore } = await startVoiceApp(t, {
     ttsProvider: {
@@ -3816,8 +3816,8 @@ test('text-mode assistant audio is rejected before HTTP provider work and by the
   const response = await fetchJson(`${baseUrl}/api/v1/messages/${assistant.id}/audio`, {
     method: 'POST', headers: { Origin: origin, Cookie: cookie },
   });
-  assert.equal(response.response.status, 404);
-  assert.equal(response.body.error.code, 'NOT_FOUND');
+  assert.equal(response.response.status, 201);
+  assert.equal(response.body.data.state, 'attached');
   const claim = await store.claimAssistantAudioWithRateLimits({
     sessionId: session.body.data.session.id,
     messageId: assistant.id,
@@ -3830,8 +3830,8 @@ test('text-mode assistant audio is rejected before HTTP provider work and by the
     attemptDeadlineAt: new Date(Date.now() + 60_000),
     now: new Date(),
   });
-  assert.equal(claim.status, 'conflict');
-  assert.equal(ttsCalls, 0);
+  assert.equal(claim.status, 'ready');
+  assert.equal(ttsCalls, 1);
 });
 
 test('durable voice recovery after store restart is bounded and does not duplicate attached TTS', async (t) => {
