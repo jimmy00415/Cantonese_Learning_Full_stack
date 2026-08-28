@@ -934,6 +934,17 @@ function fixtureReceiptChain(plan, through) {
       outputs: fixtureReceiptOutputs(plan, phase),
     });
     receipts.push(receipt);
+    if (phase === 'candidate') {
+      Object.defineProperty(receipts, 'candidatePrivacyAnchor', {
+        value: {
+          privacyProof: candidatePrivacyReference(plan),
+          candidateReceiptSha256: receipt.receiptSha256,
+        },
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      });
+    }
     if (phase === through) return receipts;
   }
   throw new Error('unknown fixture receipt phase');
@@ -941,13 +952,22 @@ function fixtureReceiptChain(plan, through) {
 
 test('candidate receipt binds the complete exact privacy-proof reference', async (t) => {
   const plan = buildReleasePlan(releaseInput());
-  const valid = fixtureReceiptChain(plan, 'candidate');
-  assert.equal(validateReleaseReceiptChain(valid, plan, { through: 'candidate' }), true);
+  const valid = fixtureReceiptChain(plan, 'mobile');
+  const candidateIndex = valid.findIndex(({ phase }) => phase === 'candidate');
+  const anchor = {
+    privacyProof: candidatePrivacyReference(plan),
+    candidateReceiptSha256: valid[candidateIndex].receiptSha256,
+  };
+  assert.equal(validateReleaseReceiptChain(valid, plan, {
+    through: 'mobile', candidatePrivacyAnchor: anchor,
+  }), true);
   const mutations = [
     ['missing artifact digest', (value) => { delete value.artifactSha256; }],
     ['artifact digest drift', (value) => { value.artifactSha256 = 'a'.repeat(64); }],
     ['object digest drift', (value) => { value.objectSha256 = 'b'.repeat(64); }],
     ['schema drift', (value) => { value.schemaVersion = 4; }],
+    ['file path drift', (value) => { value.filePath = `${value.filePath}.other`; }],
+    ['boundary drift', (value) => { value.boundarySha256 = 'c'.repeat(64); }],
     ['observed clock drift', (value) => { value.observedAt = '2026-08-26T08:00:01.000Z'; }],
     ['expiry clock drift', (value) => { value.expiresAt = '2026-08-26T08:05:01.000Z'; }],
     ['extra field', (value) => { value.extra = true; }],
@@ -956,14 +976,35 @@ test('candidate receipt binds the complete exact privacy-proof reference', async
   for (const [name, mutate] of mutations) {
     await t.test(name, () => {
       const receipts = structuredClone(valid);
-      mutate(receipts.at(-1).outputs.privacyProof);
-      receipts[receipts.length - 1] = finalizeReleasePhaseReceipt(receipts.at(-1));
+      const candidate = receipts[candidateIndex];
+      mutate(candidate.outputs.privacyProof);
+      candidate.outputs.privacyProofReferenceSha256 = createHash('sha256')
+        .update(JSON.stringify(canonicalFixture(candidate.outputs.privacyProof))).digest('hex');
+      for (let index = candidateIndex; index < receipts.length; index += 1) {
+        if (index > candidateIndex) receipts[index].previousReceiptSha256 = receipts[index - 1].receiptSha256;
+        receipts[index] = finalizeReleasePhaseReceipt(receipts[index]);
+      }
       assert.throws(
-        () => validateReleaseReceiptChain(receipts, plan, { through: 'candidate' }),
-        /receipt (?:chain|outputs)/i,
+        () => validateReleaseReceiptChain(receipts, plan, {
+          through: 'mobile', candidatePrivacyAnchor: anchor,
+        }),
+        /receipt (?:authority|chain|outputs)/i,
       );
     });
   }
+  const missingAnchor = structuredClone(valid);
+  delete missingAnchor.candidatePrivacyAnchor;
+  assert.throws(
+    () => validateReleaseReceiptChain(missingAnchor, plan, { through: 'mobile' }),
+    /authority/i,
+  );
+  assert.throws(
+    () => validateReleaseReceiptChain(valid, plan, {
+      through: 'mobile',
+      candidatePrivacyAnchor: { ...anchor, candidateReceiptSha256: 'f'.repeat(64) },
+    }),
+    /authority/i,
+  );
 });
 
 function controlledReadinessExecution(plan) {
@@ -1148,6 +1189,19 @@ function controlledMobileExecution(plan) {
     controlPlane: { stable: true, beforeSha256: '3'.repeat(64), afterSha256: '3'.repeat(64) },
     browser: MOBILE_BROWSER_CONTRACT,
     fixture: MOBILE_WAV_CONTRACT,
+    voiceWitness: {
+      baseFixtureSha256: MOBILE_WAV_CONTRACT.sha256,
+      challengeCommitmentSha256: '5'.repeat(64),
+      uploadSha256: '6'.repeat(64),
+      durationMs: 1080,
+      durationDeltaMs: 80,
+      comparedSamples: 15_665,
+      baseCorrelation: 0.993541,
+      watermarkCorrelation: 0.544045,
+      commandLineVerified: true,
+      playbackObserved: true,
+      witnessed: true,
+    },
     viewport: { width: 390, height: 844, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
     access: structuredClone(plan.candidateAccess),
     finalNavigationUrl: plan.candidateOrigin,
@@ -1249,6 +1303,15 @@ function controlledReleasePrivacyArtifact(plan, locator) {
       expiresAt: proof.expiresAt,
     },
   };
+}
+
+async function verifyControlledReleasePrivacyArtifact(reference, _plan, clock) {
+  const instant = typeof clock === 'function' ? clock() : clock;
+  assert.equal(Number.isFinite(instant?.getTime?.()), true);
+  if (instant.getTime() >= Date.parse(reference.expiresAt)) {
+    throw new Error('controlled promotion privacy proof expired');
+  }
+  return true;
 }
 
 function createTestStateStore({
@@ -3932,6 +3995,7 @@ test('later promotion rejects every stable-service tag before its first stable m
   const rejected = await runGcpRelease({
     argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`],
     input,
+    now: () => new Date('2026-08-27T08:04:00.000Z'),
     writeStableSpec: async () => true,
     execute: async (argv) => {
       calls.push(argv);
@@ -3986,7 +4050,9 @@ test('later promotion performs no cloud mutation after the final traffic mutatio
   const result = await runGcpRelease({
     argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`],
     input,
+    now: () => new Date('2026-08-27T08:04:00.000Z'),
     openStateStore: async () => store,
+    verifyReleasePrivacyArtifact: verifyControlledReleasePrivacyArtifact,
     produceReleasePrivacyArtifact: async ({ plan: privacyPlan, locator }) => {
       assert.deepEqual(stableState, stableStagedReadback(plan));
       promotionPrivacyProduced = true;
@@ -4062,6 +4128,7 @@ test('promotion drift during privacy production blocks the final intent and publ
   const result = await runGcpRelease({
     argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`],
     input,
+    now: () => new Date('2026-08-27T08:04:00.000Z'),
     openStateStore: async () => store,
     writeStableSpec: async () => true,
     produceReleasePrivacyArtifact: async ({ plan: privacyPlan, locator }) => {
@@ -4105,6 +4172,129 @@ test('promotion drift during privacy production blocks the final intent and publ
   assert.equal(store.records.some(({ recordType, operationId }) => (
     recordType === 'intent' && operationId === 'promote-traffic'
   )), false);
+});
+
+async function runPromotionExpiryCrossing({ firstRelease, crossing }) {
+  const input = releaseInput(firstRelease
+    ? { previousRevision: null, previousImageDigest: null } : {});
+  const plan = buildReleasePlan(input);
+  const store = createTestStateStore();
+  const appendIntent = store.appendIntent;
+  let current = new Date('2026-08-27T08:04:59.999Z');
+  let proofProduced = false;
+  let stableExists = !firstRelease;
+  let stableState = firstRelease ? null : stablePriorReadback(plan);
+  let stablePolicy = firstRelease ? stablePrivateIam() : stablePublicIam();
+  let finalMutations = 0;
+  if (crossing === 'intent') {
+    store.appendIntent = async (payload, options) => {
+      const record = await appendIntent(payload, options);
+      if (['promote-public-service', 'promote-traffic'].includes(options?.operationId)) {
+        current = new Date('2026-08-27T08:05:00.000Z');
+      }
+      return record;
+    };
+  }
+  const result = await runGcpRelease({
+    argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    openStateStore: async () => store,
+    now: () => new Date(current),
+    writeStableSpec: async () => true,
+    produceReleasePrivacyArtifact: async ({ plan: privacyPlan, locator }) => {
+      proofProduced = true;
+      return controlledReleasePrivacyArtifact(privacyPlan, locator);
+    },
+    verifyReleasePrivacyArtifact: async (reference, _plan, clock) => {
+      const instant = typeof clock === 'function' ? clock() : clock;
+      if (!(instant instanceof Date) || instant.getTime() >= Date.parse(reference.expiresAt)) {
+        throw new Error('controlled promotion privacy proof expired');
+      }
+      return true;
+    },
+    execute: async (argv) => {
+      if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
+      if (argv[0] === 'artifacts') return {
+        image: argv.includes(plan.previousImage) ? plan.previousImage : plan.image,
+      };
+      if (argv.includes('get-iam-policy')) {
+        if (argv[3] === CANDIDATE_SERVICE) return candidatePrivateIam();
+        if (crossing === 'read' && proofProduced) {
+          current = new Date('2026-08-27T08:05:00.000Z');
+        }
+        return structuredClone(stablePolicy);
+      }
+      if (argv[1] === 'revisions') {
+        if (argv[3] === plan.candidateRevision) return structuredClone(plan.expectedCandidate);
+        if (argv[3] === plan.stableRevision) return structuredClone(plan.expectedStable);
+        return { revision: plan.previousRevision, image: plan.previousImage };
+      }
+      if (argv[1] === 'services' && argv[2] === 'replace') {
+        if (argv.includes('--dry-run')) return structuredClone(plan.stableServiceSpec);
+        stableExists = true;
+        stableState = stableStagedReadback(plan);
+        return structuredClone(stableState);
+      }
+      if (argv[1] === 'services' && argv[2] === 'describe') {
+        if (argv[3] === CANDIDATE_SERVICE) return candidateServiceReadback(plan);
+        if (!stableExists) {
+          throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+        }
+        return structuredClone(stableState);
+      }
+      if (argv.includes('add-iam-policy-binding') || argv.includes('update-traffic')) {
+        finalMutations += 1;
+        if (firstRelease) {
+          stablePolicy = stablePublicIam('public-after');
+          return structuredClone(stablePolicy);
+        }
+        stableState = stablePromotedReadback(plan);
+        return trafficTargetAcknowledgement(plan.stableRevision);
+      }
+      throw new Error(`unexpected operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+  return { result, store, finalMutations };
+}
+
+test('promotion proof exact-expiry during the final authoritative read creates no unsafe intent', async (t) => {
+  for (const firstRelease of [true, false]) {
+    await t.test(firstRelease ? 'first public IAM' : 'later public traffic', async () => {
+      const { result, store, finalMutations } = await runPromotionExpiryCrossing({
+        firstRelease, crossing: 'read',
+      });
+      assert.equal(result.exitCode, 1, JSON.stringify({ report: result.publicReport, records: store.records }));
+      assert.equal(result.publicReport.code, 'PROMOTION_REPROOF_REQUIRED', JSON.stringify(store.records));
+      assert.equal(finalMutations, 0);
+      const operationId = firstRelease ? 'promote-public-service' : 'promote-traffic';
+      assert.equal(store.records.some(({ recordType, operationId: id }) => (
+        recordType === 'intent' && id === operationId
+      )), false);
+      assert.equal(store.records.at(-1).recordType, 'terminal');
+    });
+  }
+});
+
+test('promotion proof exact-expiry while appending final intent aborts it before public mutation', async (t) => {
+  for (const firstRelease of [true, false]) {
+    await t.test(firstRelease ? 'first public IAM' : 'later public traffic', async () => {
+      const { result, store, finalMutations } = await runPromotionExpiryCrossing({
+        firstRelease, crossing: 'intent',
+      });
+      assert.equal(result.exitCode, 1, JSON.stringify({ report: result.publicReport, records: store.records }));
+      assert.equal(result.publicReport.code, 'PROMOTION_REPROOF_REQUIRED', JSON.stringify(store.records));
+      assert.equal(finalMutations, 0);
+      const operationId = firstRelease ? 'promote-public-service' : 'promote-traffic';
+      const finalIntentIndex = store.records.findIndex(({ recordType, operationId: id }) => (
+        recordType === 'intent' && id === operationId
+      ));
+      assert.equal(finalIntentIndex >= 0, true);
+      assert.equal(store.records[finalIntentIndex + 1].recordType, 'abort');
+      assert.equal(store.records[finalIntentIndex + 1].payload.reason, 'expired-before-final-mutation');
+      assert.equal(store.records.at(-1).recordType, 'terminal');
+    });
+  }
 });
 
 test('promotion proof expires at the exact boundary before the final intent', async () => {
@@ -4250,6 +4440,59 @@ test('expired unperformed final intent is aborted without replay and permits a n
   assert.equal(store.records.at(-2).recordType, 'abort');
   assert.equal(store.records.at(-2).payload.reason, 'expired-before-final-mutation');
   assert.equal(store.records.at(-1).recordType, 'terminal');
+
+  const freshStore = createTestStateStore();
+  let freshStableState = stablePriorReadback(plan);
+  let freshPrivacyProofs = 0;
+  let freshFinalMutations = 0;
+  const recovered = await runGcpRelease({
+    argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    openStateStore: async () => freshStore,
+    now: () => new Date('2026-08-27T08:04:00.000Z'),
+    verifyReleasePrivacyArtifact: verifyControlledReleasePrivacyArtifact,
+    produceReleasePrivacyArtifact: async ({ plan: privacyPlan, locator }) => {
+      freshPrivacyProofs += 1;
+      return controlledReleasePrivacyArtifact(privacyPlan, locator);
+    },
+    writeStableSpec: async () => true,
+    execute: async (argv) => {
+      if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
+      if (argv[0] === 'artifacts') return {
+        image: argv.includes(plan.previousImage) ? plan.previousImage : plan.image,
+      };
+      if (argv.includes('get-iam-policy')) return argv[3] === CANDIDATE_SERVICE
+        ? candidatePrivateIam() : stablePublicIam();
+      if (argv[1] === 'revisions') {
+        if (argv[3] === plan.candidateRevision) return structuredClone(plan.expectedCandidate);
+        if (argv[3] === plan.stableRevision) return structuredClone(plan.expectedStable);
+        return { revision: plan.previousRevision, image: plan.previousImage };
+      }
+      if (argv[1] === 'services' && argv[2] === 'replace') {
+        if (argv.includes('--dry-run')) return structuredClone(plan.stableServiceSpec);
+        freshStableState = stableStagedReadback(plan);
+        return structuredClone(freshStableState);
+      }
+      if (argv[1] === 'services' && argv[2] === 'describe') {
+        return argv[3] === CANDIDATE_SERVICE
+          ? candidateServiceReadback(plan) : structuredClone(freshStableState);
+      }
+      if (argv.includes('update-traffic')) {
+        freshFinalMutations += 1;
+        freshStableState = stablePromotedReadback(plan);
+        return trafficTargetAcknowledgement(plan.stableRevision);
+      }
+      throw new Error(`unexpected operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(recovered.exitCode, 0, JSON.stringify(recovered.publicReport));
+  assert.equal(freshPrivacyProofs, 1);
+  assert.equal(freshFinalMutations, 1);
+  assert.equal(freshStore.records.some(({ operationId, recordType }) => (
+    operationId === 'promote-privacy-publish' && recordType === 'checkpoint'
+  )), true);
+  assert.equal(freshStore.records.some(({ recordType }) => recordType === 'abort'), false);
 });
 
 test('later-traffic restart adopts exact promoted service truth without a second update', async () => {
@@ -4321,7 +4564,9 @@ test('stable deploy restart adopts exact staged state and preserves one bounded 
   const result = await runGcpRelease({
     argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`],
     input,
+    now: () => new Date('2026-08-27T08:04:00.000Z'),
     openStateStore: async () => store,
+    verifyReleasePrivacyArtifact: verifyControlledReleasePrivacyArtifact,
     execute: async (argv) => {
       calls.push(argv);
       if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
@@ -4369,6 +4614,8 @@ test('later promotion never issues restore traffic when post-mutation read fails
   const result = await runGcpRelease({
     argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`],
     input,
+    now: () => new Date('2026-08-27T08:04:00.000Z'),
+    verifyReleasePrivacyArtifact: verifyControlledReleasePrivacyArtifact,
     writeStableSpec: async () => true,
     execute: async (argv) => {
       calls.push(argv);
@@ -4482,6 +4729,8 @@ test('first promotion IAM response loss never triggers an automatic restore muta
   const result = await runGcpRelease({
     argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`],
     input,
+    now: () => new Date('2026-08-27T08:04:00.000Z'),
+    verifyReleasePrivacyArtifact: verifyControlledReleasePrivacyArtifact,
     randomUUID: () => attemptId,
     writeStableSpec: async () => true,
     writeIamRestorePolicy: async (releasePlan, policy, options) => {
@@ -6521,7 +6770,7 @@ test('real-shape migration, authenticated workload, and tag-free promotion share
   assert.equal(migration.exitCode, 0);
 
   for (const phase of ['inventory', 'acceptance', 'collect', 'evidence', 'candidate', 'readiness']) {
-    receipts.push(finalizeReleasePhaseReceipt({
+    const receipt = finalizeReleasePhaseReceipt({
       schemaVersion: 2,
       phase,
       sequence: receipts.length + 1,
@@ -6535,7 +6784,19 @@ test('real-shape migration, authenticated workload, and tag-free promotion share
       previousReceiptSha256: receipts.at(-1).receiptSha256,
       completed: plan.operations.filter((member) => member.phase === phase).map(({ id }) => id),
       outputs: fixtureReceiptOutputs(plan, phase),
-    }));
+    });
+    receipts.push(receipt);
+    if (phase === 'candidate') {
+      Object.defineProperty(receipts, 'candidatePrivacyAnchor', {
+        value: {
+          privacyProof: candidatePrivacyReference(plan),
+          candidateReceiptSha256: receipt.receiptSha256,
+        },
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      });
+    }
   }
 
   const workload = await runGcpRelease({
@@ -6624,6 +6885,7 @@ test('real-shape migration, authenticated workload, and tag-free promotion share
   const promotion = await runGcpRelease({
     argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`], input: refreshedInput,
     loadReceipts: async () => structuredClone(receipts),
+    verifyReleasePrivacyArtifact: verifyControlledReleasePrivacyArtifact,
     verifyTask8Evidence: async (_entry, phase) => phase === 'workload' ? {
       acceptanceWindowId: workloadRecord.rawReceipts.acceptanceWindowId,
       candidateOrigin: CANDIDATE_ORIGIN,

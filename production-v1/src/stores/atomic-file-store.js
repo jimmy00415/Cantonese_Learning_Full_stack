@@ -1029,9 +1029,11 @@ export class AtomicFileStore {
           const generation = snapshot.mediaGenerations.find((item) => (
             item.ownerMessageId === message.id && item.kind === 'assistant_voice'
           ));
-          return !generation
-            || (generation.state === 'failed' && generation.retryable === true)
-            || (generation.state === 'generating' && !liveAttempt(generation, current));
+          return (message.replyMode === 'voice' && !generation)
+            || (generation !== undefined && (
+              (generation.state === 'failed' && generation.retryable === true)
+              || (generation.state === 'generating' && !liveAttempt(generation, current))
+            ));
         })()
       ))
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))

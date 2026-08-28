@@ -291,6 +291,17 @@ function receiptChain(plan, through) {
       outputs: receiptOutputs(plan, phase),
     });
     receipts.push(receipt);
+    if (phase === 'candidate') {
+      Object.defineProperty(receipts, 'candidatePrivacyAnchor', {
+        value: {
+          privacyProof: candidatePrivacyReference(plan),
+          candidateReceiptSha256: receipt.receiptSha256,
+        },
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      });
+    }
     if (phase === through) return receipts;
   }
   throw new Error('unknown receipt phase');

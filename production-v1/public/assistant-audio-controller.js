@@ -1,6 +1,7 @@
 export function createAssistantAudioController({
   fetchImpl = globalThis.fetch?.bind(globalThis),
   AudioClass = globalThis.Audio,
+  audioMount = globalThis.document?.body,
   origin = globalThis.location?.origin,
   onChange = () => {},
   now = () => Date.now(),
@@ -474,6 +475,7 @@ export function createAssistantAudioController({
       try { target.audio.pause?.(); } catch { /* pause is best effort */ }
     }
     removeAudioListeners(target);
+    try { target.audio.remove?.(); } catch { /* DOM release is best effort */ }
     currentAudio = null;
   }
 
@@ -516,6 +518,10 @@ export function createAssistantAudioController({
         audio.autoplay = false;
         audio.preload = 'none';
         audio.src = `/api/v1/media/${assetId}`;
+        audio.hidden = true;
+        audio.setAttribute?.('data-assistant-audio-message-id', id);
+        audio.setAttribute?.('data-assistant-audio-media-id', assetId);
+        audioMount?.append?.(audio);
       } catch {
         return playbackError(id, assetId);
       }

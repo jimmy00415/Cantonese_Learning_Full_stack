@@ -87,6 +87,7 @@ async function startVoiceApp(t, {
     store,
     mediaStore,
     cleanupService,
+    voiceService,
     config,
   };
 }
@@ -3832,6 +3833,99 @@ test('delivered text-mode assistant can opt in to audio while retaining the atom
   });
   assert.equal(claim.status, 'ready');
   assert.equal(ttsCalls, 1);
+});
+
+test('owned text-mode audio opt-in leaves durable retryable state that background recovery may finish', async (t) => {
+  let ttsCalls = 0;
+  const audioBytes = Buffer.from([0x49, 0x44, 0x33, 0x04, 0x05]);
+  const { baseUrl, origin, store, voiceService } = await startVoiceApp(t, {
+    mediaDeadlineMs: 60_000,
+    ttsProvider: {
+      provider: 'azure',
+      async synthesize() {
+        ttsCalls += 1;
+        if (ttsCalls === 1) throw new Error('controlled transient provider failure');
+        return { buffer: audioBytes, mimeType: 'audio/mpeg', provider: 'azure', latencyMs: 1 };
+      },
+    },
+  });
+  const session = await fetchJson(`${baseUrl}/api/v1/session`, {
+    method: 'POST', headers: { Origin: origin },
+  });
+  const cookie = session.response.headers.getSetCookie()[0].split(';')[0];
+  const assistant = await createDeliveredAssistant(
+    store, session.body.data.session, session.body.data.conversation,
+    { replyLanguage: 'en', replyMode: 'text' },
+  );
+
+  const requested = await fetchJson(`${baseUrl}/api/v1/messages/${assistant.id}/audio`, {
+    method: 'POST', headers: { Origin: origin, Cookie: cookie },
+  });
+  assert.equal(requested.response.status, 502);
+  assert.equal(requested.body.error.code, 'VOICE_SYNTHESIS_FAILED');
+  const failed = await store.getAssistantAudioStatus({
+    sessionId: session.body.data.session.id, messageId: assistant.id, kind: 'assistant_voice',
+  });
+  assert.equal(failed.state, 'failed');
+  assert.equal(failed.retryable, true);
+
+  assert.deepEqual(
+    await voiceService.recoverAssistantAudio({ limit: 1 }),
+    { scanned: 1, attempted: 1, attached: 1, limit: 1 },
+  );
+  const recovered = await store.getOwnedAssistantMessage({
+    sessionId: session.body.data.session.id, messageId: assistant.id,
+  });
+  assert.match(recovered.mediaId, /^[0-9a-f-]{36}$/i);
+  assert.equal(recovered.text, 'Durable assistant text survives TTS.');
+  assert.equal(ttsCalls, 2);
+});
+
+test('atomic audio recovery requires intrinsic voice mode or a durable prior text opt-in', async (t) => {
+  const { store } = await createStore(t, 'hb-v1-audio-recovery-opt-in-');
+  const owner = await store.createOrResumeSession({
+    tokenHash: 'a'.repeat(64), now: '2026-08-25T00:00:00.000Z',
+  });
+  const untouchedText = await createDeliveredAssistant(
+    store, owner.session, owner.conversation,
+    { replyMode: 'text', clientMessageId: '11111111-1111-4111-8111-111111111111' },
+  );
+  const intrinsicVoice = await createDeliveredAssistant(
+    store, owner.session, owner.conversation,
+    { replyMode: 'voice', clientMessageId: '22222222-2222-4222-8222-222222222222' },
+  );
+  const requestedText = await createDeliveredAssistant(
+    store, owner.session, owner.conversation,
+    { replyMode: 'text', clientMessageId: '33333333-3333-4333-8333-333333333333' },
+  );
+  const claimed = await store.claimAssistantAudioWithRateLimits({
+    sessionId: owner.session.id,
+    messageId: requestedText.id,
+    kind: 'assistant_voice',
+    rateLimits: [],
+    leaseToken: 'requested-text-lease',
+    attemptStorageKey: 'attempts/tts/requested-text.mp3',
+    configVersion: 'test',
+    leaseExpiresAt: '2026-08-25T00:00:20.000Z',
+    attemptDeadlineAt: '2026-08-25T00:00:35.000Z',
+    now: '2026-08-25T00:00:06.000Z',
+  });
+  await store.failMediaGeneration({
+    generationId: claimed.generation.id,
+    leaseToken: 'requested-text-lease',
+    failureCode: 'VOICE_PROVIDER_UNAVAILABLE',
+    failureHttpStatus: 503,
+    retryable: true,
+    now: '2026-08-25T00:00:07.000Z',
+  });
+
+  const candidates = await store.listAssistantAudioRecoveryCandidates({
+    limit: 25, now: '2026-08-25T00:00:08.000Z',
+  });
+  assert.deepEqual(new Set(candidates.map(({ id }) => id)), new Set([
+    intrinsicVoice.id, requestedText.id,
+  ]));
+  assert.equal(candidates.some(({ id }) => id === untouchedText.id), false);
 });
 
 test('durable voice recovery after store restart is bounded and does not duplicate attached TTS', async (t) => {

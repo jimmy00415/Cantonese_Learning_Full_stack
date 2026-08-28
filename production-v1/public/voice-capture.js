@@ -93,6 +93,15 @@ export function createVoiceCapture({
   clearTimeoutImpl = globalThis.clearTimeout?.bind(globalThis),
   maxDurationMs = VOICE_CAPTURE_MAX_MS,
 } = {}) {
+  const captureConstraints = Object.freeze({
+    audio: Object.freeze({
+      autoGainControl: false,
+      channelCount: 1,
+      echoCancellation: false,
+      noiseSuppression: false,
+      sampleRate: 16_000,
+    }),
+  });
   let disposed = false;
   let permissionReady = false;
   let permissionEpoch = 0;
@@ -276,7 +285,7 @@ export function createVoiceCapture({
   async function acquireRuntime(interaction) {
     let stream;
     try {
-      stream = await mediaDevices.getUserMedia({ audio: true });
+      stream = await mediaDevices.getUserMedia(captureConstraints);
     } catch {
       if (isCurrent(interaction)) fail(interaction, 'VOICE_PERMISSION_DENIED');
       return;
@@ -310,7 +319,7 @@ export function createVoiceCapture({
     permissionReady = false;
     let request;
     try {
-      request = Promise.resolve(mediaDevices.getUserMedia({ audio: true }));
+      request = Promise.resolve(mediaDevices.getUserMedia(captureConstraints));
     } catch (error) {
       request = Promise.reject(error);
     }

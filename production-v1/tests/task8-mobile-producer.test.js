@@ -12,10 +12,12 @@ import {
   MOBILE_BROWSER_CONTRACT,
   MOBILE_CHECK_IDS,
   MOBILE_WAV_CONTRACT,
+  deriveChallengeWav,
   loadPinnedBrowserContract,
   runPinnedPlaywrightFlow,
   runTask8Mobile,
   validateTask8MobileRecord,
+  verifyChallengeBoundUpload,
 } from '../scripts/task8-mobile-producer.js';
 import { createApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
@@ -95,8 +97,6 @@ function rawFlow() {
       clientWidth: 390,
     },
     voice: {
-      getUserMediaObserved: true,
-      mediaRecorderLifecycleObserved: true,
       upload: {
         clientUploadId: '11111111-1111-4111-8111-111111111111',
         claimedSha256: MOBILE_WAV_CONTRACT.sha256,
@@ -122,6 +122,19 @@ function rawFlow() {
       transcriptEditable: true,
       transcriptSent: false,
       fixture: { ...MOBILE_WAV_CONTRACT },
+      witness: {
+        baseFixtureSha256: MOBILE_WAV_CONTRACT.sha256,
+        challengeCommitmentSha256: 'c'.repeat(64),
+        uploadSha256: MOBILE_WAV_CONTRACT.sha256,
+        durationMs: 1_000,
+        durationDeltaMs: 0,
+        comparedSamples: 16_000,
+        baseCorrelation: 0.99,
+        watermarkCorrelation: 0.9,
+        commandLineVerified: true,
+        playbackObserved: true,
+        witnessed: true,
+      },
     },
     network: [
       { path: '/', method: 'GET', resourceType: 'document', status: 200, durationMs: 25 },
@@ -263,6 +276,37 @@ test('mobile producer locks exact Playwright, Chromium, viewport, and canonical 
   });
 });
 
+test('one-time WAV watermark is bounded and rejects base, prior, unrelated, silence, and forged replays', async () => {
+  const base = await readFile(FIXTURE_FILE);
+  const current = deriveChallengeWav(base, { seed: Buffer.alloc(32, 0x31) });
+  const prior = deriveChallengeWav(base, { seed: Buffer.alloc(32, 0x32) });
+  const witness = verifyChallengeBoundUpload(current.bytes, { baseValue: base, challenge: current });
+  assert.equal(witness.witnessed, true);
+  assert.equal(witness.uploadSha256, createHash('sha256').update(current.bytes).digest('hex'));
+  let baseEnergy = 0;
+  let watermarkEnergy = 0;
+  for (let offset = 44; offset < base.length; offset += 2) {
+    const baseSample = base.readInt16LE(offset);
+    const delta = current.bytes.readInt16LE(offset) - baseSample;
+    baseEnergy += baseSample * baseSample;
+    watermarkEnergy += delta * delta;
+  }
+  assert.ok(10 * Math.log10(baseEnergy / watermarkEnergy) > 20, 'watermark must remain over 20 dB below the base signal');
+
+  const silence = Buffer.from(base);
+  silence.fill(0, 44);
+  const unrelated = Buffer.from(base);
+  for (let offset = 44; offset < unrelated.length; offset += 2) {
+    unrelated.writeInt16LE(-unrelated.readInt16LE(offset), offset);
+  }
+  for (const attack of [base, prior.bytes, unrelated, silence]) {
+    assert.throws(
+      () => verifyChallengeBoundUpload(attack, { baseValue: base, challenge: current }),
+      /Controlled mobile evidence is invalid/,
+    );
+  }
+});
+
 test('matching pinned Chromium launches only from the task-owned D browser cache', async () => {
   const expectedRoot = 'D:\\VS_PROJECT\\Testing\\HongKong_Buddy\\.codex-task-5g-temp\\playwright';
   assert.equal(process.env.PLAYWRIGHT_BROWSERS_PATH, expectedRoot);
@@ -291,6 +335,7 @@ test('matching pinned Chromium launches only from the task-owned D browser cache
 
 test('pinned browser runs the actual product shell, native EventSource, voice, audio, retry, and handoff APIs', async (t) => {
   const origin = await startLocalProduct(t);
+  let privateChallengePath = null;
   const flow = await runPinnedPlaywrightFlow({
     candidateOrigin: origin,
     authorization: 'Bearer local-browser-contract',
@@ -299,23 +344,29 @@ test('pinned browser runs the actual product shell, native EventSource, voice, a
       viewport: { width: 390, height: 844 }, deviceScaleFactor: 1,
       isMobile: true, hasTouch: true, serviceWorkers: 'block', acceptDownloads: false,
     },
+    challengeSeed: Buffer.alloc(32, 0x5a),
+    testHooks: { onChallengeCreated: ({ filePath }) => { privateChallengePath = filePath; } },
   });
   assert.equal(flow.finalNavigationUrl, origin);
   assert.equal(flow.network.some(({ path, resourceType, status }) => (
     path === '/api/v1/events' && resourceType === 'eventsource' && status === 200
   )), true);
   assert.equal(flow.network.some(({ path, method }) => path === '/api/v1/voice/transcriptions' && method === 'POST'), true);
-  assert.equal(flow.voice.getUserMediaObserved, true);
-  assert.equal(flow.voice.mediaRecorderLifecycleObserved, true);
   assert.equal(flow.voice.upload.claimedSha256, flow.voice.upload.contentSha256);
   assert.match(flow.voice.upload.contentSha256, /^[0-9a-f]{64}$/);
   assert.equal(flow.voice.fixture.sha256, MOBILE_WAV_CONTRACT.sha256);
+  assert.equal(flow.voice.witness.witnessed, true);
+  assert.equal(flow.voice.witness.commandLineVerified, true);
+  assert.equal(flow.voice.witness.playbackObserved, true);
+  assert.match(flow.voice.witness.challengeCommitmentSha256, /^[0-9a-f]{64}$/);
   assert.equal(flow.voice.terminal.requestSha256, flow.voice.upload.contentSha256);
   assert.equal(flow.voice.terminal.transcript, flow.voice.terminal.domTranscript);
   assert.equal(flow.dom.assistantAudioReady, true);
   assert.equal(flow.dom.assistantAudioAutoplayed, false);
   assert.equal(flow.dom.retryReloadRetained, true);
   assert.equal(flow.dom.unsupportedHandoffVisible, true);
+  await assert.rejects(() => readFile(privateChallengePath), { code: 'ENOENT' });
+  assert.equal(JSON.stringify(flow).includes(privateChallengePath), false);
 });
 
 test('context fence blocks popup-first, WebSocket, and arbitrary EventSource traffic before a sentinel sees it', async (t) => {
@@ -356,6 +407,176 @@ test('context fence blocks popup-first, WebSocket, and arbitrary EventSource tra
   assert.equal(sentinelUpgrades, 0);
   const source = await readFile(new URL('../scripts/task8-mobile-producer.js', import.meta.url), 'utf8');
   assert.doesNotMatch(source, /__hkbuddyMobileObservation/);
+  assert.doesNotMatch(source, /exposeBinding|__hkbuddyRecordMediaLifecycle|instrumentationToken/);
+});
+
+test('candidate main world cannot enumerate, replace, or invoke the isolated playback witness', async (t) => {
+  const candidate = createServer((request, response) => {
+    response.setHeader('Content-Type', 'text/html; charset=utf-8');
+    response.end(`<!doctype html><div class="chat-shell" data-app-state="ready" style="display:block;width:10px;height:10px">ready</div>
+      <script>
+        globalThis.__hkbuddyRecordMediaLifecycle = () => true;
+        globalThis.__hkbuddyMobileObservation = { getUserMediaObserved: true, mediaRecorderObserved: true };
+      </script>`);
+  });
+  await new Promise((resolve) => candidate.listen(0, '127.0.0.1', resolve));
+  t.after(() => closeServer(candidate));
+  let visibleWitnessNames = null;
+  await runPinnedPlaywrightFlow({
+    candidateOrigin: `http://127.0.0.1:${candidate.address().port}`,
+    authorization: 'Bearer local-binding-contract', fixturePath: FIXTURE_FILE,
+    challengeSeed: Buffer.alloc(32, 0x65), testProbeOnly: true,
+    testHooks: {
+      async afterReady({ page }) {
+        visibleWitnessNames = await page.evaluate(() => Object.getOwnPropertyNames(globalThis)
+          .filter((name) => /^__hbw_/.test(name)));
+      },
+    },
+    context: {
+      viewport: { width: 390, height: 844 }, deviceScaleFactor: 1,
+      isMobile: true, hasTouch: true, serviceWorkers: 'block', acceptDownloads: false,
+    },
+  });
+  assert.deepEqual(visibleWitnessNames, []);
+});
+
+test('challenge-bound pinned browser rejects replay of the public base fixture with a coherent hash', async (t) => {
+  const origin = await startLocalProduct(t);
+  const base = await readFile(FIXTURE_FILE);
+  await assert.rejects(() => runPinnedPlaywrightFlow({
+    candidateOrigin: origin,
+    authorization: 'Bearer local-browser-replay-contract',
+    fixturePath: FIXTURE_FILE,
+    challengeSeed: Buffer.alloc(32, 0x61),
+    testHooks: {
+      transformUpload() {
+        return { bytes: base, claimedSha256: createHash('sha256').update(base).digest('hex') };
+      },
+    },
+    context: {
+      viewport: { width: 390, height: 844 }, deviceScaleFactor: 1,
+      isMobile: true, hasTouch: true, serviceWorkers: 'block', acceptDownloads: false,
+    },
+  }), /Controlled mobile evidence is invalid/);
+});
+
+test('pinned browser rejects prior challenge, unrelated WAV, silence, and self-consistent forged uploads', async (t) => {
+  const origin = await startLocalProduct(t);
+  const base = await readFile(FIXTURE_FILE);
+  const prior = deriveChallengeWav(base, { seed: Buffer.alloc(32, 0x70) }).bytes;
+  const unrelated = Buffer.from(base);
+  for (let offset = 44; offset < unrelated.length; offset += 2) {
+    unrelated.writeInt16LE(-unrelated.readInt16LE(offset), offset);
+  }
+  const silence = Buffer.from(base);
+  silence.fill(0, 44);
+  const forged = Buffer.from(base);
+  for (let offset = 44; offset < forged.length; offset += 2) {
+    forged.writeInt16LE(Math.round(500 * Math.sin(offset / 11)), offset);
+  }
+  const attacks = { 'prior-challenge': prior, unrelated, silence, 'self-consistent-forged': forged };
+  for (const [name, bytes] of Object.entries(attacks)) {
+    await assert.rejects(() => runPinnedPlaywrightFlow({
+      candidateOrigin: origin,
+      authorization: 'Bearer local-browser-attack-contract',
+      fixturePath: FIXTURE_FILE,
+      challengeSeed: Buffer.alloc(32, 0x71 + Object.keys(attacks).indexOf(name)),
+      testHooks: {
+        transformUpload() {
+          return { bytes, claimedSha256: createHash('sha256').update(bytes).digest('hex') };
+        },
+      },
+      context: {
+        viewport: { width: 390, height: 844 }, deviceScaleFactor: 1,
+        isMobile: true, hasTouch: true, serviceWorkers: 'block', acceptDownloads: false,
+      },
+    }), /Controlled mobile evidence is invalid/, name);
+  }
+});
+
+test('download attempts fail closed on both the primary page and a popup before persistence', async (t) => {
+  for (const target of ['primary', 'popup']) {
+    let downloadObserved = false;
+    const candidate = createServer((request, response) => {
+      response.setHeader('Content-Type', 'text/html; charset=utf-8');
+      if (request.url === '/popup') {
+        response.end('<button id="attack">download</button><script>attack.onclick=()=>{const a=document.createElement("a");a.href="data:text/plain,private";a.download="popup.txt";a.click()}</script>');
+        return;
+      }
+      response.end(`<!doctype html><div class="chat-shell" data-app-state="ready" style="display:block;width:10px;height:10px">ready</div>
+        <button id="attack">download</button><script>
+        attack.onclick=()=>{${target === 'primary'
+    ? 'const a=document.createElement("a");a.href=URL.createObjectURL(new Blob(["private"]));a.download="primary.txt";a.click()'
+    : 'window.open("/popup")'}}
+        </script>`);
+    });
+    await new Promise((resolve) => candidate.listen(0, '127.0.0.1', resolve));
+    try {
+      await assert.rejects(() => runPinnedPlaywrightFlow({
+        candidateOrigin: `http://127.0.0.1:${candidate.address().port}`,
+        authorization: 'Bearer local-download-contract', fixturePath: FIXTURE_FILE,
+        challengeSeed: Buffer.alloc(32, target === 'primary' ? 0x62 : 0x63),
+        testProbeOnly: true,
+        testHooks: {
+          onDownloadAttempt() { downloadObserved = true; },
+          retainUnexpectedPages: target === 'popup',
+          async afterReady({ page, context }) {
+            if (target === 'primary') await page.locator('#attack').click();
+            else {
+              const popup = context.waitForEvent('page');
+              await page.locator('#attack').click();
+              const child = await popup;
+              await child.locator('#attack').click().catch(() => undefined);
+            }
+          },
+        },
+        context: {
+          viewport: { width: 390, height: 844 }, deviceScaleFactor: 1,
+          isMobile: true, hasTouch: true, serviceWorkers: 'block', acceptDownloads: false,
+        },
+      }), /Controlled mobile evidence is invalid/, target);
+      assert.equal(downloadObserved, true, target);
+    } finally {
+      await closeServer(candidate);
+    }
+  }
+});
+
+test('isolated browser witness rejects data, blob, preloaded, and WebAudio playback before explicit Play', async () => {
+  const audioData = (await readFile(FIXTURE_FILE)).toString('base64');
+  const attacks = {
+    data: `<audio id="hidden" hidden src="data:audio/wav;base64,${audioData}"></audio><script>attack.onclick=()=>hidden.play()</script>`,
+    blob: `<script>attack.onclick=async()=>{const blob=await fetch('data:audio/wav;base64,${audioData}').then(r=>r.blob());const audio=new Audio(URL.createObjectURL(blob));audio.hidden=true;document.body.append(audio);await audio.play()}</script>`,
+    preloaded: '<audio id="hidden" hidden preload="auto" src="/audio.wav"></audio><script>attack.onclick=()=>hidden.play()</script>',
+    webaudio: '<script>attack.onclick=async()=>{const context=new AudioContext();const buffer=context.createBuffer(1,16000,16000);buffer.getChannelData(0).fill(.1);const source=context.createBufferSource();source.buffer=buffer;source.connect(context.destination);source.start()}</script>',
+  };
+  for (const [name, attack] of Object.entries(attacks)) {
+    const candidate = createServer((request, response) => {
+      if (request.url === '/audio.wav') {
+        response.setHeader('Content-Type', 'audio/wav');
+        response.end(Buffer.from(audioData, 'base64'));
+        return;
+      }
+      response.setHeader('Content-Type', 'text/html; charset=utf-8');
+      response.end(`<!doctype html><div class="chat-shell" data-app-state="ready" style="display:block;width:10px;height:10px">ready</div><button id="attack">play</button>${attack}`);
+    });
+    await new Promise((resolve) => candidate.listen(0, '127.0.0.1', resolve));
+    try {
+      await assert.rejects(() => runPinnedPlaywrightFlow({
+        candidateOrigin: `http://127.0.0.1:${candidate.address().port}`,
+        authorization: 'Bearer local-playback-contract', fixturePath: FIXTURE_FILE,
+        challengeSeed: Buffer.alloc(32, 0x66 + Object.keys(attacks).indexOf(name)),
+        testProbeOnly: true,
+        testHooks: { async afterReady({ page }) { await page.locator('#attack').click(); } },
+        context: {
+          viewport: { width: 390, height: 844 }, deviceScaleFactor: 1,
+          isMobile: true, hasTouch: true, serviceWorkers: 'block', acceptDownloads: false,
+        },
+      }), /Controlled mobile evidence is invalid/, name);
+    } finally {
+      await closeServer(candidate);
+    }
+  }
 });
 
 test('mobile producer derives all thirteen checks from raw browser state and binds safe evidence', async () => {
@@ -480,7 +701,7 @@ test('controlled contract rejects mismatched IDs, fabricated transcript, stale r
     (flow) => { flow.dom.unsupportedHandoffVisible = false; },
     (flow) => { flow.dom.assistantAudioReady = false; },
     (flow) => { flow.dom.retryReloadRetained = false; },
-    (flow) => { flow.voice.mediaRecorderLifecycleObserved = false; },
+    (flow) => { flow.voice.witness.witnessed = false; },
   ];
   for (const mutate of mutations) {
     const flow = structuredClone(rawFlow());

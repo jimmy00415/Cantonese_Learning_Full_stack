@@ -22,7 +22,8 @@ import {
   validateReconciliationPrefix,
 } from './release-reconciliation.js';
 import {
-  openReleaseStateStore, readBoundedOrdinaryFile, writeAtomicCreateOnly,
+  openReleaseStateStore, readBoundedOrdinaryFile, readReleaseJournalRecords,
+  writeAtomicCreateOnly,
 } from './release-state-store.js';
 import { GCP_IDENTITY } from '../src/gcp-identity.js';
 import { finalizeReleaseEvidenceRecord } from '../src/services/release-evidence.js';
@@ -83,6 +84,7 @@ const RECEIPT_PHASES = Object.freeze([
   'build', 'migration', 'inventory', 'acceptance', 'collect', 'evidence', 'candidate',
   'readiness', 'workload', 'mobile',
 ]);
+const receiptChainAuthorities = new WeakMap();
 const ACTION_RECEIPT_PHASES = new Set(['candidate-cleanup', 'promote', 'rollback']);
 const APP_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const execFileAsync = promisify(execFile);
@@ -3219,8 +3221,9 @@ async function validatePrivacyProofArtifact(
     || record?.binding?.boundarySha256 !== reference.boundarySha256
     || record?.occurredAt !== reference.observedAt
     || record?.expiresAt !== reference.expiresAt) throw new Error(errorMessage);
+  const verificationClock = typeof now === 'function' ? now() : now;
   try {
-    validatePrivacyProof(record, { binding: candidatePrivacyBinding(plan), now });
+    validatePrivacyProof(record, { binding: candidatePrivacyBinding(plan), now: verificationClock });
   } catch {
     throw new Error(errorMessage);
   }
@@ -3375,7 +3378,7 @@ function validateAcceptanceExecutionOutputs(executions, plan) {
   return true;
 }
 
-function validateReceiptOutputs(phase, outputs, plan) {
+function validateReceiptOutputs(phase, outputs, plan, { candidatePrivacyReference = null } = {}) {
   const expectedLabels = {
     'com.simplify.build-config-sha256': plan.buildConfigSha256,
     'com.simplify.source-archive-sha256': plan.sourceArchiveSha256,
@@ -3441,15 +3444,10 @@ function validateReceiptOutputs(phase, outputs, plan) {
     try { privacyProof = assertPrivacyProofReference(outputs?.privacyProof); } catch {
       throw new Error('Release candidate receipt outputs are invalid');
     }
-    const expectedPrivacyProof = {
-      schemaVersion: 3,
-      filePath: plan.candidatePrivacyProofPath,
-      artifactSha256: privacyProof.artifactSha256,
-      objectSha256: privacyProof.objectSha256,
-      boundarySha256: candidatePrivacyBoundarySha256(candidatePrivacyBinding(plan)),
-      observedAt: privacyProof.observedAt,
-      expiresAt: privacyProof.expiresAt,
-    };
+    let expectedPrivacyProof;
+    try { expectedPrivacyProof = assertPrivacyProofReference(candidatePrivacyReference); } catch {
+      throw new Error('Release candidate receipt authority is invalid');
+    }
     if (!exactKeys(outputs, [
       'access', 'candidateContractSha256', 'candidateService', 'imageDigest', 'origin',
       'privacyProof', 'privacyProofReferenceSha256', 'publicInvoker', 'priorRelease', 'revision', 'stableService', 'stableTrafficState',
@@ -3521,10 +3519,81 @@ function validateReceiptOutputs(phase, outputs, plan) {
   return true;
 }
 
-export function validateReleaseReceiptChain(value, plan, { through = 'mobile' } = {}) {
+function candidatePrivacyAuthority(reference, candidateReceiptSha256) {
+  return Object.freeze({
+    privacyProof: assertPrivacyProofReference(reference),
+    candidateReceiptSha256,
+  });
+}
+
+function candidatePrivacyAuthorityFromJournal(records, receipt, plan) {
+  if (!Array.isArray(records) || !DIGEST.test(String(receipt?.receiptSha256 ?? ''))) {
+    throw new Error('Candidate privacy receipt authority is invalid');
+  }
+  const terminals = records.filter((record) => record.phase === 'candidate'
+    && record.recordType === 'terminal'
+    && record.payload?.receiptSha256 === receipt.receiptSha256);
+  if (terminals.length !== 1) throw new Error('Candidate privacy receipt authority is invalid');
+  const terminal = terminals[0];
+  const attemptRecords = records.filter(({ attemptId }) => attemptId === terminal.attemptId);
+  const intents = attemptRecords.filter((record) => record.recordType === 'intent'
+    && record.operationId === 'candidate-privacy-publish');
+  if (intents.length !== 1) throw new Error('Candidate privacy receipt authority is invalid');
+  const intent = intents[0];
+  const checkpoints = attemptRecords.filter((record) => record.recordType === 'checkpoint'
+    && record.operationId === 'candidate-privacy-publish'
+    && record.payload?.intentRecordSha256 === intent.recordSha256);
+  const artifacts = intent.payload?.publication?.artifacts;
+  if (checkpoints.length !== 1 || !Array.isArray(artifacts) || artifacts.length !== 1
+    || artifacts[0]?.role !== 'privacy-proof'
+    || artifacts[0]?.filePath !== plan.candidatePrivacyProofPath) {
+    throw new Error('Candidate privacy receipt authority is invalid');
+  }
+  const bytes = Buffer.from(String(artifacts[0].contentsBase64 ?? ''), 'base64');
+  if (bytes.toString('base64') !== artifacts[0].contentsBase64
+    || bytes.length !== artifacts[0].byteLength
+    || createHash('sha256').update(bytes).digest('hex') !== artifacts[0].objectSha256) {
+    throw new Error('Candidate privacy receipt authority is invalid');
+  }
+  let proof;
+  try { proof = JSON.parse(bytes.toString('utf8')); } catch {
+    throw new Error('Candidate privacy receipt authority is invalid');
+  }
+  const reference = {
+    schemaVersion: 3,
+    filePath: artifacts[0].filePath,
+    artifactSha256: proof.artifactSha256,
+    objectSha256: artifacts[0].objectSha256,
+    boundarySha256: proof.binding?.boundarySha256,
+    observedAt: proof.occurredAt,
+    expiresAt: proof.expiresAt,
+  };
+  if (reference.boundarySha256 !== candidatePrivacyBoundarySha256(candidatePrivacyBinding(plan))) {
+    throw new Error('Candidate privacy receipt authority is invalid');
+  }
+  return candidatePrivacyAuthority(reference, receipt.receiptSha256);
+}
+
+export function validateReleaseReceiptChain(value, plan, {
+  through = 'mobile',
+  candidatePrivacyAnchor = receiptChainAuthorities.get(value)
+    ?? value?.candidatePrivacyAnchor ?? null,
+} = {}) {
   const lastIndex = RECEIPT_PHASES.indexOf(through);
   if (!plan || lastIndex < 0 || !Array.isArray(value) || value.length !== lastIndex + 1) {
     throw new Error('Release receipt chain is invalid');
+  }
+  const candidateIndex = RECEIPT_PHASES.indexOf('candidate');
+  let authority = null;
+  if (lastIndex >= candidateIndex) {
+    if (!exactKeys(candidatePrivacyAnchor, ['candidateReceiptSha256', 'privacyProof'])
+      || !DIGEST.test(String(candidatePrivacyAnchor.candidateReceiptSha256 ?? ''))) {
+      throw new Error('Candidate privacy receipt authority is invalid');
+    }
+    authority = candidatePrivacyAuthority(
+      candidatePrivacyAnchor.privacyProof,
+      candidatePrivacyAnchor.candidateReceiptSha256,
+    );
   }
   let previousReceiptSha256 = null;
   for (let index = 0; index <= lastIndex; index += 1) {
@@ -3548,7 +3617,12 @@ export function validateReleaseReceiptChain(value, plan, { through = 'mobile' } 
       || finalizeReleasePhaseReceipt(receipt).receiptSha256 !== receipt.receiptSha256) {
       throw new Error('Release receipt chain is invalid');
     }
-    validateReceiptOutputs(phase, receipt.outputs, plan);
+    validateReceiptOutputs(phase, receipt.outputs, plan, {
+      candidatePrivacyReference: authority?.privacyProof ?? null,
+    });
+    if (phase === 'candidate' && receipt.receiptSha256 !== authority.candidateReceiptSha256) {
+      throw new Error('Candidate privacy receipt authority is invalid');
+    }
     previousReceiptSha256 = receipt.receiptSha256;
   }
   return true;
@@ -3573,6 +3647,15 @@ async function loadReleaseReceiptFiles(plan, { through }) {
     const receipt = JSON.parse(raw);
     if (raw !== `${JSON.stringify(receipt, null, 2)}\n`) throw new Error('Release receipt chain is invalid');
     receipts.push(receipt);
+  }
+  if (lastIndex >= RECEIPT_PHASES.indexOf('candidate')) {
+    const candidateReceipt = receipts.find(({ phase }) => phase === 'candidate');
+    const records = await readReleaseJournalRecords(plan.releaseReceiptDirectory);
+    const authority = candidatePrivacyAuthorityFromJournal(records, candidateReceipt, plan);
+    receiptChainAuthorities.set(receipts, authority);
+    Object.defineProperty(receipts, 'candidatePrivacyAnchor', {
+      value: authority, enumerable: true, configurable: false, writable: false,
+    });
   }
   validateReleaseReceiptChain(receipts, plan, { through });
   return receipts;
@@ -3859,7 +3942,12 @@ function createReleasePhaseReceipt(phase, plan, completed, context, priorReceipt
     completed: Object.freeze([...completed]),
     outputs: releasePhaseReceiptOutputs(phase, plan, context),
   });
-  validateReleaseReceiptChain([...priorReceipts, receipt], plan, { through: phase });
+  const candidatePrivacyAnchor = phase === 'candidate'
+    ? candidatePrivacyAuthority(context.candidatePrivacyReference, receipt.receiptSha256)
+    : receiptChainAuthorities.get(priorReceipts) ?? priorReceipts.candidatePrivacyAnchor;
+  validateReleaseReceiptChain([...priorReceipts, receipt], plan, {
+    through: phase, candidatePrivacyAnchor,
+  });
   return receipt;
 }
 
@@ -4731,17 +4819,6 @@ async function validatePromotionFinalBarrier({
   verifyReleasePrivacyArtifact,
   validateReleasePrivacyProof,
 }) {
-  const current = now();
-  if (!(current instanceof Date) || !Number.isFinite(current.getTime())) {
-    throw new Error('Promotion final barrier clock is invalid');
-  }
-  await verifyReleasePrivacyArtifact(
-    promotionPrivacyReference,
-    plan,
-    current,
-    'Promotion privacy proof is invalid',
-    validateReleasePrivacyProof,
-  );
   validateReleaseReceiptChain(priorReceipts, plan, { through: 'mobile' });
   const candidateReceipt = priorReceipts.find(({ phase }) => phase === 'candidate');
   const candidateProof = candidateReceipt?.outputs?.privacyProof;
@@ -4758,7 +4835,7 @@ async function validatePromotionFinalBarrier({
       ? priorReceipts.find((value) => value.phase === 'workload')?.outputs?.execution
       : null;
     const verified = await verifyTask8Evidence(plan.task8Evidence[phase], phase, plan, {
-      now: current,
+      now: new Date(promotionPrivacyReference.observedAt),
       historical: true,
       gateWindow: workloadExecution ? {
         gateStartedAt: workloadExecution.gateStartedAt,
@@ -4781,6 +4858,27 @@ async function validatePromotionFinalBarrier({
   const stable = await readStableStagedControlPlaneState(executor, plan, {
     publicIam: plan.previousRevision !== null,
   });
+  let current = null;
+  try {
+    await verifyReleasePrivacyArtifact(
+      promotionPrivacyReference,
+      plan,
+      () => {
+        current = now();
+        if (!(current instanceof Date) || !Number.isFinite(current.getTime())) {
+          throw new Error('Promotion final barrier clock is invalid');
+        }
+        return current;
+      },
+      'Promotion privacy proof is invalid',
+      validateReleasePrivacyProof,
+    );
+  } catch (error) {
+    if (current !== null && promotionProofExpired(promotionPrivacyReference, current)) {
+      error.code = 'PROMOTION_REPROOF_REQUIRED';
+    }
+    throw error;
+  }
   return Object.freeze({
     current: current.toISOString(),
     candidate,
@@ -6708,6 +6806,8 @@ export async function runGcpRelease({
         } else {
           validateReleaseReceiptChain([...priorReceipts, phaseReceipt], plan, {
             through: selection.phase,
+            candidatePrivacyAnchor: receiptChainAuthorities.get(priorReceipts)
+              ?? priorReceipts.candidatePrivacyAnchor,
           });
         }
       }
@@ -7277,23 +7377,31 @@ export async function runGcpRelease({
               },
             ).reference;
           }
-          const barrierNow = now();
-          if (promotionProofExpired(promotionPrivacyReference, barrierNow)) {
+          const preBarrierNow = now();
+          if (promotionProofExpired(promotionPrivacyReference, preBarrierNow)) {
             await closePromotionAttemptForReproof(stateStore);
             const error = new Error('Promotion privacy proof expired before final mutation');
             error.code = 'PROMOTION_REPROOF_REQUIRED';
             throw error;
           }
-          const barrier = await validatePromotionFinalBarrier({
-            executor,
-            plan,
-            priorReceipts,
-            promotionPrivacyReference,
-            now: () => barrierNow,
-            verifyTask8Evidence,
-            verifyReleasePrivacyArtifact,
-            validateReleasePrivacyProof,
-          });
+          let barrier;
+          try {
+            barrier = await validatePromotionFinalBarrier({
+              executor,
+              plan,
+              priorReceipts,
+              promotionPrivacyReference,
+              now,
+              verifyTask8Evidence,
+              verifyReleasePrivacyArtifact,
+              validateReleasePrivacyProof,
+            });
+          } catch (error) {
+            if (error?.code === 'PROMOTION_REPROOF_REQUIRED') {
+              await closePromotionAttemptForReproof(stateStore);
+            }
+            throw error;
+          }
           promotionBarrierSha256 = canonicalSha256(barrier);
           Object.assign(promotionStableReadbacks, {
             artifact: barrier.stable.artifact,
@@ -7328,6 +7436,7 @@ export async function runGcpRelease({
           existingJournalIntent = null;
           restartAdoptions.add(member.id);
         } else {
+          let proofExpiredAfterIntent = false;
           try {
             finalMutationGuard?.beforeOperation(member.id);
             journalIntent = await stateStore.appendIntent({
@@ -7342,11 +7451,22 @@ export async function runGcpRelease({
               beforeSha256: canonicalSha256(beforeState),
               afterSha256: journalAfterSha256,
             }, { operationId: member.id });
+            const postIntentNow = selection.phase === 'promote' && finalPublicMutation
+              ? now() : null;
+            proofExpiredAfterIntent = postIntentNow !== null
+              && promotionProofExpired(promotionPrivacyReference, postIntentNow);
             if (mutationAdapter.finalPublicMutation) {
               finalMutationGuard?.afterOperation(member.id);
             }
           } catch (error) {
             error.code = 'RELEASE_JOURNAL_WRITE_FAILED';
+            throw error;
+          }
+          if (proofExpiredAfterIntent) {
+            journalMutationCount = mutationOrdinal;
+            await closePromotionAttemptForReproof(stateStore);
+            const error = new Error('Promotion privacy proof expired while publishing final intent');
+            error.code = 'PROMOTION_REPROOF_REQUIRED';
             throw error;
           }
         }

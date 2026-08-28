@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { mkdtemp } from 'node:fs/promises';
 import { createServer as createHttpServer } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import { installProcessShutdown, startServer } from '../src/server.js';
+import { AtomicFileStore } from '../src/stores/atomic-file-store.js';
 import { PostgresStore } from '../src/stores/postgres-store.js';
 
 function deferred() {
@@ -773,6 +777,92 @@ test('server assistant audio recovery recurs without overlapping provider work',
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(recoveryCalls, 2, 'duplicate timer delivery must coalesce while recovery is live');
   second.resolve({ scanned: 1, attempted: 1, attached: 1, limit: 25 });
+});
+
+test('server startup and interval recovery never synthesize an untouched text answer', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'hb-v1-server-text-recovery-'));
+  const store = new AtomicFileStore({ filePath: join(directory, 'store.json') });
+  await store.init();
+  const owner = await store.createOrResumeSession({
+    tokenHash: '9'.repeat(64), now: '2026-08-25T00:00:00.000Z',
+  });
+  const accepted = await store.acceptMessage({
+    sessionId: owner.session.id,
+    conversationId: owner.conversation.id,
+    clientMessageId: '99999999-9999-4999-8999-999999999999',
+    requestHash: 'server-untouched-text-answer',
+    text: 'Text only, please.',
+    replyLanguage: 'en',
+    replyMode: 'text',
+    now: '2026-08-25T00:00:01.000Z',
+  });
+  const claimed = await store.claimNextTurn({
+    workerId: 'server-test-worker', leaseToken: 'server-test-lease',
+    now: new Date('2026-08-25T00:00:02.000Z'),
+    leaseUntil: new Date('2026-08-25T00:01:00.000Z'),
+  });
+  await store.setTurnState({
+    turnId: claimed.id, leaseToken: 'server-test-lease', state: 'retrieving',
+    now: '2026-08-25T00:00:03.000Z',
+  });
+  await store.setTurnState({
+    turnId: claimed.id, leaseToken: 'server-test-lease', state: 'generating',
+    now: '2026-08-25T00:00:04.000Z',
+  });
+  await store.deliverAssistant({
+    turnId: accepted.turn.id, leaseToken: 'server-test-lease',
+    message: { text: 'This answer remains text only.' },
+    now: '2026-08-25T00:00:05.000Z',
+  });
+
+  let providerCalls = 0;
+  const voiceService = {
+    async recoverAssistantAudio({ limit = 25 } = {}) {
+      const candidates = await store.listAssistantAudioRecoveryCandidates({
+        limit, now: '2026-08-25T00:00:06.000Z',
+      });
+      providerCalls += candidates.length;
+      return { scanned: candidates.length, attempted: candidates.length, attached: 0, limit };
+    },
+  };
+  const order = [];
+  const runtime = runtimeFixture(order);
+  const scheduled = [];
+  const server = await startServer({
+    config: productionConfig(), host: '127.0.0.1', port: 0,
+    store: { ...runtime.store, listAssistantAudioRecoveryCandidates: store.listAssistantAudioRecoveryCandidates.bind(store) },
+    mediaStore: runtime.mediaStore,
+    cleanupService: runtime.cleanupService,
+    retentionWorker: {
+      firstRun: Promise.resolve({ ok: true }),
+      readiness: async () => ({ status: 'ready', healthy: true, policyVersion: 'retention-v1' }),
+      stop: async () => undefined,
+    },
+    voiceService,
+    corpus: {
+      schemaVersion: 'hkbu-campus-v1', snapshotAt: '2026-08-25T12:00:00+08:00', sources: [{ id: 'official-source' }],
+    },
+    llmProvider: { provider: 'fake-real', generate: async () => ({ text: 'unused' }) },
+    evaluateReadiness: async () => safeReadiness(true),
+    dispatcherOptions: { pollIntervalMs: 60_000 },
+    voiceRecoveryOptions: {
+      intervalMs: 25,
+      setTimeoutFn(callback) {
+        const handle = { callback, unref() {} };
+        scheduled.push(handle);
+        return handle;
+      },
+      clearTimeoutFn: () => undefined,
+    },
+  });
+  t.after(async () => { await server.shutdown(); await store.close(); });
+
+  await server.runtime.voiceRecovery;
+  assert.equal(providerCalls, 0);
+  assert.equal(scheduled.length, 1);
+  scheduled[0].callback();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(providerCalls, 0);
 });
 
 test('server shutdown clears recovery timers and never waits for or rearms an in-flight sweep', async (t) => {

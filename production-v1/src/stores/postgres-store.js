@@ -1530,13 +1530,18 @@ export class PostgresStore {
       WHERE m.role = 'assistant' AND m.status = 'delivered'
         AND m.media_id IS NULL
         AND (
-          g.id IS NULL
-          OR (g.state = 'failed' AND g.retryable = TRUE)
+          (m.reply_mode = 'voice' AND g.id IS NULL)
           OR (
-            g.state = 'generating'
+            g.id IS NOT NULL
             AND (
-              g.lease_expires_at IS NULL OR g.lease_expires_at <= $2
-              OR g.attempt_deadline_at IS NULL OR g.attempt_deadline_at <= $2
+              (g.state = 'failed' AND g.retryable = TRUE)
+              OR (
+                g.state = 'generating'
+                AND (
+                  g.lease_expires_at IS NULL OR g.lease_expires_at <= $2
+                  OR g.attempt_deadline_at IS NULL OR g.attempt_deadline_at <= $2
+                )
+              )
             )
           )
         )

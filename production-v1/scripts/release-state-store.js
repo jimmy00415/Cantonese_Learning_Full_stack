@@ -622,6 +622,17 @@ async function readJournalFiles(stateDirectory) {
   return { entries, records };
 }
 
+export async function readReleaseJournalRecords(receiptDirectory) {
+  if (!isAbsolute(receiptDirectory)) fail();
+  const stateDirectory = join(receiptDirectory, 'state');
+  await assertNoSymlinkPath(stateDirectory);
+  const metadata = await lstat(stateDirectory);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) fail();
+  const { records } = await readJournalFiles(stateDirectory);
+  validateJournalRecords(records);
+  return Object.freeze(records.map((record) => Object.freeze(structuredClone(record))));
+}
+
 export async function recoverJournalTemp(stateDirectory) {
   await assertNoSymlinkPath(stateDirectory);
   const { entries, records } = await readJournalFiles(stateDirectory);

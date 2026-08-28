@@ -788,8 +788,10 @@ test('assistant audio recovery query is bounded to eligible nonterminal delivere
   const query = pool.calls.find((call) => /FROM messages/i.test(call.text));
   assert.match(query.text, /role\s*=\s*'assistant'/i);
   assert.match(query.text, /status\s*=\s*'delivered'/i);
-  assert.doesNotMatch(query.text, /reply_mode\s*=/i,
-    'recovery includes manually requested audio for delivered text answers');
+  assert.match(query.text, /m\.reply_mode\s*=\s*'voice'\s+AND\s+g\.id\s+IS\s+NULL/i,
+    'only an intrinsic voice reply may recover without a durable generation request');
+  assert.match(query.text, /g\.id\s+IS\s+NOT\s+NULL[\s\S]*g\.state\s*=\s*'failed'/i,
+    'a durable retryable generation authorizes recovery for either reply mode');
   assert.match(query.text, /media_id\s+IS\s+NULL/i);
   assert.match(query.text, /LEFT JOIN\s+media_generations/i);
   assert.match(query.text, /retryable\s*=\s*TRUE/i);

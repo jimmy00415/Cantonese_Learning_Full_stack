@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { createHash, randomBytes } from 'node:crypto';
+import { mkdtemp, readFile, rmdir, unlink, writeFile } from 'node:fs/promises';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { chromium } from 'playwright';
@@ -41,6 +41,8 @@ const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/;
 const MAX_EVIDENCE_AGE_MS = 5 * 60_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const browserOwnedFlows = new WeakSet();
+const WATERMARK_AMPLITUDE = 384;
+const WITNESS_WORLD = '__hkbuddy_browser_witness_v1';
 
 function fail() {
   const error = new Error('Controlled mobile evidence is invalid');
@@ -78,6 +80,170 @@ function deepFreeze(value) {
   return Object.freeze(value);
 }
 
+function pcm16(buffer) {
+  const view = new Int16Array((buffer.length - 44) / 2);
+  for (let index = 0; index < view.length; index += 1) {
+    view[index] = buffer.readInt16LE(44 + index * 2);
+  }
+  return view;
+}
+
+function watermarkSamples(seed, sampleCount) {
+  const watermark = new Int16Array(sampleCount);
+  const firstFrequency = 400 + (seed[0] % 48) * 20;
+  let secondFrequency = 1_400 + (seed[1] % 48) * 20;
+  if (secondFrequency === firstFrequency) secondFrequency += 20;
+  const firstPhase = (seed.readUInt16BE(2) / 65_536) * 2 * Math.PI;
+  const secondPhase = (seed.readUInt16BE(4) / 65_536) * 2 * Math.PI;
+  for (let sample = 0; sample < sampleCount; sample += 1) {
+    const seconds = sample / MOBILE_WAV_CONTRACT.sampleRate;
+    watermark[sample] = Math.round(WATERMARK_AMPLITUDE * (
+      Math.sin(2 * Math.PI * firstFrequency * seconds + firstPhase)
+      + Math.sin(2 * Math.PI * secondFrequency * seconds + secondPhase)
+    ));
+  }
+  return watermark;
+}
+
+export function deriveChallengeWav(baseValue, { seed = randomBytes(32) } = {}) {
+  try {
+    const base = validateCanonicalWav(baseValue, { expectedSha256: MOBILE_WAV_CONTRACT.sha256 });
+    const secretSeed = Buffer.from(seed);
+    if (secretSeed.length !== 32) fail();
+    const bytes = Buffer.from(base.buffer);
+    const samples = pcm16(bytes);
+    const watermark = watermarkSamples(secretSeed, samples.length);
+    for (let index = 0; index < samples.length; index += 1) {
+      const watermarked = samples[index] + watermark[index];
+      bytes.writeInt16LE(Math.max(-32_768, Math.min(32_767, watermarked)), 44 + index * 2);
+    }
+    validateCanonicalWav(bytes);
+    return {
+      bytes,
+      commitmentSha256: sha256(secretSeed),
+      seed: secretSeed,
+      watermark,
+    };
+  } catch (error) {
+    if (error?.code === 'MOBILE_CONTROLLED_EVIDENCE_INVALID') throw error;
+    fail();
+  }
+}
+
+function cosine(left, right, offset, stride = 1) {
+  let dot = 0;
+  let leftSq = 0;
+  let rightSq = 0;
+  let count = 0;
+  const leftStart = Math.max(0, -offset);
+  const rightStart = Math.max(0, offset);
+  const length = Math.min(left.length - leftStart, right.length - rightStart);
+  for (let index = 0; index < length; index += stride) {
+    const a = left[leftStart + index];
+    const b = right[rightStart + index];
+    dot += a * b;
+    leftSq += a * a;
+    rightSq += b * b;
+    count += 1;
+  }
+  return {
+    count,
+    value: leftSq > 0 && rightSq > 0 ? dot / Math.sqrt(leftSq * rightSq) : 0,
+  };
+}
+
+export function verifyChallengeBoundUpload(uploadValue, {
+  baseValue,
+  challenge,
+  onMetrics,
+} = {}) {
+  try {
+    const upload = validateCanonicalWav(uploadValue);
+    const base = validateCanonicalWav(baseValue, { expectedSha256: MOBILE_WAV_CONTRACT.sha256 });
+    if (!challenge || !Buffer.isBuffer(challenge.bytes) || !Buffer.isBuffer(challenge.seed)
+      || challenge.seed.length !== 32 || upload.sha256 === base.sha256) fail();
+    const uploadedSamples = pcm16(upload.buffer);
+    const baseSamples = pcm16(base.buffer);
+    let best = { offset: 0, value: -1, count: 0 };
+    for (let offset = -1_600; offset <= 1_600; offset += 8) {
+      const candidate = cosine(baseSamples, uploadedSamples, offset, 8);
+      if (candidate.value > best.value) best = { offset, ...candidate };
+    }
+    for (let offset = best.offset - 8; offset <= best.offset + 8; offset += 1) {
+      const candidate = cosine(baseSamples, uploadedSamples, offset, 4);
+      if (candidate.value > best.value) best = { offset, ...candidate };
+    }
+    const baseStart = Math.max(0, -best.offset);
+    const uploadStart = Math.max(0, best.offset);
+    const comparedSamples = Math.min(
+      baseSamples.length - baseStart,
+      uploadedSamples.length - uploadStart,
+      challenge.watermark.length - baseStart,
+    );
+    if (comparedSamples < 12_000) fail();
+    let signalDot = 0;
+    let baseSq = 0;
+    for (let index = 0; index < comparedSamples; index += 1) {
+      const baseSample = baseSamples[baseStart + index];
+      signalDot += uploadedSamples[uploadStart + index] * baseSample;
+      baseSq += baseSample * baseSample;
+    }
+    const fittedGain = baseSq > 0 ? signalDot / baseSq : 1;
+    const residual = new Float64Array(comparedSamples);
+    const expectedWatermark = new Float64Array(comparedSamples);
+    for (let index = 0; index < comparedSamples; index += 1) {
+      residual[index] = uploadedSamples[uploadStart + index]
+        - fittedGain * baseSamples[baseStart + index];
+      expectedWatermark[index] = challenge.watermark[baseStart + index];
+    }
+    const watermarkCorrelation = Math.abs(cosine(expectedWatermark, residual, 0).value);
+    const durationDeltaMs = Math.abs(upload.durationMs - base.durationMs);
+    const metrics = {
+      baseFixtureSha256: base.sha256,
+      challengeCommitmentSha256: challenge.commitmentSha256,
+      uploadSha256: upload.sha256,
+      durationMs: upload.durationMs,
+      durationDeltaMs,
+      comparedSamples,
+      baseCorrelation: Number(best.value.toFixed(6)),
+      watermarkCorrelation: Number(watermarkCorrelation.toFixed(6)),
+      witnessed: true,
+    };
+    onMetrics?.(deepFreeze({ ...metrics }));
+    if (best.value < 0.8 || watermarkCorrelation < 0.25 || durationDeltaMs > 250) fail();
+    return deepFreeze(metrics);
+  } catch (error) {
+    if (error?.code === 'MOBILE_CONTROLLED_EVIDENCE_INVALID') throw error;
+    fail();
+  }
+}
+
+function taskOwnedTempRoot(value) {
+  const root = resolve(String(value ?? ''));
+  if (!isAbsolute(root) || !/^[dD]:\\/.test(root)
+    || !root.toLowerCase().includes('\\.codex-task-5g-temp\\')) fail();
+  return root;
+}
+
+async function createPrivateChallenge({ baseBytes, seed, tempRoot }) {
+  const root = taskOwnedTempRoot(tempRoot);
+  const directory = await mkdtemp(join(root, 'mobile-voice-challenge-'));
+  const filePath = join(directory, 'capture.wav');
+  if (relative(root, filePath).startsWith('..')) fail();
+  const challenge = deriveChallengeWav(baseBytes, { seed });
+  await writeFile(filePath, challenge.bytes, { flag: 'wx', mode: 0o600 });
+  return {
+    ...challenge,
+    filePath,
+    async dispose() {
+      if (resolve(dirname(filePath)) !== resolve(directory)
+        || relative(root, directory).startsWith('..')) fail();
+      await unlink(filePath);
+      await rmdir(directory);
+    },
+  };
+}
+
 export async function loadPinnedBrowserContract() {
   const packageJson = JSON.parse(await readFile(new URL('../node_modules/playwright/package.json', import.meta.url)));
   const browsers = JSON.parse(await readFile(new URL('../node_modules/playwright-core/browsers.json', import.meta.url)));
@@ -112,6 +278,25 @@ function assertPrivacyReference(value, boundarySha256) {
   return value;
 }
 
+function assertVoiceWitness(value) {
+  if (!exactKeys(value, [
+    'baseCorrelation', 'baseFixtureSha256', 'challengeCommitmentSha256',
+    'commandLineVerified', 'comparedSamples', 'durationDeltaMs', 'durationMs',
+    'playbackObserved', 'uploadSha256', 'watermarkCorrelation', 'witnessed',
+  ]) || value.baseFixtureSha256 !== MOBILE_WAV_CONTRACT.sha256
+    || !DIGEST.test(value.challengeCommitmentSha256) || !DIGEST.test(value.uploadSha256)
+    || value.commandLineVerified !== true || value.playbackObserved !== true
+    || value.witnessed !== true || !Number.isSafeInteger(value.comparedSamples)
+    || value.comparedSamples < 12_000 || !Number.isFinite(value.durationMs)
+    || value.durationMs < 750 || value.durationMs > 1_250
+    || !Number.isFinite(value.durationDeltaMs) || value.durationDeltaMs < 0
+    || value.durationDeltaMs > 250 || !Number.isFinite(value.baseCorrelation)
+    || value.baseCorrelation < 0.8 || value.baseCorrelation > 1
+    || !Number.isFinite(value.watermarkCorrelation)
+    || value.watermarkCorrelation < 0.25 || value.watermarkCorrelation > 1) fail();
+  return value;
+}
+
 export function validateTask8MobileRecord(record, {
   binding,
   sourceArchiveSha256,
@@ -131,7 +316,7 @@ export function validateTask8MobileRecord(record, {
         'expiresAt', 'finalNavigationUrl', 'fixture', 'gate', 'imageDigest', 'network',
         'occurredAt', 'privacyProofs', 'result', 'schemaVersion', 'screenshots',
         'sourceArchiveSha256', 'stableService', 'stableTrafficState', 'trafficPercent',
-        'trafficState', 'viewport',
+        'trafficState', 'viewport', 'voiceWitness',
       ]) || record.schemaVersion !== 3 || record.gate !== 'mobile' || record.result !== 'pass'
       || record.commitSha !== binding.releaseSha || record.sourceArchiveSha256 !== sourceArchiveSha256
       || record.imageDigest !== binding.imageDigest || record.candidateService !== binding.candidateService
@@ -150,6 +335,7 @@ export function validateTask8MobileRecord(record, {
       || JSON.stringify(record.viewport) !== JSON.stringify({
         width: 390, height: 844, deviceScaleFactor: 1, isMobile: true, hasTouch: true,
       }) || !exactKeys(record.privacyProofs, ['end', 'start'])) fail();
+    assertVoiceWitness(record.voiceWitness);
     const start = assertPrivacyReference(record.privacyProofs.start, boundarySha256);
     const end = assertPrivacyReference(record.privacyProofs.end, boundarySha256);
     if (record.occurredAt !== start.observedAt
@@ -216,95 +402,107 @@ function canonicalEventSourceUrl(url, candidateOrigin) {
 }
 
 export async function runPinnedPlaywrightFlow({
-  candidateOrigin, authorization, context, fixturePath, testProbeOnly = false,
+  candidateOrigin,
+  authorization,
+  context,
+  fixturePath,
+  testProbeOnly = false,
+  challengeSeed,
+  testHooks = null,
 }) {
   if (typeof authorization !== 'string' || authorization.length < 1 || authorization.length > 16_384) fail();
   const trustedOrigin = exactCandidateOrigin(candidateOrigin);
-  const browser = await chromium.launch({
-    headless: true,
-    args: [
-      '--use-fake-ui-for-media-stream',
-      '--use-fake-device-for-media-stream',
-      `--use-file-for-fake-audio-capture=${fixturePath}`,
-    ],
+  const baseBytes = await readFile(fixturePath);
+  const base = validateCanonicalWav(baseBytes, { expectedSha256: MOBILE_WAV_CONTRACT.sha256 });
+  if (base.durationMs !== MOBILE_WAV_CONTRACT.durationMs) fail();
+  const deterministicSeed = challengeSeed === undefined ? undefined : Buffer.from(challengeSeed);
+  if (deterministicSeed !== undefined && deterministicSeed.length !== 32) fail();
+  const challenge = await createPrivateChallenge({
+    baseBytes: base.buffer,
+    seed: deterministicSeed,
+    tempRoot: process.env.TEMP,
   });
+  await testHooks?.onChallengeCreated?.({ filePath: challenge.filePath, bytes: Buffer.from(challenge.bytes) });
+  let browser;
   const failures = [];
   const network = [];
   const started = new Map();
   const responseTasks = [];
-  const mediaLifecycle = [];
   const messageRequests = [];
   const uploadRequests = [];
   const uploadResponses = [];
   const audioRequests = [];
   const audioResponses = [];
   const expectedFailedRequests = new WeakSet();
+  const nativePlayback = [];
+  const mediaPlayback = [];
+  const webAudioContexts = new Map();
+  const webAudioSources = new Set();
+  const webAudioDestinations = new Set();
+  const webAudioConnections = new Set();
   let primaryPage = null;
   let abortNextMessage = false;
+  let explicitPlayStarted = false;
+  let commandLineVerified = false;
+  let uploadWitness = null;
   try {
-    if (browser.version() !== MOBILE_BROWSER_CONTRACT.browserVersion) fail();
-    const browserContext = await browser.newContext(context);
-    const instrumentationToken = createHash('sha256')
-      .update(`${Date.now()}:${Math.random()}:${authorization.length}`)
-      .digest('hex');
-    await browserContext.exposeBinding('__hkbuddyRecordMediaLifecycle', ({ page }, token, event, details = {}) => {
-      if (page !== primaryPage || token !== instrumentationToken
-        || !['getUserMedia.request', 'getUserMedia.resolved', 'MediaRecorder.construct',
-          'MediaRecorder.start', 'MediaRecorder.dataavailable', 'MediaRecorder.stop'].includes(event)) return;
-      mediaLifecycle.push({
-        event,
-        size: Number.isSafeInteger(details?.size) && details.size >= 0 ? details.size : null,
-        type: typeof details?.type === 'string' ? details.type.slice(0, 64) : null,
-      });
+    browser = await chromium.launch({
+      headless: true,
+      args: [
+        '--enable-automation',
+        '--use-fake-ui-for-media-stream',
+        '--use-fake-device-for-media-stream',
+        `--use-file-for-fake-audio-capture=${challenge.filePath}`,
+      ],
     });
-    await browserContext.addInitScript(({ token }) => {
-      const report = (event, details = {}) => {
-        try { void globalThis.__hkbuddyRecordMediaLifecycle(token, event, details); } catch { /* browser teardown */ }
-      };
-      const mediaDevices = navigator.mediaDevices;
-      const originalGetUserMedia = mediaDevices?.getUserMedia?.bind(mediaDevices);
-      if (originalGetUserMedia) {
-        Object.defineProperty(mediaDevices, 'getUserMedia', {
-          configurable: false,
-          value: async (...args) => {
-            report('getUserMedia.request');
-            const stream = await originalGetUserMedia(...args);
-            report('getUserMedia.resolved');
-            return stream;
-          },
-        });
-      }
-      const OriginalMediaRecorder = globalThis.MediaRecorder;
-      if (OriginalMediaRecorder) {
-        Object.defineProperty(globalThis, 'MediaRecorder', {
-          configurable: false,
-          value: new Proxy(OriginalMediaRecorder, {
-            construct(target, args, newTarget) {
-              const recorder = Reflect.construct(target, args, newTarget);
-              report('MediaRecorder.construct', { type: recorder.mimeType });
-              recorder.addEventListener('start', () => report('MediaRecorder.start', { type: recorder.mimeType }));
-              recorder.addEventListener('dataavailable', (event) => report('MediaRecorder.dataavailable', {
-                size: event.data?.size ?? null, type: event.data?.type ?? null,
-              }));
-              recorder.addEventListener('stop', () => report('MediaRecorder.stop', { type: recorder.mimeType }));
-              return recorder;
-            },
-          }),
-        });
-      }
-    }, { token: instrumentationToken });
+    if (browser.version() !== MOBILE_BROWSER_CONTRACT.browserVersion) fail();
+    const browserCdp = await browser.newBrowserCDPSession();
+    const commandLine = await browserCdp.send('Browser.getBrowserCommandLine');
+    const arguments_ = commandLine?.arguments;
+    const expectedCaptureArgument = `--use-file-for-fake-audio-capture=${challenge.filePath}`;
+    commandLineVerified = Array.isArray(arguments_)
+      && arguments_.includes('--enable-automation')
+      && arguments_.includes('--use-fake-ui-for-media-stream')
+      && arguments_.includes('--use-fake-device-for-media-stream')
+      && arguments_.some((argument) => argument.toLowerCase() === expectedCaptureArgument.toLowerCase());
+    await browserCdp.detach();
+    if (!commandLineVerified) fail();
+    const browserContext = await browser.newContext(context);
     browserContext.on('serviceworker', (worker) => {
       failures.push('serviceworker');
       void worker.evaluate?.(() => self.close?.()).catch?.(() => undefined);
     });
+    const installPageGuards = (page) => {
+      page.on('pageerror', () => failures.push('pageerror'));
+      page.on('worker', (worker) => {
+        failures.push('worker');
+        void worker.evaluate?.(() => self.close?.()).catch?.(() => undefined);
+      });
+      page.on('download', (download) => {
+        failures.push('download');
+        testHooks?.onDownloadAttempt?.({ primary: page === primaryPage });
+        void download.cancel().catch(() => undefined);
+      });
+      page.on('requestfailed', (request) => {
+        const url = new URL(request.url());
+        const expectedStreamClose = request.resourceType() === 'eventsource'
+          && canonicalEventSourceUrl(url, trustedOrigin);
+        if (!expectedFailedRequests.has(request) && !expectedStreamClose) {
+          failures.push(`requestfailed:${url.pathname}`);
+        }
+      });
+    };
     browserContext.on('page', (page) => {
+      installPageGuards(page);
       if (primaryPage === null) {
         primaryPage = page;
         return;
       }
       if (page !== primaryPage) {
         failures.push('child-page');
-        void page.close().catch(() => undefined);
+        if (testHooks?.retainUnexpectedPages !== true) {
+          void page.close().catch(() => undefined);
+        }
       }
     });
     await browserContext.routeWebSocket('**/*', (socket) => {
@@ -327,20 +525,125 @@ export async function runPinnedPlaywrightFlow({
         await route.abort('failed');
         return;
       }
-      await route.continue({ headers: { ...request.headers(), authorization } });
+      let headers = { ...request.headers(), authorization };
+      let postData;
+      if (request.method() === 'POST' && url.pathname === '/api/v1/voice/transcriptions') {
+        let bytes = request.postDataBuffer();
+        let claimedSha256 = headers['x-content-sha256'] ?? null;
+        if (typeof testHooks?.transformUpload === 'function') {
+          const transformed = await testHooks.transformUpload({
+            bytes: Buffer.from(bytes ?? []), claimedSha256,
+          });
+          bytes = Buffer.from(transformed?.bytes ?? []);
+          claimedSha256 = transformed?.claimedSha256 ?? null;
+          headers = {
+            ...headers,
+            'content-length': String(bytes.length),
+            'x-content-sha256': claimedSha256,
+          };
+          postData = bytes;
+        }
+        uploadRequests.push({
+          clientUploadId: headers['x-client-upload-id'] ?? null,
+          claimedSha256,
+          contentSha256: bytes ? sha256(bytes) : null,
+          language: headers['x-asr-language'] ?? null,
+          byteLength: bytes?.length ?? null,
+          bytes: bytes ? Buffer.from(bytes) : null,
+          request,
+        });
+      }
+      await route.continue({ headers, ...(postData === undefined ? {} : { postData }) });
     });
     const page = await browserContext.newPage();
-    page.on('pageerror', () => failures.push('pageerror'));
-    page.on('worker', (worker) => {
-      failures.push('worker');
-      void worker.evaluate?.(() => self.close?.()).catch?.(() => undefined);
+    const pageCdp = await browserContext.newCDPSession(page);
+    const isolatedContexts = new Set();
+    const bindingName = `__hbw_${randomBytes(16).toString('hex')}`;
+    pageCdp.on('Runtime.executionContextCreated', ({ context: executionContext }) => {
+      if (executionContext?.name === WITNESS_WORLD) isolatedContexts.add(executionContext.id);
     });
-    page.on('download', () => failures.push('download'));
-    page.on('requestfailed', (request) => {
-      const url = new URL(request.url());
-      const expectedStreamClose = request.resourceType() === 'eventsource'
-        && canonicalEventSourceUrl(url, trustedOrigin);
-      if (!expectedFailedRequests.has(request) && !expectedStreamClose) failures.push(`requestfailed:${url.pathname}`);
+    pageCdp.on('Runtime.bindingCalled', ({ name, payload, executionContextId }) => {
+      if (name !== bindingName || !isolatedContexts.has(executionContextId)) {
+        failures.push('witness-binding-origin');
+        return;
+      }
+      try {
+        const event = JSON.parse(payload);
+        if (!exactKeys(event, ['kind', 'src']) || !['play', 'playing'].includes(event.kind)
+          || typeof event.src !== 'string' || event.src.length > 2_048) fail();
+        nativePlayback.push(event);
+        testHooks?.onPlaybackEvent?.(event);
+        if (!explicitPlayStarted) failures.push('preplay-native');
+      } catch {
+        failures.push('witness-binding-payload');
+      }
+    });
+    pageCdp.on('Media.playerEventsAdded', ({ events }) => {
+      for (const event of events ?? []) {
+        const text = `${event?.type ?? ''}:${event?.value ?? ''}`;
+        if (/\bplay(?:ing)?\b|kPlay/i.test(text)) {
+          mediaPlayback.push(text.slice(0, 256));
+          if (!explicitPlayStarted) failures.push('preplay-media');
+        }
+      }
+    });
+    pageCdp.on('WebAudio.audioContextCreated', ({ context: audioContext }) => {
+      webAudioContexts.set(audioContext.contextId, {
+        state: audioContext.contextState,
+        type: audioContext.contextType,
+      });
+    });
+    pageCdp.on('WebAudio.audioContextChanged', ({ context: audioContext }) => {
+      webAudioContexts.set(audioContext.contextId, {
+        state: audioContext.contextState,
+        type: audioContext.contextType,
+      });
+      if (audioContext.contextState === 'running'
+        && audioContext.contextType === 'realtime'
+        && webAudioConnections.has(audioContext.contextId) && !explicitPlayStarted) {
+        failures.push('preplay-webaudio');
+      }
+    });
+    pageCdp.on('WebAudio.audioNodeCreated', ({ node }) => {
+      if (/AudioBufferSource|Oscillator/i.test(node?.nodeType ?? '')) {
+        webAudioSources.add(`${node.contextId}:${node.nodeId}`);
+      }
+      if (/AudioDestination/i.test(node?.nodeType ?? '')) {
+        webAudioDestinations.add(`${node.contextId}:${node.nodeId}`);
+      }
+    });
+    pageCdp.on('WebAudio.nodesConnected', ({ contextId, sourceId, destinationId }) => {
+      const sourceKey = `${contextId}:${sourceId}`;
+      const destinationKey = `${contextId}:${destinationId}`;
+      if (webAudioSources.has(sourceKey) && webAudioDestinations.has(destinationKey)) {
+        webAudioConnections.add(contextId);
+        const contextState = webAudioContexts.get(contextId);
+        if (contextState?.state === 'running' && contextState.type === 'realtime'
+          && !explicitPlayStarted) failures.push('preplay-webaudio');
+        if (!contextState) {
+          void pageCdp.send('WebAudio.getRealtimeData', { contextId }).then(
+            () => { if (!explicitPlayStarted) failures.push('preplay-webaudio'); },
+            () => undefined,
+          );
+        }
+      }
+    });
+    await pageCdp.send('Runtime.enable');
+    await pageCdp.send('Page.enable');
+    await pageCdp.send('Media.enable');
+    await pageCdp.send('WebAudio.enable');
+    await pageCdp.send('Runtime.addBinding', { name: bindingName, executionContextName: WITNESS_WORLD });
+    await pageCdp.send('Page.addScriptToEvaluateOnNewDocument', {
+      worldName: WITNESS_WORLD,
+      source: `(() => {
+        const report = (event) => {
+          const target = event.target;
+          const src = target instanceof HTMLMediaElement ? (target.currentSrc || target.src || '') : '';
+          globalThis[${JSON.stringify(bindingName)}](JSON.stringify({ kind: event.type, src }));
+        };
+        document.addEventListener('play', report, true);
+        document.addEventListener('playing', report, true);
+      })();`,
     });
     page.on('request', (request) => {
       started.set(request, Date.now());
@@ -349,18 +652,6 @@ export async function runPinnedPlaywrightFlow({
       if (url.pathname === '/api/v1/messages' && request.method() === 'POST') {
         const body = parseJsonBody(request.postData());
         messageRequests.push({ body, request });
-      }
-      if (url.pathname === '/api/v1/voice/transcriptions' && request.method() === 'POST') {
-        const bytes = request.postDataBuffer();
-        const headers = request.headers();
-        uploadRequests.push({
-          clientUploadId: headers['x-client-upload-id'] ?? null,
-          claimedSha256: headers['x-content-sha256'] ?? null,
-          contentSha256: bytes ? sha256(bytes) : null,
-          language: headers['x-asr-language'] ?? null,
-          byteLength: bytes?.length ?? null,
-          request,
-        });
       }
       if ((/^\/api\/v1\/messages\/[^/]+\/audio(?:\/status)?$/.test(url.pathname)
         || /^\/api\/v1\/media\/[^/]+$/.test(url.pathname))) {
@@ -416,6 +707,7 @@ export async function runPinnedPlaywrightFlow({
     });
     await page.goto(trustedOrigin, { waitUntil: 'domcontentloaded' });
     await page.locator('.chat-shell[data-app-state="ready"]').waitFor({ state: 'visible' });
+    await testHooks?.afterReady?.({ page, context: browserContext });
     if (testProbeOnly === true) {
       await page.waitForTimeout(250);
       if (failures.length > 0) fail();
@@ -478,6 +770,9 @@ export async function runPinnedPlaywrightFlow({
     ));
     let assistantAudioReady = generateLabelObserved && audioPostObserved && Boolean(attachedAudio)
       && (await supportedAudioButton.textContent()) === 'Play voice';
+    if (nativePlayback.length > 0 || mediaPlayback.length > 0
+      || failures.some((item) => /^preplay-/.test(item))) fail();
+    explicitPlayStarted = true;
     await supportedAudioButton.click();
     await page.waitForFunction((prior) => performance.getEntriesByType('resource')
       .filter((entry) => new URL(entry.name).pathname.startsWith('/api/v1/media/')).length > prior,
@@ -485,6 +780,15 @@ export async function runPinnedPlaywrightFlow({
     assistantAudioReady = assistantAudioReady
       && audioRequests.filter(({ path, method }) => path.startsWith('/api/v1/media/') && method === 'GET').length
         > mediaFetchesBeforePlay;
+    for (let attempt = 0; attempt < 40
+      && !nativePlayback.some(({ kind }) => kind === 'playing'); attempt += 1) {
+      await page.waitForTimeout(25);
+    }
+    const ownedMediaPath = `/api/v1/media/${attachedAudio?.data?.mediaId}`;
+    const playbackObserved = nativePlayback.some(({ kind, src }) => {
+      try { return kind === 'playing' && new URL(src).pathname === ownedMediaPath; } catch { return false; }
+    });
+    assistantAudioReady = assistantAudioReady && playbackObserved;
 
     const unsupportedPriorIds = new Set(await page.locator('.message-row--assistant[data-message-id]').evaluateAll(
       (rows) => rows.map((row) => row.dataset.messageId),
@@ -537,6 +841,15 @@ export async function runPinnedPlaywrightFlow({
     await voiceButton.press('Space');
     await page.waitForTimeout(1_100);
     await voiceButton.press('Space');
+    for (let attempt = 0; attempt < 80 && uploadRequests.length === 0; attempt += 1) {
+      await page.waitForTimeout(25);
+    }
+    const witnessedUpload = uploadRequests.at(-1);
+    uploadWitness = verifyChallengeBoundUpload(witnessedUpload?.bytes, {
+      baseValue: base.buffer,
+      challenge,
+      onMetrics: testHooks?.onWitnessMetrics,
+    });
     await page.locator('#voice-draft').waitFor({ state: 'visible' });
     await page.locator('#voice-draft-state').filter({ hasText: 'Voice draft · Not sent' }).waitFor();
     const transcript = await page.locator('#message-input').inputValue();
@@ -581,9 +894,6 @@ export async function runPinnedPlaywrightFlow({
     await page.locator('#message-feed > *').first().waitFor({ state: 'detached' });
     const clearConversationObserved = await page.locator('#message-feed > *').count() === 0;
     screenshots.push(safeAreaScreenshot);
-    const mediaRecorderLifecycleObserved = ['MediaRecorder.construct', 'MediaRecorder.start',
-      'MediaRecorder.dataavailable', 'MediaRecorder.stop']
-      .every((event) => mediaLifecycle.some((item) => item.event === event));
     const pollResponses = uploadResponses.filter(({ path, method, status, data }) => (
       method === 'GET' && status >= 200 && status < 300
       && data?.clientUploadId === upload?.clientUploadId
@@ -592,6 +902,7 @@ export async function runPinnedPlaywrightFlow({
     const initialUploadResponse = uploadResponses.find(({ path, method }) => (
       method === 'POST' && path === '/api/v1/voice/transcriptions'
     ));
+    if (!uploadWitness || upload?.contentSha256 !== uploadWitness.uploadSha256) fail();
     if (failures.length > 0) fail();
     const finalNavigationUrl = new URL(page.url()).origin;
     await browserContext.close();
@@ -606,9 +917,6 @@ export async function runPinnedPlaywrightFlow({
         keyboardFocusVisible, ...geometry,
       },
       voice: {
-        getUserMediaObserved: mediaLifecycle.some(({ event }) => event === 'getUserMedia.request')
-          && mediaLifecycle.some(({ event }) => event === 'getUserMedia.resolved'),
-        mediaRecorderLifecycleObserved,
         upload: {
           clientUploadId: upload?.clientUploadId ?? null,
           claimedSha256: upload?.claimedSha256 ?? null,
@@ -634,6 +942,11 @@ export async function runPinnedPlaywrightFlow({
         transcriptEditable: voiceTranscriptEditable,
         transcriptSent: false,
         fixture: MOBILE_WAV_CONTRACT,
+        witness: {
+          ...uploadWitness,
+          commandLineVerified,
+          playbackObserved,
+        },
       },
       network,
       screenshots,
@@ -641,7 +954,8 @@ export async function runPinnedPlaywrightFlow({
     browserOwnedFlows.add(flow);
     return flow;
   } finally {
-    await browser.close();
+    await browser?.close().catch(() => undefined);
+    try { await challenge.dispose(); } catch { fail(); }
   }
 }
 
@@ -655,9 +969,10 @@ function deriveChecks(flow, { controlledBrowserAdapter = false } = {}) {
     'retryReloadRetained', 'scrollWidth', 'textMessageSent', 'unsupportedHandoffVisible',
     'verifiedOfficialSourceVisible', 'voiceTranscriptEditable', 'voiceTranscriptUnsent',
   ]) || !exactKeys(voice, [
-    'fixture', 'getUserMediaObserved', 'mediaRecorderLifecycleObserved', 'polls',
-    'terminal', 'transcriptEditable', 'transcriptSent', 'upload',
+    'fixture', 'polls', 'terminal', 'transcriptEditable', 'transcriptSent', 'upload',
+    'witness',
   ]) || (!controlledBrowserAdapter && !browserOwnedFlows.has(flow))) fail();
+  const witness = assertVoiceWitness(voice.witness);
   const upload = voice.upload;
   const terminal = voice.terminal;
   const validPolls = Array.isArray(voice.polls)
@@ -690,8 +1005,7 @@ function deriveChecks(flow, { controlledBrowserAdapter = false } = {}) {
     'text-send': dom.textMessageSent === true,
     'editable-voice-transcript': dom.voiceTranscriptEditable === true
       && dom.voiceTranscriptUnsent === true && voice.transcriptEditable === true
-      && voice.transcriptSent === false && voice.getUserMediaObserved === true
-      && voice.mediaRecorderLifecycleObserved === true && voiceCorrelated
+      && voice.transcriptSent === false && voiceCorrelated && witness.witnessed === true
       && JSON.stringify(voice.fixture) === JSON.stringify(MOBILE_WAV_CONTRACT),
     'assistant-audio-ready-no-autoplay': dom.assistantAudioReady === true
       && dom.assistantAudioAutoplayed === false,
@@ -817,6 +1131,7 @@ export async function runTask8Mobile({
       controlPlane: { stable: true, beforeSha256: before.sha256, afterSha256: after.sha256 },
       browser: MOBILE_BROWSER_CONTRACT,
       fixture: MOBILE_WAV_CONTRACT,
+      voiceWitness: flow.voice.witness,
       viewport: { width: 390, height: 844, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
       access: candidateAccess,
       finalNavigationUrl: flow.finalNavigationUrl,

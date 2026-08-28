@@ -181,7 +181,15 @@ test('consented permission preflight stops every temporary track and constructs 
 
   const ready = await capture.preflightPermission({ consent: true });
   assert.equal(ready.status, 'ready');
-  assert.deepEqual(mediaDevices.calls, [{ audio: true }]);
+  assert.deepEqual(mediaDevices.calls, [{
+    audio: {
+      autoGainControl: false,
+      channelCount: 1,
+      echoCancellation: false,
+      noiseSuppression: false,
+      sampleRate: 16_000,
+    },
+  }]);
   assert.deepEqual(permissionStream.tracks.map((track) => track.stopCalls), [1, 1, 1]);
   assert.equal(recorders.instances.length, 0);
 });

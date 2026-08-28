@@ -63,6 +63,9 @@ class FakeAudio {
     this.playCalls = 0;
     this.pauseCalls = 0;
     this.listeners = new Map();
+    this.attributes = new Map();
+    this.hidden = false;
+    this.removed = false;
     this.playResult = Promise.resolve();
     FakeAudio.instances.push(this);
   }
@@ -75,6 +78,14 @@ class FakeAudio {
 
   removeEventListener(type, listener) {
     this.listeners.get(type)?.delete(listener);
+  }
+
+  setAttribute(name, value) {
+    this.attributes.set(name, value);
+  }
+
+  remove() {
+    this.removed = true;
   }
 
   dispatch(type) {
@@ -525,6 +536,7 @@ test('network, session, rate-limit, TTS, malformed, and durable failure outcomes
 
 test('an existing message mediaId plays only through the explicit play API and never changes message text', async () => {
   FakeAudio.instances.length = 0;
+  const mounted = [];
   const message = {
     id: MESSAGE_ID,
     mediaId: MEDIA_ID,
@@ -533,6 +545,7 @@ test('an existing message mediaId plays only through the explicit play API and n
   const controller = createAssistantAudioController({
     fetchImpl: async () => { throw new Error('existing media must not generate'); },
     AudioClass: FakeAudio,
+    audioMount: { append: (audio) => mounted.push(audio) },
     origin: 'https://buddy.example',
   });
 
@@ -544,6 +557,10 @@ test('an existing message mediaId plays only through the explicit play API and n
   assert.equal(audio.preload, 'none');
   assert.equal(audio.autoplay, false);
   assert.equal(audio.playCalls, 1);
+  assert.deepEqual(mounted, [audio]);
+  assert.equal(audio.hidden, true);
+  assert.equal(audio.attributes.get('data-assistant-audio-message-id'), MESSAGE_ID);
+  assert.equal(audio.attributes.get('data-assistant-audio-media-id'), MEDIA_ID);
   assert.equal(result.state, 'playing');
   assert.deepEqual(controller.snapshot().playback, {
     messageId: MESSAGE_ID,
@@ -554,6 +571,8 @@ test('an existing message mediaId plays only through the explicit play API and n
   });
   assert.equal(controller.snapshot().entries[MESSAGE_ID].state, 'ready');
   assert.equal(message.text, 'The complete assistant answer must remain visible.');
+  controller.dispose();
+  assert.equal(audio.removed, true);
 });
 
 test('play enforces the generated message/media identity and never creates Audio for a mismatch', async () => {
