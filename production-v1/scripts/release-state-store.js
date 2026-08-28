@@ -381,6 +381,12 @@ function ordinaryFile(metadata) {
     && metadataSize(metadata) !== null;
 }
 
+function uniquelyLinkedOrdinaryFile(metadata) {
+  const links = metadata?.nlink;
+  const oneLink = links === 1n || links === 1;
+  return ordinaryFile(metadata) && oneLink;
+}
+
 function metadataSize(metadata) {
   if (typeof metadata?.size === 'bigint') {
     if (metadata.size < 0n || metadata.size > BigInt(Number.MAX_SAFE_INTEGER)) return null;
@@ -420,7 +426,7 @@ export async function readBoundedOrdinaryFile(filePath, {
   // An initial ENOENT is intentionally preserved so a create-only publisher can
   // distinguish absence from any identity drift after the path was observed.
   const pathBefore = await lstat(filePath, { bigint: true });
-  if (!ordinaryFile(pathBefore)) throw new Error('Bounded ordinary file is invalid');
+  if (!uniquelyLinkedOrdinaryFile(pathBefore)) throw new Error('Bounded ordinary file is invalid');
   const byteLength = expectedByteLength ?? metadataSize(pathBefore);
   if (byteLength < 1 || byteLength > maximumBytes || !exactMetadataSize(pathBefore, byteLength)) {
     throw new Error('Bounded ordinary file length is invalid');
@@ -431,7 +437,8 @@ export async function readBoundedOrdinaryFile(filePath, {
     handle = await open(filePath, fsConstants.O_RDONLY | noFollow);
     const opened = await handle.stat({ bigint: true });
     const pathOpened = await lstat(filePath, { bigint: true });
-    if (!ordinaryFile(opened) || !exactMetadataSize(opened, byteLength) || !ordinaryFile(pathOpened)
+    if (!uniquelyLinkedOrdinaryFile(opened) || !exactMetadataSize(opened, byteLength)
+      || !uniquelyLinkedOrdinaryFile(pathOpened)
       || !exactMetadataSize(pathOpened, byteLength) || !statIdentityMatches(pathBefore, opened)
       || !statIdentityMatches(pathOpened, opened)) {
       throw new Error('Bounded ordinary file identity changed');
@@ -453,8 +460,8 @@ export async function readBoundedOrdinaryFile(filePath, {
     const pathAfter = await lstat(filePath, { bigint: true });
     const parentAfter = await lstat(parent, { bigint: true });
     const parentRealAfter = await realpath(parent);
-    if (!ordinaryFile(descriptorAfter) || !exactMetadataSize(descriptorAfter, byteLength)
-      || !ordinaryFile(pathAfter) || !exactMetadataSize(pathAfter, byteLength)
+    if (!uniquelyLinkedOrdinaryFile(descriptorAfter) || !exactMetadataSize(descriptorAfter, byteLength)
+      || !uniquelyLinkedOrdinaryFile(pathAfter) || !exactMetadataSize(pathAfter, byteLength)
       || !parentAfter.isDirectory() || parentAfter.isSymbolicLink()
       || !statIdentityMatches(opened, descriptorAfter)
       || !statIdentityMatches(pathAfter, descriptorAfter)
@@ -731,12 +738,12 @@ export async function recoverJournalTemp(stateDirectory, {
   }
   const finalHandle = await open(finalPath, 'r+');
   try { await finalHandle.sync(); } finally { await finalHandle.close(); }
+  await unlink(temporaryPath);
+  await syncDirectory(stateDirectory);
   const finalBytes = await fileReader(finalPath, { maximumBytes: JOURNAL_MAX_BYTES });
   if (!finalBytes.equals(bytes)) {
     throw new Error('Release journal recovery target differs from temporary bytes');
   }
-  await unlink(temporaryPath);
-  await syncDirectory(stateDirectory);
   return finalName;
 }
 

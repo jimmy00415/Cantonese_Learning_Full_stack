@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -224,6 +224,93 @@ test('bounded ordinary-file adoption binds intended length and rejects a same-by
     },
   }), /ordinary file|changed|identity/i);
   assert.deepEqual(await readFile(filePath), intended);
+});
+
+test('bounded ordinary-file adoption rejects pre-existing and post-open hard links', async (t) => {
+  const fixture = await stateFixture(t, 'hkbuddy-bounded-hard-link-');
+  const source = join(fixture.root, 'source.json');
+  const linked = join(fixture.stateDirectory, '00000001-intent.json');
+  const bytes = Buffer.from('{"safe":true}\n');
+  await writeFile(source, bytes);
+  await link(source, linked);
+  await assert.rejects(
+    () => readBoundedOrdinaryFile(linked, { maximumBytes: 1024 }),
+    /ordinary|link|identity|changed/i,
+  );
+
+  const raced = join(fixture.stateDirectory, '00000002-intent.json');
+  const racedAlias = join(fixture.root, 'raced-alias.json');
+  await writeFile(raced, bytes);
+  await assert.rejects(() => readBoundedOrdinaryFile(raced, {
+    maximumBytes: 1024,
+    afterOpen: () => link(raced, racedAlias),
+  }), /ordinary|link|identity|changed/i);
+});
+
+test('every reserved journal, temp, active, stale, moved, and release read rejects hard links', async (t) => {
+  const record = threeRecordJournal()[0];
+  const recordName = journalFileName(record);
+  const recordBytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
+  const cases = [
+    ['journal', recordName, recordBytes,
+      ({ receiptDirectory }) => readReleaseJournalRecords(receiptDirectory)],
+    ['temporary journal', `${recordName}.tmp-${'1'.repeat(32)}`, recordBytes,
+      ({ stateDirectory }) => recoverJournalTemp(stateDirectory)],
+    ['active lock', '.release-state.lock', canonicalLockBytes(),
+      ({ stateDirectory }) => acquireReleaseStateLock(stateDirectory, {
+        attemptId: ATTEMPT_ID, now: () => new Date('2026-08-26T01:22:03.000Z'),
+        isPidAlive: () => false, staleAfterMs: 60_000,
+      })],
+    ['stale lock', `.release-state.lock.stale-${'2'.repeat(32)}`, canonicalLockBytes(),
+      ({ stateDirectory }) => acquireReleaseStateLock(stateDirectory, {
+        attemptId: ATTEMPT_ID, now: () => new Date('2026-08-26T01:22:03.000Z'),
+        isPidAlive: () => false, staleAfterMs: 60_000,
+      })],
+  ];
+  for (const [label, entryName, bytes, action] of cases) {
+    await t.test(label, async (subtest) => {
+      const fixture = await stateFixture(subtest, `hkbuddy-state-hard-link-${label.replace(' ', '-')}-`);
+      const source = join(fixture.root, 'outside-source');
+      await writeFile(source, bytes);
+      await link(source, join(fixture.stateDirectory, entryName));
+      await assert.rejects(() => action(fixture), /ordinary|link|identity|changed|journal|temporary|lock/i);
+    });
+  }
+
+  await t.test('moved lock after takeover rename', async (subtest) => {
+    const fixture = await stateFixture(subtest, 'hkbuddy-state-hard-link-moved-lock-');
+    await writeFile(join(fixture.stateDirectory, '.release-state.lock'), canonicalLockBytes());
+    let aliasCreated = false;
+    const reader = async (filePath, options) => {
+      if (!aliasCreated && filePath.includes('.release-state.lock.stale-')) {
+        aliasCreated = true;
+        await link(filePath, join(fixture.root, 'moved-lock-alias'));
+      }
+      return readBoundedOrdinaryFile(filePath, options);
+    };
+    await assert.rejects(() => acquireReleaseStateLock(fixture.stateDirectory, {
+      attemptId: ATTEMPT_ID, now: () => new Date('2026-08-26T01:22:03.000Z'),
+      isPidAlive: () => false, staleAfterMs: 60_000, fileReader: reader,
+    }), /ordinary|link|identity|changed|lock|takeover/i);
+    assert.equal(aliasCreated, true);
+  });
+
+  await t.test('release-time ownership read', async (subtest) => {
+    const fixture = await stateFixture(subtest, 'hkbuddy-state-hard-link-release-lock-');
+    const activePath = join(fixture.stateDirectory, '.release-state.lock');
+    let releaseRead = false;
+    const reader = async (filePath, options) => {
+      if (releaseRead && filePath === activePath) {
+        await link(filePath, join(fixture.root, 'release-lock-alias'));
+      }
+      return readBoundedOrdinaryFile(filePath, options);
+    };
+    const lock = await acquireReleaseStateLock(fixture.stateDirectory, {
+      attemptId: ATTEMPT_ID, now: () => new Date(CREATED_AT), fileReader: reader,
+    });
+    releaseRead = true;
+    await assert.rejects(() => lock.release(), /ordinary|link|identity|changed|lock|ownership/i);
+  });
 });
 
 test('atomic create-only publication rejects parent replacement after temp durability', async (t) => {
