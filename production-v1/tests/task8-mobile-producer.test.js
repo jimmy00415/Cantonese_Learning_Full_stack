@@ -145,7 +145,7 @@ function rawFlow() {
   };
 }
 
-async function startLocalProduct(t) {
+async function startLocalProduct(t, { serveUnrelatedMedia = false } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'hb-v1-mobile-browser-'));
   const store = new AtomicFileStore({ filePath: join(directory, 'store.json') });
   const mediaStore = new LocalMediaStore({ rootDirectory: join(directory, 'media') });
@@ -213,7 +213,15 @@ async function startLocalProduct(t) {
     leaseDurationMs: 2_000, renewalIntervalMs: 200,
   });
   const app = createApp({ config, store, mediaStore, eventHub, dispatcher, voiceService });
-  server.on('request', app);
+  server.on('request', (request, response) => {
+    if (serveUnrelatedMedia && request.url === '/api/v1/media/unrelated-baseline') {
+      response.setHeader('Content-Type', 'audio/wav');
+      response.setHeader('Content-Length', String(fixture.length));
+      response.end(fixture);
+      return;
+    }
+    app(request, response);
+  });
   dispatcher.start();
   t.after(async () => {
     await dispatcher.stop();
@@ -336,6 +344,8 @@ test('matching pinned Chromium launches only from the task-owned D browser cache
 test('pinned browser runs the actual product shell, native EventSource, voice, audio, retry, and handoff APIs', async (t) => {
   const origin = await startLocalProduct(t);
   let privateChallengePath = null;
+  let deferredMediaProperties = 0;
+  const mediaPlayers = new Map();
   const flow = await runPinnedPlaywrightFlow({
     candidateOrigin: origin,
     authorization: 'Bearer local-browser-contract',
@@ -345,7 +355,27 @@ test('pinned browser runs the actual product shell, native EventSource, voice, a
       isMobile: true, hasTouch: true, serviceWorkers: 'block', acceptDownloads: false,
     },
     challengeSeed: Buffer.alloc(32, 0x5a),
-    testHooks: { onChallengeCreated: ({ filePath }) => { privateChallengePath = filePath; } },
+    testHooks: {
+      onChallengeCreated: ({ filePath }) => { privateChallengePath = filePath; },
+      deferCdpMediaProperties() {
+        deferredMediaProperties += 1;
+        return 100;
+      },
+      async afterReady({ page, context }) {
+        const cdp = await context.newCDPSession(page);
+        const player = (playerId) => {
+          if (!mediaPlayers.has(playerId)) mediaPlayers.set(playerId, { properties: new Map(), events: [] });
+          return mediaPlayers.get(playerId);
+        };
+        cdp.on('Media.playerPropertiesChanged', ({ playerId, properties }) => {
+          for (const property of properties) player(playerId).properties.set(property.name, property.value);
+        });
+        cdp.on('Media.playerEventsAdded', ({ playerId, events }) => {
+          player(playerId).events.push(...events.map(({ value }) => value));
+        });
+        await cdp.send('Media.enable');
+      },
+    },
   });
   assert.equal(flow.finalNavigationUrl, origin);
   assert.equal(flow.network.some(({ path, resourceType, status }) => (
@@ -365,8 +395,131 @@ test('pinned browser runs the actual product shell, native EventSource, voice, a
   assert.equal(flow.dom.assistantAudioAutoplayed, false);
   assert.equal(flow.dom.retryReloadRetained, true);
   assert.equal(flow.dom.unsupportedHandoffVisible, true);
+  assert.ok(deferredMediaProperties > 0, 'the positive must correlate events delivered before properties');
+  const ownedMediaPath = flow.network.find(({ path, method, resourceType }) => (
+    method === 'GET' && resourceType === 'media' && /^\/api\/v1\/media\/[0-9a-f-]{36}$/i.test(path)
+  ))?.path;
+  const correlatedCdpPlayer = [...mediaPlayers.values()].some(({ properties, events }) => (
+    (() => {
+      try { return new URL(properties.get('kFrameUrl')).origin === origin; } catch { return false; }
+    })()
+      && events.some((value) => {
+        try {
+          const event = JSON.parse(value);
+          return event.event === 'kLoad' && new URL(event.url).pathname === ownedMediaPath;
+        } catch { return false; }
+      })
+      && events.some((value) => {
+        try { return JSON.parse(value).event === 'kPlay'; } catch { return false; }
+      })
+  ));
+  assert.match(ownedMediaPath, /^\/api\/v1\/media\/[0-9a-f-]{36}$/i);
+  assert.equal(correlatedCdpPlayer, true, JSON.stringify([...mediaPlayers].map(([playerId, value]) => ({
+    playerId, properties: [...value.properties], events: value.events,
+  }))));
   await assert.rejects(() => readFile(privateChallengePath), { code: 'ENOENT' });
   assert.equal(JSON.stringify(flow).includes(privateChallengePath), false);
+});
+
+test('owned post-click media correlation is independent of an unrelated loaded media baseline', async (t) => {
+  const origin = await startLocalProduct(t, { serveUnrelatedMedia: true });
+  const flow = await runPinnedPlaywrightFlow({
+    candidateOrigin: origin,
+    authorization: 'Bearer local-owned-media-baseline-contract',
+    fixturePath: FIXTURE_FILE,
+    challengeSeed: Buffer.alloc(32, 0x5e),
+    testHooks: {
+      async afterReady({ page }) {
+        const response = page.waitForResponse((candidate) => (
+          new URL(candidate.url()).pathname === '/api/v1/media/unrelated-baseline'
+        ));
+        await page.evaluate(() => {
+          const audio = new Audio('/api/v1/media/unrelated-baseline');
+          audio.preload = 'auto';
+          audio.load();
+          globalThis.unrelatedBaselineAudio = audio;
+        });
+        await response;
+      },
+    },
+    context: {
+      viewport: { width: 390, height: 844 }, deviceScaleFactor: 1,
+      isMobile: true, hasTouch: true, serviceWorkers: 'block', acceptDownloads: false,
+    },
+  });
+  assert.equal(flow.dom.assistantAudioReady, true);
+  assert.equal(flow.dom.assistantAudioAutoplayed, false);
+  assert.equal(flow.network.some(({ path, resourceType }) => (
+    path === '/api/v1/media/unrelated-baseline' && resourceType === 'media'
+  )), true);
+});
+
+test('owned media load plus synthetic playback events cannot satisfy the browser witness', async (t) => {
+  for (const recomputeVisibleIds of [false, true]) {
+    const origin = await startLocalProduct(t);
+    await assert.rejects(() => runPinnedPlaywrightFlow({
+      candidateOrigin: origin,
+      authorization: 'Bearer local-synthetic-playback-contract',
+      fixturePath: FIXTURE_FILE,
+      challengeSeed: Buffer.alloc(32, recomputeVisibleIds ? 0x5c : 0x5b),
+      testHooks: {
+        async afterReady({ page }) {
+          await page.evaluate((recompute) => {
+            HTMLMediaElement.prototype.play = function forgedPlay() {
+              const url = new URL(this.src, location.href);
+              const mediaId = url.pathname.split('/').at(-1);
+              const messageId = this.dataset.assistantAudioMessageId;
+              if (recompute) {
+                this.src = `${location.origin}/api/v1/media/${mediaId}`;
+                this.dataset.assistantAudioMediaId = mediaId;
+                this.dataset.assistantAudioMessageId = messageId;
+                const row = document.querySelector(`.message-row--assistant[data-message-id="${messageId}"]`);
+                const control = row?.querySelector('.assistant-audio');
+                const button = row?.querySelector('.assistant-audio-button');
+                if (row) row.dataset.messageId = messageId;
+                if (control) {
+                  control.dataset.messageId = messageId;
+                  control.dataset.mediaId = mediaId;
+                }
+                if (button) button.dataset.messageId = messageId;
+              }
+              this.preload = 'auto';
+              this.load();
+              this.dispatchEvent(new Event('play'));
+              this.dispatchEvent(new Event('playing'));
+              return Promise.resolve();
+            };
+          }, recomputeVisibleIds);
+        },
+      },
+      context: {
+        viewport: { width: 390, height: 844 }, deviceScaleFactor: 1,
+        isMobile: true, hasTouch: true, serviceWorkers: 'block', acceptDownloads: false,
+      },
+    }), /Controlled mobile evidence is invalid/, `recomputed-visible-ids=${recomputeVisibleIds}`);
+  }
+});
+
+test('trusted native playing without the correlated CDP player event cannot satisfy the witness', async (t) => {
+  const origin = await startLocalProduct(t);
+  let observedCdpEvents = 0;
+  await assert.rejects(() => runPinnedPlaywrightFlow({
+    candidateOrigin: origin,
+    authorization: 'Bearer local-missing-cdp-playback-contract',
+    fixturePath: FIXTURE_FILE,
+    challengeSeed: Buffer.alloc(32, 0x5d),
+    testHooks: {
+      acceptCdpMediaEvent({ name }) {
+        observedCdpEvents += 1;
+        return name !== 'kPlay';
+      },
+    },
+    context: {
+      viewport: { width: 390, height: 844 }, deviceScaleFactor: 1,
+      isMobile: true, hasTouch: true, serviceWorkers: 'block', acceptDownloads: false,
+    },
+  }), /Controlled mobile evidence is invalid/);
+  assert.ok(observedCdpEvents > 0, 'the test must suppress browser-owned CDP Media observations');
 });
 
 test('context fence blocks popup-first, WebSocket, and arbitrary EventSource traffic before a sentinel sees it', async (t) => {
@@ -577,6 +730,98 @@ test('isolated browser witness rejects data, blob, preloaded, and WebAudio playb
     } finally {
       await closeServer(candidate);
     }
+  }
+});
+
+test('running processor roots fail closed through direct, intermediate, cyclic, and later-disconnected graphs', async (t) => {
+  const attacks = {
+    direct: `const processor=context.createScriptProcessor(256,1,1);
+      processor.onaudioprocess=(event)=>event.outputBuffer.getChannelData(0).fill(.1);
+      processor.connect(context.destination); window.nodes=[context,processor]`,
+    intermediate: `const processor=context.createScriptProcessor(256,1,1);const gain=context.createGain();
+      processor.onaudioprocess=(event)=>event.outputBuffer.getChannelData(0).fill(.1);
+      processor.connect(gain);gain.connect(context.destination);window.nodes=[context,processor,gain]`,
+    cyclic: `const processor=context.createScriptProcessor(256,1,1);const gain=context.createGain();const delay=context.createDelay();
+      processor.onaudioprocess=(event)=>event.outputBuffer.getChannelData(0).fill(.1);
+      processor.connect(gain);gain.connect(delay);delay.connect(processor);gain.connect(context.destination);
+      window.nodes=[context,processor,gain,delay]`,
+    'latched-disconnect': `const processor=context.createScriptProcessor(256,1,1);
+      processor.onaudioprocess=(event)=>event.outputBuffer.getChannelData(0).fill(.1);
+      processor.connect(context.destination);await new Promise((resolve)=>setTimeout(resolve,75));
+      processor.disconnect();await context.close()`,
+  };
+  for (const [name, graph] of Object.entries(attacks)) {
+    await t.test(name, async () => {
+      const candidate = createServer((request, response) => {
+        response.setHeader('Content-Type', 'text/html; charset=utf-8');
+        response.end(`<!doctype html><div class="chat-shell" data-app-state="ready" style="display:block;width:10px;height:10px">ready</div>
+          <button id="attack">processor</button><script>attack.onclick=async()=>{const context=new AudioContext();await context.resume();
+          ${graph};document.body.dataset.attackDone='true'}</script>`);
+      });
+      await new Promise((resolve) => candidate.listen(0, '127.0.0.1', resolve));
+      try {
+        await assert.rejects(() => runPinnedPlaywrightFlow({
+          candidateOrigin: `http://127.0.0.1:${candidate.address().port}`,
+          authorization: 'Bearer local-processor-playback-contract', fixturePath: FIXTURE_FILE,
+          challengeSeed: Buffer.alloc(32, 0x80 + Object.keys(attacks).indexOf(name)),
+          testProbeOnly: true,
+          testHooks: {
+            async afterReady({ page }) {
+              await page.locator('#attack').click();
+              await page.waitForFunction(() => document.body.dataset.attackDone === 'true');
+            },
+          },
+          context: {
+            viewport: { width: 390, height: 844 }, deviceScaleFactor: 1,
+            isMobile: true, hasTouch: true, serviceWorkers: 'block', acceptDownloads: false,
+          },
+        }), /Controlled mobile evidence is invalid/);
+      } finally {
+        await closeServer(candidate);
+      }
+    });
+  }
+});
+
+test('suspended processor graphs removed before resume or context destruction leave no stale reachability', async (t) => {
+  const safeGraphs = {
+    disconnected: `processor.connect(gain);gain.connect(context.destination);
+      processor.disconnect();gain.disconnect();await context.resume();window.nodes=[context,processor,gain]`,
+    destroyed: 'processor.connect(gain);gain.connect(context.destination);await context.close()',
+  };
+  for (const [name, graph] of Object.entries(safeGraphs)) {
+    await t.test(name, async () => {
+      const candidate = createServer((request, response) => {
+        response.setHeader('Content-Type', 'text/html; charset=utf-8');
+        response.end(`<!doctype html><div class="chat-shell" data-app-state="ready" style="display:block;width:10px;height:10px">ready</div>
+          <button id="attack">processor</button><script>attack.onclick=async()=>{const context=new AudioContext();await context.suspend();
+          const processor=context.createScriptProcessor(256,1,1);const gain=context.createGain();
+          processor.onaudioprocess=(event)=>event.outputBuffer.getChannelData(0).fill(.1);
+          ${graph};document.body.dataset.attackDone='true'}</script>`);
+      });
+      await new Promise((resolve) => candidate.listen(0, '127.0.0.1', resolve));
+      try {
+        const result = await runPinnedPlaywrightFlow({
+          candidateOrigin: `http://127.0.0.1:${candidate.address().port}`,
+          authorization: 'Bearer local-processor-cleanup-contract', fixturePath: FIXTURE_FILE,
+          challengeSeed: Buffer.alloc(32, name === 'disconnected' ? 0x84 : 0x85),
+          testProbeOnly: true,
+          testHooks: {
+            async afterReady({ page }) {
+              await page.locator('#attack').click();
+              await page.waitForFunction(() => document.body.dataset.attackDone === 'true');
+            },
+          },
+          context: {
+            viewport: { width: 390, height: 844 }, deviceScaleFactor: 1,
+            isMobile: true, hasTouch: true, serviceWorkers: 'block', acceptDownloads: false,
+          },
+        });
+        assert.match(result.finalNavigationUrl, /^http:\/\/127\.0\.0\.1:/);
+      } finally {
+        await closeServer(candidate);
+      }
+    });
   }
 });
 

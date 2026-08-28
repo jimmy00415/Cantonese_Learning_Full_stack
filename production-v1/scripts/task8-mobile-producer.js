@@ -436,6 +436,49 @@ export async function runPinnedPlaywrightFlow({
   const expectedFailedRequests = new WeakSet();
   const nativePlayback = [];
   const mediaPlayback = [];
+  const mediaPlayers = new Map();
+  const mediaPlayer = (playerId) => {
+    if (typeof playerId !== 'string' || playerId.length < 1 || playerId.length > 256) return null;
+    if (!mediaPlayers.has(playerId)) {
+      mediaPlayers.set(playerId, { properties: new Map(), sourceUrls: new Set(), playback: [] });
+    }
+    return mediaPlayers.get(playerId);
+  };
+  const parseMediaEvent = (value) => {
+    if (typeof value !== 'string' || value.length < 2 || value.length > 8_192) return null;
+    try {
+      const event = JSON.parse(value);
+      if (!event || typeof event !== 'object' || Array.isArray(event)) return null;
+      return {
+        name: typeof event.event === 'string' && event.event.length <= 128 ? event.event : null,
+        pipelineState: typeof event.pipeline_state === 'string' && event.pipeline_state.length <= 128
+          ? event.pipeline_state : null,
+        sourceUrl: typeof event.url === 'string' && event.url.length <= 2_048 ? event.url : null,
+      };
+    } catch {
+      return null;
+    }
+  };
+  const isMediaPlaybackEvent = ({ name, pipelineState } = {}) => (
+    name === 'kPlay' || name === 'kPlaying' || pipelineState === 'kPlaying'
+  );
+  const mediaPlayerHasOwnedPlayback = (ownedMediaPath) => {
+    for (const player of mediaPlayers.values()) {
+      let frameOwned = false;
+      try { frameOwned = new URL(player.properties.get('kFrameUrl')).origin === trustedOrigin; } catch { /* not owned */ }
+      if (!frameOwned) continue;
+      const sourceOwned = [...player.sourceUrls].some((value) => {
+        try {
+          const url = new URL(value);
+          return url.origin === trustedOrigin && url.pathname === ownedMediaPath && !url.search && !url.hash;
+        } catch { return false; }
+      });
+      if (sourceOwned && player.playback.some(({ afterExplicitPlay, name }) => (
+        afterExplicitPlay === true && name === 'kPlay'
+      ))) return true;
+    }
+    return false;
+  };
   const webAudioContexts = new Map();
   const webAudioNodes = new Map();
   const webAudioEdges = new Map();
@@ -455,8 +498,9 @@ export async function runPinnedPlaywrightFlow({
     const destinations = new Set();
     const pending = [];
     for (const [nodeId, node] of nodes.entries()) {
-      if (/AudioDestination/i.test(node.nodeType)) destinations.add(nodeId);
-      if (node.numberOfInputs === 0 && node.numberOfOutputs > 0) pending.push(nodeId);
+      const destination = /AudioDestination/i.test(node.nodeType);
+      if (destination) destinations.add(nodeId);
+      if (!destination && node.numberOfOutputs > 0) pending.push(nodeId);
     }
     if (destinations.size === 0 || pending.length === 0) return false;
     const adjacency = new Map();
@@ -609,8 +653,13 @@ export async function runPinnedPlaywrightFlow({
       }
       try {
         const event = JSON.parse(payload);
-        if (!exactKeys(event, ['kind', 'src']) || !['play', 'playing'].includes(event.kind)
+        if (!exactKeys(event, ['isTrusted', 'kind', 'src']) || !['play', 'playing'].includes(event.kind)
+          || typeof event.isTrusted !== 'boolean'
           || typeof event.src !== 'string' || event.src.length > 2_048) fail();
+        if (event.isTrusted !== true) {
+          failures.push('untrusted-native');
+          return;
+        }
         nativePlayback.push(event);
         testHooks?.onPlaybackEvent?.(event);
         if (!explicitPlayStarted) failures.push('preplay-native');
@@ -618,22 +667,80 @@ export async function runPinnedPlaywrightFlow({
         failures.push('witness-binding-payload');
       }
     });
-    pageCdp.on('Media.playerEventsAdded', ({ events }) => {
+    pageCdp.on('Media.playerPropertiesChanged', ({ playerId, properties }) => {
+      const player = mediaPlayer(playerId);
+      if (!player || !Array.isArray(properties)) {
+        failures.push('media-properties');
+        return;
+      }
+      const applyProperties = () => {
+        for (const property of properties) {
+          if (typeof property?.name !== 'string' || property.name.length < 1 || property.name.length > 256
+            || (property.value !== null
+              && (typeof property.value !== 'string' || property.value.length > 8_192))) {
+            failures.push('media-property');
+            continue;
+          }
+          if (property.value === null) player.properties.delete(property.name);
+          else player.properties.set(property.name, property.value);
+        }
+      };
+      let testDelayMs = 0;
+      if (typeof testHooks?.deferCdpMediaProperties === 'function') {
+        try { testDelayMs = testHooks.deferCdpMediaProperties(); } catch {
+          failures.push('media-property-test-hook');
+          return;
+        }
+        if (!Number.isSafeInteger(testDelayMs) || testDelayMs < 1 || testDelayMs > 1_000) {
+          failures.push('media-property-test-delay');
+          return;
+        }
+      }
+      if (testDelayMs > 0) setTimeout(applyProperties, testDelayMs);
+      else applyProperties();
+    });
+    pageCdp.on('Media.playerEventsAdded', ({ playerId, events }) => {
+      const player = mediaPlayer(playerId);
+      if (!player || !Array.isArray(events)) {
+        failures.push('media-events');
+        return;
+      }
       for (const event of events ?? []) {
-        const text = `${event?.type ?? ''}:${event?.value ?? ''}`;
-        if (/\bplay(?:ing)?\b|kPlay/i.test(text)) {
-          mediaPlayback.push(text.slice(0, 256));
+        const parsed = parseMediaEvent(event?.value);
+        if (!parsed) continue;
+        if (typeof testHooks?.acceptCdpMediaEvent === 'function') {
+          let accepted = false;
+          try { accepted = testHooks.acceptCdpMediaEvent(Object.freeze({ ...parsed })) === true; } catch {
+            failures.push('media-event-test-hook');
+            continue;
+          }
+          if (!accepted) continue;
+        }
+        if (parsed.sourceUrl !== null) player.sourceUrls.add(parsed.sourceUrl);
+        if (isMediaPlaybackEvent(parsed)) {
+          const observation = {
+            name: parsed.name,
+            pipelineState: parsed.pipelineState,
+            afterExplicitPlay: explicitPlayStarted,
+          };
+          player.playback.push(observation);
+          mediaPlayback.push({ playerId, ...observation });
           if (!explicitPlayStarted) failures.push('preplay-media');
         }
       }
     });
-    pageCdp.on('WebAudio.audioContextCreated', ({ context: audioContext }) => {
+    pageCdp.on('WebAudio.contextCreated', ({ context: audioContext }) => {
       webAudioContexts.set(audioContext.contextId, {
         state: audioContext.contextState,
         type: audioContext.contextType,
       });
+      if (audioContext.contextState === 'running'
+        && audioContext.contextType === 'realtime'
+        && refreshWebAudioPath(audioContext.contextId) && !explicitPlayStarted) {
+        failures.push('preplay-webaudio');
+      }
     });
-    pageCdp.on('WebAudio.audioContextChanged', ({ context: audioContext }) => {
+    pageCdp.on('WebAudio.contextChanged', ({ context: audioContext }) => {
       webAudioContexts.set(audioContext.contextId, {
         state: audioContext.contextState,
         type: audioContext.contextType,
@@ -674,16 +781,11 @@ export async function runPinnedPlaywrightFlow({
     }) => {
       const key = JSON.stringify([sourceId, destinationId, sourceOutputIndex, destinationInputIndex]);
       webAudioEdgeMap(contextId).set(key, { sourceId, destinationId, sourceOutputIndex, destinationInputIndex });
-      if (refreshWebAudioPath(contextId)) {
+      const reachesDestination = refreshWebAudioPath(contextId);
+      if (reachesDestination) {
         const contextState = webAudioContexts.get(contextId);
         if (contextState?.state === 'running' && contextState.type === 'realtime'
           && !explicitPlayStarted) failures.push('preplay-webaudio');
-        if (!contextState) {
-          void pageCdp.send('WebAudio.getRealtimeData', { contextId }).then(
-            () => { if (!explicitPlayStarted) failures.push('preplay-webaudio'); },
-            () => undefined,
-          );
-        }
       }
     });
     pageCdp.on('WebAudio.nodesDisconnected', ({
@@ -693,7 +795,8 @@ export async function runPinnedPlaywrightFlow({
       if (!edges) return;
       for (const [key, edge] of edges.entries()) {
         if (edge.sourceId !== sourceId) continue;
-        if (destinationId !== null && destinationId !== undefined && edge.destinationId !== destinationId) continue;
+        if (typeof destinationId === 'string' && destinationId.length > 0
+          && edge.destinationId !== destinationId) continue;
         if (sourceOutputIndex !== undefined && edge.sourceOutputIndex !== sourceOutputIndex) continue;
         if (destinationInputIndex !== undefined && edge.destinationInputIndex !== destinationInputIndex) continue;
         edges.delete(key);
@@ -711,7 +814,11 @@ export async function runPinnedPlaywrightFlow({
         const report = (event) => {
           const target = event.target;
           const src = target instanceof HTMLMediaElement ? (target.currentSrc || target.src || '') : '';
-          globalThis[${JSON.stringify(bindingName)}](JSON.stringify({ kind: event.type, src }));
+          globalThis[${JSON.stringify(bindingName)}](JSON.stringify({
+            kind: event.type,
+            src,
+            isTrusted: event.isTrusted,
+          }));
         };
         document.addEventListener('play', report, true);
         document.addEventListener('playing', report, true);
@@ -727,7 +834,12 @@ export async function runPinnedPlaywrightFlow({
       }
       if ((/^\/api\/v1\/messages\/[^/]+\/audio(?:\/status)?$/.test(url.pathname)
         || /^\/api\/v1\/media\/[^/]+$/.test(url.pathname))) {
-        audioRequests.push({ path: url.pathname, method: request.method(), request });
+        audioRequests.push({
+          path: url.pathname,
+          method: request.method(),
+          resourceType: request.resourceType(),
+          request,
+        });
       }
     });
     page.on('response', (response) => {
@@ -821,7 +933,9 @@ export async function runPinnedPlaywrightFlow({
     screenshots.push({ id: 'text-source', bytes: await page.screenshot({ type: 'png' }) });
     const supportedAudioButton = supportedRow.locator('.assistant-audio-button');
     await supportedAudioButton.waitFor({ state: 'visible' });
-    const mediaFetchesBeforeGenerate = audioRequests.filter(({ path }) => path.startsWith('/api/v1/media/')).length;
+    const mediaFetchesBeforeGenerate = audioRequests.filter(({ path, method, resourceType }) => (
+      path.startsWith('/api/v1/media/') && method === 'GET' && resourceType === 'media'
+    )).length;
     const audioPostsBeforeGenerate = audioRequests.filter(({ method, path }) => method === 'POST'
       && path === `/api/v1/messages/${supportedAssistantId}/audio`).length;
     const generateLabelObserved = (await supportedAudioButton.textContent()) === 'Generate voice';
@@ -830,7 +944,9 @@ export async function runPinnedPlaywrightFlow({
       const button = document.querySelector(`.message-row[data-message-id="${id}"] .assistant-audio-button`);
       return button?.textContent === 'Play voice';
     }, supportedAssistantId);
-    const mediaFetchesBeforePlay = audioRequests.filter(({ path }) => path.startsWith('/api/v1/media/')).length;
+    const mediaFetchesBeforePlay = audioRequests.filter(({ path, method, resourceType }) => (
+      path.startsWith('/api/v1/media/') && method === 'GET' && resourceType === 'media'
+    )).length;
     const assistantAudioAutoplayed = mediaFetchesBeforePlay !== mediaFetchesBeforeGenerate;
     const audioPostObserved = audioRequests.filter(({ method, path }) => method === 'POST'
       && path === `/api/v1/messages/${supportedAssistantId}/audio`).length === audioPostsBeforeGenerate + 1;
@@ -842,6 +958,10 @@ export async function runPinnedPlaywrightFlow({
     ));
     let assistantAudioReady = generateLabelObserved && audioPostObserved && Boolean(attachedAudio)
       && (await supportedAudioButton.textContent()) === 'Play voice';
+    const ownedMediaPath = `/api/v1/media/${attachedAudio?.data?.mediaId}`;
+    const ownedMediaFetchesBeforePlay = audioRequests.filter(({ path, method, resourceType }) => (
+      path === ownedMediaPath && method === 'GET' && resourceType === 'media'
+    )).length;
     if (nativePlayback.length > 0 || mediaPlayback.length > 0
       || failures.some((item) => /^preplay-/.test(item))) fail();
     explicitPlayStarted = true;
@@ -850,16 +970,28 @@ export async function runPinnedPlaywrightFlow({
       .filter((entry) => new URL(entry.name).pathname.startsWith('/api/v1/media/')).length > prior,
     mediaFetchesBeforePlay).catch(() => undefined);
     assistantAudioReady = assistantAudioReady
-      && audioRequests.filter(({ path, method }) => path.startsWith('/api/v1/media/') && method === 'GET').length
-        > mediaFetchesBeforePlay;
-    for (let attempt = 0; attempt < 40
-      && !nativePlayback.some(({ kind }) => kind === 'playing'); attempt += 1) {
+      && audioRequests.filter(({ path, method, resourceType }) => (
+        path === ownedMediaPath && method === 'GET' && resourceType === 'media'
+      )).length
+        > ownedMediaFetchesBeforePlay;
+    for (let attempt = 0; attempt < 80
+      && !(nativePlayback.some(({ isTrusted, kind, src }) => {
+        try {
+          const url = new URL(src);
+          return isTrusted === true && kind === 'playing' && url.origin === trustedOrigin
+            && url.pathname === ownedMediaPath && !url.search && !url.hash;
+        } catch { return false; }
+      }) && mediaPlayerHasOwnedPlayback(ownedMediaPath)); attempt += 1) {
       await page.waitForTimeout(25);
     }
-    const ownedMediaPath = `/api/v1/media/${attachedAudio?.data?.mediaId}`;
-    const playbackObserved = nativePlayback.some(({ kind, src }) => {
-      try { return kind === 'playing' && new URL(src).pathname === ownedMediaPath; } catch { return false; }
+    const trustedNativePlayback = nativePlayback.some(({ isTrusted, kind, src }) => {
+      try {
+        const url = new URL(src);
+        return isTrusted === true && kind === 'playing' && url.origin === trustedOrigin
+          && url.pathname === ownedMediaPath && !url.search && !url.hash;
+      } catch { return false; }
     });
+    const playbackObserved = trustedNativePlayback && mediaPlayerHasOwnedPlayback(ownedMediaPath);
     assistantAudioReady = assistantAudioReady && playbackObserved;
 
     const unsupportedPriorIds = new Set(await page.locator('.message-row--assistant[data-message-id]').evaluateAll(
