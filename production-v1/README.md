@@ -201,8 +201,8 @@ must equal that clean `HEAD` before and after every acceptance run.
    npm.cmd run acceptance:legacy-inventory -- --manifest <absolute-owner-reviewed-safe-json> --confirm-owner-reviewed-legacy-resources
    ```
 
-2. Configure only the approved new V1 PostgreSQL/Blob resources plus the
-   `V1_ACCEPTANCE_*` settings. The acceptance schema and Blob prefix must contain
+2. Configure only the approved new V1 PostgreSQL/GCS resources plus the
+   `V1_ACCEPTANCE_*` settings. The acceptance schema and GCS prefix must contain
    the same fresh UUID. Then run:
 
    ```powershell
