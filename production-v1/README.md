@@ -364,8 +364,11 @@ promotion, or rollback.
 
 ## Stage D controlled acceptance contract (local implementation only)
 
-The local release controller treats candidate privacy as the receipt-bound last
-candidate operation. Historical privacy proofs are validated against the clock
+The local release controller treats candidate privacy publication as the last
+candidate operation. Its receipt still hashes the complete seven-field privacy
+reference, while an independent authority anchor is reconstructed from the
+journaled publication and the terminal candidate-receipt digest; a self-consistent
+forged receipt chain therefore cannot redefine that reference. Historical privacy proofs are validated against the clock
 recorded at their own gate; that historical proof-at-gate result is not a live
 freshness claim. Readiness, workload, and mobile freshness are checked
 separately, and promotion always requires a new proof evaluated with the current
@@ -401,12 +404,19 @@ revision `1234` / browser `151.0.7922.34`, a `390x844` DPR-1 isolated context,
 and canonical one-second PCM16LE 16 kHz mono WAV SHA-256
 `ef989be190f7e9cef40b80516209d972eb08910263ddee3a44f52fdf84e534a7`.
 The positive local harness starts the real Production V1 application and uses
-its native authenticated EventSource and product HTTP APIs. Node-owned browser
-observations bind upload body/header hashes, transcript/draft identity,
-supported and unsupported reply IDs, text-answer manual TTS, explicit playback,
-retry/canonical-ID/reload state, and the thirteen UI checks; page-supplied pass
-booleans are not trusted. Four fully opaque, structurally decoded PNGs must have
-unique encoded and decoded-pixel hashes. This is deterministic Chromium
+its native authenticated EventSource and product HTTP APIs. For every run, Node
+derives a private temporary WAV by adding a cryptographic low-amplitude
+watermark to the reviewed public fixture, verifies Chromium's actual command
+line, captures the real upload bytes, and accepts only the challenge-correlated
+signal. Playback is witnessed outside the page main world through isolated CDP,
+native media, Media, and WebAudio observations; there is no page-visible
+instrumentation token or page-lifecycle authority. Node-owned observations also
+bind transcript/draft identity, supported and unsupported reply IDs, explicit
+text-answer TTS opt-in, retryable prior generation recovery, explicit playback,
+retry/canonical-ID/reload state, downloads on every page, and the thirteen UI
+checks. Untouched text answers are never auto-enqueued by startup or interval
+recovery. Four fully opaque, structurally decoded PNGs must have unique encoded
+and decoded-pixel hashes. This is deterministic Chromium
 mobile-web evidence, not real-iOS Safari acceptance. Live GCP/provider evidence,
 real iOS, promotion, public IAM, and production runtime health remain separate
 unexecuted operator gates.

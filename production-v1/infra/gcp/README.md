@@ -584,7 +584,9 @@ with the recovery boundary visible.
 
 Stage D is implemented and locally contract-tested only; it does not authorize
 or attest a live GCP mutation. Candidate privacy publication is the final
-candidate operation and its complete privacy reference is receipt-bound.
+candidate operation. The candidate receipt hashes its complete seven-field
+privacy reference, and an independent authority anchor reconstructed from the
+journaled publication plus terminal candidate-receipt digest must agree exactly.
 Historical proofs are checked at their recorded gate clocks. A long workload
 may exceed five minutes: its start proof is checked at workload start and its
 end proof at workload end, while promotion freshness is an independent current-
@@ -618,8 +620,14 @@ The deterministic browser contract is Playwright `1.62.1`, Chromium revision
 encoded and decoded-pixel hashes, and canonical WAV SHA-256
 `ef989be190f7e9cef40b80516209d972eb08910263ddee3a44f52fdf84e534a7`.
 Its positive local harness runs the real Production V1 shell, native exact
-EventSource, and product voice/message/media APIs; Node-owned observations prove
-hash/transcript/draft/ID/audio/retry correlations and the thirteen UI checks.
-Page-owned booleans cannot authorize acceptance. It is not real-iOS evidence.
+EventSource, and product voice/message/media APIs. Node creates a private
+per-run watermarked WAV challenge, verifies the actual Chromium command line,
+captures and correlates the uploaded bytes, and observes explicit playback from
+isolated CDP plus native media/Media/WebAudio signals. No browser binding secret
+is exposed to the page and no page-lifecycle boolean authorizes acceptance.
+Node-owned observations also prove transcript/draft/ID/retry correlations,
+observe download attempts on every page, and cover all thirteen UI checks.
+Text-answer TTS is opt-in; recovery may resume an existing retryable generation
+but cannot auto-enqueue an untouched text answer. It is not real-iOS evidence.
 Real iOS, live candidate/provider/GCP proof, promotion, stable/public acceptance,
 runtime health, URL, and QR remain explicit operator gates.

@@ -293,7 +293,9 @@ Wire enums are exactly `en | yue-Hant-HK | cmn-Hans-CN` and `text | voice`.
 
 ## Stage D local implementation checkpoint (2026-08-28)
 
-- [x] Candidate privacy is the receipt-bound final candidate operation, with
+- [x] Candidate privacy publication is the final candidate operation. Bind the
+  receipt's seven-field reference to an independent authority anchor rebuilt
+  from its journaled publication and terminal candidate-receipt digest, with
   journal-before-create-only publication and exact-byte restart adoption.
 - [x] Journal readiness, the privacy-start/privacy-end/workload three-file
   bundle, and all seven mobile artifacts before publication; recover every
@@ -312,7 +314,11 @@ Wire enums are exactly `en | yue-Hant-HK | cmn-Hans-CN` and `text | voice`.
   `1234` / `151.0.7922.34`, `390x844` DPR 1, the canonical WAV, and four fully
   opaque PNGs with unique encoded plus decoded-pixel hashes. Its positive local
   test runs the real Product V1 shell, native EventSource, and product APIs with
-  Node-owned voice/message/media/retry/UI correlation; it does not claim iOS.
+  a private per-run watermarked WAV challenge, actual Chromium command-line and
+  upload correlation, and isolated CDP/native Media/WebAudio playback evidence.
+  No token or page-lifecycle claim is trusted; every page is download-fenced.
+  Text TTS recovery requires a prior explicit opt-in and never auto-enqueues an
+  untouched text answer. The harness does not claim real iOS.
 - [x] The final post-staging proof is an append-only attempt-bound checkpoint.
   Current-clock proof validation plus fresh authoritative predecessor,
   candidate, stable, IAM, and authority rereads form a canonical barrier digest

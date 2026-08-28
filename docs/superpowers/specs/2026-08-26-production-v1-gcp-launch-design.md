@@ -475,8 +475,10 @@ migration 1 is additive; rollback never drops production data.
 ## Stage D local acceptance closure (2026-08-28)
 
 The executable local contract adds the missing final barriers without changing
-the live authorization boundary. Candidate privacy publication is the
-receipt-bound final candidate operation. Candidate privacy, readiness, the
+the live authorization boundary. Candidate privacy publication is the final
+candidate operation. The candidate receipt hashes all seven reference fields;
+an independent authority anchor reconstructed from the publication journal and
+terminal candidate-receipt digest must match before dependent phases. Candidate privacy, readiness, the
 privacy-start/privacy-end/workload three-file bundle, and the seven-file mobile
 bundle are journaled byte-for-byte before create-only publication; deterministic
 restart adopts only exact prior bytes and continues the missing suffix.
@@ -507,10 +509,16 @@ revision `1234` / browser `151.0.7922.34`, isolated `390x844` DPR-1 mobile web,
 four fully opaque PNG screenshots with encoded and decoded-pixel uniqueness, and
 fixed one-second PCM16LE 16 kHz mono WAV SHA-256
 `ef989be190f7e9cef40b80516209d972eb08910263ddee3a44f52fdf84e534a7`.
-The positive local harness starts the real Product V1 application, observes its
-native exact EventSource and product voice/message/media APIs from Node, and
-binds actual upload hashes, transcript/draft/message/media IDs, explicit audio
-play, unsupported handoff, retry/reload, and UI state. It does not trust page
-pass booleans and does not claim real-iOS Safari. All live GCP, provider,
+The positive local harness starts the real Product V1 application and observes
+its native exact EventSource and product voice/message/media APIs from Node.
+Each run derives a private cryptographically watermarked WAV challenge, verifies
+the real Chromium command line, captures the actual upload, and accepts only a
+challenge-correlated signal. Explicit playback is observed outside the page
+main world through isolated CDP plus native media/Media/WebAudio signals; there
+is no page-visible instrumentation token. The harness also binds transcript,
+draft, message and media IDs, unsupported handoff, retry/reload, every-page
+download attempts, and UI state. Manual text-answer TTS is durable only after
+opt-in: recovery resumes an existing retryable generation but does not enqueue
+untouched text answers. It does not claim real-iOS Safari. All live GCP, provider,
 real-iOS, promotion, public-IAM, runtime-health, URL, and QR gates remain
 unexecuted.

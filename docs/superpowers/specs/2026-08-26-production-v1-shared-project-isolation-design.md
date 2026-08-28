@@ -226,7 +226,10 @@ control-plane call because no genuine prior V1 exists.
 ## Stage D local acceptance closure (2026-08-28)
 
 The isolation contract applies to the evidence filesystem as well as the shared
-cloud project. Candidate privacy, readiness, the privacy-start/privacy-end/
+cloud project. Candidate privacy is the final candidate operation: its receipt
+hashes all seven reference fields, while a separate authority anchor is rebuilt
+from the journaled publication and terminal candidate-receipt digest and checked
+before dependent work. Candidate privacy, readiness, the privacy-start/privacy-end/
 workload three-file bundle, and all seven mobile artifacts are journaled before
 create-only publication. Restart can adopt only exact intended bytes, complete
 the missing suffix, and append a missing terminal record. Exact length and
@@ -251,10 +254,15 @@ cloud mutation is allowed after the terminal promotion mutation.
 
 The mobile phase rejects prebuilt evidence and binds fresh privacy boundaries,
 before/after candidate and stable readbacks, and the real local Production V1
-shell/API/EventSource flow. Node-owned observations, rather than page booleans,
-bind voice hash/transcript/draft IDs, supported/unsupported message identities,
-manual text-answer audio generation and explicit play, retry/reload, and all UI
-checks. Local evidence pins Playwright `1.62.1`, Chromium revision `1234` /
+shell/API/EventSource flow. Node derives a private per-run cryptographically
+watermarked WAV, verifies Chromium's actual command line, captures the real
+upload bytes, and validates the challenge correlation. Explicit playback is
+browser-owned evidence from isolated CDP and native media/Media/WebAudio
+observations, not a page token or lifecycle boolean. Node also binds transcript/
+draft IDs, supported/unsupported message identities, manual text-answer audio
+generation and its durable retry only after opt-in, retry/reload, every-page
+downloads, and all UI checks. Untouched text answers remain excluded from
+startup and interval recovery. Local evidence pins Playwright `1.62.1`, Chromium revision `1234` /
 `151.0.7922.34`, `390x844` DPR 1, four fully opaque raw-and-pixel-unique PNGs,
 and WAV SHA-256
 `ef989be190f7e9cef40b80516209d972eb08910263ddee3a44f52fdf84e534a7`.

@@ -550,9 +550,10 @@ known shared-project boundary, URL, and QR artifact.
 
 ## Stage D local implementation checkpoint (2026-08-28)
 
-- [x] Make candidate privacy receipt-bound and last in the candidate phase;
-  journal exact proof bytes before create-only publication and adopt only exact
-  prior bytes after restart.
+- [x] Make candidate privacy publication last in the candidate phase. Hash the
+  seven-field reference in the receipt and independently anchor it to the
+  journaled publication plus terminal candidate-receipt digest; adopt only
+  exact prior bytes after restart.
 - [x] Journal readiness, the privacy-start/privacy-end/workload three-file
   bundle, and all seven mobile artifacts before publication; exact-byte restart
   completes every covered suffix/terminal crash boundary without overwrite.
@@ -566,7 +567,11 @@ known shared-project boundary, URL, and QR artifact.
   `151.0.7922.34`, and `390x844` DPR 1; require four fully opaque raw/pixel-
   unique PNGs and keep real iOS separate. The positive harness uses the real
   local Product V1 shell, native EventSource, and product APIs with Node-owned
-  voice/message/media/retry/UI observations rather than page pass booleans.
+  message/retry/UI observations plus a private per-run watermarked WAV,
+  verified Chromium command line and actual upload, and isolated CDP/native
+  Media/WebAudio playback evidence. It trusts no page token/lifecycle report,
+  observes downloads on every page, and limits text-answer recovery to an
+  already-existing retryable generation after explicit opt-in.
 - [x] Validate workload start/end and other historical evidence at their recorded
   gate clocks while fresh wrappers reject the exact expiry boundary. Promotion
   appends an attempt-bound proof, validates it with the current post-proof clock,
