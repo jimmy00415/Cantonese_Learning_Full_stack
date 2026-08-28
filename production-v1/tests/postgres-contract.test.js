@@ -697,7 +697,7 @@ test('assistant delivery locks session then conversation then turn', async () =>
   pool.assertDrained();
 });
 
-test('live ASR and TTS claims are observed under row locks instead of double-claimed', async () => {
+test('live ASR and delivered-assistant TTS claims are observed under row locks instead of double-claimed', async () => {
   const voice = {
     id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', session_id: sessionRow().id,
     client_upload_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
@@ -713,7 +713,7 @@ test('live ASR and TTS claims are observed under row locks instead of double-cla
     id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', session_id: sessionRow().id,
     conversation_id: conversationRow().id, turn_id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
     sequence: '2', role: 'assistant', kind: 'text', status: 'delivered', text: 'answer',
-    reply_language: 'en', reply_mode: 'voice',
+    reply_language: 'en', reply_mode: 'text',
     created_at: NOW,
   };
   const generation = {
@@ -758,16 +758,18 @@ test('live ASR and TTS claims are observed under row locks instead of double-cla
   assert.equal(activeSessionQueries.every((call) => /FOR UPDATE/i.test(call.text)), true,
     'voice claims must serialize with session deletion before choosing an attempt key');
   const assistantClaim = pool.calls.find((call) => /FROM messages[\s\S]*role\s*=\s*'assistant'[\s\S]*FOR UPDATE/i.test(call.text));
-  assert.match(assistantClaim.text, /reply_mode\s*=\s*'voice'/i);
+  assert.match(assistantClaim.text, /status\s*=\s*'delivered'/i);
+  assert.doesNotMatch(assistantClaim.text, /reply_mode\s*=/i,
+    'manual voice generation remains available for an owned delivered text answer');
   pool.assertDrained();
 });
 
-test('assistant audio recovery query is bounded to eligible nonterminal voice generations', async () => {
+test('assistant audio recovery query is bounded to eligible nonterminal delivered generations', async () => {
   const candidate = {
     id: 'abababab-abab-4bab-8bab-abababababab',
     session_id: sessionRow().id,
     reply_language: 'yue-Hant-HK',
-    reply_mode: 'voice',
+    reply_mode: 'text',
     created_at: NOW,
   };
   const pool = new RecordingPool([
@@ -780,13 +782,14 @@ test('assistant audio recovery query is bounded to eligible nonterminal voice ge
     id: candidate.id,
     sessionId: candidate.session_id,
     replyLanguage: 'yue-Hant-HK',
-    replyMode: 'voice',
+    replyMode: 'text',
     createdAt: NOW,
   }]);
   const query = pool.calls.find((call) => /FROM messages/i.test(call.text));
   assert.match(query.text, /role\s*=\s*'assistant'/i);
   assert.match(query.text, /status\s*=\s*'delivered'/i);
-  assert.match(query.text, /reply_mode\s*=\s*'voice'/i);
+  assert.doesNotMatch(query.text, /reply_mode\s*=/i,
+    'recovery includes manually requested audio for delivered text answers');
   assert.match(query.text, /media_id\s+IS\s+NULL/i);
   assert.match(query.text, /LEFT JOIN\s+media_generations/i);
   assert.match(query.text, /retryable\s*=\s*TRUE/i);
