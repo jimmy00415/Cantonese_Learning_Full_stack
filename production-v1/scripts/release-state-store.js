@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
 import {
-  link, lstat, mkdir, open, readFile, readdir, realpath, rename, unlink,
+  link, lstat, mkdir, open, opendir, realpath, rename, unlink,
 } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, parse, relative, resolve } from 'node:path';
@@ -40,6 +40,11 @@ const RECORD_TYPES = new Set(['abort', 'intent', 'checkpoint', 'terminal']);
 const JOURNAL_NAME = /^(\d{8})-(abort|intent|checkpoint|terminal)\.json$/;
 const TEMP_NAME = /^(\d{8}-(?:abort|intent|checkpoint|terminal)\.json)\.tmp-([0-9a-f]{32})$/;
 const STALE_LOCK_NAME = /^\.release-state\.lock\.stale-([0-9a-f]{32})$/;
+const ACTIVE_LOCK_NAME = '.release-state.lock';
+const JOURNAL_MAX_BYTES = 1024 * 1024;
+const LOCK_MAX_BYTES = 16 * 1024;
+const STATE_ENTRY_LIMIT = 1024;
+const STATE_ENTRY_NAME_MAX_BYTES = 255;
 const COMMON_KEYS = [
   'attemptId', 'createdAt', 'generation', 'operationId', 'payload', 'phase',
   'phasePlanSha256', 'previousRecordSha256', 'receiptHeadSha256', 'recordSha256',
@@ -597,21 +602,70 @@ export async function writeAtomicCreateOnly(filePath, bytes, {
   }
 }
 
-async function readJournalFiles(stateDirectory) {
-  const entries = await readdir(stateDirectory, { withFileTypes: true });
+function reservedStateName(name) {
+  return name === ACTIVE_LOCK_NAME || JOURNAL_NAME.test(name)
+    || TEMP_NAME.test(name) || STALE_LOCK_NAME.test(name);
+}
+
+async function readStateEntries(stateDirectory) {
+  const directoryBefore = await lstat(stateDirectory, { bigint: true });
+  const directoryRealBefore = await realpath(stateDirectory);
+  if (!directoryBefore.isDirectory() || directoryBefore.isSymbolicLink()
+    || !canonicalPathMatches(directoryRealBefore, stateDirectory)) {
+    throw new Error('Release-state directory is invalid');
+  }
+  let handle;
+  const entries = [];
+  try {
+    handle = await opendir(stateDirectory);
+    while (true) {
+      const entry = await handle.read();
+      if (entry === null) break;
+      if (entries.length >= STATE_ENTRY_LIMIT) {
+        throw new Error('Release-state directory entry count exceeds the safe limit');
+      }
+      const nameBytes = typeof entry?.name === 'string'
+        ? Buffer.byteLength(entry.name, 'utf8') : 0;
+      if (nameBytes < 1 || nameBytes > STATE_ENTRY_NAME_MAX_BYTES
+        || /[\u0000-\u001f\u007f/\\]/u.test(entry.name)
+        || !reservedStateName(entry.name)) {
+        throw new Error('Release journal directory entry is invalid');
+      }
+      if (entry.isFile() !== true || entry.isSymbolicLink() === true) {
+        throw new Error('Reserved state entry is not an ordinary file');
+      }
+      entries.push(entry);
+    }
+  } finally {
+    await handle?.close().catch((error) => {
+      if (error?.code !== 'ERR_DIR_CLOSED') throw error;
+    });
+  }
+  const directoryAfter = await lstat(stateDirectory, { bigint: true });
+  const directoryRealAfter = await realpath(stateDirectory);
+  if (!directoryAfter.isDirectory() || directoryAfter.isSymbolicLink()
+    || !statIdentityMatches(directoryBefore, directoryAfter)
+    || !canonicalPathMatches(directoryRealBefore, directoryRealAfter)
+    || !canonicalPathMatches(directoryRealAfter, stateDirectory)) {
+    throw new Error('Release-state directory identity changed');
+  }
+  return entries;
+}
+
+async function readJournalFiles(stateDirectory, {
+  fileReader = readBoundedOrdinaryFile,
+} = {}) {
+  if (typeof fileReader !== 'function') fail('Release journal reader is invalid');
+  const entries = await readStateEntries(stateDirectory);
   const recordNames = entries
-    .filter((entry) => entry.isFile() && JOURNAL_NAME.test(entry.name))
+    .filter((entry) => JOURNAL_NAME.test(entry.name))
     .map((entry) => entry.name).sort();
-  const unexpected = entries.filter((entry) => (
-    entry.name !== '.release-state.lock'
-      && !JOURNAL_NAME.test(entry.name)
-      && !TEMP_NAME.test(entry.name)
-  ));
-  if (unexpected.length > 0) fail('Release journal directory is invalid');
   const records = [];
   for (const name of recordNames) {
-    const bytes = await readFile(join(stateDirectory, name));
-    if (bytes.length < 3 || bytes.length > 1024 * 1024) fail();
+    const bytes = await fileReader(join(stateDirectory, name), {
+      maximumBytes: JOURNAL_MAX_BYTES,
+    });
+    if (bytes.length < 3) fail();
     const raw = bytes.toString('utf8');
     if (!Buffer.from(raw).equals(bytes)) fail();
     const record = JSON.parse(raw);
@@ -622,30 +676,33 @@ async function readJournalFiles(stateDirectory) {
   return { entries, records };
 }
 
-export async function readReleaseJournalRecords(receiptDirectory) {
+export async function readReleaseJournalRecords(receiptDirectory, {
+  fileReader = readBoundedOrdinaryFile,
+} = {}) {
   if (!isAbsolute(receiptDirectory)) fail();
   const stateDirectory = join(receiptDirectory, 'state');
   await assertNoSymlinkPath(stateDirectory);
   const metadata = await lstat(stateDirectory);
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) fail();
-  const { records } = await readJournalFiles(stateDirectory);
+  const { records } = await readJournalFiles(stateDirectory, { fileReader });
   validateJournalRecords(records);
   return Object.freeze(records.map((record) => Object.freeze(structuredClone(record))));
 }
 
-export async function recoverJournalTemp(stateDirectory) {
+export async function recoverJournalTemp(stateDirectory, {
+  fileReader = readBoundedOrdinaryFile,
+} = {}) {
   await assertNoSymlinkPath(stateDirectory);
-  const { entries, records } = await readJournalFiles(stateDirectory);
+  const { entries, records } = await readJournalFiles(stateDirectory, { fileReader });
   const tempEntries = entries.filter((entry) => TEMP_NAME.test(entry.name));
   if (tempEntries.length === 0) return null;
   if (tempEntries.length !== 1) throw new Error('Release journal temporary files are ambiguous');
   const entry = tempEntries[0];
-  if (!entry.isFile()) throw new Error('Release journal temporary file is invalid');
   const match = TEMP_NAME.exec(entry.name);
   const finalName = match[1];
   const temporaryPath = join(stateDirectory, entry.name);
   const finalPath = join(stateDirectory, finalName);
-  const bytes = await readFile(temporaryPath);
+  const bytes = await fileReader(temporaryPath, { maximumBytes: JOURNAL_MAX_BYTES });
   const raw = bytes.toString('utf8');
   let record;
   try { record = JSON.parse(raw); } catch { throw new Error('Release journal temporary file is invalid'); }
@@ -656,7 +713,7 @@ export async function recoverJournalTemp(stateDirectory) {
   }
   const published = records.find((candidate) => journalFileName(candidate) === finalName);
   if (published) {
-    const finalBytes = await readFile(finalPath);
+    const finalBytes = await fileReader(finalPath, { maximumBytes: JOURNAL_MAX_BYTES });
     if (!finalBytes.equals(bytes) || published.recordSha256 !== record.recordSha256) {
       throw new Error('Release journal recovery target differs from temporary bytes');
     }
@@ -674,6 +731,10 @@ export async function recoverJournalTemp(stateDirectory) {
   }
   const finalHandle = await open(finalPath, 'r+');
   try { await finalHandle.sync(); } finally { await finalHandle.close(); }
+  const finalBytes = await fileReader(finalPath, { maximumBytes: JOURNAL_MAX_BYTES });
+  if (!finalBytes.equals(bytes)) {
+    throw new Error('Release journal recovery target differs from temporary bytes');
+  }
   await unlink(temporaryPath);
   await syncDirectory(stateDirectory);
   return finalName;
@@ -702,6 +763,7 @@ export async function acquireReleaseStateLock(stateDirectory, {
   now = () => new Date(),
   isPidAlive = defaultIsPidAlive,
   staleAfterMs = 15 * 60 * 1000,
+  fileReader = readBoundedOrdinaryFile,
 } = {}) {
   await assertNoSymlinkPath(stateDirectory);
   const record = {
@@ -711,20 +773,20 @@ export async function acquireReleaseStateLock(stateDirectory, {
   if (!Number.isSafeInteger(staleAfterMs) || staleAfterMs < 60_000) {
     throw new Error('Release-state lock threshold is invalid');
   }
-  const lockPath = join(stateDirectory, '.release-state.lock');
+  if (typeof fileReader !== 'function') throw new Error('Release-state lock reader is invalid');
+  const lockPath = join(stateDirectory, ACTIVE_LOCK_NAME);
   const bytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
 
-  const entries = await readdir(stateDirectory, { withFileTypes: true });
+  const entries = await readStateEntries(stateDirectory);
   const staleArtifacts = entries.filter((entry) => STALE_LOCK_NAME.test(entry.name));
   if (staleArtifacts.length > 1) throw new Error('Release-state lock recovery is ambiguous');
   if (staleArtifacts.length === 1) {
     const artifact = staleArtifacts[0];
-    if (!artifact.isFile()) throw new Error('Release-state lock recovery is invalid');
     const artifactPath = join(stateDirectory, artifact.name);
     let staleRecord;
     let staleBytes;
     try {
-      staleBytes = await readFile(artifactPath);
+      staleBytes = await fileReader(artifactPath, { maximumBytes: LOCK_MAX_BYTES });
       staleRecord = JSON.parse(staleBytes.toString('utf8'));
       assertLockRecord(staleRecord);
       if (!staleBytes.equals(Buffer.from(`${JSON.stringify(staleRecord, null, 2)}\n`))) {
@@ -754,9 +816,12 @@ export async function acquireReleaseStateLock(stateDirectory, {
     let existing;
     let existingBytes;
     try {
-      existingBytes = await readFile(lockPath);
+      existingBytes = await fileReader(lockPath, { maximumBytes: LOCK_MAX_BYTES });
       existing = JSON.parse(existingBytes.toString('utf8'));
       assertLockRecord(existing);
+      if (!existingBytes.equals(Buffer.from(`${JSON.stringify(existing, null, 2)}\n`))) {
+        throw new Error('noncanonical active lock');
+      }
     } catch {
       throw new Error('Release-state lock is invalid');
     }
@@ -767,7 +832,7 @@ export async function acquireReleaseStateLock(stateDirectory, {
     const stalePath = join(stateDirectory, `.release-state.lock.stale-${randomUUID().replaceAll('-', '')}`);
     try {
       await rename(lockPath, stalePath);
-      const moved = await readFile(stalePath);
+      const moved = await fileReader(stalePath, { maximumBytes: LOCK_MAX_BYTES });
       if (!moved.equals(existingBytes)) throw new Error('Release-state lock changed during takeover');
       await createLock();
       await unlink(stalePath);
@@ -782,8 +847,13 @@ export async function acquireReleaseStateLock(stateDirectory, {
     record: Object.freeze(record),
     async release() {
       if (released) return;
-      const current = await readFile(lockPath).catch(() => null);
-      if (!current?.equals(bytes)) throw new Error('Release-state lock ownership changed');
+      let current;
+      try {
+        current = await fileReader(lockPath, { maximumBytes: LOCK_MAX_BYTES });
+      } catch (error) {
+        throw new Error('Release-state lock ownership changed', { cause: error });
+      }
+      if (!current.equals(bytes)) throw new Error('Release-state lock ownership changed');
       await unlink(lockPath);
       await syncDirectory(stateDirectory);
       released = true;

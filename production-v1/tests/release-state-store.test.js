@@ -11,6 +11,7 @@ import {
   journalFileName,
   openReleaseStateStore,
   readBoundedOrdinaryFile,
+  readReleaseJournalRecords,
   recoverJournalTemp,
   validateJournalRecords,
   writeAtomicCreateOnly,
@@ -93,6 +94,45 @@ function threeRecordJournal() {
     },
   }), { terminalState });
   return [intent, checkpoint, terminal];
+}
+
+async function stateFixture(t, label) {
+  const root = await mkdtemp(join(tmpdir(), label));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const receiptDirectory = join(root, 'receipts');
+  const stateDirectory = join(receiptDirectory, 'state');
+  await mkdir(stateDirectory, { recursive: true });
+  return { root, receiptDirectory, stateDirectory };
+}
+
+function canonicalLockBytes({
+  attemptId = '323e4567-e89b-42d3-a456-426614174000',
+  pid = 2_147_483_647,
+  createdAt = CREATED_AT,
+} = {}) {
+  return Buffer.from(`${JSON.stringify({
+    schemaVersion: 1, attemptId, host: hostname(), pid, createdAt,
+  }, null, 2)}\n`);
+}
+
+function pathnameReplacementReader(shouldReplace) {
+  const calls = [];
+  return {
+    calls,
+    reader: async (filePath, options) => {
+      calls.push({ filePath, maximumBytes: options?.maximumBytes });
+      return readBoundedOrdinaryFile(filePath, {
+        ...options,
+        afterOpen: async () => {
+          if (!shouldReplace(filePath, calls)) return;
+          const original = `${filePath}.displaced`;
+          const bytes = await readFile(filePath);
+          await rename(filePath, original);
+          await writeFile(filePath, bytes);
+        },
+      });
+    },
+  };
 }
 
 test('journal records are canonical, exact, secret-free, and hash chained', () => {
@@ -233,6 +273,214 @@ test('one valid contiguous crash temp is recovered and every ambiguous temp set 
   await assert.rejects(() => recoverJournalTemp(stateDirectory), /temporary|ambiguous/i);
 });
 
+test('reserved journal, temp, lock, and stale-lock names reject non-ordinary directory entries on every platform', async (t) => {
+  const cases = [
+    ['journal', '00000001-intent.json', ({ receiptDirectory }) => readReleaseJournalRecords(receiptDirectory)],
+    ['temp', `00000001-intent.json.tmp-${'1'.repeat(32)}`, ({ stateDirectory }) => recoverJournalTemp(stateDirectory)],
+    ['active lock', '.release-state.lock', ({ stateDirectory }) => acquireReleaseStateLock(stateDirectory, {
+      attemptId: ATTEMPT_ID, now: () => new Date('2026-08-26T01:22:03.000Z'), isPidAlive: () => false,
+    })],
+    ['stale lock', `.release-state.lock.stale-${'1'.repeat(32)}`, ({ stateDirectory }) => acquireReleaseStateLock(stateDirectory, {
+      attemptId: ATTEMPT_ID, now: () => new Date('2026-08-26T01:22:03.000Z'), isPidAlive: () => false,
+    })],
+  ];
+  for (const [name, entryName, action] of cases) {
+    await t.test(name, async (subtest) => {
+      const fixture = await stateFixture(subtest, `hkbuddy-state-nonordinary-${name.replace(' ', '-')}-`);
+      await mkdir(join(fixture.stateDirectory, entryName));
+      await assert.rejects(() => action(fixture), /reserved state entry is not an ordinary file/i);
+    });
+  }
+});
+
+test('release-state directory enumeration fails closed above the explicit 1024-entry ceiling', async (t) => {
+  const fixture = await stateFixture(t, 'hkbuddy-state-entry-cap-');
+  for (let generation = 1; generation <= 1025; generation += 1) {
+    await mkdir(join(fixture.stateDirectory, `${String(generation).padStart(8, '0')}-intent.json`));
+  }
+  await assert.rejects(
+    () => readReleaseJournalRecords(fixture.receiptDirectory),
+    /entry|count|journal directory/i,
+  );
+});
+
+test('every journal, temp, recovery-target, and lock read is descriptor-bound against pathname replacement', async (t) => {
+  const record = threeRecordJournal()[0];
+  const recordName = journalFileName(record);
+  const recordBytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
+
+  await t.test('canonical journal', async (subtest) => {
+    const fixture = await stateFixture(subtest, 'hkbuddy-state-swap-journal-');
+    await writeFile(join(fixture.stateDirectory, recordName), recordBytes);
+    const observed = pathnameReplacementReader((filePath) => filePath.endsWith(recordName));
+    await assert.rejects(
+      () => readReleaseJournalRecords(fixture.receiptDirectory, { fileReader: observed.reader }),
+      /changed|identity|ordinary/i,
+    );
+    assert.deepEqual(observed.calls.map(({ maximumBytes }) => maximumBytes), [1024 * 1024]);
+  });
+
+  await t.test('recovery temp', async (subtest) => {
+    const fixture = await stateFixture(subtest, 'hkbuddy-state-swap-temp-');
+    const tempName = `${recordName}.tmp-${'1'.repeat(32)}`;
+    await writeFile(join(fixture.stateDirectory, tempName), recordBytes);
+    const observed = pathnameReplacementReader((filePath) => filePath.endsWith(tempName));
+    await assert.rejects(
+      () => recoverJournalTemp(fixture.stateDirectory, { fileReader: observed.reader }),
+      /changed|identity|ordinary|temporary/i,
+    );
+    assert.deepEqual(observed.calls.map(({ maximumBytes }) => maximumBytes), [1024 * 1024]);
+  });
+
+  await t.test('published recovery target reread', async (subtest) => {
+    const fixture = await stateFixture(subtest, 'hkbuddy-state-swap-final-');
+    const tempName = `${recordName}.tmp-${'2'.repeat(32)}`;
+    await writeFile(join(fixture.stateDirectory, recordName), recordBytes);
+    await writeFile(join(fixture.stateDirectory, tempName), recordBytes);
+    let finalReads = 0;
+    const observed = pathnameReplacementReader((filePath) => {
+      if (!filePath.endsWith(recordName)) return false;
+      finalReads += 1;
+      return finalReads === 2;
+    });
+    await assert.rejects(
+      () => recoverJournalTemp(fixture.stateDirectory, { fileReader: observed.reader }),
+      /changed|identity|ordinary|target/i,
+    );
+    assert.deepEqual(observed.calls.map(({ maximumBytes }) => maximumBytes), [
+      1024 * 1024, 1024 * 1024, 1024 * 1024,
+    ]);
+  });
+
+  await t.test('active lock', async (subtest) => {
+    const fixture = await stateFixture(subtest, 'hkbuddy-state-swap-active-lock-');
+    await writeFile(join(fixture.stateDirectory, '.release-state.lock'), canonicalLockBytes());
+    const observed = pathnameReplacementReader((filePath) => filePath.endsWith('.release-state.lock'));
+    await assert.rejects(() => acquireReleaseStateLock(fixture.stateDirectory, {
+      attemptId: ATTEMPT_ID, now: () => new Date('2026-08-26T01:22:03.000Z'),
+      isPidAlive: () => false, staleAfterMs: 60_000, fileReader: observed.reader,
+    }), /changed|identity|ordinary|lock/i);
+    assert.deepEqual(observed.calls.map(({ maximumBytes }) => maximumBytes), [16 * 1024]);
+  });
+
+  await t.test('stale-lock recovery artifact', async (subtest) => {
+    const fixture = await stateFixture(subtest, 'hkbuddy-state-swap-stale-lock-');
+    const staleName = `.release-state.lock.stale-${'3'.repeat(32)}`;
+    await writeFile(join(fixture.stateDirectory, staleName), canonicalLockBytes());
+    const observed = pathnameReplacementReader((filePath) => filePath.endsWith(staleName));
+    await assert.rejects(() => acquireReleaseStateLock(fixture.stateDirectory, {
+      attemptId: ATTEMPT_ID, now: () => new Date('2026-08-26T01:22:03.000Z'),
+      isPidAlive: () => false, staleAfterMs: 60_000, fileReader: observed.reader,
+    }), /changed|identity|ordinary|lock/i);
+    assert.deepEqual(observed.calls.map(({ maximumBytes }) => maximumBytes), [16 * 1024]);
+  });
+
+  await t.test('moved stale lock after takeover rename', async (subtest) => {
+    const fixture = await stateFixture(subtest, 'hkbuddy-state-swap-moved-lock-');
+    await writeFile(join(fixture.stateDirectory, '.release-state.lock'), canonicalLockBytes());
+    const observed = pathnameReplacementReader((filePath) => filePath.includes('.release-state.lock.stale-'));
+    await assert.rejects(() => acquireReleaseStateLock(fixture.stateDirectory, {
+      attemptId: ATTEMPT_ID, now: () => new Date('2026-08-26T01:22:03.000Z'),
+      isPidAlive: () => false, staleAfterMs: 60_000, fileReader: observed.reader,
+    }), /changed|identity|ordinary|lock|takeover/i);
+    assert.deepEqual(observed.calls.map(({ maximumBytes }) => maximumBytes), [16 * 1024, 16 * 1024]);
+  });
+
+  await t.test('release-time ownership read', async (subtest) => {
+    const fixture = await stateFixture(subtest, 'hkbuddy-state-swap-release-lock-');
+    const observed = pathnameReplacementReader((filePath) => filePath.endsWith('.release-state.lock'));
+    const lock = await acquireReleaseStateLock(fixture.stateDirectory, {
+      attemptId: ATTEMPT_ID, now: () => new Date(CREATED_AT), fileReader: observed.reader,
+    });
+    await assert.rejects(() => lock.release(), /changed|identity|ordinary|lock|ownership/i);
+    assert.deepEqual(observed.calls.map(({ maximumBytes }) => maximumBytes), [16 * 1024]);
+  });
+});
+
+test('oversized journal, temp, lock, and stale-lock files route through explicit preallocation bounds', async (t) => {
+  const cases = [
+    ['journal', '00000001-intent.json', 1024 * 1024,
+      ({ receiptDirectory }, reader) => readReleaseJournalRecords(receiptDirectory, { fileReader: reader })],
+    ['temp', `00000001-intent.json.tmp-${'4'.repeat(32)}`, 1024 * 1024,
+      ({ stateDirectory }, reader) => recoverJournalTemp(stateDirectory, { fileReader: reader })],
+    ['active lock', '.release-state.lock', 16 * 1024,
+      ({ stateDirectory }, reader) => acquireReleaseStateLock(stateDirectory, {
+        attemptId: ATTEMPT_ID, now: () => new Date('2026-08-26T01:22:03.000Z'),
+        isPidAlive: () => false, fileReader: reader,
+      })],
+    ['stale lock', `.release-state.lock.stale-${'5'.repeat(32)}`, 16 * 1024,
+      ({ stateDirectory }, reader) => acquireReleaseStateLock(stateDirectory, {
+        attemptId: ATTEMPT_ID, now: () => new Date('2026-08-26T01:22:03.000Z'),
+        isPidAlive: () => false, fileReader: reader,
+      })],
+  ];
+  for (const [name, entryName, maximumBytes, action] of cases) {
+    await t.test(name, async (subtest) => {
+      const fixture = await stateFixture(subtest, `hkbuddy-state-oversized-${name.replace(' ', '-')}-`);
+      await writeFile(join(fixture.stateDirectory, entryName), Buffer.alloc(maximumBytes + 1, 0x78));
+      const calls = [];
+      const reader = async (filePath, options) => {
+        calls.push({ filePath, maximumBytes: options?.maximumBytes });
+        return readBoundedOrdinaryFile(filePath, options);
+      };
+      await assert.rejects(() => action(fixture, reader), /length|ordinary|invalid|journal|temporary|lock/i);
+      assert.deepEqual(calls.map((call) => call.maximumBytes), [maximumBytes]);
+    });
+  }
+
+  await t.test('final recovery target grows beyond the journal bound before its decisive reread', async (subtest) => {
+    const fixture = await stateFixture(subtest, 'hkbuddy-state-oversized-final-target-');
+    const record = threeRecordJournal()[0];
+    const recordName = journalFileName(record);
+    const recordBytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
+    const finalPath = join(fixture.stateDirectory, recordName);
+    const tempPath = join(fixture.stateDirectory, `${recordName}.tmp-${'6'.repeat(32)}`);
+    await writeFile(finalPath, recordBytes);
+    await writeFile(tempPath, recordBytes);
+    const reader = async (filePath, options) => {
+      const bytes = await readBoundedOrdinaryFile(filePath, options);
+      if (filePath === tempPath) await writeFile(finalPath, Buffer.alloc(1024 * 1024 + 1, 0x78));
+      return bytes;
+    };
+    await assert.rejects(
+      () => recoverJournalTemp(fixture.stateDirectory, { fileReader: reader }),
+      /length|ordinary|changed|target/i,
+    );
+  });
+
+  await t.test('moved stale lock grows beyond the lock bound before its decisive reread', async (subtest) => {
+    const fixture = await stateFixture(subtest, 'hkbuddy-state-oversized-moved-lock-');
+    const activePath = join(fixture.stateDirectory, '.release-state.lock');
+    await writeFile(activePath, canonicalLockBytes());
+    const reader = async (filePath, options) => {
+      const bytes = await readBoundedOrdinaryFile(filePath, options);
+      if (filePath === activePath) await writeFile(activePath, Buffer.alloc(16 * 1024 + 1, 0x78));
+      return bytes;
+    };
+    await assert.rejects(() => acquireReleaseStateLock(fixture.stateDirectory, {
+      attemptId: ATTEMPT_ID, now: () => new Date('2026-08-26T01:22:03.000Z'),
+      isPidAlive: () => false, staleAfterMs: 60_000, fileReader: reader,
+    }), /length|ordinary|changed|lock|takeover/i);
+  });
+
+  await t.test('release-time lock grows beyond the lock bound before ownership read', async (subtest) => {
+    const fixture = await stateFixture(subtest, 'hkbuddy-state-oversized-release-lock-');
+    const activePath = join(fixture.stateDirectory, '.release-state.lock');
+    let growBeforeRead = false;
+    const reader = async (filePath, options) => {
+      if (growBeforeRead && filePath === activePath) {
+        await writeFile(activePath, Buffer.alloc(16 * 1024 + 1, 0x78));
+      }
+      return readBoundedOrdinaryFile(filePath, options);
+    };
+    const lock = await acquireReleaseStateLock(fixture.stateDirectory, {
+      attemptId: ATTEMPT_ID, now: () => new Date(CREATED_AT), fileReader: reader,
+    });
+    growBeforeRead = true;
+    await assert.rejects(() => lock.release(), /length|ordinary|changed|lock|ownership/i);
+  });
+});
+
 test('Windows directory-sync degradation accepts EPERM only', async () => {
   const module = await import('../scripts/release-state-store.js');
   assert.equal(module.classifyDirectorySyncError(
@@ -262,7 +510,7 @@ test('release-state lock permits only bounded dead same-host takeover', async (t
   await writeFile(join(stateDirectory, '.release-state.lock'), `${JSON.stringify({
     schemaVersion: 1, attemptId: '323e4567-e89b-42d3-a456-426614174000',
     host: hostname(), pid: 4321, createdAt: CREATED_AT,
-  })}\n`, { mode: 0o600 });
+  }, null, 2)}\n`, { mode: 0o600 });
   const reclaimed = await acquireReleaseStateLock(stateDirectory, {
     attemptId: ATTEMPT_ID, host: hostname(), pid: 5678,
     now: () => new Date('2026-08-26T01:12:03.000Z'), isPidAlive: () => false,
