@@ -360,6 +360,173 @@ test('one valid contiguous crash temp is recovered and every ambiguous temp set 
   await assert.rejects(() => recoverJournalTemp(stateDirectory), /temporary|ambiguous/i);
 });
 
+test('recovery completes the exact hard-link publication crash window and remains idempotent', async (t) => {
+  const fixture = await stateFixture(t, 'hkbuddy-linked-publication-recovery-');
+  const records = threeRecordJournal();
+  const firstName = journalFileName(records[0]);
+  const secondName = journalFileName(records[1]);
+  const secondBytes = Buffer.from(`${JSON.stringify(records[1], null, 2)}\n`);
+  const temporaryPath = join(fixture.stateDirectory, `${secondName}.tmp-${'5'.repeat(32)}`);
+  const finalPath = join(fixture.stateDirectory, secondName);
+  await writeFile(join(fixture.stateDirectory, firstName), `${JSON.stringify(records[0], null, 2)}\n`);
+  await writeFile(temporaryPath, secondBytes);
+  await link(temporaryPath, finalPath);
+  assert.equal((await stat(temporaryPath)).nlink, 2);
+  assert.equal((await stat(finalPath)).nlink, 2);
+
+  assert.equal(await recoverJournalTemp(fixture.stateDirectory), secondName);
+  await assert.rejects(() => stat(temporaryPath), { code: 'ENOENT' });
+  assert.equal((await stat(finalPath)).nlink, 1);
+  assert.deepEqual(await readFile(finalPath), secondBytes);
+  assert.equal(await recoverJournalTemp(fixture.stateDirectory), null);
+  assert.deepEqual(
+    (await readReleaseJournalRecords(fixture.receiptDirectory)).map((record) => record.recordSha256),
+    records.slice(0, 2).map((record) => record.recordSha256),
+  );
+});
+
+test('linked publication recovery rejects every ambiguous or adversarial topology before unlink', async (t) => {
+  const records = threeRecordJournal();
+  const firstName = journalFileName(records[0]);
+  const secondName = journalFileName(records[1]);
+  const secondBytes = Buffer.from(`${JSON.stringify(records[1], null, 2)}\n`);
+
+  async function installFirstAndPair(subtest, label) {
+    const fixture = await stateFixture(subtest, label);
+    await writeFile(
+      join(fixture.stateDirectory, firstName),
+      `${JSON.stringify(records[0], null, 2)}\n`,
+    );
+    const temporaryPath = join(fixture.stateDirectory, `${secondName}.tmp-${'6'.repeat(32)}`);
+    const finalPath = join(fixture.stateDirectory, secondName);
+    await writeFile(temporaryPath, secondBytes);
+    await link(temporaryPath, finalPath);
+    return { ...fixture, temporaryPath, finalPath };
+  }
+
+  await t.test('nlink greater than two proves an external alias', async (subtest) => {
+    const fixture = await installFirstAndPair(subtest, 'hkbuddy-linked-publication-external-alias-');
+    const aliasPath = join(fixture.root, 'external-alias');
+    await link(fixture.finalPath, aliasPath);
+    await assert.rejects(() => recoverJournalTemp(fixture.stateDirectory), /link|ordinary|identity|temporary|journal/i);
+    assert.equal((await stat(fixture.temporaryPath)).nlink, 3);
+    assert.equal((await stat(fixture.finalPath)).nlink, 3);
+  });
+
+  await t.test('two separately linked inodes are not an owned publication pair', async (subtest) => {
+    const fixture = await stateFixture(subtest, 'hkbuddy-linked-publication-distinct-inodes-');
+    await writeFile(join(fixture.stateDirectory, firstName), `${JSON.stringify(records[0], null, 2)}\n`);
+    const temporaryPath = join(fixture.stateDirectory, `${secondName}.tmp-${'7'.repeat(32)}`);
+    const finalPath = join(fixture.stateDirectory, secondName);
+    await writeFile(temporaryPath, secondBytes);
+    await writeFile(finalPath, secondBytes);
+    await link(temporaryPath, join(fixture.root, 'temporary-alias'));
+    await link(finalPath, join(fixture.root, 'final-alias'));
+    await assert.rejects(() => recoverJournalTemp(fixture.stateDirectory), /link|ordinary|identity|temporary|journal/i);
+    assert.equal((await stat(temporaryPath)).nlink, 2);
+    assert.equal((await stat(finalPath)).nlink, 2);
+  });
+
+  for (const [label, finalName, bytes] of [
+    ['malformed record', secondName, Buffer.from('{"not":"canonical"}')],
+    ['record and final name mismatch', secondName, Buffer.from(`${JSON.stringify(records[0], null, 2)}\n`)],
+    ['noncontiguous journal chain', journalFileName(records[2]), Buffer.from(`${JSON.stringify(records[2], null, 2)}\n`)],
+  ]) {
+    await t.test(label, async (subtest) => {
+      const fixture = await stateFixture(subtest, `hkbuddy-linked-publication-${label.replaceAll(' ', '-')}-`);
+      await writeFile(join(fixture.stateDirectory, firstName), `${JSON.stringify(records[0], null, 2)}\n`);
+      const temporaryPath = join(fixture.stateDirectory, `${finalName}.tmp-${'8'.repeat(32)}`);
+      const finalPath = join(fixture.stateDirectory, finalName);
+      await writeFile(temporaryPath, bytes);
+      await link(temporaryPath, finalPath);
+      await assert.rejects(() => recoverJournalTemp(fixture.stateDirectory), /invalid|journal|temporary|link|ordinary/i);
+      assert.equal((await stat(temporaryPath)).nlink, 2);
+      assert.equal((await stat(finalPath)).nlink, 2);
+    });
+  }
+
+  await t.test('a second temporary name is ambiguous', async (subtest) => {
+    const fixture = await installFirstAndPair(subtest, 'hkbuddy-linked-publication-multiple-temp-');
+    await writeFile(
+      join(fixture.stateDirectory, `${secondName}.tmp-${'9'.repeat(32)}`),
+      secondBytes,
+    );
+    await assert.rejects(() => recoverJournalTemp(fixture.stateDirectory), /ordinary|temporary|ambiguous/i);
+    assert.equal((await stat(fixture.temporaryPath)).nlink, 2);
+  });
+
+  await t.test('a temporary name added after pair inspection is rejected before unlink', async (subtest) => {
+    const fixture = await installFirstAndPair(subtest, 'hkbuddy-linked-publication-late-temp-');
+    const lateTemporaryPath = join(fixture.stateDirectory, `${secondName}.tmp-${'a'.repeat(32)}`);
+    let added = false;
+    const reader = async (filePath, options) => {
+      const bytes = await readBoundedOrdinaryFile(filePath, options);
+      if (!added && filePath.endsWith(firstName)) {
+        added = true;
+        await writeFile(lateTemporaryPath, secondBytes);
+      }
+      return bytes;
+    };
+    await assert.rejects(
+      () => recoverJournalTemp(fixture.stateDirectory, { fileReader: reader }),
+      /ambiguous|changed|identity|journal|temporary/i,
+    );
+    assert.equal(added, true);
+    assert.equal((await stat(fixture.temporaryPath)).nlink, 2);
+    assert.deepEqual(await readFile(lateTemporaryPath), secondBytes);
+  });
+
+  await t.test('final path replacement after pair inspection is rejected', async (subtest) => {
+    const fixture = await installFirstAndPair(subtest, 'hkbuddy-linked-publication-path-swap-');
+    let swapped = false;
+    const reader = async (filePath, options) => {
+      const bytes = await readBoundedOrdinaryFile(filePath, options);
+      if (!swapped && filePath.endsWith(firstName)) {
+        swapped = true;
+        await rename(fixture.finalPath, join(fixture.root, 'displaced-final'));
+        await writeFile(fixture.finalPath, secondBytes);
+      }
+      return bytes;
+    };
+    await assert.rejects(
+      () => recoverJournalTemp(fixture.stateDirectory, { fileReader: reader }),
+      /changed|identity|link|ordinary|journal|temporary/i,
+    );
+    assert.equal(swapped, true);
+    assert.equal((await stat(fixture.temporaryPath)).nlink, 2);
+  });
+
+  await t.test('state parent replacement after pair inspection is rejected', async (subtest) => {
+    const fixture = await installFirstAndPair(subtest, 'hkbuddy-linked-publication-parent-swap-');
+    const displacedState = join(fixture.root, 'state-displaced');
+    let swapped = false;
+    const reader = async (filePath, options) => {
+      const bytes = await readBoundedOrdinaryFile(filePath, options);
+      if (!swapped && filePath.endsWith(firstName)) {
+        swapped = true;
+        await rename(fixture.stateDirectory, displacedState);
+        await mkdir(fixture.stateDirectory);
+      }
+      return bytes;
+    };
+    await assert.rejects(
+      () => recoverJournalTemp(fixture.stateDirectory, { fileReader: reader }),
+      /changed|identity|parent|journal|temporary/i,
+    );
+    assert.equal(swapped, true);
+    assert.equal((await stat(join(displacedState, `${secondName}.tmp-${'6'.repeat(32)}`))).nlink, 2);
+  });
+
+  await t.test('a final-only hard link remains a generic linked journal rejection', async (subtest) => {
+    const fixture = await stateFixture(subtest, 'hkbuddy-linked-publication-final-only-');
+    const finalPath = join(fixture.stateDirectory, firstName);
+    await writeFile(finalPath, `${JSON.stringify(records[0], null, 2)}\n`);
+    await link(finalPath, join(fixture.root, 'external-final-alias'));
+    await assert.rejects(() => recoverJournalTemp(fixture.stateDirectory), /link|ordinary|identity|journal/i);
+    assert.equal((await stat(finalPath)).nlink, 2);
+  });
+});
+
 test('reserved journal, temp, lock, and stale-lock names reject non-ordinary directory entries on every platform', async (t) => {
   const cases = [
     ['journal', '00000001-intent.json', ({ receiptDirectory }) => readReleaseJournalRecords(receiptDirectory)],

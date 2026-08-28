@@ -387,6 +387,12 @@ function uniquelyLinkedOrdinaryFile(metadata) {
   return ordinaryFile(metadata) && oneLink;
 }
 
+function twiceLinkedOrdinaryFile(metadata) {
+  const links = metadata?.nlink;
+  const twoLinks = links === 2n || links === 2;
+  return ordinaryFile(metadata) && twoLinks;
+}
+
 function metadataSize(metadata) {
   if (typeof metadata?.size === 'bigint') {
     if (metadata.size < 0n || metadata.size > BigInt(Number.MAX_SAFE_INTEGER)) return null;
@@ -476,6 +482,22 @@ export async function readBoundedOrdinaryFile(filePath, {
   } finally {
     await handle?.close().catch(() => undefined);
   }
+}
+
+async function readExactDescriptorBytes(handle, byteLength) {
+  const bytes = Buffer.allocUnsafe(byteLength + 1);
+  let offset = 0;
+  while (offset < bytes.length) {
+    const result = await handle.read(bytes, offset, bytes.length - offset, offset);
+    if (!Number.isSafeInteger(result?.bytesRead) || result.bytesRead < 0
+      || result.bytesRead > bytes.length - offset) {
+      throw new Error('Release journal publication read is invalid');
+    }
+    if (result.bytesRead === 0) break;
+    offset += result.bytesRead;
+  }
+  if (offset !== byteLength) throw new Error('Release journal publication size changed');
+  return Buffer.from(bytes.subarray(0, byteLength));
 }
 
 async function assertNoSymlinkPath(target) {
@@ -659,27 +681,43 @@ async function readStateEntries(stateDirectory) {
   return entries;
 }
 
-async function readJournalFiles(stateDirectory, {
+function parseCanonicalJournalBytes(bytes, name, message = 'Release journal is invalid') {
+  if (!Buffer.isBuffer(bytes) || bytes.length < 3) throw new Error(message);
+  const raw = bytes.toString('utf8');
+  let record;
+  try { record = JSON.parse(raw); } catch { throw new Error(message); }
+  if (!Buffer.from(raw).equals(bytes)
+    || raw !== `${JSON.stringify(record, null, 2)}\n`
+    || journalFileName(record) !== name) {
+    throw new Error(message);
+  }
+  return record;
+}
+
+async function readJournalRecordsFromEntries(stateDirectory, entries, {
+  excludeName = null,
   fileReader = readBoundedOrdinaryFile,
 } = {}) {
   if (typeof fileReader !== 'function') fail('Release journal reader is invalid');
-  const entries = await readStateEntries(stateDirectory);
   const recordNames = entries
-    .filter((entry) => JOURNAL_NAME.test(entry.name))
+    .filter((entry) => JOURNAL_NAME.test(entry.name) && entry.name !== excludeName)
     .map((entry) => entry.name).sort();
   const records = [];
   for (const name of recordNames) {
     const bytes = await fileReader(join(stateDirectory, name), {
       maximumBytes: JOURNAL_MAX_BYTES,
     });
-    if (bytes.length < 3) fail();
-    const raw = bytes.toString('utf8');
-    if (!Buffer.from(raw).equals(bytes)) fail();
-    const record = JSON.parse(raw);
-    if (raw !== `${JSON.stringify(record, null, 2)}\n` || journalFileName(record) !== name) fail();
-    records.push(record);
+    records.push(parseCanonicalJournalBytes(bytes, name));
   }
   if (records.length > 0) validateJournalRecords(records);
+  return records;
+}
+
+async function readJournalFiles(stateDirectory, {
+  fileReader = readBoundedOrdinaryFile,
+} = {}) {
+  const entries = await readStateEntries(stateDirectory);
+  const records = await readJournalRecordsFromEntries(stateDirectory, entries, { fileReader });
   return { entries, records };
 }
 
@@ -696,28 +734,201 @@ export async function readReleaseJournalRecords(receiptDirectory, {
   return Object.freeze(records.map((record) => Object.freeze(structuredClone(record))));
 }
 
+async function readLinkedPublicationCrashPair(stateDirectory, temporaryPath, finalPath, finalName) {
+  if (!isAbsolute(stateDirectory) || !isAbsolute(temporaryPath) || !isAbsolute(finalPath)
+    || !canonicalPathMatches(dirname(temporaryPath), stateDirectory)
+    || !canonicalPathMatches(dirname(finalPath), stateDirectory)
+    || basename(finalPath) !== finalName || !JOURNAL_NAME.test(finalName)) {
+    throw new Error('Release journal linked publication paths are invalid');
+  }
+  const parentBefore = await lstat(stateDirectory, { bigint: true });
+  const parentRealBefore = await realpath(stateDirectory);
+  const temporaryBefore = await lstat(temporaryPath, { bigint: true });
+  const finalBefore = await lstat(finalPath, { bigint: true });
+  if (!parentBefore.isDirectory() || parentBefore.isSymbolicLink()
+    || !canonicalPathMatches(parentRealBefore, stateDirectory)) {
+    throw new Error('Release journal linked publication parent is invalid');
+  }
+  if (uniquelyLinkedOrdinaryFile(temporaryBefore) && uniquelyLinkedOrdinaryFile(finalBefore)) {
+    return null;
+  }
+  const byteLength = metadataSize(temporaryBefore);
+  if (!twiceLinkedOrdinaryFile(temporaryBefore) || !twiceLinkedOrdinaryFile(finalBefore)
+    || !statIdentityMatches(temporaryBefore, finalBefore)
+    || byteLength < 1 || byteLength > JOURNAL_MAX_BYTES
+    || !exactMetadataSize(finalBefore, byteLength)) {
+    throw new Error('Release journal linked publication topology is invalid');
+  }
+
+  const noFollow = Number.isInteger(fsConstants.O_NOFOLLOW) ? fsConstants.O_NOFOLLOW : 0;
+  let temporaryHandle;
+  let finalHandle;
+  let bytes;
+  try {
+    temporaryHandle = await open(temporaryPath, fsConstants.O_RDONLY | noFollow);
+    finalHandle = await open(finalPath, fsConstants.O_RDONLY | noFollow);
+    const temporaryOpened = await temporaryHandle.stat({ bigint: true });
+    const finalOpened = await finalHandle.stat({ bigint: true });
+    const temporaryPathOpened = await lstat(temporaryPath, { bigint: true });
+    const finalPathOpened = await lstat(finalPath, { bigint: true });
+    if (!twiceLinkedOrdinaryFile(temporaryOpened) || !twiceLinkedOrdinaryFile(finalOpened)
+      || !twiceLinkedOrdinaryFile(temporaryPathOpened) || !twiceLinkedOrdinaryFile(finalPathOpened)
+      || !exactMetadataSize(temporaryOpened, byteLength)
+      || !exactMetadataSize(finalOpened, byteLength)
+      || !exactMetadataSize(temporaryPathOpened, byteLength)
+      || !exactMetadataSize(finalPathOpened, byteLength)
+      || !statIdentityMatches(temporaryBefore, temporaryOpened)
+      || !statIdentityMatches(finalBefore, finalOpened)
+      || !statIdentityMatches(temporaryOpened, finalOpened)
+      || !statIdentityMatches(temporaryPathOpened, temporaryOpened)
+      || !statIdentityMatches(finalPathOpened, finalOpened)) {
+      throw new Error('Release journal linked publication identity changed');
+    }
+    const temporaryBytes = await readExactDescriptorBytes(temporaryHandle, byteLength);
+    const finalBytes = await readExactDescriptorBytes(finalHandle, byteLength);
+    if (!temporaryBytes.equals(finalBytes)) {
+      throw new Error('Release journal linked publication bytes differ');
+    }
+    const temporaryAfter = await temporaryHandle.stat({ bigint: true });
+    const finalAfter = await finalHandle.stat({ bigint: true });
+    const temporaryPathAfter = await lstat(temporaryPath, { bigint: true });
+    const finalPathAfter = await lstat(finalPath, { bigint: true });
+    const parentAfter = await lstat(stateDirectory, { bigint: true });
+    const parentRealAfter = await realpath(stateDirectory);
+    if (!twiceLinkedOrdinaryFile(temporaryAfter) || !twiceLinkedOrdinaryFile(finalAfter)
+      || !twiceLinkedOrdinaryFile(temporaryPathAfter) || !twiceLinkedOrdinaryFile(finalPathAfter)
+      || !exactMetadataSize(temporaryAfter, byteLength)
+      || !exactMetadataSize(finalAfter, byteLength)
+      || !exactMetadataSize(temporaryPathAfter, byteLength)
+      || !exactMetadataSize(finalPathAfter, byteLength)
+      || !statIdentityMatches(temporaryOpened, temporaryAfter)
+      || !statIdentityMatches(finalOpened, finalAfter)
+      || !statIdentityMatches(temporaryAfter, finalAfter)
+      || !statIdentityMatches(temporaryPathAfter, temporaryAfter)
+      || !statIdentityMatches(finalPathAfter, finalAfter)
+      || !parentAfter.isDirectory() || parentAfter.isSymbolicLink()
+      || !statIdentityMatches(parentBefore, parentAfter)
+      || !canonicalPathMatches(parentRealBefore, parentRealAfter)
+      || !canonicalPathMatches(parentRealAfter, stateDirectory)) {
+      throw new Error('Release journal linked publication identity changed');
+    }
+    bytes = temporaryBytes;
+  } catch (error) {
+    throw new Error('Release journal linked publication changed or could not be read', { cause: error });
+  } finally {
+    await temporaryHandle?.close().catch(() => undefined);
+    await finalHandle?.close().catch(() => undefined);
+  }
+  const record = parseCanonicalJournalBytes(
+    bytes, finalName, 'Release journal linked publication record is invalid',
+  );
+  return { bytes, record, byteLength, parentBefore, parentRealBefore, temporaryBefore, finalBefore };
+}
+
+async function assertLinkedPublicationStillOwned(
+  stateDirectory, temporaryPath, finalPath, snapshot, expectedEntryNames,
+) {
+  try {
+    const currentEntryNames = (await readStateEntries(stateDirectory))
+      .map((entry) => entry.name).sort();
+    if (currentEntryNames.length !== expectedEntryNames.length
+      || currentEntryNames.some((name, index) => name !== expectedEntryNames[index])) {
+      throw new Error('Release journal linked publication entry set changed');
+    }
+    const parent = await lstat(stateDirectory, { bigint: true });
+    const parentReal = await realpath(stateDirectory);
+    const temporary = await lstat(temporaryPath, { bigint: true });
+    const final = await lstat(finalPath, { bigint: true });
+    if (!parent.isDirectory() || parent.isSymbolicLink()
+      || !statIdentityMatches(snapshot.parentBefore, parent)
+      || !canonicalPathMatches(snapshot.parentRealBefore, parentReal)
+      || !canonicalPathMatches(parentReal, stateDirectory)
+      || !twiceLinkedOrdinaryFile(temporary) || !twiceLinkedOrdinaryFile(final)
+      || !exactMetadataSize(temporary, snapshot.byteLength)
+      || !exactMetadataSize(final, snapshot.byteLength)
+      || !statIdentityMatches(snapshot.temporaryBefore, temporary)
+      || !statIdentityMatches(snapshot.finalBefore, final)
+      || !statIdentityMatches(temporary, final)) {
+      throw new Error('Release journal linked publication identity changed');
+    }
+  } catch (error) {
+    throw new Error('Release journal linked publication identity changed', { cause: error });
+  }
+}
+
+async function assertPathAbsent(filePath) {
+  try {
+    await lstat(filePath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return;
+    throw error;
+  }
+  throw new Error('Release journal temporary unlink was not durable');
+}
+
 export async function recoverJournalTemp(stateDirectory, {
   fileReader = readBoundedOrdinaryFile,
 } = {}) {
+  if (typeof fileReader !== 'function') fail('Release journal reader is invalid');
   await assertNoSymlinkPath(stateDirectory);
-  const { entries, records } = await readJournalFiles(stateDirectory, { fileReader });
+  const entries = await readStateEntries(stateDirectory);
   const tempEntries = entries.filter((entry) => TEMP_NAME.test(entry.name));
-  if (tempEntries.length === 0) return null;
+  if (tempEntries.length === 0) {
+    await readJournalRecordsFromEntries(stateDirectory, entries, { fileReader });
+    return null;
+  }
   if (tempEntries.length !== 1) throw new Error('Release journal temporary files are ambiguous');
   const entry = tempEntries[0];
   const match = TEMP_NAME.exec(entry.name);
   const finalName = match[1];
   const temporaryPath = join(stateDirectory, entry.name);
   const finalPath = join(stateDirectory, finalName);
-  const bytes = await fileReader(temporaryPath, { maximumBytes: JOURNAL_MAX_BYTES });
-  const raw = bytes.toString('utf8');
-  let record;
-  try { record = JSON.parse(raw); } catch { throw new Error('Release journal temporary file is invalid'); }
-  if (!Buffer.from(raw).equals(bytes)
-    || raw !== `${JSON.stringify(record, null, 2)}\n`
-    || journalFileName(record) !== finalName) {
-    throw new Error('Release journal temporary file is invalid');
+  const finalEntry = entries.find((candidate) => candidate.name === finalName);
+  if (finalEntry) {
+    const linkedPublication = await readLinkedPublicationCrashPair(
+      stateDirectory, temporaryPath, finalPath, finalName,
+    );
+    if (linkedPublication) {
+      const authoritativeReader = fileReader === readBoundedOrdinaryFile
+        ? readBoundedOrdinaryFile
+        : async (filePath, options) => {
+          await fileReader(filePath, options);
+          return readBoundedOrdinaryFile(filePath, options);
+        };
+      const records = await readJournalRecordsFromEntries(stateDirectory, entries, {
+        excludeName: finalName,
+        fileReader: authoritativeReader,
+      });
+      if (linkedPublication.record.generation !== records.length + 1) {
+        throw new Error('Release journal linked publication record is invalid');
+      }
+      validateJournalRecords([...records, linkedPublication.record]);
+      await assertLinkedPublicationStillOwned(
+        stateDirectory, temporaryPath, finalPath, linkedPublication,
+        entries.map((candidate) => candidate.name).sort(),
+      );
+      await unlink(temporaryPath);
+      await syncDirectory(stateDirectory);
+      await assertPathAbsent(temporaryPath);
+      const finalBytes = await readBoundedOrdinaryFile(finalPath, {
+        expectedByteLength: linkedPublication.byteLength,
+        maximumBytes: JOURNAL_MAX_BYTES,
+      });
+      const finalRecord = parseCanonicalJournalBytes(
+        finalBytes, finalName, 'Release journal recovery target is invalid',
+      );
+      if (!finalBytes.equals(linkedPublication.bytes)
+        || finalRecord.recordSha256 !== linkedPublication.record.recordSha256) {
+        throw new Error('Release journal recovery target differs from temporary bytes');
+      }
+      return finalName;
+    }
   }
+  const records = await readJournalRecordsFromEntries(stateDirectory, entries, { fileReader });
+  const bytes = await fileReader(temporaryPath, { maximumBytes: JOURNAL_MAX_BYTES });
+  const record = parseCanonicalJournalBytes(
+    bytes, finalName, 'Release journal temporary file is invalid',
+  );
   const published = records.find((candidate) => journalFileName(candidate) === finalName);
   if (published) {
     const finalBytes = await fileReader(finalPath, { maximumBytes: JOURNAL_MAX_BYTES });
