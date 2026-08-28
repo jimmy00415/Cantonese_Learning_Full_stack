@@ -364,23 +364,49 @@ promotion, or rollback.
 
 ## Stage D controlled acceptance contract (local implementation only)
 
-The local release controller now treats candidate privacy as part of the
-receipt-bound candidate phase and validates each immutable proof against the
-clock recorded at its own gate. Readiness, workload, and mobile evidence remain
-promotion-fresh separately; a historical proof is not incorrectly expired by a
-later promotion clock. Candidate privacy publication, readiness publication,
-and the seven-file mobile evidence bundle are journaled before create-only
-publication, so a restart may adopt only byte-for-byte identical prior files.
-Foreign bytes, symbolic-link/junction destinations, incomplete bundles, or
-caller-supplied prebuilt evidence fail closed.
+The local release controller treats candidate privacy as the receipt-bound last
+candidate operation. Historical privacy proofs are validated against the clock
+recorded at their own gate; that historical proof-at-gate result is not a live
+freshness claim. Readiness, workload, and mobile freshness are checked
+separately, and promotion always requires a new proof evaluated with the current
+post-proof clock. Fresh validators reject the exact `expiresAt` boundary.
+
+Candidate privacy and readiness publication, the workload privacy-start /
+privacy-end / workload three-file bundle, and the seven-file mobile bundle are
+journaled byte-for-byte before create-only publication. A restart may adopt only
+the exact intended regular-file bytes. Every evidence adoption read is bounded
+by the intended length and rechecks descriptor, pathname, and parent identity;
+publication similarly rechecks the durable temp inode and parent before and
+after the create-only link. Foreign bytes, oversized files, replacement,
+symbolic links, Windows junctions, incomplete bundles, receipt drift, and
+caller-supplied prebuilt mobile evidence fail closed without overwrite.
+
+These are the strongest portable Node filesystem checks used inside a trusted,
+operator-owned local evidence directory. Node on Windows has no handle-relative
+`openat` primitive, so this is not a claim that an actively malicious same-user
+process cannot win every kernel pathname race.
+
+Promotion uses append-only, attempt-bound proof checkpoints. After stable
+staging, it publishes a fresh proof, then uses the current clock to validate the
+proof and reread every receipt/evidence predecessor plus candidate/stable
+service, revision, image/config, traffic, IAM, and authority state. The final
+intent is bound to the canonical digest of that complete promotion barrier.
+Expired pre-intent proofs are preserved and followed by a new proof; an expired,
+unperformed final intent with exact before-state is explicitly aborted before a
+new proof/intent. Mixed or ambiguous state blocks, and only reads plus durable
+local writes may follow the terminal public mutation.
 
 The controlled mobile producer is pinned to Playwright `1.62.1`, Chromium
-revision `1234` / browser `151.0.7922.34`, a `390x844` DPR-1 isolated mobile
-context, and the canonical one-second PCM16LE 16 kHz mono WAV fixture with SHA-256
+revision `1234` / browser `151.0.7922.34`, a `390x844` DPR-1 isolated context,
+and canonical one-second PCM16LE 16 kHz mono WAV SHA-256
 `ef989be190f7e9cef40b80516209d972eb08910263ddee3a44f52fdf84e534a7`.
-It derives all thirteen checks from the product API/browser flow and requires
-four structurally decoded, visually diverse PNGs whose encoded and decoded-pixel
-hashes are each unique. This is deterministic Chromium mobile-web evidence, not
-a claim of real-iOS Safari acceptance. Real iOS, live GCP/provider evidence,
-promotion, public IAM, and production runtime health remain separate unexecuted
-operator gates.
+The positive local harness starts the real Production V1 application and uses
+its native authenticated EventSource and product HTTP APIs. Node-owned browser
+observations bind upload body/header hashes, transcript/draft identity,
+supported and unsupported reply IDs, text-answer manual TTS, explicit playback,
+retry/canonical-ID/reload state, and the thirteen UI checks; page-supplied pass
+booleans are not trusted. Four fully opaque, structurally decoded PNGs must have
+unique encoded and decoded-pixel hashes. This is deterministic Chromium
+mobile-web evidence, not real-iOS Safari acceptance. Live GCP/provider evidence,
+real iOS, promotion, public IAM, and production runtime health remain separate
+unexecuted operator gates.

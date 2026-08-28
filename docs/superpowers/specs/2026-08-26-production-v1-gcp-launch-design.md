@@ -474,22 +474,43 @@ migration 1 is additive; rollback never drops production data.
 
 ## Stage D local acceptance closure (2026-08-28)
 
-The executable local contract now adds the missing final barriers without
-changing the live authorization boundary. Candidate privacy proof publication
-is receipt-bound, journal-first, create-only, and the last candidate operation.
-Historical proofs are validated at their recorded gate clocks; promotion
-freshness is a separate check. Readiness and mobile publication journal exact
-bytes before the first file create and recover only by adopting identical prior
-bytes. The mobile phase rejects prebuilt evidence and binds privacy-start,
-candidate/stable before-readbacks, a fresh product-flow browser run,
-candidate/stable after-readbacks, privacy-end, and the terminal receipt.
+The executable local contract adds the missing final barriers without changing
+the live authorization boundary. Candidate privacy publication is the
+receipt-bound final candidate operation. Candidate privacy, readiness, the
+privacy-start/privacy-end/workload three-file bundle, and the seven-file mobile
+bundle are journaled byte-for-byte before create-only publication; deterministic
+restart adopts only exact prior bytes and continues the missing suffix.
+Historical privacy validity is evaluated at each recorded gate clock, including
+the independent start/end clocks for a workload longer than five minutes.
+Freshness is separate, and every live wrapper rejects the exact expiry boundary.
+
+Adoption reads require the exact intended length before allocation, bound all
+reads, and compare descriptor/path/parent identity before and after. Publication
+does the same around the durable temp file and create-only hard link. Links,
+junctions, replacement, oversize, mixed bundles, and receipt drift fail closed.
+This is a portable defense for a trusted operator-owned local evidence
+directory, not a native no-TOCTOU guarantee against an actively malicious
+same-user process; Node on Windows exposes no handle-relative `openat` API.
+
+Promotion uses append-only attempt-bound proof checkpoints. After stable staging
+it produces a fresh privacy proof, validates it using the current post-proof
+clock, and rereads every evidence/receipt predecessor and authoritative
+candidate/stable service, revision, image/config, traffic, IAM, and authority
+source. A canonical digest of that full promotion barrier is stored in the final
+intent. Expired pre-intent proof checkpoints are preserved and followed by a new
+proof; an expired unperformed final intent requires exact before-state, an abort,
+and a new proof/intent. Mixed or ambiguous state blocks. No cloud mutation may
+follow the terminal promotion mutation.
 
 The controlled browser evidence contract is Playwright `1.62.1`, Chromium
 revision `1234` / browser `151.0.7922.34`, isolated `390x844` DPR-1 mobile web,
-four PNG screenshots with both encoded and decoded-pixel uniqueness, and a fixed
-one-second PCM16LE 16 kHz mono WAV whose SHA-256 is
+four fully opaque PNG screenshots with encoded and decoded-pixel uniqueness, and
+fixed one-second PCM16LE 16 kHz mono WAV SHA-256
 `ef989be190f7e9cef40b80516209d972eb08910263ddee3a44f52fdf84e534a7`.
-It does not claim real-iOS Safari. The final post-staging privacy proof is
-validated directly before the first stable/public mutation; no cloud mutation
-follows the final promotion mutation. All live GCP, provider, real-iOS,
-promotion, public-IAM, and runtime-health gates remain unexecuted.
+The positive local harness starts the real Product V1 application, observes its
+native exact EventSource and product voice/message/media APIs from Node, and
+binds actual upload hashes, transcript/draft/message/media IDs, explicit audio
+play, unsupported handoff, retry/reload, and UI state. It does not trust page
+pass booleans and does not claim real-iOS Safari. All live GCP, provider,
+real-iOS, promotion, public-IAM, runtime-health, URL, and QR gates remain
+unexecuted.

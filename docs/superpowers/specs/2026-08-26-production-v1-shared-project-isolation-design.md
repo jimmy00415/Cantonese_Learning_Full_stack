@@ -225,21 +225,38 @@ control-plane call because no genuine prior V1 exists.
 
 ## Stage D local acceptance closure (2026-08-28)
 
-The isolation contract now applies to the evidence filesystem as well as the
-shared cloud project. Candidate privacy, readiness, and the complete seven-file
-mobile bundle are journaled before create-only publication. A restart may adopt
-only exact intended bytes at an exact regular-file destination; foreign bytes,
-symbolic links, Windows junctions, incomplete foreign bundles, and receipt drift
-fail closed before evidence is trusted. The mobile phase rejects prebuilt
-evidence and makes fresh privacy boundaries plus before/after candidate and
-stable readbacks part of the receipt chain.
+The isolation contract applies to the evidence filesystem as well as the shared
+cloud project. Candidate privacy, readiness, the privacy-start/privacy-end/
+workload three-file bundle, and all seven mobile artifacts are journaled before
+create-only publication. Restart can adopt only exact intended bytes, complete
+the missing suffix, and append a missing terminal record. Exact length and
+bounded descriptor reads plus parent/path/file identity checks reject foreign,
+oversized, replaced, linked/junction, mixed, wrong-attempt, and receipt-drifted
+state without overwrite. Publication rechecks the durable temp inode and parent
+around the hard link. These portable checks assume a trusted operator-owned
+local directory; they do not claim a native no-TOCTOU guarantee against a
+malicious same-user process because Windows Node has no handle-relative `openat`.
 
-Promotion separately distinguishes historical proof validity from current
-freshness. After stable staging and all readbacks, a final post-staging privacy
-proof and stable/candidate/evidence validation run directly before the first
-stable or public-IAM mutation. No later cloud mutation is allowed after the
-terminal promotion mutation. Local Chromium evidence is pinned to Playwright
-`1.62.1`, Chromium revision `1234` / `151.0.7922.34`, `390x844` DPR 1, four
-raw-and-pixel-unique decoded PNGs, and the fixed WAV SHA-256
+Historical proof-at-gate validity is distinct from current freshness. Workload
+start and end proofs are checked at their respective recorded gate clocks even
+when the valid workload lasts longer than five minutes. Fresh wrappers reject
+`current >= expiresAt`. After stable staging, promotion appends a fresh,
+attempt-bound proof, validates it with the current post-proof clock, and rereads
+the complete receipt/evidence chain plus candidate/stable service, revision,
+image/config, traffic, IAM, and authority state. Its final intent binds the
+canonical digest of that barrier. Expired pre-intent proofs are retained and
+followed by a new proof; an expired unperformed final intent requires an exact
+before-state abort before re-proof. Mixed/ambiguous state blocks, and no later
+cloud mutation is allowed after the terminal promotion mutation.
+
+The mobile phase rejects prebuilt evidence and binds fresh privacy boundaries,
+before/after candidate and stable readbacks, and the real local Production V1
+shell/API/EventSource flow. Node-owned observations, rather than page booleans,
+bind voice hash/transcript/draft IDs, supported/unsupported message identities,
+manual text-answer audio generation and explicit play, retry/reload, and all UI
+checks. Local evidence pins Playwright `1.62.1`, Chromium revision `1234` /
+`151.0.7922.34`, `390x844` DPR 1, four fully opaque raw-and-pixel-unique PNGs,
+and WAV SHA-256
 `ef989be190f7e9cef40b80516209d972eb08910263ddee3a44f52fdf84e534a7`.
-This remains a controlled mobile-web gate, not real-iOS or live-GCP acceptance.
+This remains controlled mobile-web evidence, not real-iOS, live-GCP, provider,
+promotion, public-IAM, or runtime acceptance.

@@ -583,26 +583,43 @@ with the recovery boundary visible.
 ## Stage D evidence and promotion barrier
 
 Stage D is implemented and locally contract-tested only; it does not authorize
-or attest a live GCP mutation. Candidate privacy proof publication is the final
-candidate operation, is journaled before create-only evidence publication, and
-is recorded in the candidate receipt. Historical proof validity is evaluated at
-the proof/gate clock, while readiness, workload, mobile, and candidate freshness
-are independently revalidated at promotion.
+or attest a live GCP mutation. Candidate privacy publication is the final
+candidate operation and its complete privacy reference is receipt-bound.
+Historical proofs are checked at their recorded gate clocks. A long workload
+may exceed five minutes: its start proof is checked at workload start and its
+end proof at workload end, while promotion freshness is an independent current-
+clock check. Every fresh wrapper rejects `current >= expiresAt`.
 
-Mobile acceptance accepts no prebuilt evidence. The release runner creates a
-fresh privacy-start proof, reads the candidate and stable control plane before
-the browser run, invokes the pinned producer, reads both services afterward,
-creates the privacy-end proof, validates the seven-artifact bundle, journals
-every intended byte, and only then publishes create-only. Exact prior bytes may
-be adopted after restart; foreign bytes, links/junctions, partial foreign state,
-or receipt drift fail closed. Immediately before the first stable/public
-mutation, the final promotion proof revalidates the candidate, the complete
-evidence chain, and the stable baseline. No cloud mutation is permitted after
-the final promotion mutation.
+Candidate privacy, readiness, the journaled privacy-start/privacy-end/workload
+three-file bundle, and the seven-file mobile bundle use intent-before-create
+publication. Restart adopts only exact intended bytes and reconstructs the
+missing suffix or terminal record. Reads are size-bounded and bind an open file
+descriptor to the pathname and parent identity; publication binds the durable
+temp inode and parent before and after the create-only hard link. Foreign,
+mixed, oversized, replaced, linked/junction, wrong-attempt, or receipt-drifted
+state fails closed without overwrite. This assumes a trusted operator-owned
+local directory: portable Node on Windows has no handle-relative `openat`, so it
+does not eliminate every actively malicious same-user kernel pathname race.
+
+Mobile accepts no prebuilt evidence. It produces fresh privacy-start, exact
+candidate/stable before readbacks, the pinned browser run, exact after readbacks,
+privacy-end, four screenshots, and a terminal receipt. Promotion then appends an
+attempt-bound proof checkpoint after stable staging. Using the current
+post-proof clock, it rereads all evidence/receipt predecessors and authoritative
+candidate/stable service, revision, image/config, traffic, IAM, and authority
+state. The final intent binds the canonical promotion-barrier digest. An expired
+open proof is preserved and followed by another proof; an expired unperformed
+final intent is explicitly aborted only when exact before-state is proved.
+Mixed/ambiguous state blocks. No cloud mutation is permitted after the terminal
+promotion mutation.
 
 The deterministic browser contract is Playwright `1.62.1`, Chromium revision
-`1234` / `151.0.7922.34`, `390x844` at DPR 1, four PNGs with unique encoded and
-decoded-pixel hashes, and canonical WAV SHA-256
+`1234` / `151.0.7922.34`, `390x844` at DPR 1, four fully opaque PNGs with unique
+encoded and decoded-pixel hashes, and canonical WAV SHA-256
 `ef989be190f7e9cef40b80516209d972eb08910263ddee3a44f52fdf84e534a7`.
-It is not real-iOS evidence. Real iOS, live candidate/provider/GCP proof,
-promotion, and stable/public acceptance remain explicit operator gates.
+Its positive local harness runs the real Production V1 shell, native exact
+EventSource, and product voice/message/media APIs; Node-owned observations prove
+hash/transcript/draft/ID/audio/retry correlations and the thirteen UI checks.
+Page-owned booleans cannot authorize acceptance. It is not real-iOS evidence.
+Real iOS, live candidate/provider/GCP proof, promotion, stable/public acceptance,
+runtime health, URL, and QR remain explicit operator gates.

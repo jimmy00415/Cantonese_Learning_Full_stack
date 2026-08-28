@@ -553,17 +553,27 @@ known shared-project boundary, URL, and QR artifact.
 - [x] Make candidate privacy receipt-bound and last in the candidate phase;
   journal exact proof bytes before create-only publication and adopt only exact
   prior bytes after restart.
-- [x] Journal readiness and all seven mobile artifacts before publication;
-  reject foreign bytes, links/junctions, incomplete bundles, prebuilt evidence,
-  and receipt drift without overwriting anything.
+- [x] Journal readiness, the privacy-start/privacy-end/workload three-file
+  bundle, and all seven mobile artifacts before publication; exact-byte restart
+  completes every covered suffix/terminal crash boundary without overwrite.
+- [x] Bound evidence reads to intended length and descriptor/path/parent identity
+  and recheck publication identity around the create-only link. This is the
+  strongest portable Node contract for a trusted operator-owned directory, not
+  a native no-TOCTOU guarantee against a malicious same-user process.
 - [x] Bind the fresh mobile chain to privacy start/end, candidate and stable
   before/after readbacks, four structurally decoded PNG screenshots, and the
   canonical WAV fixture. Pin Playwright `1.62.1`, Chromium revision `1234` /
-  `151.0.7922.34`, and `390x844` DPR 1; keep real iOS as a separate gate.
-- [x] Validate historical evidence at its recorded gate clock, then enforce
-  separate promotion freshness and a final post-staging proof immediately
-  before the first stable/public mutation. Forbid all cloud mutation after the
-  terminal promotion mutation.
+  `151.0.7922.34`, and `390x844` DPR 1; require four fully opaque raw/pixel-
+  unique PNGs and keep real iOS separate. The positive harness uses the real
+  local Product V1 shell, native EventSource, and product APIs with Node-owned
+  voice/message/media/retry/UI observations rather than page pass booleans.
+- [x] Validate workload start/end and other historical evidence at their recorded
+  gate clocks while fresh wrappers reject the exact expiry boundary. Promotion
+  appends an attempt-bound proof, validates it with the current post-proof clock,
+  rereads all predecessors and candidate/stable/IAM/authority sources, and binds
+  the canonical barrier digest to final intent. Expired safe-before paths abort
+  and re-proof; mixed/ambiguous paths block. Forbid every cloud mutation after
+  the terminal promotion mutation.
 - [ ] Execute live shared-project/candidate/provider/real-iOS/promotion/public
   acceptance. The Stage D checkpoint is local-only and authorizes no GCP,
   provider, legacy, Azure, or public-IAM operation.

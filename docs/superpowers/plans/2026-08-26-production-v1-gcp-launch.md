@@ -295,18 +295,29 @@ Wire enums are exactly `en | yue-Hant-HK | cmn-Hans-CN` and `text | voice`.
 
 - [x] Candidate privacy is the receipt-bound final candidate operation, with
   journal-before-create-only publication and exact-byte restart adoption.
-- [x] Historical proof-at-gate validity is distinct from readiness/workload/
-  mobile/promotion freshness; drift, expiry at the relevant clock, or foreign
-  evidence fails closed.
+- [x] Journal readiness, the privacy-start/privacy-end/workload three-file
+  bundle, and all seven mobile artifacts before publication; recover every
+  covered crash boundary by exact-byte suffix/terminal adoption only.
+- [x] Bound adoption reads to the intended length and descriptor/path/parent
+  identity, and recheck durable temp/publication identity. These portable checks
+  assume a trusted operator-owned directory and do not claim native Windows
+  `openat` or elimination of every malicious same-user pathname race.
+- [x] Historical proof-at-gate validity is distinct from fresh promotion
+  validity. Workload start/end use their own recorded clocks, and every fresh
+  privacy/readiness/workload/mobile/promotion wrapper rejects exact expiry.
 - [x] Mobile orchestration rejects prebuilt evidence and binds fresh privacy
   boundaries, candidate/stable before-and-after readbacks, four decoded PNGs,
   the canonical WAV fixture, create-only publication, and terminal receipt.
 - [x] Controlled browser evidence pins Playwright `1.62.1`, Chromium revision
-  `1234` / `151.0.7922.34`, `390x844` DPR 1, and four unique encoded plus
-  decoded-pixel hashes. It does not claim real-iOS Safari.
-- [x] The final post-staging privacy/stable/candidate/evidence proof runs directly
-  before the first stable/public mutation, and the controller forbids cloud
-  mutation after the terminal promotion mutation.
+  `1234` / `151.0.7922.34`, `390x844` DPR 1, the canonical WAV, and four fully
+  opaque PNGs with unique encoded plus decoded-pixel hashes. Its positive local
+  test runs the real Product V1 shell, native EventSource, and product APIs with
+  Node-owned voice/message/media/retry/UI correlation; it does not claim iOS.
+- [x] The final post-staging proof is an append-only attempt-bound checkpoint.
+  Current-clock proof validation plus fresh authoritative predecessor,
+  candidate, stable, IAM, and authority rereads form a canonical barrier digest
+  bound to final intent. Expired unperformed paths abort/re-proof safely;
+  mixed/ambiguous paths block. No cloud mutation follows the terminal mutation.
 - [ ] Run live candidate, provider, GCP, real-iOS, promotion, public-IAM, runtime,
   rollback-drill, URL, and QR gates. This local checkpoint authorizes none of
   those operations and makes no deployed-production claim.
