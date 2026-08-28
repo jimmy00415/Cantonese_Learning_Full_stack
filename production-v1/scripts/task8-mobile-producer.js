@@ -474,17 +474,71 @@ export async function runPinnedPlaywrightFlow({
   const isMediaPlaybackEvent = ({ name, pipelineState } = {}) => (
     name === 'kPlay' || name === 'kPlaying' || pipelineState === 'kPlaying'
   );
-  const denseOwnArray = (value, maximumLength) => Array.isArray(value)
-    && value.length <= maximumLength
-    && Array.from({ length: value.length }, (_, index) => Object.hasOwn(value, index)).every(Boolean);
-  const controlledTestMediaWrapper = (wrapper) => {
-    if (wrapper === null) return true;
-    if (!exactKeys(wrapper, []) && !exactKeys(wrapper, ['value'])) return false;
-    if (!Object.hasOwn(wrapper, 'value')) return true;
-    const { value } = wrapper;
-    return value === undefined || value === null || typeof value === 'boolean'
+  const snapshotDataObject = (value, allowedKeySets) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const ownKeys = Reflect.ownKeys(descriptors);
+    const expectedKeys = allowedKeySets.find((keys) => ownKeys.length === keys.length
+      && ownKeys.every((key) => typeof key === 'string' && keys.includes(key)));
+    if (!expectedKeys) return null;
+    const snapshot = {};
+    for (const key of expectedKeys) {
+      const descriptor = descriptors[key];
+      if (!descriptor || !Object.hasOwn(descriptor, 'value')) return null;
+      snapshot[key] = descriptor.value;
+    }
+    return Object.freeze(snapshot);
+  };
+  const snapshotControlledTestMediaWrapper = (wrapper) => {
+    if (wrapper === null) return { valid: true, snapshot: null };
+    const snapshot = snapshotDataObject(wrapper, [[], ['value']]);
+    if (!snapshot) return { valid: false, snapshot: null };
+    if (!Object.hasOwn(snapshot, 'value')) return { valid: true, snapshot };
+    const { value } = snapshot;
+    const valid = value === undefined || value === null || typeof value === 'boolean'
       || (typeof value === 'number' && Number.isFinite(value))
       || (typeof value === 'string' && value.length <= 128 * 1024);
+    return { valid, snapshot: valid ? snapshot : null };
+  };
+  const snapshotControlledTestMediaObservation = (observation) => {
+    const snapshot = snapshotDataObject(observation, [[
+      'name', 'pipelineState', 'sourceUrl',
+    ]]);
+    if (!snapshot || (snapshot.name !== null
+      && (typeof snapshot.name !== 'string' || snapshot.name.length > 128))
+      || (snapshot.pipelineState !== null
+        && (typeof snapshot.pipelineState !== 'string' || snapshot.pipelineState.length > 128))
+      || (snapshot.sourceUrl !== null
+        && (typeof snapshot.sourceUrl !== 'string' || snapshot.sourceUrl.length > 2_048))) {
+      return { valid: false, snapshot: null };
+    }
+    return { valid: true, snapshot };
+  };
+  const snapshotHookArray = (value, maximumLength, snapshotEntry) => {
+    try {
+      if (!Array.isArray(value)) return null;
+      const descriptors = Object.getOwnPropertyDescriptors(value);
+      const ownKeys = Reflect.ownKeys(descriptors);
+      const lengthDescriptor = descriptors.length;
+      if (!lengthDescriptor || !Object.hasOwn(lengthDescriptor, 'value')
+        || !Number.isSafeInteger(lengthDescriptor.value)
+        || lengthDescriptor.value < 0 || lengthDescriptor.value > maximumLength) return null;
+      const length = lengthDescriptor.value;
+      const expectedKeys = ['length', ...Array.from({ length }, (_, index) => String(index))];
+      if (ownKeys.length !== expectedKeys.length
+        || ownKeys.some((key) => typeof key !== 'string' || !expectedKeys.includes(key))) return null;
+      const snapshot = [];
+      for (let index = 0; index < length; index += 1) {
+        const descriptor = descriptors[String(index)];
+        if (!descriptor || !Object.hasOwn(descriptor, 'value')) return null;
+        const entry = snapshotEntry(descriptor.value);
+        if (!entry.valid) return null;
+        snapshot.push(entry.snapshot);
+      }
+      return Object.freeze(snapshot);
+    } catch {
+      return null;
+    }
   };
   const mediaPlayerHasOwnedPlayback = (ownedMediaPath) => {
     for (const player of mediaPlayers.values()) {
@@ -738,9 +792,10 @@ export async function runPinnedPlaywrightFlow({
             failures.push('media-event-wrapper-test-hook');
             continue;
           }
-          if (!denseOwnArray(wrappers, 4) || Array.prototype.some.call(wrappers, (wrapper) => (
-            wrapper !== originalWrapper && !controlledTestMediaWrapper(wrapper)
-          ))) {
+          wrappers = snapshotHookArray(
+            wrappers, 4, snapshotControlledTestMediaWrapper,
+          );
+          if (wrappers === null) {
             failures.push('media-event-wrapper-test-hook');
             continue;
           }
@@ -773,17 +828,10 @@ export async function runPinnedPlaywrightFlow({
               failures.push('media-event-test-hook');
               continue;
             }
-            if (!denseOwnArray(observations, 4)
-              || Array.prototype.some.call(observations, (observation) => !exactKeys(observation, [
-                'name', 'pipelineState', 'sourceUrl',
-              ]) || (observation.name !== null
-                && (typeof observation.name !== 'string' || observation.name.length > 128))
-                || (observation.pipelineState !== null
-                  && (typeof observation.pipelineState !== 'string'
-                    || observation.pipelineState.length > 128))
-                || (observation.sourceUrl !== null
-                  && (typeof observation.sourceUrl !== 'string'
-                    || observation.sourceUrl.length > 2_048)))) {
+            observations = snapshotHookArray(
+              observations, 4, snapshotControlledTestMediaObservation,
+            );
+            if (observations === null) {
               failures.push('media-event-test-hook');
               continue;
             }

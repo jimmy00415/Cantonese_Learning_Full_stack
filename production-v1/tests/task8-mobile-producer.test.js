@@ -280,6 +280,71 @@ async function runMediaHookFlow(t, {
   return { flow, rejection, wrapperHookCalls, parsedHookCalls };
 }
 
+function statefulIndexArray(entry, { proxy = false } = {}) {
+  let reads = 0;
+  const values = [];
+  Object.defineProperty(values, '0', {
+    configurable: true,
+    enumerable: true,
+    get() {
+      reads += 1;
+      return reads === 1 ? entry : undefined;
+    },
+  });
+  if (!proxy) return { values, reads: () => reads };
+  return {
+    values: new Proxy(values, {
+      getOwnPropertyDescriptor(target, property) {
+        if (property === '0') {
+          return {
+            configurable: true,
+            enumerable: true,
+            get() { return entry; },
+          };
+        }
+        return Reflect.getOwnPropertyDescriptor(target, property);
+      },
+    }),
+    reads: () => reads,
+  };
+}
+
+function accessorBackedEntry(entry, kind, { proxy = false } = {}) {
+  const keys = kind === 'wrapper'
+    ? ['value']
+    : ['name', 'pipelineState', 'sourceUrl'];
+  const captured = Object.fromEntries(keys.map((key) => [key, entry[key]]));
+  let reads = 0;
+  const value = {};
+  for (const key of keys) {
+    Object.defineProperty(value, key, {
+      configurable: true,
+      enumerable: true,
+      get() {
+        reads += 1;
+        return captured[key];
+      },
+    });
+  }
+  if (!proxy) return { value, reads: () => reads };
+  const target = { ...captured };
+  return {
+    value: new Proxy(target, {
+      getOwnPropertyDescriptor(original, property) {
+        if (keys.includes(property)) {
+          return {
+            configurable: true,
+            enumerable: true,
+            get() { return captured[property]; },
+          };
+        }
+        return Reflect.getOwnPropertyDescriptor(original, property);
+      },
+    }),
+    reads: () => reads,
+  };
+}
+
 async function controlledRun(flow) {
   const contract = {
     schemaVersion: 3,
@@ -876,6 +941,113 @@ test('a dense empty parsed-event hook array remains intentional test-only suppre
   });
   assert.ok(result.parsedHookCalls > 0, 'the parsed-event hook must observe real CDP Media');
   assert.equal(suppressions, 1);
+  assert.equal(result.rejection, null);
+  assert.equal(result.flow?.voice.witness.playbackObserved, true);
+});
+
+test('hook result arrays reject own index accessors and Proxy descriptor substitution', async (t) => {
+  for (const hook of ['wrapper', 'parsed']) {
+    for (const proxy of [false, true]) {
+      await t.test(`${hook}-${proxy ? 'proxy' : 'accessor'}`, async (nestedT) => {
+        let injection = null;
+        const options = {
+          authorization: 'Bearer local-media-array-snapshot-contract',
+          seed: 0x5a,
+        };
+        const rewrite = (entry) => {
+          if (injection === null) {
+            injection = statefulIndexArray(entry, { proxy });
+            return injection.values;
+          }
+          return [entry];
+        };
+        if (hook === 'wrapper') options.rewriteCdpMediaEventWrappers = rewrite;
+        else options.rewriteCdpMediaEvents = rewrite;
+        const result = await runMediaHookFlow(nestedT, options);
+        assert.ok((hook === 'wrapper' ? result.wrapperHookCalls : result.parsedHookCalls) > 0);
+        assert.ok(injection, 'one real CDP Media event must receive the adversarial array');
+        assert.equal(injection.reads(), 0, 'an accessor index must be rejected from its descriptor');
+        assert.match(result.rejection?.message ?? '', /Controlled mobile evidence is invalid/);
+      });
+    }
+  }
+});
+
+test('hook entry snapshots reject accessors and Proxy descriptor traps', async (t) => {
+  for (const hook of ['wrapper', 'parsed']) {
+    for (const proxy of [false, true]) {
+      await t.test(`${hook}-${proxy ? 'proxy' : 'accessor'}`, async (nestedT) => {
+        let injection = null;
+        const options = {
+          authorization: 'Bearer local-media-entry-snapshot-contract',
+          seed: 0x5a,
+        };
+        const rewrite = (entry) => {
+          if (injection === null) {
+            injection = accessorBackedEntry(entry, hook, { proxy });
+            return [injection.value];
+          }
+          return [entry];
+        };
+        if (hook === 'wrapper') options.rewriteCdpMediaEventWrappers = rewrite;
+        else options.rewriteCdpMediaEvents = rewrite;
+        const result = await runMediaHookFlow(nestedT, options);
+        assert.ok((hook === 'wrapper' ? result.wrapperHookCalls : result.parsedHookCalls) > 0);
+        assert.ok(injection, 'one real CDP Media event must receive the adversarial entry');
+        assert.equal(injection.reads(), 0, 'an entry accessor must be rejected from its descriptor');
+        assert.match(result.rejection?.message ?? '', /Controlled mobile evidence is invalid/);
+      });
+    }
+  }
+});
+
+test('hook array and entry snapshots reject unexpected symbol keys', async (t) => {
+  for (const hook of ['wrapper', 'parsed']) {
+    for (const target of ['array', 'entry']) {
+      await t.test(`${hook}-${target}`, async (nestedT) => {
+        let injections = 0;
+        const options = {
+          authorization: 'Bearer local-media-symbol-snapshot-contract',
+          seed: 0x5a,
+        };
+        const rewrite = (entry) => {
+          if (injections > 0) return [entry];
+          injections += 1;
+          if (target === 'array') {
+            const values = [entry];
+            values[Symbol('unexpected')] = true;
+            return values;
+          }
+          const substituted = hook === 'wrapper'
+            ? { value: entry.value }
+            : {
+                name: entry.name,
+                pipelineState: entry.pipelineState,
+                sourceUrl: entry.sourceUrl,
+              };
+          substituted[Symbol('unexpected')] = true;
+          return [substituted];
+        };
+        if (hook === 'wrapper') options.rewriteCdpMediaEventWrappers = rewrite;
+        else options.rewriteCdpMediaEvents = rewrite;
+        const result = await runMediaHookFlow(nestedT, options);
+        assert.ok((hook === 'wrapper' ? result.wrapperHookCalls : result.parsedHookCalls) > 0);
+        assert.equal(injections, 1);
+        assert.match(result.rejection?.message ?? '', /Controlled mobile evidence is invalid/);
+      });
+    }
+  }
+});
+
+test('plain wrapper and parsed hook snapshots preserve the honest pinned flow', async (t) => {
+  const result = await runMediaHookFlow(t, {
+    authorization: 'Bearer local-media-plain-snapshot-contract',
+    seed: 0x5a,
+    rewriteCdpMediaEventWrappers(wrapper) { return [wrapper]; },
+    rewriteCdpMediaEvents(event) { return [event]; },
+  });
+  assert.ok(result.wrapperHookCalls > 0);
+  assert.ok(result.parsedHookCalls > 0);
   assert.equal(result.rejection, null);
   assert.equal(result.flow?.voice.witness.playbackObserved, true);
 });
