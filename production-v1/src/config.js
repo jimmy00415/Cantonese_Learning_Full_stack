@@ -34,6 +34,12 @@ const GOOGLE_SECRET_ENV_NAMES = Object.freeze([
   'GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_APPLICATION_CREDENTIALS_JSON',
   'V1_GOOGLE_CREDENTIAL_JSON', 'V1_GOOGLE_ACCESS_TOKEN',
 ]);
+const PROVIDER_API_KEY_ENV_NAMES = Object.freeze([
+  'V1_HKBU_API_KEY', 'HKBU_API_KEY',
+  'V1_AZURE_OPENAI_KEY', 'AZURE_OPENAI_KEY',
+  'V1_MINIMAX_API_KEY', 'MINIMAX_API_KEY',
+  'V1_AZURE_SPEECH_KEY', 'AZURE_SPEECH_KEY',
+]);
 const GOOGLE_SPEECH_LANGUAGES = Object.freeze(['yue-Hant-HK', 'en-US', 'cmn-Hans-CN']);
 const GOOGLE_TTS_VOICES = Object.freeze({
   en: Object.freeze({ languageCode: 'en-US', envName: 'V1_GOOGLE_TTS_VOICE_EN' }),
@@ -123,6 +129,12 @@ function configuredLlm(provider, settings) {
 function assertGoogleAdcOnly(env) {
   if (GOOGLE_SECRET_ENV_NAMES.some((name) => env[name] !== undefined && env[name] !== '')) {
     throw new Error('Google providers require attached-service-account ADC only');
+  }
+}
+
+function assertProductionProviderApiKeyFree(env) {
+  if (PROVIDER_API_KEY_ENV_NAMES.some((name) => env[name] !== undefined && env[name] !== '')) {
+    throw new Error('Production V1 providers require attached-service-account ADC with no provider API key');
   }
 }
 
@@ -337,8 +349,8 @@ function assertProductionReady(config) {
   if (config.gcsResourceId !== GCS_RESOURCE_ID) {
     throw new Error('V1_GCS_RESOURCE_ID is invalid in production');
   }
-  if (!config.llm.available || config.llm.provider === 'deterministic') {
-    throw new Error('Production requires a configured real LLM provider');
+  if (!config.llm.available || config.llm.provider !== 'vertex-ai') {
+    throw new Error('Production V1 requires the exact Vertex AI provider');
   }
   if (!validResourceId(config.llm.credentialVersion)) {
     throw new Error('V1_LLM_CREDENTIAL_VERSION is required in production');
@@ -357,6 +369,12 @@ function assertProductionReady(config) {
       throw new Error('Production LLM provider URLs must be valid HTTPS URLs');
     }
   }
+  if (!config.asr.available || config.asr.provider !== 'google-stt-v2') {
+    throw new Error('Production V1 requires the exact Google STT V2 provider');
+  }
+  if (!config.tts.available || config.tts.provider !== 'google-tts') {
+    throw new Error('Production V1 requires the exact Google TTS provider');
+  }
   if (config.instancePolicy !== 'single') throw new Error('V1_INSTANCE_POLICY=single is required in production');
   if (!config.privacyNoticeVersion || !config.privacyNoticeApproved) {
     throw new Error('An approved V1_PRIVACY_NOTICE_VERSION is required in production');
@@ -371,10 +389,15 @@ export function loadLlmSmokeConfiguration(environment = process.env, { now = () 
   if (!releaseCommitSha || !RELEASE_SHA.test(releaseCommitSha)) {
     throw new Error('V1_RELEASE_COMMIT_SHA must be a lowercase 40-hex commit SHA');
   }
-  const llm = buildLlmConfiguration(env, { v1Only: true });
-  if (!llm.available || llm.provider === 'deterministic' || !validResourceId(llm.credentialVersion)) {
-    throw new Error('Strict V1 LLM provider configuration is required');
+  if (env.V1_RUNTIME_SERVICE_ACCOUNT !== RUNTIME_SERVICE_ACCOUNT) {
+    throw new Error('V1_RUNTIME_SERVICE_ACCOUNT must be the exact runtime service account');
   }
+  const llm = buildLlmConfiguration(env, { v1Only: true });
+  if (!llm.available || llm.provider !== 'vertex-ai' || !validResourceId(llm.credentialVersion)) {
+    throw new Error('Strict Vertex AI V1 LLM provider configuration is required');
+  }
+  assertGoogleAdcOnly(env);
+  assertProductionProviderApiKeyFree(env);
   llmProviderConfigDigest(llm);
   void now;
   return { releaseCommitSha, llm };
@@ -536,7 +559,10 @@ export function loadConfig(environment = process.env, { now = () => new Date() }
     throw new Error('Configure exactly one Azure Blob authentication mode');
   }
   const mediaCredential = mediaConnectionString ?? mediaAccountUrl;
-  if (isProduction) assertGoogleAdcOnly(env);
+  if (isProduction) {
+    assertGoogleAdcOnly(env);
+    assertProductionProviderApiKeyFree(env);
+  }
   const releaseCommitSha = env.V1_RELEASE_COMMIT_SHA?.trim() || null;
   if (releaseCommitSha && !RELEASE_SHA.test(releaseCommitSha)) {
     throw new Error('V1_RELEASE_COMMIT_SHA must be a 40-hex commit SHA');

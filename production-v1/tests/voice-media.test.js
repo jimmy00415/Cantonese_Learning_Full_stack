@@ -1119,14 +1119,13 @@ test('voice release evidence is artifact/config/commit bound and expires dynamic
     occurredAt,
   });
   const llmConfig = {
-    provider: 'hkbu',
-    credentialVersion: 'llm-rotation-2026-08',
+    provider: 'vertex-ai',
+    credentialVersion: 'runtime-sa-rotation-v1',
     timeoutMs: 12_000,
     settings: {
-      apiKey: 'llm-secret',
-      baseUrl: 'https://llm.example.test',
-      model: 'model',
-      apiVersion: 'v1',
+      projectId: gcsProjectId,
+      location: 'global',
+      model: 'gemini-2.5-flash',
     },
   };
   const llmRecord = finalizeReleaseEvidenceRecord({
@@ -1158,9 +1157,8 @@ test('voice release evidence is artifact/config/commit bound and expires dynamic
     V1_POSTGRES_RESOURCE_ID: postgresResourceId,
     V1_MEDIA_DRIVER: 'gcs', V1_GOOGLE_CLOUD_PROJECT: gcsProjectId,
     V1_GCS_BUCKET: gcsBucket, V1_GCS_RESOURCE_ID: gcsResourceId,
-    V1_LLM_PROVIDER: 'hkbu', V1_LLM_CREDENTIAL_VERSION: llmConfig.credentialVersion,
-    V1_HKBU_API_KEY: llmConfig.settings.apiKey, V1_HKBU_BASE_URL: llmConfig.settings.baseUrl,
-    V1_HKBU_MODEL: llmConfig.settings.model, V1_HKBU_API_VERSION: llmConfig.settings.apiVersion,
+    V1_LLM_PROVIDER: 'vertex-ai', V1_LLM_CREDENTIAL_VERSION: llmConfig.credentialVersion,
+    V1_VERTEX_LOCATION: 'global', V1_VERTEX_MODEL: llmConfig.settings.model,
     V1_LLM_SMOKE_EVIDENCE_FILE: llmPath, V1_LLM_SMOKE_EVIDENCE_VERSION: llmRecord.artifactSha256,
     V1_INSTANCE_POLICY: 'single', V1_PRIVACY_NOTICE_VERSION: 'notice-v1', V1_PRIVACY_NOTICE_APPROVED: 'true', V1_RETENTION_WORKER_ENABLED: 'true',
     V1_RELEASE_COMMIT_SHA: commitSha,
@@ -1169,17 +1167,22 @@ test('voice release evidence is artifact/config/commit bound and expires dynamic
     V1_LEGACY_RESOURCE_INVENTORY_APPROVED: 'true',
     V1_DEPENDENCY_ACCEPTANCE_EVIDENCE_FILE: dependencyPath,
     V1_DEPENDENCY_ACCEPTANCE_EVIDENCE_VERSION: dependencyRecord.artifactSha256,
-    V1_ASR_PROVIDER: 'azure', V1_TTS_PROVIDER: 'azure', V1_AZURE_SPEECH_KEY: 'speech-secret', V1_AZURE_SPEECH_REGION: 'eastasia',
-    V1_AZURE_SPEECH_CREDENTIAL_VERSION: 'speech-rotation-2026-08',
+    V1_ASR_PROVIDER: 'google-stt-v2', V1_GOOGLE_STT_LOCATION: 'asia-southeast1',
+    V1_GOOGLE_STT_MODEL: 'chirp_2', V1_GOOGLE_STT_RECOGNIZER: '_',
+    V1_TTS_PROVIDER: 'google-tts', V1_GOOGLE_TTS_LOCATION: 'asia-southeast1',
+    V1_GOOGLE_TTS_VOICE_EN: 'en-US-Chirp3-HD-Achernar',
+    V1_GOOGLE_TTS_VOICE_YUE: 'yue-HK-Chirp3-HD-Achernar',
+    V1_GOOGLE_TTS_VOICE_CMN: 'cmn-CN-Chirp3-HD-Achernar',
+    V1_GOOGLE_CREDENTIAL_VERSION: 'runtime-sa-rotation-v1',
   };
   const unverified = loadConfig({ ...baseEnvironment, NODE_ENV: 'test' }, { now: () => new Date(occurredAt) });
   const asrRecord = finalizeEvidenceRecord({
-    schemaVersion: 1, commitSha, capability: 'asr', provider: 'azure', contractVersion: 'azure-asr-v1',
+    schemaVersion: 1, commitSha, capability: 'asr', provider: 'google-stt-v2', contractVersion: 'google-stt-v2-v2',
     providerConfigDigest: providerConfigDigest(unverified.asr, 'asr'), occurredAt, result: 'pass', latencyMs: 120,
     fixtureSha256: 'a'.repeat(64), fixtureDurationMs: 1_000,
   });
   const ttsRecord = finalizeEvidenceRecord({
-    schemaVersion: 1, commitSha, capability: 'tts', provider: 'azure', contractVersion: 'azure-tts-v1',
+    schemaVersion: 1, commitSha, capability: 'tts', provider: 'google-tts', contractVersion: 'google-tts-v3',
     providerConfigDigest: providerConfigDigest(unverified.tts, 'tts'), occurredAt, result: 'pass', latencyMs: 100,
   });
   const iosRecord = finalizeEvidenceRecord({

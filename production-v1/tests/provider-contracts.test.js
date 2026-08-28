@@ -45,6 +45,21 @@ function miniMaxSuccess(rawText = '{"replyText":"ok"}', stopReason = 'end_turn')
   }), { status: 200, headers: { 'content-type': 'application/json' } });
 }
 
+function vertexSuccess(rawText = '{"replyText":"ok"}', finishReason = 'STOP') {
+  return new Response(JSON.stringify({
+    responseId: 'request-1',
+    candidates: [{ content: { parts: [{ text: rawText }] }, finishReason }],
+    usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 4, totalTokenCount: 14 },
+  }), { status: 200, headers: { 'content-type': 'application/json', 'x-request-id': 'header-request-1' } });
+}
+
+function createSmokeProvider(options) {
+  return createLlmProvider({
+    ...options,
+    googleAuthProvider: { fetch: options.fetchImpl },
+  });
+}
+
 test('Google auth adapter caches bounded ADC tokens and sanitizes authentication failures', async () => {
   const authModule = await import('../src/providers/google-auth.js').catch(() => ({}));
   assert.equal(typeof authModule.createGoogleAccessTokenProvider, 'function');
@@ -257,12 +272,12 @@ function smokeEnvironment(overrides = {}) {
   return {
     NODE_ENV: 'production',
     V1_RELEASE_COMMIT_SHA: SMOKE_COMMIT,
-    V1_LLM_PROVIDER: 'hkbu',
-    V1_LLM_CREDENTIAL_VERSION: 'credential-v7',
-    V1_HKBU_API_KEY: 'never-print-this-key',
-    V1_HKBU_BASE_URL: 'https://hkbu.test',
-    V1_HKBU_MODEL: 'model',
-    V1_HKBU_API_VERSION: 'v1',
+    V1_RUNTIME_SERVICE_ACCOUNT: 'hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com',
+    V1_LLM_PROVIDER: 'vertex-ai',
+    V1_LLM_CREDENTIAL_VERSION: 'runtime-sa-rotation-v1',
+    V1_GOOGLE_CLOUD_PROJECT: 'motion-expert-hk-ltd-webpage',
+    V1_VERTEX_LOCATION: 'global',
+    V1_VERTEX_MODEL: 'gemini-2.5-flash',
     ...overrides,
   };
 }
@@ -648,10 +663,11 @@ test('confirmed provider smoke emits one strict commit/config-bound immutable ev
   const exitCode = await runProviderSmoke({
     argv: ['--confirm-real-provider'],
     env: smokeEnvironment(),
+    createProvider: createSmokeProvider,
     fetchImpl: async (url, init) => {
       calls += 1;
       requestedBody = init.body;
-      return openAiSuccess('{"ok":true}');
+      return vertexSuccess('{"ok":true}');
     },
     inspectGit: async () => {
       gitCalls += 1;
@@ -681,12 +697,12 @@ test('confirmed provider smoke emits one strict commit/config-bound immutable ev
   assert.deepEqual(record.usage, { inputTokens: 10, outputTokens: 4, totalTokens: 14 });
   assert.equal(record.latencyMs, 123);
   const selected = loadConfig({ ...smokeEnvironment(), NODE_ENV: 'test' }).llm;
-  selected.credentialVersion = 'credential-v7';
+  selected.credentialVersion = 'runtime-sa-rotation-v1';
   assert.equal(record.providerConfigDigest, llmProviderConfigDigest(selected));
   assert.equal(validateLlmSmokeEvidence(record, {
     expectedVersion: record.artifactSha256,
     commitSha: SMOKE_COMMIT,
-    provider: 'hkbu',
+    provider: 'vertex-ai',
     configDigest: record.providerConfigDigest,
     now: SMOKE_NOW,
   }).valid, true);
@@ -695,7 +711,7 @@ test('confirmed provider smoke emits one strict commit/config-bound immutable ev
   assert.equal(output.length, 1);
   const rendered = output[0];
   assert.deepEqual(JSON.parse(rendered), {
-    provider: 'hkbu',
+    provider: 'vertex-ai',
     httpClass: '2xx',
     normalizedSuccess: true,
     latencyMs: 123,
@@ -703,7 +719,7 @@ test('confirmed provider smoke emits one strict commit/config-bound immutable ev
     code: 'LLM_SMOKE_RECORDED',
   });
   for (const forbidden of [
-    'never-print-this-key', 'https://hkbu.test', 'private', 'path',
+    'private', 'path',
     record.providerConfigDigest, '{"ok":true}', 'request-1',
   ]) assert.equal(rendered.includes(forbidden), false);
 });
@@ -761,7 +777,8 @@ test('provider smoke rejects dirty or moving Git state before publishing evidenc
       const exitCode = await runProviderSmoke({
         argv: ['--confirm-real-provider'],
         env: smokeEnvironment(),
-        fetchImpl: async () => { calls += 1; return openAiSuccess('{"ok":true}'); },
+        createProvider: createSmokeProvider,
+        fetchImpl: async () => { calls += 1; return vertexSuccess('{"ok":true}'); },
         inspectGit: async () => states.shift(),
         writeEvidence: async () => { writes += 1; },
         clockMs: (() => { let value = 1_000; return () => { value += 1; return value; }; })(),
@@ -814,7 +831,8 @@ test('provider smoke requires exact normalized JSON and redacts provider and art
       const exitCode = await runProviderSmoke({
         argv: ['--confirm-real-provider'],
         env: smokeEnvironment(),
-        fetchImpl: async () => openAiSuccess(rawText),
+        createProvider: createSmokeProvider,
+        fetchImpl: async () => vertexSuccess(rawText),
         inspectGit: cleanFrozenGit(),
         writeEvidence: async () => { writes += 1; },
         clockMs: (() => { let value = 1_000; return () => ++value; })(),
@@ -830,13 +848,14 @@ test('provider smoke requires exact normalized JSON and redacts provider and art
   const providerExit = await runProviderSmoke({
     argv: ['--confirm-real-provider'],
     env: smokeEnvironment(),
+    createProvider: createSmokeProvider,
     fetchImpl: async () => new Response('never-print-this-key private provider body', { status: 401 }),
     inspectGit: cleanFrozenGit(),
     stdout: () => {}, stderr: (line) => providerErrors.push(line),
   });
   assert.equal(providerExit, 1);
   assert.deepEqual(JSON.parse(providerErrors.at(-1)), {
-    provider: 'hkbu', httpClass: '4xx', normalizedSuccess: false,
+    provider: 'vertex-ai', httpClass: '4xx', normalizedSuccess: false,
     latencyMs: JSON.parse(providerErrors.at(-1)).latencyMs,
     artifactSha256: null, code: 'PROVIDER_AUTH_FAILED',
   });
@@ -847,7 +866,8 @@ test('provider smoke requires exact normalized JSON and redacts provider and art
   const writeExit = await runProviderSmoke({
     argv: ['--confirm-real-provider'],
     env: smokeEnvironment(),
-    fetchImpl: async () => openAiSuccess('{"ok":true}'),
+    createProvider: createSmokeProvider,
+    fetchImpl: async () => vertexSuccess('{"ok":true}'),
     inspectGit: cleanFrozenGit(),
     writeEvidence: async () => { const error = new Error('C:\\private\\evidence.json'); error.code = 'EEXIST'; throw error; },
     clockMs: (() => { let value = 1_000; return () => ++value; })(),

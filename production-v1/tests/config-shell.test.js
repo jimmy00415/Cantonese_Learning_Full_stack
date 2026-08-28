@@ -27,14 +27,13 @@ const TEST_STABLE_ORIGIN = `https://hkbuddy-v1-api-${TEST_PROJECT_NUMBER}.asia-e
 const TEST_CANDIDATE_ORIGIN = `https://candidate-${TEST_RELEASE_COMMIT.slice(0, 12)}---hkbuddy-v1-api-candidate-${TEST_PROJECT_NUMBER}.asia-east2.run.app`;
 const TEST_RUNTIME_SERVICE_ACCOUNT = 'hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com';
 const TEST_LLM_CONFIG = {
-  provider: 'hkbu',
-  credentialVersion: TEST_LLM_CREDENTIAL_VERSION,
+  provider: 'vertex-ai',
+  credentialVersion: 'runtime-sa-rotation-v1',
   timeoutMs: 12_000,
   settings: {
-    apiKey: 'test-key',
-    baseUrl: 'https://hkbu.example.test',
-    model: 'hkbu-model',
-    apiVersion: 'v1',
+    projectId: TEST_GCS_PROJECT,
+    location: 'global',
+    model: 'gemini-2.5-flash',
   },
 };
 const evidenceDirectory = mkdtempSync(join(tmpdir(), 'hk-buddy-config-shell-'));
@@ -112,12 +111,20 @@ function productionEnvironment(overrides = {}) {
     V1_GOOGLE_CLOUD_PROJECT: TEST_GCS_PROJECT,
     V1_GCS_BUCKET: TEST_GCS_BUCKET,
     V1_GCS_RESOURCE_ID: TEST_GCS_RESOURCE_ID,
-    V1_LLM_PROVIDER: 'hkbu',
-    V1_LLM_CREDENTIAL_VERSION: TEST_LLM_CREDENTIAL_VERSION,
-    V1_HKBU_API_KEY: 'test-key',
-    V1_HKBU_BASE_URL: 'https://hkbu.example.test',
-    V1_HKBU_MODEL: 'hkbu-model',
-    V1_HKBU_API_VERSION: 'v1',
+    V1_LLM_PROVIDER: 'vertex-ai',
+    V1_LLM_CREDENTIAL_VERSION: 'runtime-sa-rotation-v1',
+    V1_VERTEX_LOCATION: 'global',
+    V1_VERTEX_MODEL: 'gemini-2.5-flash',
+    V1_ASR_PROVIDER: 'google-stt-v2',
+    V1_GOOGLE_STT_LOCATION: 'asia-southeast1',
+    V1_GOOGLE_STT_MODEL: 'chirp_2',
+    V1_GOOGLE_STT_RECOGNIZER: '_',
+    V1_TTS_PROVIDER: 'google-tts',
+    V1_GOOGLE_TTS_LOCATION: 'asia-southeast1',
+    V1_GOOGLE_TTS_VOICE_EN: 'en-US-Chirp3-HD-Achernar',
+    V1_GOOGLE_TTS_VOICE_YUE: 'yue-HK-Chirp3-HD-Achernar',
+    V1_GOOGLE_TTS_VOICE_CMN: 'cmn-CN-Chirp3-HD-Achernar',
+    V1_GOOGLE_CREDENTIAL_VERSION: 'runtime-sa-rotation-v1',
     V1_LLM_SMOKE_EVIDENCE_FILE: llmSmokeFile,
     V1_LLM_SMOKE_EVIDENCE_VERSION: llmSmoke.artifactSha256,
     V1_INSTANCE_POLICY: 'single',
@@ -132,6 +139,31 @@ function productionEnvironment(overrides = {}) {
     V1_DEPENDENCY_ACCEPTANCE_EVIDENCE_VERSION: dependency.artifactSha256,
     ...overrides,
   };
+}
+
+function llmSmokeEvidenceFor(config, label) {
+  const record = finalizeReleaseEvidenceRecord({
+    schemaVersion: 1,
+    commitSha: TEST_RELEASE_COMMIT,
+    capability: 'llm',
+    provider: config.provider,
+    contractVersion: 'llm-connectivity-json-v1',
+    providerConfigDigest: llmProviderConfigDigest(config),
+    occurredAt: new Date().toISOString(),
+    result: 'pass',
+    httpClass: '2xx',
+    normalizedSuccess: true,
+    requestCount: 1,
+    latencyMs: 1,
+    usage: { inputTokens: null, outputTokens: null, totalTokens: null },
+  });
+  const file = join(evidenceDirectory, `llm-smoke-${label}.json`);
+  writeFileSync(file, JSON.stringify(record));
+  return { file, version: record.artifactSha256 };
+}
+
+function googleProductionEnvironment(overrides = {}) {
+  return productionEnvironment(overrides);
 }
 
 test('config defaults to a local atomic-file runtime outside production', () => {
@@ -208,23 +240,33 @@ test('LLM smoke bootstrap uses strict production V1 semantics without requiring 
   const environment = {
     NODE_ENV: 'test',
     V1_RELEASE_COMMIT_SHA: TEST_RELEASE_COMMIT,
-    V1_LLM_PROVIDER: 'hkbu',
-    V1_LLM_CREDENTIAL_VERSION: TEST_LLM_CREDENTIAL_VERSION,
-    V1_HKBU_API_KEY: 'private-key',
-    V1_HKBU_BASE_URL: 'https://hkbu.example.test',
-    V1_HKBU_MODEL: 'hkbu-model',
-    V1_HKBU_API_VERSION: 'v1',
+    V1_RUNTIME_SERVICE_ACCOUNT: TEST_RUNTIME_SERVICE_ACCOUNT,
+    V1_LLM_PROVIDER: 'vertex-ai',
+    V1_LLM_CREDENTIAL_VERSION: 'runtime-sa-rotation-v1',
+    V1_GOOGLE_CLOUD_PROJECT: TEST_GCS_PROJECT,
+    V1_VERTEX_LOCATION: 'global',
+    V1_VERTEX_MODEL: 'gemini-2.5-flash',
   };
   const smokeConfig = loadLlmSmokeConfiguration(environment, { now: () => new Date() });
   assert.equal(smokeConfig.releaseCommitSha, TEST_RELEASE_COMMIT);
   assert.equal(smokeConfig.llm.available, true);
-  assert.equal(smokeConfig.llm.credentialVersion, TEST_LLM_CREDENTIAL_VERSION);
+  assert.equal(smokeConfig.llm.provider, 'vertex-ai');
+  assert.equal(smokeConfig.llm.credentialVersion, 'runtime-sa-rotation-v1');
   assert.equal(Object.hasOwn(smokeConfig, 'llmEvidence'), false);
 
   for (const [name, invalid] of [
     ['uppercase SHA', { ...environment, V1_RELEASE_COMMIT_SHA: TEST_RELEASE_COMMIT.toUpperCase() }],
-    ['HTTP transport', { ...environment, V1_HKBU_BASE_URL: 'http://hkbu.example.test' }],
+    ['wrong provider', {
+      ...environment,
+      V1_LLM_PROVIDER: 'hkbu',
+      V1_HKBU_API_KEY: 'private-key',
+      V1_HKBU_BASE_URL: 'https://hkbu.example.test',
+      V1_HKBU_MODEL: 'hkbu-model',
+      V1_HKBU_API_VERSION: 'v1',
+    }],
     ['missing credential version', { ...environment, V1_LLM_CREDENTIAL_VERSION: undefined }],
+    ['missing runtime identity', { ...environment, V1_RUNTIME_SERVICE_ACCOUNT: undefined }],
+    ['provider key residue', { ...environment, V1_MINIMAX_API_KEY: 'must-not-be-accepted' }],
     ['legacy-only provider settings', {
       V1_RELEASE_COMMIT_SHA: TEST_RELEASE_COMMIT,
       V1_LLM_CREDENTIAL_VERSION: TEST_LLM_CREDENTIAL_VERSION,
@@ -232,8 +274,88 @@ test('LLM smoke bootstrap uses strict production V1 semantics without requiring 
       HKBU_BASE_URL: 'https://hkbu.example.test', HKBU_MODEL: 'hkbu-model', HKBU_API_VERSION: 'v1',
     }],
   ]) {
-    assert.throws(() => loadLlmSmokeConfiguration(invalid), /LLM|release|provider|configuration/i, name);
+    assert.throws(() => loadLlmSmokeConfiguration(invalid), /LLM|release|provider|configuration|runtime/i, name);
   }
+});
+
+test('production accepts only exact Google ADC providers and rejects coherent non-Google evidence', () => {
+  const exactGoogle = loadConfig(googleProductionEnvironment());
+  assert.equal(exactGoogle.llm.provider, 'vertex-ai');
+  assert.equal(exactGoogle.asr.provider, 'google-stt-v2');
+  assert.equal(exactGoogle.tts.provider, 'google-tts');
+
+  const providerCases = [
+    ['hkbu', {
+      provider: 'hkbu', credentialVersion: 'legacy-key-v1', timeoutMs: 12_000,
+      settings: { apiKey: 'key', baseUrl: 'https://hkbu.example.test', model: 'model', apiVersion: 'v1' },
+    }, {
+      V1_LLM_PROVIDER: 'hkbu', V1_LLM_CREDENTIAL_VERSION: 'legacy-key-v1',
+      V1_HKBU_API_KEY: 'key', V1_HKBU_BASE_URL: 'https://hkbu.example.test',
+      V1_HKBU_MODEL: 'model', V1_HKBU_API_VERSION: 'v1',
+    }],
+    ['azure-openai', {
+      provider: 'azure-openai', credentialVersion: 'legacy-key-v1', timeoutMs: 12_000,
+      settings: {
+        apiKey: 'key', endpoint: 'https://azure.example.test', deployment: 'chat',
+        apiVersion: '2024-10-21', requestProfile: 'standard', minCompletionTokens: 1600,
+      },
+    }, {
+      V1_LLM_PROVIDER: 'azure-openai', V1_LLM_CREDENTIAL_VERSION: 'legacy-key-v1',
+      V1_AZURE_OPENAI_KEY: 'key', V1_AZURE_OPENAI_ENDPOINT: 'https://azure.example.test',
+      V1_AZURE_OPENAI_DEPLOYMENT: 'chat', V1_AZURE_OPENAI_API_VERSION: '2024-10-21',
+      V1_AZURE_OPENAI_REQUEST_PROFILE: 'standard',
+    }],
+    ['minimax', {
+      provider: 'minimax', credentialVersion: 'legacy-key-v1', timeoutMs: 12_000,
+      settings: {
+        apiKey: 'key', baseUrl: 'https://minimax.example.test',
+        anthropicBaseUrl: 'https://anthropic.example.test', model: 'model',
+      },
+    }, {
+      V1_LLM_PROVIDER: 'minimax', V1_LLM_CREDENTIAL_VERSION: 'legacy-key-v1',
+      V1_MINIMAX_API_KEY: 'key', V1_MINIMAX_BASE_URL: 'https://minimax.example.test',
+      V1_MINIMAX_ANTHROPIC_BASE_URL: 'https://anthropic.example.test', V1_MINIMAX_LLM_MODEL: 'model',
+    }],
+  ];
+  for (const [name, config, providerEnvironment] of providerCases) {
+    const evidence = llmSmokeEvidenceFor(config, `coherent-${name}`);
+    assert.throws(() => loadConfig(productionEnvironment({
+      ...providerEnvironment,
+      V1_LLM_SMOKE_EVIDENCE_FILE: evidence.file,
+      V1_LLM_SMOKE_EVIDENCE_VERSION: evidence.version,
+    })), /Google|Vertex|provider|ADC/i, name);
+  }
+
+  for (const [name, overrides] of [
+    ['Azure ASR', {
+      V1_ASR_PROVIDER: 'azure', V1_AZURE_SPEECH_KEY: 'key',
+      V1_AZURE_SPEECH_REGION: 'eastasia', V1_AZURE_SPEECH_CREDENTIAL_VERSION: 'key-v1',
+    }],
+    ['MiniMax TTS', {
+      V1_TTS_PROVIDER: 'minimax', V1_MINIMAX_API_KEY: 'key',
+      V1_MINIMAX_BASE_URL: 'https://minimax.example.test', V1_MINIMAX_TTS_MODEL: 'speech-01',
+      V1_MINIMAX_TTS_VOICE: 'voice', V1_MINIMAX_CREDENTIAL_VERSION: 'key-v1',
+    }],
+  ]) assert.throws(() => loadConfig(googleProductionEnvironment(overrides)), /Google|speech|provider|ADC/i, name);
+});
+
+test('production rejects inactive provider API-key residue while local compatibility remains', () => {
+  for (const name of [
+    'V1_HKBU_API_KEY', 'HKBU_API_KEY',
+    'V1_AZURE_OPENAI_KEY', 'AZURE_OPENAI_KEY',
+    'V1_MINIMAX_API_KEY', 'MINIMAX_API_KEY',
+    'V1_AZURE_SPEECH_KEY', 'AZURE_SPEECH_KEY',
+  ]) {
+    assert.throws(
+      () => loadConfig(googleProductionEnvironment({ [name]: 'must-not-be-accepted' })),
+      /ADC|API.key|provider|secret/i,
+      name,
+    );
+  }
+  assert.equal(loadConfig({
+    NODE_ENV: 'test', V1_LLM_PROVIDER: 'hkbu', HKBU_API_KEY: 'local-key',
+    HKBU_BASE_URL: 'https://hkbu.example.test', HKBU_MODEL: 'model', HKBU_API_VERSION: 'v1',
+  }).llm.available, true);
 });
 
 test('normal production config requires current file-bound LLM smoke evidence before startup', () => {
@@ -241,12 +363,12 @@ test('normal production config requires current file-bound LLM smoke evidence be
     ['missing evidence file', { V1_LLM_SMOKE_EVIDENCE_FILE: undefined }],
     ['missing evidence version', { V1_LLM_SMOKE_EVIDENCE_VERSION: undefined }],
     ['missing credential version', { V1_LLM_CREDENTIAL_VERSION: undefined }],
-    ['provider config drift', { V1_HKBU_MODEL: 'drifted-model' }],
+    ['provider config drift', { V1_VERTEX_MODEL: 'drifted-model' }],
     ['version mismatch', { V1_LLM_SMOKE_EVIDENCE_VERSION: 'f'.repeat(64) }],
   ]) {
     assert.throws(
       () => loadConfig(productionEnvironment(overrides)),
-      /LLM|smoke evidence|credential/i,
+      /LLM|smoke evidence|credential|Vertex/i,
       name,
     );
   }
@@ -423,20 +545,7 @@ test('config requires every explicit selected LLM provider member', () => {
       const incompleteValues = { ...provider.values };
       delete incompleteValues[missingMember];
       const incomplete = { NODE_ENV: 'test', V1_LLM_PROVIDER: provider.selector, ...incompleteValues };
-      const productionValues = Object.fromEntries(
-        Object.entries(provider.values).map(([name, value]) => [`V1_${name}`, value]),
-      );
-      const incompleteProduction = productionEnvironment({
-        V1_LLM_PROVIDER: provider.selector,
-        ...productionValues,
-      });
-      delete incompleteProduction[`V1_${missingMember}`];
       assert.equal(loadConfig(incomplete).llm.available, false, `${provider.name} requires ${missingMember} locally`);
-      assert.throws(
-        () => loadConfig(incompleteProduction),
-        /configured real LLM provider/,
-        `${provider.name} requires ${missingMember} in production`,
-      );
     }
   }
 
@@ -534,32 +643,14 @@ test('Google AI config is ADC-only, V1-prefixed, and binds one exact voice per l
   }
 });
 
-test('production ignores unprefixed voice selectors and settings while local compatibility remains', () => {
+test('production ignores unprefixed voice selectors while local provider compatibility remains', () => {
   const legacyOnly = loadConfig(productionEnvironment({
     ASR_PROVIDER: 'azure', TTS_PROVIDER: 'azure',
-    AZURE_SPEECH_KEY: 'legacy-secret', AZURE_SPEECH_REGION: 'eastasia',
-    V1_AZURE_SPEECH_CREDENTIAL_VERSION: 'rotation-v1',
   }));
-  assert.equal(legacyOnly.asr.provider, 'none');
-  assert.equal(legacyOnly.tts.provider, 'none');
-  assert.equal(legacyOnly.asr.available, false);
-  assert.equal(legacyOnly.tts.available, false);
-
-  const legacySettings = loadConfig(productionEnvironment({
-    V1_ASR_PROVIDER: 'azure', V1_TTS_PROVIDER: 'azure',
-    AZURE_SPEECH_KEY: 'legacy-secret', AZURE_SPEECH_REGION: 'eastasia',
-    V1_AZURE_SPEECH_CREDENTIAL_VERSION: 'rotation-v1',
-  }));
-  assert.equal(legacySettings.asr.available, false);
-  assert.equal(legacySettings.tts.available, false);
-
-  const v1Settings = loadConfig(productionEnvironment({
-    V1_ASR_PROVIDER: 'azure', V1_TTS_PROVIDER: 'azure',
-    V1_AZURE_SPEECH_KEY: 'v1-secret', V1_AZURE_SPEECH_REGION: 'eastasia',
-    V1_AZURE_SPEECH_CREDENTIAL_VERSION: 'rotation-v1',
-  }));
-  assert.equal(v1Settings.asr.available, true);
-  assert.equal(v1Settings.tts.available, true);
+  assert.equal(legacyOnly.asr.provider, 'google-stt-v2');
+  assert.equal(legacyOnly.tts.provider, 'google-tts');
+  assert.equal(legacyOnly.asr.available, true);
+  assert.equal(legacyOnly.tts.available, true);
 
   const local = loadConfig({
     NODE_ENV: 'test', ASR_PROVIDER: 'azure', TTS_PROVIDER: 'azure',
@@ -581,17 +672,6 @@ test('config requires the Azure deployment setting rather than a model alias', (
   };
 
   assert.equal(loadConfig(azureModelOnly).llm.available, false);
-  assert.throws(
-    () => loadConfig(productionEnvironment({
-      V1_LLM_PROVIDER: 'azure-openai',
-      AZURE_OPENAI_KEY: 'key',
-      AZURE_OPENAI_ENDPOINT: 'https://azure.example.test',
-      AZURE_OPENAI_MODEL: 'not-a-deployment',
-      AZURE_OPENAI_API_VERSION: '2024-10-21',
-      AZURE_OPENAI_REQUEST_PROFILE: 'standard',
-    })),
-    /configured real LLM provider/,
-  );
 });
 
 test('config fails closed when selected Azure lacks an explicit allowed request profile', () => {
@@ -629,8 +709,8 @@ test('config disables incomplete voice providers without disabling text', () => 
 
 test('config rejects an incomplete selected production LLM after earlier gates pass', () => {
   assert.throws(
-    () => loadConfig(productionEnvironment({ V1_HKBU_API_KEY: undefined })),
-    /configured real LLM provider/,
+    () => loadConfig(productionEnvironment({ V1_VERTEX_MODEL: undefined })),
+    /Vertex|configured.*LLM provider/i,
   );
 });
 

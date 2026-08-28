@@ -142,7 +142,12 @@ test('session api uses a 30-day secure production cookie without weakening produ
     V1_SESSION_SECRET: 'x'.repeat(32),
     V1_TRUST_PROXY_HOPS: '1', V1_STORE_DRIVER: 'postgres', DATABASE_URL: 'postgres://localhost/v1',
     V1_MEDIA_DRIVER: 'azure-blob', V1_AZURE_BLOB_CONTAINER: 'v1-media', V1_AZURE_STORAGE_CONNECTION_STRING: 'UseDevelopmentStorage=true',
-    V1_LLM_PROVIDER: 'hkbu', HKBU_API_KEY: 'test-key', HKBU_BASE_URL: 'https://hkbu.example.test', HKBU_MODEL: 'hkbu-model', HKBU_API_VERSION: 'v1',
+    V1_LLM_PROVIDER: 'vertex-ai', V1_LLM_CREDENTIAL_VERSION: 'runtime-sa-rotation-v1',
+    V1_GOOGLE_CLOUD_PROJECT: 'motion-expert-hk-ltd-webpage', V1_VERTEX_LOCATION: 'global', V1_VERTEX_MODEL: 'gemini-2.5-flash',
+    V1_ASR_PROVIDER: 'google-stt-v2', V1_GOOGLE_STT_LOCATION: 'asia-southeast1', V1_GOOGLE_STT_MODEL: 'chirp_2', V1_GOOGLE_STT_RECOGNIZER: '_',
+    V1_TTS_PROVIDER: 'google-tts', V1_GOOGLE_TTS_LOCATION: 'asia-southeast1',
+    V1_GOOGLE_TTS_VOICE_EN: 'en-US-Chirp3-HD-Achernar', V1_GOOGLE_TTS_VOICE_YUE: 'yue-HK-Chirp3-HD-Achernar',
+    V1_GOOGLE_TTS_VOICE_CMN: 'cmn-CN-Chirp3-HD-Achernar', V1_GOOGLE_CREDENTIAL_VERSION: 'runtime-sa-rotation-v1',
     V1_INSTANCE_POLICY: 'single', V1_PRIVACY_NOTICE_VERSION: '2026-08-25', V1_PRIVACY_NOTICE_APPROVED: 'true', V1_RETENTION_WORKER_ENABLED: 'true',
   }), /V1_DATABASE_URL/);
   const { baseUrl, origin } = await startApp(t, {}, {
