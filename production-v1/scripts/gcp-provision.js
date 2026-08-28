@@ -529,6 +529,94 @@ export function createGcloudExecutor({ executable, prefixArgs = [], execFile = e
   };
 }
 
+const AUTHENTICATED_RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
+
+async function readBoundedAuthenticatedResponse(response) {
+  let contentLength = null;
+  let headerError = null;
+  try {
+    if (typeof response?.headers?.get !== 'function') throw commandError('TRANSPORT_AMBIGUOUS');
+    const raw = response.headers.get('content-length');
+    if (raw !== null && raw !== undefined) {
+      if (typeof raw !== 'string' || !/^(?:0|[1-9][0-9]*)$/.test(raw) || raw.length > 16) {
+        throw commandError('TRANSPORT_AMBIGUOUS');
+      }
+      contentLength = Number(raw);
+      if (!Number.isSafeInteger(contentLength)) throw commandError('TRANSPORT_AMBIGUOUS');
+      if (contentLength > AUTHENTICATED_RESPONSE_MAX_BYTES) {
+        throw commandError('CONTROL_PLANE_RESPONSE_TOO_LARGE');
+      }
+    }
+  } catch (error) {
+    headerError = error?.code ? error : commandError('TRANSPORT_AMBIGUOUS');
+  }
+
+  let body;
+  try { body = response?.body; } catch { throw commandError('TRANSPORT_AMBIGUOUS'); }
+  if (body === null) {
+    if (headerError) throw headerError;
+    const bodyForbiddenByStatus = [204, 205, 304].includes(response.status);
+    if (contentLength !== 0 && !(contentLength === null && bodyForbiddenByStatus)) {
+      throw commandError('TRANSPORT_AMBIGUOUS');
+    }
+    return '';
+  }
+  if (!body || typeof body.getReader !== 'function') {
+    throw commandError('TRANSPORT_AMBIGUOUS');
+  }
+
+  let reader;
+  let complete = false;
+  const bytes = Buffer.allocUnsafe(AUTHENTICATED_RESPONSE_MAX_BYTES);
+  let total = 0;
+  try {
+    reader = body.getReader();
+    if (!reader || typeof reader.read !== 'function' || typeof reader.cancel !== 'function'
+      || typeof reader.releaseLock !== 'function') throw commandError('TRANSPORT_AMBIGUOUS');
+    if (headerError) throw headerError;
+    while (true) {
+      const result = await reader.read();
+      if (!result || typeof result !== 'object' || typeof result.done !== 'boolean') {
+        throw commandError('TRANSPORT_AMBIGUOUS');
+      }
+      if (result.done) {
+        if (result.value !== undefined) throw commandError('TRANSPORT_AMBIGUOUS');
+        complete = true;
+        break;
+      }
+      const chunk = result.value;
+      if (!(chunk instanceof Uint8Array) || chunk.byteLength < 1
+        || !Number.isSafeInteger(chunk.byteLength)
+        || chunk.byteOffset < 0 || !Number.isSafeInteger(chunk.byteOffset)
+        || chunk.byteOffset + chunk.byteLength > chunk.buffer?.byteLength) {
+        throw commandError('TRANSPORT_AMBIGUOUS');
+      }
+      if (chunk.byteLength > AUTHENTICATED_RESPONSE_MAX_BYTES - total) {
+        throw commandError('CONTROL_PLANE_RESPONSE_TOO_LARGE');
+      }
+      bytes.set(chunk, total);
+      total += chunk.byteLength;
+    }
+    if (contentLength !== null && contentLength !== total) throw commandError('TRANSPORT_AMBIGUOUS');
+    try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, total)); } catch {
+      throw commandError('CONTROL_PLANE_OUTPUT_INVALID');
+    }
+  } catch (error) {
+    if (!complete) await reader?.cancel().catch(() => undefined);
+    if (error?.code) throw error;
+    throw commandError('TRANSPORT_AMBIGUOUS');
+  } finally {
+    try { reader?.releaseLock(); } catch { /* best-effort release only */ }
+  }
+}
+
+async function cancelUnreadAuthenticatedResponse(response) {
+  try {
+    const body = response?.body;
+    if (body && typeof body.cancel === 'function') await body.cancel();
+  } catch { /* best-effort transport cleanup only */ }
+}
+
 export function createGcloudAuthenticatedRequest({
   executable,
   prefixArgs = [],
@@ -638,6 +726,7 @@ export function createGcloudAuthenticatedRequest({
     try {
       response = await fetchImpl(target.href, {
         method,
+        redirect: 'error',
         headers: {
           authorization: `Bearer ${token}`,
           accept: 'application/json',
@@ -649,15 +738,19 @@ export function createGcloudAuthenticatedRequest({
     } catch {
       throw commandError('TRANSPORT_AMBIGUOUS');
     }
-    const contentLength = Number(response?.headers?.get?.('content-length') ?? 0);
-    if (Number.isFinite(contentLength) && contentLength > 2 * 1024 * 1024) {
-      throw commandError('CONTROL_PLANE_RESPONSE_TOO_LARGE');
+    let responseMetadataValid = false;
+    try {
+      responseMetadataValid = response?.redirected === false
+        && response.url === target.href
+        && typeof response.ok === 'boolean'
+        && Number.isSafeInteger(response.status)
+        && response.status >= 100 && response.status <= 599;
+    } catch { responseMetadataValid = false; }
+    if (!responseMetadataValid) {
+      await cancelUnreadAuthenticatedResponse(response);
+      throw commandError('TRANSPORT_AMBIGUOUS');
     }
-    let text;
-    try { text = await response.text(); } catch { throw commandError('TRANSPORT_AMBIGUOUS'); }
-    if (Buffer.byteLength(text, 'utf8') > 2 * 1024 * 1024) {
-      throw commandError('CONTROL_PLANE_RESPONSE_TOO_LARGE');
-    }
+    const text = await readBoundedAuthenticatedResponse(response);
     if (!response.ok) {
       const error = commandError(response.status === 403 ? 'FORBIDDEN'
         : response.status === 404 ? 'NOT_FOUND'
@@ -1757,9 +1850,9 @@ function sensitiveInputFor(id, { contract, controlPlane, randomBytes, secretVers
   return null;
 }
 
-function safeFailureReport(code, completed, resumeBoundary) {
+function safeFailureReport(code, completed, resumeBoundary, mutationPerformed = false) {
   return {
-    status: 'failed', code, projectId: PROJECT, mutationPerformed: true,
+    status: 'failed', code, projectId: PROJECT, mutationPerformed,
     completed, resumeBoundary,
     partialResourcesPreserved: true,
   };
@@ -1847,6 +1940,7 @@ export async function runGcpProvision({
 
   const completed = [];
   const secretVersions = {};
+  let mutationPerformed = false;
   try {
     await plane.auditPreMutationState({ notificationChannel: selection.channel });
   } catch (error) {
@@ -1864,6 +1958,7 @@ export async function runGcpProvision({
         return publish(writeOutput, 1, safeFailureReport(
           error?.code ?? 'IAM_ALLOWLIST_MISMATCH', completed,
           projectOnly ? 'project-iam-subset-audit' : 'managed-iam-subset-audit',
+          mutationPerformed,
         ));
       }
     }
@@ -1874,19 +1969,26 @@ export async function runGcpProvision({
         return publish(writeOutput, 1, safeFailureReport(
           error?.code ?? 'SERVICE_ACCOUNT_KEY_AUDIT_INVALID', completed,
           'service-account-key-audit',
+          mutationPerformed,
         ));
       }
     }
     if (id === 'notification-channel') {
       if (!selection.channel) {
-        return publish(writeOutput, 1, safeFailureReport('ALERT_CHANNEL_REQUIRED', completed, id));
+        return publish(writeOutput, 1, safeFailureReport(
+          'ALERT_CHANNEL_REQUIRED', completed, id, mutationPerformed,
+        ));
       }
       let channel;
       try { channel = await plane.read(id, { notificationChannel: selection.channel }); } catch {
-        return publish(writeOutput, 1, safeFailureReport('ALERT_CHANNEL_UNVERIFIED', completed, id));
+        return publish(writeOutput, 1, safeFailureReport(
+          'ALERT_CHANNEL_UNVERIFIED', completed, id, mutationPerformed,
+        ));
       }
       if (channel?.status !== 'present' || !plane.compare(id, channel.value, { notificationChannel: selection.channel })) {
-        return publish(writeOutput, 1, safeFailureReport('ALERT_CHANNEL_UNVERIFIED', completed, id));
+        return publish(writeOutput, 1, safeFailureReport(
+          'ALERT_CHANNEL_UNVERIFIED', completed, id, mutationPerformed,
+        ));
       }
       completed.push(id);
       continue;
@@ -1915,7 +2017,12 @@ export async function runGcpProvision({
           id, mutate: true,
           initialState: current,
           read: () => plane.read(id, { notificationChannel: selection.channel, secretVersions }),
-          create: () => plane.create(id, { notificationChannel: selection.channel, secretVersions, sensitive }),
+          create: () => {
+            mutationPerformed = true;
+            return plane.create(id, {
+              notificationChannel: selection.channel, secretVersions, sensitive,
+            });
+          },
           compare: (value) => plane.compare(id, value, { secretVersions }),
         });
         void result;
@@ -1928,7 +2035,10 @@ export async function runGcpProvision({
         await ensureExactResource({
           id, mutate: true,
           read: () => plane.read(id, { notificationChannel: selection.channel, secretVersions }),
-          create: () => plane.create(id, { notificationChannel: selection.channel, secretVersions }),
+          create: () => {
+            mutationPerformed = true;
+            return plane.create(id, { notificationChannel: selection.channel, secretVersions });
+          },
           compare: (value) => plane.compare(id, value, { notificationChannel: selection.channel, secretVersions }),
         });
       }
@@ -1946,6 +2056,7 @@ export async function runGcpProvision({
           : (error?.code ?? 'PROVISION_STEP_FAILED'),
         completed,
         id,
+        mutationPerformed,
       ));
     } finally {
       sensitive = null;
@@ -1954,15 +2065,17 @@ export async function runGcpProvision({
 
   try { await plane.finalReadback({ notificationChannel: selection.channel, secretVersions }); } catch (error) {
     return publish(writeOutput, 1, safeFailureReport(
-      error?.code ?? 'FINAL_READBACK_FAILED', completed, 'final-readback',
+      error?.code ?? 'FINAL_READBACK_FAILED', completed, 'final-readback', mutationPerformed,
     ));
   }
   if (!GENERATED_SECRET_IDS.every((id) => NUMERIC_VERSION.test(String(secretVersions[id] ?? '')))) {
-    return publish(writeOutput, 1, safeFailureReport('SECRET_VERSION_INVALID', completed, 'final-readback'));
+    return publish(writeOutput, 1, safeFailureReport(
+      'SECRET_VERSION_INVALID', completed, 'final-readback', mutationPerformed,
+    ));
   }
   return publish(writeOutput, 0, {
     status: 'provisioned', code: 'GCP_PROVISION_COMPLETE', projectId: PROJECT,
-    mutationPerformed: true, completed, secretVersions,
+    mutationPerformed, completed, secretVersions,
   });
 }
 

@@ -801,9 +801,13 @@ test('default-style HTTPS authentication reuses the exact gcloud account without
     environment: {},
     fetchImpl: async (url, options) => {
       fetchCalls.push({ url, options });
+      const body = Buffer.from('{"ok":true}');
       return {
-        ok: true, status: 200,
-        headers: { get: () => null },
+        ok: true, status: 200, redirected: false, url,
+        headers: { get: (name) => name === 'content-length' ? String(body.length) : null },
+        body: new ReadableStream({
+          start(controller) { controller.enqueue(body); controller.close(); },
+        }),
         text: async () => '{"ok":true}',
       };
     },
@@ -827,6 +831,183 @@ test('default-style HTTPS authentication reuses the exact gcloud account without
   assert.equal(JSON.stringify(execCalls).includes('body-only'), false);
   assert.equal(fetchCalls[0].options.headers.authorization, 'Bearer sensitive-bearer-token');
   assert.equal(fetchCalls[0].options.body, '{"secret":"body-only"}');
+  assert.equal(fetchCalls[0].options.redirect, 'error');
+});
+
+function authenticatedResponse(url, {
+  chunks = [Buffer.from('{"ok":true}')],
+  contentLength,
+  redirected = false,
+  finalUrl = url,
+  status = 200,
+} = {}) {
+  let index = 0;
+  const observations = { cancelled: false, reads: 0, textCalls: 0 };
+  const body = chunks === null ? null : new ReadableStream({
+    pull(controller) {
+      if (index >= chunks.length) return controller.close();
+      observations.reads += 1;
+      controller.enqueue(chunks[index]);
+      index += 1;
+    },
+    cancel() { observations.cancelled = true; },
+  }, { highWaterMark: 0 });
+  return {
+    observations,
+    response: {
+      ok: status >= 200 && status < 300,
+      status,
+      redirected,
+      url: finalUrl,
+      headers: {
+        get(name) {
+          if (name !== 'content-length') return null;
+          return contentLength === undefined ? null : String(contentLength);
+        },
+      },
+      body,
+      async text() {
+        observations.textCalls += 1;
+        return chunks === null ? '' : Buffer.concat(chunks).toString('utf8');
+      },
+    },
+  };
+}
+
+function authenticatedRequestFixture(fetchImpl) {
+  return createGcloudAuthenticatedRequest({
+    executable: 'python.exe', prefixArgs: ['C:/gcloud/lib/gcloud.py'],
+    account: 'admin@motionexp.com', environment: {},
+    execFile: async (_executable, args) => args.includes('config')
+      ? { stdout: '{"core":{"account":"admin@motionexp.com"},"auth":{}}\n', stderr: '' }
+      : { stdout: 'sensitive-bearer-token\n', stderr: '' },
+    getTokenInfo: async () => ({ email: 'admin@motionexp.com' }),
+    fetchImpl,
+    now: () => 1_000,
+  });
+}
+
+test('authenticated REST rejects redirected or drifted final URLs before consuming response bytes', async (t) => {
+  const target = 'https://example.googleapis.com/v1/write';
+  for (const [name, responseOverrides] of [
+    ['redirected response', { redirected: true }],
+    ['missing final URL', { finalUrl: null }],
+    ['drifted final URL', { finalUrl: 'https://other.googleapis.com/v1/write' }],
+  ]) {
+    await t.test(name, async () => {
+      const fixture = authenticatedResponse(target, responseOverrides);
+      const request = authenticatedRequestFixture(async () => fixture.response);
+      await assert.rejects(
+        () => request({ method: 'POST', url: target, body: { value: 'private-body' } }),
+        (error) => !String(error).includes('private-body'),
+      );
+      assert.equal(fixture.observations.textCalls, 0);
+      assert.equal(fixture.observations.reads, 0);
+      assert.equal(fixture.observations.cancelled, true);
+    });
+  }
+});
+
+test('authenticated REST redirect policy prevents 307/308 replay of secret and SQL password bodies', async (t) => {
+  const target = 'https://example.googleapis.com/v1/write';
+  for (const [status, body, privateValue] of [
+    [307, { payload: { data: 'secret-version-private-value' } }, 'secret-version-private-value'],
+    [308, { name: 'hkbuddy_app', password: 'cloud-sql-private-password' }, 'cloud-sql-private-password'],
+  ]) {
+    await t.test(String(status), async () => {
+      const replayedBodies = [];
+      const request = authenticatedRequestFixture(async (url, options) => {
+        if (options.redirect === 'error') throw new TypeError(`redirect ${status} refused`);
+        replayedBodies.push(options.body);
+        return authenticatedResponse(url).response;
+      });
+      await assert.rejects(
+        () => request({ method: 'POST', url: target, body }),
+        (error) => !String(error).includes(privateValue),
+      );
+      assert.deepEqual(replayedBodies, []);
+    });
+  }
+});
+
+test('authenticated REST incrementally bounds chunked responses and never calls whole-body text', async () => {
+  const target = 'https://example.googleapis.com/v1/read';
+  const fixture = authenticatedResponse(target, {
+    chunks: [Buffer.alloc(1024 * 1024), Buffer.alloc(1024 * 1024), Buffer.from('x')],
+  });
+  const request = authenticatedRequestFixture(async () => fixture.response);
+  await assert.rejects(
+    () => request({ method: 'GET', url: target }),
+    (error) => error.code === 'CONTROL_PLANE_RESPONSE_TOO_LARGE',
+  );
+  assert.equal(fixture.observations.cancelled, true);
+  assert.equal(fixture.observations.textCalls, 0);
+});
+
+test('authenticated REST accepts exact-URL JSON and coherently empty null bodies through the bounded reader', async () => {
+  const jsonUrl = 'https://example.googleapis.com/v1/read';
+  const jsonBytes = Buffer.from('{"ok":true}');
+  const jsonFixture = authenticatedResponse(jsonUrl, {
+    chunks: [jsonBytes], contentLength: jsonBytes.length,
+  });
+  const jsonRequest = authenticatedRequestFixture(async () => jsonFixture.response);
+  assert.deepEqual(await jsonRequest({ method: 'GET', url: jsonUrl }), { ok: true });
+  assert.equal(jsonFixture.observations.textCalls, 0);
+
+  const emptyUrl = 'https://example.googleapis.com/v1/empty';
+  const emptyFixture = authenticatedResponse(emptyUrl, { chunks: null, contentLength: 0 });
+  const emptyRequest = authenticatedRequestFixture(async () => emptyFixture.response);
+  assert.equal(await emptyRequest({ method: 'GET', url: emptyUrl }), null);
+  assert.equal(emptyFixture.observations.textCalls, 0);
+});
+
+test('authenticated REST validates declared length, stream chunks, UTF-8, and empty-body coherence', async (t) => {
+  const target = 'https://example.googleapis.com/v1/read';
+  const cases = [
+    ['oversized declared length', {
+      fixture: authenticatedResponse(target, { contentLength: 2 * 1024 * 1024 + 1 }),
+      code: 'CONTROL_PLANE_RESPONSE_TOO_LARGE', cancelled: true,
+    }],
+    ['noncanonical declared length', {
+      fixture: authenticatedResponse(target, { contentLength: '01' }),
+      code: 'TRANSPORT_AMBIGUOUS', cancelled: true,
+    }],
+    ['declared length mismatch', {
+      fixture: authenticatedResponse(target, {
+        chunks: [Buffer.from('{"ok":true}')], contentLength: 12,
+      }),
+      code: 'TRANSPORT_AMBIGUOUS', cancelled: false,
+    }],
+    ['invalid stream chunk', {
+      fixture: authenticatedResponse(target, { chunks: ['not-bytes'] }),
+      code: 'TRANSPORT_AMBIGUOUS', cancelled: true,
+    }],
+    ['invalid UTF-8', {
+      fixture: authenticatedResponse(target, { chunks: [Buffer.from([0xc3, 0x28])] }),
+      code: 'CONTROL_PLANE_OUTPUT_INVALID', cancelled: false,
+    }],
+    ['unexplained null body', {
+      fixture: authenticatedResponse(target, { chunks: null }),
+      code: 'TRANSPORT_AMBIGUOUS', cancelled: false,
+    }],
+  ];
+  for (const [name, { fixture, code, cancelled }] of cases) {
+    await t.test(name, async () => {
+      const request = authenticatedRequestFixture(async () => fixture.response);
+      await assert.rejects(
+        () => request({ method: 'GET', url: target }),
+        (error) => error.code === code && !String(error).includes('sensitive-bearer-token'),
+      );
+      assert.equal(fixture.observations.cancelled, cancelled);
+      assert.equal(fixture.observations.textCalls, 0);
+    });
+  }
+
+  const forbidden = authenticatedResponse(target, {
+    status: 403, chunks: [Buffer.from('{"error":"redacted"}')],
+  });
+  const request = authenticatedRequestFixture(async () => forbidden.response);
+  await assert.rejects(() => request({ method: 'GET', url: target }), { code: 'FORBIDDEN' });
 });
 
 test('gcloud HTTPS authentication rejects every effective credential override before token use', async (t) => {
@@ -3301,6 +3482,39 @@ test('safe partial rerun skips exact resources, stops on drift, and preserves a 
     });
     assert.equal(result.exitCode, 0);
     assert.equal(plane.calls.some(([kind]) => kind === 'create'), false);
+    assert.equal(result.publicReport.mutationPerformed, false);
+  });
+
+  await t.test('post-audit failure before an idempotent run attempts any create remains non-mutating', async () => {
+    const plane = new MemoryControlPlane({
+      existing: EXPECTED_PROVISION_STEPS,
+      iamSubsetFailure: 'project',
+    });
+    const result = await runGcpProvision({
+      argv: [`--confirm-project=${PROJECT}`, `--notification-channel=${CHANNEL}`],
+      contract: await contractFixture(), controlPlane: plane,
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.publicReport.code, 'IAM_ALLOWLIST_MISMATCH');
+    assert.equal(plane.calls.some(([kind]) => kind === 'create'), false);
+    assert.equal(result.publicReport.mutationPerformed, false);
+  });
+
+  await t.test('ambiguous create failure remains conservatively mutation-performed', async () => {
+    const plane = new MemoryControlPlane();
+    plane.create = async (id) => {
+      plane.calls.push(['create', id]);
+      throw Object.assign(new Error('response lost'), { code: 'CREATE_RESULT_AMBIGUOUS' });
+    };
+    const result = await runGcpProvision({
+      argv: [`--confirm-project=${PROJECT}`, `--notification-channel=${CHANNEL}`],
+      contract: await contractFixture(), controlPlane: plane,
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1);
+    assert.equal(plane.calls.some(([kind]) => kind === 'create'), true);
+    assert.equal(result.publicReport.mutationPerformed, true);
   });
 
   await t.test('drift stops before later mutation', async () => {
