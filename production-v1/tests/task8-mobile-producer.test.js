@@ -238,6 +238,48 @@ async function closeServer(server) {
   await new Promise((resolve) => server.close(resolve));
 }
 
+async function runMediaHookFlow(t, {
+  authorization,
+  seed,
+  rewriteCdpMediaEventWrappers,
+  rewriteCdpMediaEvents,
+}) {
+  const origin = await startLocalProduct(t);
+  let wrapperHookCalls = 0;
+  let parsedHookCalls = 0;
+  const testHooks = {};
+  if (rewriteCdpMediaEventWrappers) {
+    testHooks.rewriteCdpMediaEventWrappers = (wrapper) => {
+      wrapperHookCalls += 1;
+      return rewriteCdpMediaEventWrappers(wrapper, origin);
+    };
+  }
+  if (rewriteCdpMediaEvents) {
+    testHooks.rewriteCdpMediaEvents = (event) => {
+      parsedHookCalls += 1;
+      return rewriteCdpMediaEvents(event, origin);
+    };
+  }
+  let flow = null;
+  let rejection = null;
+  try {
+    flow = await runPinnedPlaywrightFlow({
+      candidateOrigin: origin,
+      authorization,
+      fixturePath: FIXTURE_FILE,
+      challengeSeed: Buffer.alloc(32, seed),
+      testHooks,
+      context: {
+        viewport: { width: 390, height: 844 }, deviceScaleFactor: 1,
+        isMobile: true, hasTouch: true, serviceWorkers: 'block', acceptDownloads: false,
+      },
+    });
+  } catch (error) {
+    rejection = error;
+  }
+  return { flow, rejection, wrapperHookCalls, parsedHookCalls };
+}
+
 async function controlledRun(flow) {
   const contract = {
     schemaVersion: 3,
@@ -625,6 +667,217 @@ test('a reused player cannot combine an older owned kLoad with a later lifecycle
       assert.ok(retainedPlays > 0, 'the test must retain the later browser-owned kPlay');
     });
   }
+});
+
+test('malformed raw CDP Media wrappers and values permanently invalidate a later honest lifecycle', async (t) => {
+  const attacks = [
+    ['null-wrapper', null],
+    ['missing-value', {}],
+    ['non-string', { value: 17 }],
+    ['empty', { value: '' }],
+    ['over-bound', { value: 'x'.repeat(8_193) }],
+    ['invalid-json', { value: '{' }],
+    ['json-null', { value: 'null' }],
+    ['json-array', { value: '[]' }],
+    ['json-string', { value: '"future"' }],
+    ['json-number', { value: '17' }],
+  ];
+  for (const [name, malformedWrapper] of attacks) {
+    await t.test(name, async (nestedT) => {
+      let injections = 0;
+      const result = await runMediaHookFlow(nestedT, {
+        authorization: 'Bearer local-malformed-media-raw-contract',
+        seed: 0x5a,
+        rewriteCdpMediaEventWrappers(wrapper) {
+          if (injections === 0) {
+            injections += 1;
+            return [malformedWrapper, wrapper];
+          }
+          return [wrapper];
+        },
+      });
+      assert.ok(result.wrapperHookCalls > 0, 'the raw wrapper hook must observe real CDP Media');
+      assert.equal(injections, 1, 'one malformed wrapper must precede later honest Media evidence');
+      assert.match(result.rejection?.message ?? '', /Controlled mobile evidence is invalid/);
+    });
+  }
+});
+
+test('malformed present known CDP Media fields permanently invalidate later honest evidence', async (t) => {
+  const attacks = [
+    ['event-type', { event: 7 }],
+    ['event-bound', { event: 'x'.repeat(129) }],
+    ['pipeline-type', { pipeline_state: false }],
+    ['pipeline-bound', { pipeline_state: 'x'.repeat(129) }],
+    ['url-type', { url: 7 }],
+    ['url-bound', { url: 'x'.repeat(2_049) }],
+  ];
+  for (const [name, malformedEvent] of attacks) {
+    await t.test(name, async (nestedT) => {
+      let injections = 0;
+      const result = await runMediaHookFlow(nestedT, {
+        authorization: 'Bearer local-malformed-media-known-field-contract',
+        seed: 0x5a,
+        rewriteCdpMediaEventWrappers(wrapper) {
+          if (injections === 0) {
+            injections += 1;
+            return [{ value: JSON.stringify(malformedEvent) }, wrapper];
+          }
+          return [wrapper];
+        },
+      });
+      assert.ok(result.wrapperHookCalls > 0, 'the raw wrapper hook must observe real CDP Media');
+      assert.equal(injections, 1, 'one malformed known field must precede later honest Media evidence');
+      assert.match(result.rejection?.message ?? '', /Controlled mobile evidence is invalid/);
+    });
+  }
+});
+
+test('a well-formed unknown CDP Media event remains safely ignored', async (t) => {
+  let injections = 0;
+  const result = await runMediaHookFlow(t, {
+    authorization: 'Bearer local-unknown-media-event-contract',
+    seed: 0x5a,
+    rewriteCdpMediaEventWrappers(wrapper) {
+      if (injections === 0) {
+        injections += 1;
+        return [{ value: JSON.stringify({ future_field: 'bounded-unknown' }) }, wrapper];
+      }
+      return [wrapper];
+    },
+  });
+  assert.ok(result.wrapperHookCalls > 0, 'the raw wrapper hook must observe real CDP Media');
+  assert.equal(injections, 1);
+  assert.equal(result.rejection, null);
+  assert.equal(result.flow?.voice.witness.playbackObserved, true);
+});
+
+test('a valid foreign absolute kLoad remains a replaceable non-owned lifecycle', async (t) => {
+  let injectedLoads = 0;
+  const result = await runMediaHookFlow(t, {
+    authorization: 'Bearer local-foreign-absolute-kload-contract',
+    seed: 0x5a,
+    rewriteCdpMediaEventWrappers(wrapper) {
+      let event = null;
+      try { event = JSON.parse(wrapper.value); } catch { /* wait for a real load */ }
+      if (event?.event === 'kLoad' && injectedLoads === 0) {
+        injectedLoads += 1;
+        return [{
+          value: JSON.stringify({ event: 'kLoad', url: 'https://foreign.invalid/media.mp3' }),
+        }, wrapper];
+      }
+      return [wrapper];
+    },
+  });
+  assert.ok(result.wrapperHookCalls > 0, 'the raw wrapper hook must observe real CDP Media');
+  assert.equal(injectedLoads, 1, 'the foreign lifecycle must precede the honest owned lifecycle');
+  assert.equal(result.rejection, null);
+  assert.equal(result.flow?.voice.witness.playbackObserved, true);
+});
+
+test('malformed kLoad resets the player lifecycle and permanently rejects later honest playback', async (t) => {
+  const invalidLoads = [
+    ['missing', { event: 'kLoad' }],
+    ['null', { event: 'kLoad', url: null }],
+    ['empty', { event: 'kLoad', url: '' }],
+    ['over-bound', { event: 'kLoad', url: 'x'.repeat(2_049) }],
+    ['non-absolute', { event: 'kLoad', url: '/api/v1/media/not-absolute' }],
+  ];
+  for (const [name, invalidLoad] of invalidLoads) {
+    await t.test(name, async (nestedT) => {
+      let injectedLoads = 0;
+      const result = await runMediaHookFlow(nestedT, {
+        authorization: 'Bearer local-malformed-kload-contract',
+        seed: 0x5a,
+        rewriteCdpMediaEventWrappers(wrapper) {
+          let event = null;
+          try { event = JSON.parse(wrapper.value); } catch { /* wait for a real load */ }
+          if (event?.event === 'kLoad' && injectedLoads === 0) {
+            injectedLoads += 1;
+            return [{ value: JSON.stringify(invalidLoad) }, wrapper];
+          }
+          return [wrapper];
+        },
+      });
+      assert.ok(result.wrapperHookCalls > 0, 'the raw wrapper hook must observe real CDP Media');
+      assert.equal(injectedLoads, 1, 'the malformed load must precede a later honest load and play');
+      assert.match(result.rejection?.message ?? '', /Controlled mobile evidence is invalid/);
+    });
+  }
+});
+
+test('kPlay without a current valid load permanently rejects a later valid lifecycle', async (t) => {
+  let injectedPlays = 0;
+  const result = await runMediaHookFlow(t, {
+    authorization: 'Bearer local-kplay-without-load-contract',
+    seed: 0x5a,
+    rewriteCdpMediaEventWrappers(wrapper) {
+      let event = null;
+      try { event = JSON.parse(wrapper.value); } catch { /* wait for a real load */ }
+      if (event?.event === 'kLoad' && injectedPlays === 0) {
+        injectedPlays += 1;
+        return [{ value: JSON.stringify({ event: 'kPlay' }) }, wrapper];
+      }
+      return [wrapper];
+    },
+  });
+  assert.ok(result.wrapperHookCalls > 0, 'the raw wrapper hook must observe real CDP Media');
+  assert.equal(injectedPlays, 1, 'a loadless play must precede a later honest load and play');
+  assert.match(result.rejection?.message ?? '', /Controlled mobile evidence is invalid/);
+});
+
+test('sparse or inherited parsed-event hook arrays fail closed at every index position', async (t) => {
+  const attacks = {
+    leading(event) { const values = new Array(2); values[1] = event; return values; },
+    middle(event) { return [event, , event]; },
+    trailing(event) { const values = [event]; values.length = 2; return values; },
+    inherited(event) {
+      const values = new Array(1);
+      const inherited = [];
+      inherited[0] = event;
+      Object.setPrototypeOf(values, inherited);
+      return values;
+    },
+  };
+  for (const [name, attack] of Object.entries(attacks)) {
+    await t.test(name, async (nestedT) => {
+      let injections = 0;
+      const result = await runMediaHookFlow(nestedT, {
+        authorization: 'Bearer local-sparse-media-hook-contract',
+        seed: 0x5a,
+        rewriteCdpMediaEvents(event) {
+          if (injections === 0) {
+            injections += 1;
+            return attack(event);
+          }
+          return [event];
+        },
+      });
+      assert.ok(result.parsedHookCalls > 0, 'the parsed-event hook must observe real CDP Media');
+      assert.equal(injections, 1);
+      assert.match(result.rejection?.message ?? '', /Controlled mobile evidence is invalid/);
+    });
+  }
+});
+
+test('a dense empty parsed-event hook array remains intentional test-only suppression', async (t) => {
+  let suppressions = 0;
+  const result = await runMediaHookFlow(t, {
+    authorization: 'Bearer local-dense-empty-media-hook-contract',
+    seed: 0x5a,
+    rewriteCdpMediaEvents(event) {
+      if (!['kLoad', 'kPlay', 'kPlaying'].includes(event.name)
+        && event.pipelineState !== 'kPlaying' && suppressions === 0) {
+        suppressions += 1;
+        return [];
+      }
+      return [event];
+    },
+  });
+  assert.ok(result.parsedHookCalls > 0, 'the parsed-event hook must observe real CDP Media');
+  assert.equal(suppressions, 1);
+  assert.equal(result.rejection, null);
+  assert.equal(result.flow?.voice.witness.playbackObserved, true);
 });
 
 test('context fence blocks popup-first, WebSocket, and arbitrary EventSource traffic before a sentinel sees it', async (t) => {

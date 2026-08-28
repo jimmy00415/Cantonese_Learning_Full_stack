@@ -445,23 +445,47 @@ export async function runPinnedPlaywrightFlow({
     return mediaPlayers.get(playerId);
   };
   const parseMediaEvent = (value) => {
-    if (typeof value !== 'string' || value.length < 2 || value.length > 8_192) return null;
+    const invalid = (name = null) => ({
+      valid: false, name, pipelineState: null, sourceUrl: null,
+    });
+    if (typeof value !== 'string' || value.length < 2 || value.length > 8_192) return invalid();
     try {
       const event = JSON.parse(value);
-      if (!event || typeof event !== 'object' || Array.isArray(event)) return null;
+      if (!event || typeof event !== 'object' || Array.isArray(event)) return invalid();
+      const knownString = (key, maximumLength) => {
+        if (!Object.hasOwn(event, key)) return { valid: true, value: null };
+        return typeof event[key] === 'string' && event[key].length <= maximumLength
+          ? { valid: true, value: event[key] }
+          : { valid: false, value: null };
+      };
+      const name = knownString('event', 128);
+      const pipelineState = knownString('pipeline_state', 128);
+      const sourceUrl = knownString('url', 2_048);
       return {
-        name: typeof event.event === 'string' && event.event.length <= 128 ? event.event : null,
-        pipelineState: typeof event.pipeline_state === 'string' && event.pipeline_state.length <= 128
-          ? event.pipeline_state : null,
-        sourceUrl: typeof event.url === 'string' && event.url.length <= 2_048 ? event.url : null,
+        valid: name.valid && pipelineState.valid && sourceUrl.valid,
+        name: name.value,
+        pipelineState: pipelineState.value,
+        sourceUrl: sourceUrl.value,
       };
     } catch {
-      return null;
+      return invalid();
     }
   };
   const isMediaPlaybackEvent = ({ name, pipelineState } = {}) => (
     name === 'kPlay' || name === 'kPlaying' || pipelineState === 'kPlaying'
   );
+  const denseOwnArray = (value, maximumLength) => Array.isArray(value)
+    && value.length <= maximumLength
+    && Array.from({ length: value.length }, (_, index) => Object.hasOwn(value, index)).every(Boolean);
+  const controlledTestMediaWrapper = (wrapper) => {
+    if (wrapper === null) return true;
+    if (!exactKeys(wrapper, []) && !exactKeys(wrapper, ['value'])) return false;
+    if (!Object.hasOwn(wrapper, 'value')) return true;
+    const { value } = wrapper;
+    return value === undefined || value === null || typeof value === 'boolean'
+      || (typeof value === 'number' && Number.isFinite(value))
+      || (typeof value === 'string' && value.length <= 128 * 1024);
+  };
   const mediaPlayerHasOwnedPlayback = (ownedMediaPath) => {
     for (const player of mediaPlayers.values()) {
       let frameOwned = false;
@@ -705,61 +729,105 @@ export async function runPinnedPlaywrightFlow({
         return;
       }
       for (const event of events ?? []) {
-        const parsed = parseMediaEvent(event?.value);
-        if (!parsed) continue;
-        let observations = [parsed];
-        if (typeof testHooks?.rewriteCdpMediaEvents === 'function') {
+        let wrappers = [event];
+        if (typeof testHooks?.rewriteCdpMediaEventWrappers === 'function') {
+          const originalWrapper = Object.freeze({ value: event?.value });
           try {
-            observations = testHooks.rewriteCdpMediaEvents(Object.freeze({ ...parsed }));
+            wrappers = testHooks.rewriteCdpMediaEventWrappers(originalWrapper);
           } catch {
-            failures.push('media-event-test-hook');
+            failures.push('media-event-wrapper-test-hook');
             continue;
           }
-          if (!Array.isArray(observations) || observations.length > 4
-            || observations.some((observation) => !exactKeys(observation, [
-              'name', 'pipelineState', 'sourceUrl',
-            ]) || (observation.name !== null
-              && (typeof observation.name !== 'string' || observation.name.length > 128))
-              || (observation.pipelineState !== null
-                && (typeof observation.pipelineState !== 'string'
-                  || observation.pipelineState.length > 128))
-              || (observation.sourceUrl !== null
-                && (typeof observation.sourceUrl !== 'string'
-                  || observation.sourceUrl.length > 2_048)))) {
-            failures.push('media-event-test-hook');
+          if (!denseOwnArray(wrappers, 4) || Array.prototype.some.call(wrappers, (wrapper) => (
+            wrapper !== originalWrapper && !controlledTestMediaWrapper(wrapper)
+          ))) {
+            failures.push('media-event-wrapper-test-hook');
             continue;
           }
         }
-        for (const candidate of observations) {
-          const observed = Object.freeze({ ...candidate });
-          if (typeof testHooks?.acceptCdpMediaEvent === 'function') {
-            let accepted = false;
-            try { accepted = testHooks.acceptCdpMediaEvent(observed) === true; } catch {
+        for (let wrapperIndex = 0; wrapperIndex < wrappers.length; wrapperIndex += 1) {
+          const wrapper = wrappers[wrapperIndex];
+          const wrapperValid = wrapper !== null && typeof wrapper === 'object'
+            && !Array.isArray(wrapper) && Object.hasOwn(wrapper, 'value');
+          const parsed = wrapperValid ? parseMediaEvent(wrapper.value) : {
+            valid: false, name: null, pipelineState: null, sourceUrl: null,
+          };
+          if (!parsed.valid) {
+            if (parsed.name === 'kLoad') {
+              player.lifecycleId += 1;
+              player.currentLoad = null;
+            }
+            failures.push('media-event');
+            continue;
+          }
+          const parsedObservation = {
+            name: parsed.name,
+            pipelineState: parsed.pipelineState,
+            sourceUrl: parsed.sourceUrl,
+          };
+          let observations = [parsedObservation];
+          if (typeof testHooks?.rewriteCdpMediaEvents === 'function') {
+            try {
+              observations = testHooks.rewriteCdpMediaEvents(Object.freeze({ ...parsedObservation }));
+            } catch {
               failures.push('media-event-test-hook');
               continue;
             }
-            if (!accepted) continue;
-          }
-          if (observed.name === 'kLoad') {
-            player.lifecycleId += 1;
-            player.currentLoad = {
-              lifecycleId: player.lifecycleId,
-              sourceUrl: observed.sourceUrl,
-              loadAfterExplicitPlay: explicitPlayStarted,
-              playAfterExplicitPlay: false,
-            };
-          }
-          if (isMediaPlaybackEvent(observed)) {
-            const observation = {
-              name: observed.name,
-              pipelineState: observed.pipelineState,
-              afterExplicitPlay: explicitPlayStarted,
-            };
-            mediaPlayback.push({ playerId, ...observation });
-            if (observed.name === 'kPlay' && player.currentLoad !== null) {
-              player.currentLoad.playAfterExplicitPlay = explicitPlayStarted;
+            if (!denseOwnArray(observations, 4)
+              || Array.prototype.some.call(observations, (observation) => !exactKeys(observation, [
+                'name', 'pipelineState', 'sourceUrl',
+              ]) || (observation.name !== null
+                && (typeof observation.name !== 'string' || observation.name.length > 128))
+                || (observation.pipelineState !== null
+                  && (typeof observation.pipelineState !== 'string'
+                    || observation.pipelineState.length > 128))
+                || (observation.sourceUrl !== null
+                  && (typeof observation.sourceUrl !== 'string'
+                    || observation.sourceUrl.length > 2_048)))) {
+              failures.push('media-event-test-hook');
+              continue;
             }
-            if (!explicitPlayStarted) failures.push('preplay-media');
+          }
+          for (let observationIndex = 0; observationIndex < observations.length;
+            observationIndex += 1) {
+            const candidate = observations[observationIndex];
+            const observed = Object.freeze({ ...candidate });
+            if (typeof testHooks?.acceptCdpMediaEvent === 'function') {
+              let accepted = false;
+              try { accepted = testHooks.acceptCdpMediaEvent(observed) === true; } catch {
+                failures.push('media-event-test-hook');
+                continue;
+              }
+              if (!accepted) continue;
+            }
+            if (observed.name === 'kLoad') {
+              player.lifecycleId += 1;
+              player.currentLoad = null;
+              try {
+                new URL(observed.sourceUrl);
+                player.currentLoad = {
+                  lifecycleId: player.lifecycleId,
+                  sourceUrl: observed.sourceUrl,
+                  loadAfterExplicitPlay: explicitPlayStarted,
+                  playAfterExplicitPlay: false,
+                };
+              } catch {
+                failures.push('media-load');
+              }
+            }
+            if (isMediaPlaybackEvent(observed)) {
+              const observation = {
+                name: observed.name,
+                pipelineState: observed.pipelineState,
+                afterExplicitPlay: explicitPlayStarted,
+              };
+              mediaPlayback.push({ playerId, ...observation });
+              if (observed.name === 'kPlay') {
+                if (player.currentLoad === null) failures.push('media-play-without-load');
+                else player.currentLoad.playAfterExplicitPlay = explicitPlayStarted;
+              }
+              if (!explicitPlayStarted) failures.push('preplay-media');
+            }
           }
         }
       }
