@@ -2,8 +2,10 @@
 
 Production V1 is a mobile-first, text-primary HKBU senior chat. Voice behaves like
 a WeChat/WhatsApp voice message: the student records, reviews the transcript, and
-sends it as one normal chat message. The assistant may generate an optional voice
-reply only after an explicit tap; text remains canonical and audio never autoplays.
+sends it as one normal chat message. Intrinsically voice-mode assistant replies may
+prepare optional AI voice automatically; normal text-mode replies generate voice
+only after the student explicitly taps **Generate voice**. Text is always the durable
+primary answer, and playback never starts before an explicit **Play** action.
 
 This directory is isolated from the legacy application. It has its own runtime,
 storage drivers, release evidence, reports, and deployment boundary. Do not point
