@@ -492,7 +492,7 @@ complete Google verification before continuing. Then run:
 
 ```powershell
 $env:V1_NOTIFICATION_CHANNEL = gcloud.cmd monitoring channels list --project=motion-expert-hk-ltd-webpage --filter="displayName='HK Buddy V1 operations' AND type='email'" --format="value(name)" --limit=1
-if (-not ($env:V1_NOTIFICATION_CHANNEL -match '^projects/582852715831/notificationChannels/[1-9]\d*$')) { throw 'Verified HK Buddy V1 notification channel is unavailable' }
+if (-not ($env:V1_NOTIFICATION_CHANNEL -match '^projects/motion-expert-hk-ltd-webpage/notificationChannels/[1-9]\d*$')) { throw 'Verified HK Buddy V1 notification channel is unavailable' }
 npm run gcp:provision -- --confirm-project=motion-expert-hk-ltd-webpage "--notification-channel=$env:V1_NOTIFICATION_CHANNEL"
 ```
 

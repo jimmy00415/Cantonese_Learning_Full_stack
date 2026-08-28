@@ -144,15 +144,22 @@ mismatch fails before mutation.
 An optional existing target-project Monitoring channel can be checked with:
 
 ```text
-npm run gcp:preflight -- --notification-channel=projects/582852715831/notificationChannels/NUMERIC_ID
+npm run gcp:preflight -- --notification-channel=projects/motion-expert-hk-ltd-webpage/notificationChannels/NUMERIC_ID
 ```
 
 The channel must have display name `HK Buddy V1 operations`, exact ownership
 labels `application=hong_kong_buddy`, `environment=production_v1`, and
-`hkbuddy_contract=operations`, have `type=email`, be enabled, and have
+`hkbuddy_contract=operations`, the sole endpoint label
+`email_address=admin@motionexp.com`, have `type=email`, be enabled, and have
 `verificationStatus=VERIFIED`. Billing Budgets does not accept an arbitrary
 Monitoring channel type. A missing, disabled, inaccessible, non-email, or
 unverified channel is not treated as usable.
+
+Monitoring REST normalizes either the exact project-ID or project-number alias
+to the project-ID resource name shown above. The scripts accept only those two
+exact target-project forms and use the project-ID form for Monitoring and
+Billing Budget payloads. Cloud Asset inventory is validated independently
+against its numeric Monitoring asset name and numeric `project` field.
 
 `npm run gcp:provision` is also inert by default: it validates the contract and
 prints the planned fixed operation IDs. The mutating first-stage bootstrap is:
@@ -167,7 +174,7 @@ the required channel gate. After the operator creates and verifies the email
 channel, the mutating resume form is:
 
 ```text
-npm run gcp:provision -- --confirm-project=motion-expert-hk-ltd-webpage --notification-channel=projects/582852715831/notificationChannels/NUMERIC_ID
+npm run gcp:provision -- --confirm-project=motion-expert-hk-ltd-webpage --notification-channel=projects/motion-expert-hk-ltd-webpage/notificationChannels/NUMERIC_ID
 ```
 
 No abbreviated confirmation, alternate project, extra flag, or legacy identity
@@ -372,6 +379,10 @@ project resolution. A second subset audit covers every managed bucket,
 repository, secret, and service-account policy after the empty containers exist
 but before any secret value or database user is written. These audits permit
 not-yet-created expected grants but reject every unmodeled entitlement. The
+pre-mutation project audit compares its initial enabled-API set with both sides
+of the IAM bracket and uses the bracket's stable final set for every subsequent
+managed-identity, network, and resource inventory decision; any A-to-B drift
+fails before mutation. The
 final readback is mandatory, not advisory: it re-describes every
 resource, re-audits all five service accounts for user-managed keys, rejects a
 public bucket member, and compares the managed project, both buckets, repository,
@@ -381,7 +392,10 @@ lists project custom roles and requires the one fixed GA
 `storage.buckets.get`; an extra permission, role, deletion, or stage drift is a
 hard failure. Any
 extra managed workload binding, conditional replacement, or missing binding
-fails the run. Workload principals may never receive
+fails the run. The exact IAM decision is the terminal final-readback operation:
+the control plane lists enabled APIs immediately before and after the IAM read,
+requires the two canonical sets to match, and authorizes against the second set.
+It never accepts a caller-supplied or cached API snapshot. Workload principals may never receive
 `roles/iam.serviceAccountTokenCreator`; the only such binding is the expected
 Google-managed Cloud Build service agent on
 `hkbuddy-v1-build@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com`.
@@ -398,6 +412,14 @@ re-created by this script. Exact official service-agent member/role pairs for
 the enabled or used APIs are permitted if Google materializes them; arbitrary
 Google-managed roles, external users/service accounts, public principals, and
 extra project or resource bindings are rejected. In particular, an optional
+Container Registry service agent and an optional Pub/Sub service agent are
+accepted only as their exact project-number principals with respectively
+`roles/containerregistry.ServiceAgent` and `roles/pubsub.serviceAgent`, and
+only while their owning APIs are enabled. Each enabled-service row must identify
+the exact numeric-project Service Usage resource, repeat the same canonical API
+name in `config.name`, and report `state=ENABLED`; missing, disabled,
+contradictory, foreign-project, or duplicate rows fail closed. These dependency grants do not permit
+either service-agent role on any other principal. An optional
 newer Google APIs Service Agent entitlement may be only the exact
 `roles/compute.instanceGroupManagerServiceAgent` pair enumerated by the
 contract; it does not replace or weaken the immutable observed Editor baseline

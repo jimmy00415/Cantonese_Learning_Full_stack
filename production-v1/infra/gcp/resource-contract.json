@@ -287,6 +287,7 @@
         },
         "mustBeEnabled": true,
         "requiredType": "email",
+        "requiredEmailAddress": "admin@motionexp.com",
         "requiredVerificationStatus": "VERIFIED"
       },
       "metricTypes": [
@@ -428,6 +429,16 @@
         "member": "serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-cloudbuild.iam.gserviceaccount.com",
         "role": "roles/cloudbuild.serviceAgent",
         "required": true
+      },
+      {
+        "member": "serviceAccount:service-__PROJECT_NUMBER__@containerregistry.iam.gserviceaccount.com",
+        "role": "roles/containerregistry.ServiceAgent",
+        "required": false
+      },
+      {
+        "member": "serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-pubsub.iam.gserviceaccount.com",
+        "role": "roles/pubsub.serviceAgent",
+        "required": false
       },
       {
         "member": "serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-artifactregistry.iam.gserviceaccount.com",

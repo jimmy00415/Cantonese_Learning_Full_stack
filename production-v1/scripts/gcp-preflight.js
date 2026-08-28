@@ -3,6 +3,7 @@ import { pathToFileURL } from 'node:url';
 
 import {
   assertResourceContract,
+  canonicalMonitoringChannelName,
   createDefaultGcloudAuthenticatedRequest,
   createDefaultGcloudExecutor,
   GcpControlPlane,
@@ -19,7 +20,6 @@ const PROJECT = GCP_IDENTITY.projectId;
 const PROJECT_NUMBER = GCP_IDENTITY.projectNumber;
 const ORGANIZATION = GCP_IDENTITY.organizationId;
 const BILLING_ACCOUNT = GCP_IDENTITY.billingAccountId;
-const CHANNEL_NAME = /^projects\/582852715831\/notificationChannels\/[1-9]\d*$/;
 
 function publish(writeOutput, exitCode, publicReport) {
   writeOutput(`${JSON.stringify(publicReport)}\n`);
@@ -30,8 +30,10 @@ function parseArguments(argv) {
   if (!Array.isArray(argv) || argv.some((value) => typeof value !== 'string')) return null;
   if (argv.length === 0) return { notificationChannel: null };
   if (argv.length !== 1 || !argv[0].startsWith('--notification-channel=')) return null;
-  const notificationChannel = argv[0].slice('--notification-channel='.length);
-  return CHANNEL_NAME.test(notificationChannel) ? { notificationChannel } : null;
+  const notificationChannel = canonicalMonitoringChannelName(
+    argv[0].slice('--notification-channel='.length),
+  );
+  return notificationChannel ? { notificationChannel } : null;
 }
 
 function projectMatches(project) {
@@ -215,6 +217,10 @@ export async function runGcpPreflight({
         ).length
         || !Object.entries(selectedContract.resources.monitoring.notificationChannel.ownershipLabels)
           .every(([key, value]) => channel.userLabels[key] === value)
+        || !channel?.labels
+        || Object.keys(channel.labels).length !== 1
+        || channel.labels.email_address
+          !== selectedContract.resources.monitoring.notificationChannel.requiredEmailAddress
         || channel?.type !== 'email' || channel?.enabled !== true
         || channel?.verificationStatus !== 'VERIFIED') {
         return publish(writeOutput, 1, safeFailure('ALERT_CHANNEL_UNVERIFIED', {

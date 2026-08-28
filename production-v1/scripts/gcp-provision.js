@@ -20,16 +20,23 @@ const BILLING_ACCOUNT = GCP_IDENTITY.billingAccountId;
 export const REQUIRED_OPERATOR_ACCOUNT = 'admin@motionexp.com';
 const CONTRACT_PATH = fileURLToPath(new URL('../infra/gcp/resource-contract.json', import.meta.url));
 const NUMERIC_VERSION = /^[1-9]\d*$/;
-const CHANNEL_NAME = new RegExp(`^projects/${PROJECT_NUMBER}/notificationChannels/[1-9]\\d*$`);
+const CHANNEL_NAME = new RegExp(
+  `^projects/(?:${PROJECT}|${PROJECT_NUMBER})/notificationChannels/([1-9]\\d*)$`,
+);
 const SAFE_ARGUMENT = /^[^\u0000\r\n]*$/;
 const ASSET_PROJECT = `projects/${PROJECT_NUMBER}`;
-const ASSET_PROJECT_PARENT = `//cloudresourcemanager.googleapis.com/projects/${PROJECT_NUMBER}`;
+const ASSET_PROJECT_PARENT = `//cloudresourcemanager.googleapis.com/projects/${PROJECT}`;
 const ASSET_PROJECT_TYPE = 'cloudresourcemanager.googleapis.com/Project';
 const ASSET_READ_MASK = 'name,assetType,project,displayName,description,location,labels,parentFullResourceName,parentAssetType,state';
 const ASSET_MAX_BUFFER = 16 * 1024 * 1024;
 const OWNERSHIP_LABELS = Object.freeze({
   application: 'hong_kong_buddy', environment: 'production_v1', hkbuddy_contract: 'operations',
 });
+
+export function canonicalMonitoringChannelName(value) {
+  const match = CHANNEL_NAME.exec(String(value ?? ''));
+  return match ? `projects/${PROJECT}/notificationChannels/${match[1]}` : null;
+}
 const REQUIRED_APIS = Object.freeze([
   'cloudresourcemanager.googleapis.com', 'serviceusage.googleapis.com',
   'cloudbilling.googleapis.com', 'billingbudgets.googleapis.com',
@@ -44,7 +51,7 @@ const REQUIRED_APIS = Object.freeze([
 const REQUIRED_MONITORING = Object.freeze({
   notificationChannel: {
     required: true, displayName: 'HK Buddy V1 operations', ownershipLabels: OWNERSHIP_LABELS,
-    mustBeEnabled: true, requiredType: 'email',
+    mustBeEnabled: true, requiredType: 'email', requiredEmailAddress: REQUIRED_OPERATOR_ACCOUNT,
     requiredVerificationStatus: 'VERIFIED',
   },
   metricTypes: [
@@ -78,6 +85,8 @@ const REQUIRED_FORBIDDEN_WORKLOAD_ROLES = Object.freeze([
 const REQUIRED_AUTOMATIC_PROJECT_BINDINGS = Object.freeze([
   { member: `user:${REQUIRED_OPERATOR_ACCOUNT}`, role: 'roles/owner', required: true },
   { member: 'serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-cloudbuild.iam.gserviceaccount.com', role: 'roles/cloudbuild.serviceAgent', required: true },
+  { member: 'serviceAccount:service-__PROJECT_NUMBER__@containerregistry.iam.gserviceaccount.com', role: 'roles/containerregistry.ServiceAgent', required: false },
+  { member: 'serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-pubsub.iam.gserviceaccount.com', role: 'roles/pubsub.serviceAgent', required: false },
   { member: 'serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-artifactregistry.iam.gserviceaccount.com', role: 'roles/artifactregistry.serviceAgent', required: false },
   { member: 'serviceAccount:service-__PROJECT_NUMBER__@compute-system.iam.gserviceaccount.com', role: 'roles/compute.serviceAgent', required: false },
   { member: 'serviceAccount:service-__PROJECT_NUMBER__@service-networking.iam.gserviceaccount.com', role: 'roles/servicenetworking.serviceAgent', required: false },
@@ -408,6 +417,37 @@ function requireObjectList(value) {
     throw commandError('LIST_RESPONSE_AMBIGUOUS');
   }
   return value;
+}
+
+function canonicalServiceApiName(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 253
+    || !value.endsWith('.googleapis.com')) return false;
+  const labels = value.split('.');
+  return labels.length >= 3 && labels.every((label) => (
+    /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label)
+  ));
+}
+
+function requireEnabledApiSet(value) {
+  const rows = requireObjectList(value);
+  const enabled = new Set();
+  for (const row of rows) {
+    const config = row.config;
+    const service = config?.name;
+    if (!config || typeof config !== 'object' || Array.isArray(config)
+      || !canonicalServiceApiName(service)
+      || row.name !== `projects/${PROJECT_NUMBER}/services/${service}`
+      || row.state !== 'ENABLED' || enabled.has(service)) {
+      throw commandError('LIST_RESPONSE_AMBIGUOUS');
+    }
+    enabled.add(service);
+  }
+  return enabled;
+}
+
+function sameStringSet(left, right) {
+  return left instanceof Set && right instanceof Set && left.size === right.size
+    && [...left].every((value) => right.has(value));
 }
 
 function normalizeTransportStderr(value) {
@@ -985,13 +1025,13 @@ function managedIamScopes(contract) {
 }
 
 function assertManagedIamPolicies({
-  contract, projectNumber, policiesByScope, scopes, requireExpected, requireProtectedBaseline = false, enabledApis = null,
+  contract, projectNumber, policiesByScope, scopes, requireExpected, requireProtectedBaseline = false, enabledApis,
 }) {
   if (!contract || !/^\d{6,20}$/.test(String(projectNumber ?? ''))
     || (!policiesByScope || typeof policiesByScope !== 'object')
     || !Array.isArray(scopes) || scopes.length === 0
     || typeof requireExpected !== 'boolean' || typeof requireProtectedBaseline !== 'boolean'
-    || (enabledApis !== null && !(enabledApis instanceof Set))) {
+    || !(enabledApis instanceof Set)) {
     throw commandError('IAM_ALLOWLIST_MISMATCH');
   }
   const workloadMembers = new Set(contract.resources.serviceAccounts.map(
@@ -1013,6 +1053,8 @@ function assertManagedIamPolicies({
   }));
   const serviceAgentApi = new Map([
     ['roles/cloudbuild.serviceAgent', 'cloudbuild.googleapis.com'],
+    ['roles/containerregistry.ServiceAgent', 'containerregistry.googleapis.com'],
+    ['roles/pubsub.serviceAgent', 'pubsub.googleapis.com'],
     ['roles/artifactregistry.serviceAgent', 'artifactregistry.googleapis.com'],
     ['roles/compute.serviceAgent', 'compute.googleapis.com'],
     ['roles/servicenetworking.serviceAgent', 'servicenetworking.googleapis.com'],
@@ -1026,7 +1068,7 @@ function assertManagedIamPolicies({
     ['roles/compute.instanceGroupManagerServiceAgent', 'compute.googleapis.com'],
   ]);
   const permittedAutomatic = automatic.filter((binding) => (
-    enabledApis === null || !serviceAgentApi.has(binding.role) || enabledApis.has(serviceAgentApi.get(binding.role))
+    !serviceAgentApi.has(binding.role) || enabledApis.has(serviceAgentApi.get(binding.role))
   ));
   const required = [
     ...baseline,
@@ -1079,13 +1121,13 @@ function assertManagedIamPolicies({
   return true;
 }
 
-export function assertManagedIamPoliciesSubset({ contract, projectNumber, policiesByScope, scopes, requireProtectedBaseline = false, enabledApis = null }) {
+export function assertManagedIamPoliciesSubset({ contract, projectNumber, policiesByScope, scopes, requireProtectedBaseline = false, enabledApis }) {
   return assertManagedIamPolicies({
     contract, projectNumber, policiesByScope, scopes, requireExpected: false, requireProtectedBaseline, enabledApis,
   });
 }
 
-export function assertExactManagedIamPolicies({ contract, projectNumber, policiesByScope, enabledApis = null }) {
+export function assertExactManagedIamPolicies({ contract, projectNumber, policiesByScope, enabledApis }) {
   return assertManagedIamPolicies({
     contract, projectNumber, policiesByScope,
     scopes: managedIamScopes(contract), requireExpected: true, enabledApis,
@@ -1535,7 +1577,7 @@ function assertMonitoringInventory(policies, channels) {
   const expectedPolicies = new Map(REQUIRED_MONITORING.policies.map((policy) => [policy.displayName, policy]));
   const seenPolicies = new Set();
   for (const policy of requireObjectList(policies)) {
-    if (!new RegExp(`^projects/${PROJECT_NUMBER}/alertPolicies/[1-9]\\d*$`).test(policy?.name ?? '')) {
+    if (!new RegExp(`^projects/${PROJECT}/alertPolicies/[1-9]\\d*$`).test(policy?.name ?? '')) {
       throw commandError('LIST_RESPONSE_AMBIGUOUS');
     }
     if (typeof policy.displayName !== 'string' || (policy.userLabels !== undefined
@@ -1555,11 +1597,14 @@ function assertMonitoringInventory(policies, channels) {
   }
   let managedChannels = 0;
   for (const channel of requireObjectList(channels)) {
-    if (!new RegExp(`^projects/${PROJECT_NUMBER}/notificationChannels/[1-9]\\d*$`).test(channel?.name ?? '')) {
+    if (!new RegExp(`^projects/${PROJECT}/notificationChannels/[1-9]\\d*$`).test(channel?.name ?? '')) {
       throw commandError('LIST_RESPONSE_AMBIGUOUS');
     }
     if (typeof channel.displayName !== 'string' || typeof channel.type !== 'string'
-      || typeof channel.enabled !== 'boolean' || typeof channel.verificationStatus !== 'string'
+      || typeof channel.enabled !== 'boolean'
+      || (channel.verificationStatus !== undefined && typeof channel.verificationStatus !== 'string')
+      || (channel.labels !== undefined && (!channel.labels
+        || typeof channel.labels !== 'object' || Array.isArray(channel.labels)))
       || (channel.userLabels !== undefined && (!channel.userLabels
         || typeof channel.userLabels !== 'object' || Array.isArray(channel.userLabels)))) {
       throw commandError('LIST_RESPONSE_AMBIGUOUS');
@@ -1568,6 +1613,9 @@ function assertMonitoringInventory(policies, channels) {
       || channel.userLabels?.application === OWNERSHIP_LABELS.application;
     if (managed && (channel.displayName !== REQUIRED_MONITORING.notificationChannel.displayName
       || !exact(channel.userLabels, OWNERSHIP_LABELS) || channel.type !== 'email'
+      || !exact(channel.labels, {
+        email_address: REQUIRED_MONITORING.notificationChannel.requiredEmailAddress,
+      })
       || channel.enabled !== true || channel.verificationStatus !== 'VERIFIED')) {
       throw commandError('RESOURCE_COLLISION');
     }
@@ -1677,7 +1725,10 @@ function exactManagedGeneratedAsset(asset) {
     return asset.displayName === REQUIRED_MONITORING.notificationChannel.displayName
       && new RegExp(`^//monitoring\\.googleapis\\.com/projects/${PROJECT_NUMBER}/notificationChannels/[1-9]\\d*$`).test(asset.name)
       && asset.location === 'global' && asset.parentFullResourceName === ASSET_PROJECT_PARENT
-      && asset.parentAssetType === ASSET_PROJECT_TYPE && exact(labels, OWNERSHIP_LABELS);
+      && asset.parentAssetType === ASSET_PROJECT_TYPE
+      && exact(labels, {
+        email_address: REQUIRED_MONITORING.notificationChannel.requiredEmailAddress,
+      });
   }
   return false;
 }
@@ -1777,8 +1828,8 @@ function parseArguments(argv) {
     if (value === `--confirm-project=${PROJECT}` && !confirmed) {
       confirmed = true;
     } else if (value.startsWith('--notification-channel=') && channel === null) {
-      channel = value.slice('--notification-channel='.length);
-      if (!CHANNEL_NAME.test(channel)) return { valid: false };
+      channel = canonicalMonitoringChannelName(value.slice('--notification-channel='.length));
+      if (!channel) return { valid: false };
     } else {
       return { valid: false };
     }
@@ -2094,7 +2145,9 @@ export async function runGcpProvision({
 export class GcpControlPlane {
   constructor({ contract, notificationChannel, gcloud, request }) {
     this.contract = contract;
-    this.notificationChannel = notificationChannel;
+    this.notificationChannel = notificationChannel == null
+      ? null
+      : canonicalMonitoringChannelName(notificationChannel);
     this.gcloud = gcloud;
     this.request = request;
     this.cache = new Map();
@@ -2109,23 +2162,31 @@ export class GcpControlPlane {
     return assertNoUserManagedServiceAccountKeys({ contract: this.contract, gcloud: this.gcloud });
   }
 
-  async auditManagedIamPolicies({ projectOnly = false, enabledApis = null, requireProtectedBaseline = projectOnly } = {}) {
-    if (typeof projectOnly !== 'boolean' || typeof requireProtectedBaseline !== 'boolean'
-      || (enabledApis !== null && !(enabledApis instanceof Set))) {
+  async auditManagedIamPolicies(options = {}) {
+    if (!options || typeof options !== 'object' || Array.isArray(options)
+      || Object.keys(options).some((key) => !['projectOnly', 'requireProtectedBaseline'].includes(key))) {
+      throw commandError('IAM_ALLOWLIST_MISMATCH');
+    }
+    const projectOnly = options.projectOnly ?? false;
+    const requireProtectedBaseline = options.requireProtectedBaseline ?? projectOnly;
+    if (typeof projectOnly !== 'boolean' || typeof requireProtectedBaseline !== 'boolean') {
       throw commandError('IAM_ALLOWLIST_MISMATCH');
     }
     const scopes = projectOnly ? ['project'] : managedIamScopes(this.contract);
+    const enabledBefore = await this.#enabledApis();
     const policyEntries = await Promise.all(scopes.map(async (scope) => (
       [scope, await this.#iamPolicy(scope)]
     )));
+    if (!projectOnly) await this.#auditCustomRoles();
+    const enabledAfter = await this.#enabledApis();
+    if (!sameStringSet(enabledBefore, enabledAfter)) throw commandError('IAM_ALLOWLIST_MISMATCH');
     assertManagedIamPoliciesSubset({
       contract: this.contract,
       projectNumber: this.#projectNumber(),
       policiesByScope: new Map(policyEntries),
-      scopes, enabledApis, requireProtectedBaseline,
+      scopes, enabledApis: enabledAfter, requireProtectedBaseline,
     });
-    if (!projectOnly) await this.#auditCustomRoles();
-    return true;
+    return new Set(enabledAfter);
   }
 
   async auditPreMutationState({ notificationChannel } = {}) {
@@ -2153,12 +2214,11 @@ export class GcpControlPlane {
       throw commandError('SHARED_PROJECT_BASELINE_INVALID');
     }
     await this.#auditCloudAssetInventory();
-    const enabled = requireObjectList(await this.#gcloud([
-      'services', 'list', '--enabled', `--project=${PROJECT}`, '--format=json',
-    ]));
-    const enabledApis = new Set(enabled.map(({ config, name }) => config?.name ?? name));
-    this.cache.set('apis', enabled);
-    await this.auditManagedIamPolicies({ projectOnly: true, enabledApis });
+    const enabledBeforeIamAudit = await this.#enabledApis();
+    const enabledApis = await this.auditManagedIamPolicies({ projectOnly: true });
+    if (!sameStringSet(enabledBeforeIamAudit, enabledApis)) {
+      throw commandError('IAM_ALLOWLIST_MISMATCH');
+    }
     await this.#auditManagedIdentityInventory(enabledApis);
 
     if (enabledApis.has('compute.googleapis.com')) {
@@ -2184,7 +2244,10 @@ export class GcpControlPlane {
       }
     }
 
-    const context = { notificationChannel, secretVersions: {} };
+    const context = {
+      notificationChannel: canonicalMonitoringChannelName(notificationChannel),
+      secretVersions: {},
+    };
     for (const id of STATIC_EXPECTED_STEPS) {
       if (['project', 'billing', 'apis'].includes(id) || id.startsWith('iam:')) continue;
       if (id === 'notification-channel' && !notificationChannel) continue;
@@ -2265,6 +2328,15 @@ export class GcpControlPlane {
     const value = String(project?.projectNumber ?? '');
     if (!/^\d{6,20}$/.test(value)) throw commandError('PROJECT_NUMBER_UNAVAILABLE');
     return value;
+  }
+
+  async #enabledApis() {
+    const enabled = requireObjectList(await this.#gcloud([
+      'services', 'list', '--enabled', `--project=${PROJECT}`, '--format=json',
+    ]));
+    const enabledApis = requireEnabledApiSet(enabled);
+    this.cache.set('apis', enabled);
+    return enabledApis;
   }
 
   #privateIp() {
@@ -2413,7 +2485,7 @@ export class GcpControlPlane {
       const value = await this.#gcloud([
         'services', 'list', '--enabled', `--project=${PROJECT}`, '--format=json',
       ]);
-      const enabled = new Set(requireObjectList(value).map(({ config, name }) => config?.name ?? name));
+      const enabled = requireEnabledApiSet(value);
       return REQUIRED_APIS.every((api) => enabled.has(api))
         ? { status: 'present', value }
         : { status: 'absent' };
@@ -2519,8 +2591,10 @@ export class GcpControlPlane {
     if (id.startsWith('db-user:')) return this.#readDatabaseUser(id.slice('db-user:'.length));
     if (id.startsWith('iam:')) return this.#readIam(Number(id.slice(4)) - 1);
     if (id === 'notification-channel') {
-      const channel = context.notificationChannel ?? this.notificationChannel;
-      if (!CHANNEL_NAME.test(String(channel ?? ''))) return { status: 'absent' };
+      const channel = canonicalMonitoringChannelName(
+        context.notificationChannel ?? this.notificationChannel,
+      );
+      if (!channel) return { status: 'absent' };
       const value = await this.#rest({ method: 'GET', url: `https://monitoring.googleapis.com/v3/${channel}` });
       return { status: 'present', value };
     }
@@ -2669,7 +2743,7 @@ export class GcpControlPlane {
       return isExactProjectBillingLink(value);
     }
     if (id === 'apis') {
-      const enabled = new Set((value ?? []).map(({ config, name }) => config?.name ?? name));
+      const enabled = requireEnabledApiSet(value);
       return REQUIRED_APIS.every((api) => enabled.has(api));
     }
     if (id === 'artifact-registry') {
@@ -2748,11 +2822,19 @@ export class GcpControlPlane {
     if (id.startsWith('secret-version:')) return this.#compareSecretVersion(id.slice('secret-version:'.length), value, context);
     if (id.startsWith('db-user:')) return this.#compareDatabaseUser(id.slice('db-user:'.length), value);
     if (id.startsWith('iam:')) return value.exact === true;
-    if (id === 'notification-channel') return value.name === context.notificationChannel
+    if (id === 'notification-channel') {
+      const channel = canonicalMonitoringChannelName(
+        context.notificationChannel ?? this.notificationChannel,
+      );
+      return Boolean(channel) && value.name === channel
       && value.displayName === REQUIRED_MONITORING.notificationChannel.displayName
       && exact(value.userLabels, OWNERSHIP_LABELS)
+      && exact(value.labels, {
+        email_address: REQUIRED_MONITORING.notificationChannel.requiredEmailAddress,
+      })
       && value.type === 'email' && value.enabled === true
       && value.verificationStatus === 'VERIFIED';
+    }
     if (id.startsWith('monitoring-policy:')) return value.exact === true;
     if (id === 'budget') return value.exact === true;
     return false;
@@ -3016,9 +3098,11 @@ export class GcpControlPlane {
 
   #policyBody(policyId, channel) {
     const policy = this.#policyDefinition(policyId);
+    const canonicalChannel = canonicalMonitoringChannelName(channel);
+    if (!canonicalChannel) throw commandError('MONITORING_CHANNEL_INVALID');
     const common = {
       displayName: policy.displayName,
-      combiner: 'OR', enabled: true, notificationChannels: [channel],
+      combiner: 'OR', enabled: true, notificationChannels: [canonicalChannel],
       userLabels: { application: 'hong_kong_buddy', environment: 'production_v1', hkbuddy_contract: policy.id.replaceAll('-', '_') },
     };
     if (policy.kind === 'log-match') {
@@ -3057,7 +3141,7 @@ export class GcpControlPlane {
   }
 
   #policyMatches(policyId, actual) {
-    if (!new RegExp(`^projects/${PROJECT_NUMBER}/alertPolicies/[1-9]\\d*$`).test(actual?.name ?? '')) return false;
+    if (!new RegExp(`^projects/${PROJECT}/alertPolicies/[1-9]\\d*$`).test(actual?.name ?? '')) return false;
     const expected = this.#policyBody(policyId, this.notificationChannel);
     const projected = {
       displayName: actual.displayName, combiner: actual.combiner, enabled: actual.enabled,
@@ -3120,6 +3204,8 @@ export class GcpControlPlane {
   }
 
   #budgetBody(channel) {
+    const canonicalChannel = canonicalMonitoringChannelName(channel);
+    if (!canonicalChannel) throw commandError('MONITORING_CHANNEL_INVALID');
     return {
       displayName: 'Hong Kong Buddy Production V1 monthly guard',
       budgetFilter: { projects: [`projects/${this.#projectNumber()}`], calendarPeriod: 'MONTH' },
@@ -3131,7 +3217,7 @@ export class GcpControlPlane {
         { thresholdPercent: 1, spendBasis: 'FORECASTED_SPEND' },
       ],
       notificationsRule: {
-        monitoringNotificationChannels: [channel], disableDefaultIamRecipients: false,
+        monitoringNotificationChannels: [canonicalChannel], disableDefaultIamRecipients: false,
       },
     };
   }
@@ -3176,15 +3262,30 @@ export class GcpControlPlane {
   }
 
   async finalReadback({ notificationChannel, secretVersions }) {
-    if (!CHANNEL_NAME.test(notificationChannel)
+    const canonicalChannel = canonicalMonitoringChannelName(notificationChannel);
+    if (!canonicalChannel
       || !GENERATED_SECRET_IDS.every((id) => NUMERIC_VERSION.test(String(secretVersions[id] ?? '')))) {
       throw commandError('FINAL_READBACK_FAILED');
     }
+    await this.auditUserManagedServiceAccountKeys();
+
+    for (const id of STATIC_EXPECTED_STEPS) {
+      const value = await this.read(id, { notificationChannel: canonicalChannel, secretVersions });
+      if (value?.status !== 'present' || !this.compare(id, value.value, {
+        notificationChannel: canonicalChannel, secretVersions,
+      })) {
+        throw commandError('FINAL_READBACK_FAILED');
+      }
+    }
+
     const scopes = managedIamScopes(this.contract);
+    const enabledBefore = await this.#enabledApis();
     await this.#auditCustomRoles();
     const policyEntries = await Promise.all(scopes.map(async (scope) => (
       [scope, await this.#iamPolicy(scope)]
     )));
+    const enabledAfter = await this.#enabledApis();
+    if (!sameStringSet(enabledBefore, enabledAfter)) throw commandError('IAM_ALLOWLIST_MISMATCH');
     const policiesByScope = new Map(policyEntries);
     const bucketPolicy = policiesByScope.get(`bucket:${GCP_IDENTITY.bucket}`);
     const publicMember = (bucketPolicy?.bindings ?? []).some(({ members }) => (
@@ -3194,16 +3295,8 @@ export class GcpControlPlane {
 
     assertExactManagedIamPolicies({
       contract: this.contract, projectNumber: this.#projectNumber(), policiesByScope,
+      enabledApis: enabledAfter,
     });
-
-    await this.auditUserManagedServiceAccountKeys();
-
-    for (const id of STATIC_EXPECTED_STEPS) {
-      const value = await this.read(id, { notificationChannel, secretVersions });
-      if (value?.status !== 'present' || !this.compare(id, value.value, { notificationChannel, secretVersions })) {
-        throw commandError('FINAL_READBACK_FAILED');
-      }
-    }
   }
 }
 

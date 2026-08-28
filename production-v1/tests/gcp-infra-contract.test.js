@@ -7,6 +7,7 @@ import {
   GcpControlPlane,
   assertExactCustomRoleDefinitions,
   assertExactManagedIamPolicies,
+  assertManagedIamPoliciesSubset,
   assertNoUserManagedServiceAccountKeys,
   assertCidrAvailable,
   assertResourceContract,
@@ -27,12 +28,17 @@ import {
 
 const CONTRACT_URL = new URL('../infra/gcp/resource-contract.json', import.meta.url);
 const OPERATOR_README_URL = new URL('../infra/gcp/README.md', import.meta.url);
+const SHARED_PROJECT_PLAN_URL = new URL(
+  '../../docs/superpowers/plans/2026-08-26-production-v1-shared-project-isolation.md',
+  import.meta.url,
+);
 const PROJECT = GCP_IDENTITY.projectId;
 const PROJECT_NUMBER = GCP_IDENTITY.projectNumber;
-const CHANNEL = `projects/${PROJECT_NUMBER}/notificationChannels/123456789`;
-const NUMERIC_CHANNEL = CHANNEL;
+const CHANNEL = `projects/${PROJECT}/notificationChannels/123456789`;
+const PROJECT_ID_CHANNEL = CHANNEL;
+const NUMERIC_CHANNEL = `projects/${PROJECT_NUMBER}/notificationChannels/123456789`;
 const ASSET_PROJECT = `projects/${PROJECT_NUMBER}`;
-const ASSET_PROJECT_PARENT = `//cloudresourcemanager.googleapis.com/projects/${PROJECT_NUMBER}`;
+const ASSET_PROJECT_PARENT = `//cloudresourcemanager.googleapis.com/projects/${PROJECT}`;
 const ASSET_PROJECT_TYPE = 'cloudresourcemanager.googleapis.com/Project';
 const ASSET_READ_MASK = 'name,assetType,project,displayName,description,location,labels,parentFullResourceName,parentAssetType,state';
 const ACCEPTANCE_BUCKET_METADATA_ROLE = Object.freeze({
@@ -47,6 +53,8 @@ const ACCEPTANCE_BUCKET_METADATA_ROLE = Object.freeze({
 const AUTOMATIC_PROJECT_BINDINGS = Object.freeze([
   { member: 'user:admin@motionexp.com', role: 'roles/owner', required: true },
   { member: 'serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-cloudbuild.iam.gserviceaccount.com', role: 'roles/cloudbuild.serviceAgent', required: true },
+  { member: 'serviceAccount:service-__PROJECT_NUMBER__@containerregistry.iam.gserviceaccount.com', role: 'roles/containerregistry.ServiceAgent', required: false },
+  { member: 'serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-pubsub.iam.gserviceaccount.com', role: 'roles/pubsub.serviceAgent', required: false },
   { member: 'serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-artifactregistry.iam.gserviceaccount.com', role: 'roles/artifactregistry.serviceAgent', required: false },
   { member: 'serviceAccount:service-__PROJECT_NUMBER__@compute-system.iam.gserviceaccount.com', role: 'roles/compute.serviceAgent', required: false },
   { member: 'serviceAccount:service-__PROJECT_NUMBER__@service-networking.iam.gserviceaccount.com', role: 'roles/servicenetworking.serviceAgent', required: false },
@@ -58,6 +66,12 @@ const AUTOMATIC_PROJECT_BINDINGS = Object.freeze([
   { member: 'serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-logging.iam.gserviceaccount.com', role: 'roles/logging.serviceAgent', required: false },
   { member: 'serviceAccount:__PROJECT_NUMBER__@cloudbuild.gserviceaccount.com', role: 'roles/cloudbuild.builds.builder', required: false },
   { member: 'serviceAccount:__PROJECT_NUMBER__@cloudservices.gserviceaccount.com', role: 'roles/compute.instanceGroupManagerServiceAgent', required: false },
+]);
+const AUTOMATIC_BINDING_APIS = Object.freeze([
+  'cloudbuild.googleapis.com', 'containerregistry.googleapis.com', 'pubsub.googleapis.com',
+  'artifactregistry.googleapis.com', 'compute.googleapis.com', 'servicenetworking.googleapis.com',
+  'sqladmin.googleapis.com', 'run.googleapis.com', 'aiplatform.googleapis.com',
+  'speech.googleapis.com', 'monitoring.googleapis.com', 'logging.googleapis.com',
 ]);
 
 const OFFICIAL_LOG_FILTERS = Object.freeze({
@@ -100,6 +114,14 @@ function protectedProjectPolicy(contract) {
 
 function notFound() {
   return Object.assign(new Error('not found'), { code: 'NOT_FOUND' });
+}
+
+function enabledServiceRows(names) {
+  return names.map((service) => ({
+    config: { name: service },
+    name: `projects/${PROJECT_NUMBER}/services/${service}`,
+    state: 'ENABLED',
+  }));
 }
 
 function assetAuditControlPlane({
@@ -147,7 +169,7 @@ function assetAuditControlPlane({
         if (assets instanceof Error) throw assets;
         return assets;
       }
-      if (args[0] === 'services' && args[1] === 'list') return enabledApis.map((name) => ({ config: { name } }));
+      if (args[0] === 'services' && args[1] === 'list') return enabledServiceRows(enabledApis);
       const key = args.slice(0, 3).join(' ');
       if (Object.hasOwn(gcloudRows, key)) return gcloudRows[key];
       if (args[0] === 'iam' && args.includes('list')) return [];
@@ -254,6 +276,15 @@ test('Tasks 1-2 operator documentation uses every executable V1 identity and no 
   assert.match(readme, /earlier `USD 300` draft/, 'the explicit historical budget context remains allowed');
 });
 
+test('the executable shared-project release plan accepts the canonical Monitoring channel name', async () => {
+  const plan = await readFile(SHARED_PROJECT_PLAN_URL, 'utf8');
+  const plannedPattern = plan.match(/V1_NOTIFICATION_CHANNEL -match '([^']+)'/)?.[1];
+  assert.equal(typeof plannedPattern, 'string');
+  const gate = new RegExp(plannedPattern);
+  assert.equal(gate.test(CHANNEL), true);
+  assert.equal(gate.test('projects/foreign-project/notificationChannels/123456789'), false);
+});
+
 test('operator IAM prose protects the observed Google APIs Service Agent Editor baseline and forbids additions', async () => {
   const readme = await readFile(OPERATOR_README_URL, 'utf8');
   assert.match(readme, /serviceAccount:582852715831@cloudservices\.gserviceaccount\.com/);
@@ -322,6 +353,7 @@ test('the executable contract fixes the isolated GCP topology and least-privileg
     ownershipLabels: { application: 'hong_kong_buddy', environment: 'production_v1', hkbuddy_contract: 'operations' },
     mustBeEnabled: true,
     requiredType: 'email',
+    requiredEmailAddress: 'admin@motionexp.com',
     requiredVerificationStatus: 'VERIFIED',
   });
   assert.equal(contract.resources.budget.projectFilter, `projects/${PROJECT_NUMBER}`);
@@ -1336,20 +1368,20 @@ test('monitoring policy identity matches the marker-or-display-name union before
   });
 });
 
-test('Monitoring and Billing readbacks bind generated IDs to exact numeric parents and ownership markers', async (t) => {
+test('Monitoring REST readbacks bind generated IDs to canonical project-ID parents and ownership markers', async (t) => {
   const contract = await contractFixture();
   const definition = contract.resources.monitoring.policies.find(({ id }) => id === 'sql-backup-failure');
   const exactPolicy = {
-    name: `projects/${PROJECT_NUMBER}/alertPolicies/123456789`,
+    name: `projects/${PROJECT}/alertPolicies/123456789`,
     displayName: definition.displayName,
-    combiner: 'OR', enabled: true, notificationChannels: [NUMERIC_CHANNEL],
+    combiner: 'OR', enabled: true, notificationChannels: [CHANNEL],
     userLabels: { application: 'hong_kong_buddy', environment: 'production_v1', hkbuddy_contract: 'sql_backup_failure' },
     conditions: [{ displayName: definition.displayName, conditionMatchedLog: { filter: definition.filter } }],
     alertStrategy: { notificationRateLimit: { period: '300s' }, autoClose: '604800s' },
   };
   const channel = {
-    name: NUMERIC_CHANNEL, displayName: 'HK Buddy V1 operations', type: 'email', enabled: true,
-    verificationStatus: 'VERIFIED', labels: { email_address: 'operations@example.test' },
+    name: CHANNEL, displayName: 'HK Buddy V1 operations', type: 'email', enabled: true,
+    verificationStatus: 'VERIFIED', labels: { email_address: 'admin@motionexp.com' },
     userLabels: { application: 'hong_kong_buddy', environment: 'production_v1', hkbuddy_contract: 'operations' },
   };
   const exactBudget = {
@@ -1363,7 +1395,7 @@ test('Monitoring and Billing readbacks bind generated IDs to exact numeric paren
       { thresholdPercent: 1, spendBasis: 'CURRENT_SPEND' },
       { thresholdPercent: 1, spendBasis: 'FORECASTED_SPEND' },
     ],
-    notificationsRule: { monitoringNotificationChannels: [NUMERIC_CHANNEL] },
+    notificationsRule: { monitoringNotificationChannels: [CHANNEL] },
   };
 
   await t.test('alert policy', async () => {
@@ -1372,7 +1404,7 @@ test('Monitoring and Billing readbacks bind generated IDs to exact numeric paren
       [`projects/999999999999/alertPolicies/123456789`, false],
     ]) {
       const plane = new GcpControlPlane({
-        contract, notificationChannel: NUMERIC_CHANNEL,
+        contract, notificationChannel: CHANNEL,
         gcloud: async () => { throw new Error('gcloud must not run'); },
         request: async () => ({ alertPolicies: [{ ...exactPolicy, name }] }),
       });
@@ -1382,26 +1414,45 @@ test('Monitoring and Billing readbacks bind generated IDs to exact numeric paren
     }
   });
 
+  await t.test('alert policy accepts the project-ID parent returned by Monitoring REST', async () => {
+    const plane = new GcpControlPlane({
+      contract,
+      notificationChannel: PROJECT_ID_CHANNEL,
+      gcloud: async () => { throw new Error('gcloud must not run'); },
+      request: async () => ({
+        alertPolicies: [{
+          ...exactPolicy,
+          name: `projects/${PROJECT}/alertPolicies/123456789`,
+          notificationChannels: [PROJECT_ID_CHANNEL],
+        }],
+      }),
+    });
+    assert.deepEqual(await plane.read('monitoring-policy:sql-backup-failure'), {
+      status: 'present', value: { exact: true },
+    });
+  });
+
   await t.test('notification channel', async () => {
     for (const [value, expected] of [
       [channel, true],
       [{ ...channel, displayName: 'HK Buddy V1 foreign operations' }, false],
       [{ ...channel, userLabels: { ...channel.userLabels, hkbuddy_contract: 'foreign' } }, false],
+      [{ ...channel, labels: { email_address: 'attacker@example.test' } }, false],
     ]) {
       const plane = new GcpControlPlane({
-        contract, notificationChannel: NUMERIC_CHANNEL,
+        contract, notificationChannel: CHANNEL,
         gcloud: async () => { throw new Error('gcloud must not run'); },
         request: async () => value,
       });
-      const readback = await plane.read('notification-channel', { notificationChannel: NUMERIC_CHANNEL });
+      const readback = await plane.read('notification-channel', { notificationChannel: CHANNEL });
       assert.equal(readback.status, 'present');
-      assert.equal(plane.compare('notification-channel', readback.value, { notificationChannel: NUMERIC_CHANNEL }), expected);
+      assert.equal(plane.compare('notification-channel', readback.value, { notificationChannel: CHANNEL }), expected);
     }
   });
 
   await t.test('budget', async () => {
     const plane = new GcpControlPlane({
-      contract, notificationChannel: NUMERIC_CHANNEL,
+      contract, notificationChannel: CHANNEL,
       gcloud: async (args) => {
         if (args[0] === 'projects') return { projectId: PROJECT, projectNumber: PROJECT_NUMBER };
         throw new Error('unexpected gcloud');
@@ -1563,13 +1614,25 @@ function exactManagedIamPolicies(contract) {
 test('managed IAM final readback is an exact per-scope allowlist and forbids workload token creation', async (t) => {
   const contract = await contractFixture();
   const exactPolicies = exactManagedIamPolicies(contract);
+  const allEnabledApis = new Set(AUTOMATIC_BINDING_APIS);
   assert.doesNotThrow(() => assertExactManagedIamPolicies({
     contract, projectNumber: PROJECT_NUMBER, policiesByScope: exactPolicies,
+    enabledApis: allEnabledApis,
   }));
+
+  await t.test('pure IAM assertions require an explicit enabled API set', () => {
+    assert.throws(
+      () => assertExactManagedIamPolicies({
+        contract, projectNumber: PROJECT_NUMBER, policiesByScope: exactPolicies,
+      }),
+      (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
+    );
+  });
   const realEmptyPolicyShape = clone(exactPolicies);
   delete realEmptyPolicyShape[`secret:${GCP_IDENTITY.secrets.bootstrap}`].bindings;
   assert.doesNotThrow(() => assertExactManagedIamPolicies({
     contract, projectNumber: PROJECT_NUMBER, policiesByScope: realEmptyPolicyShape,
+    enabledApis: allEnabledApis,
   }));
 
   const runtime = `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`;
@@ -1595,7 +1658,9 @@ test('managed IAM final readback is an exact per-scope allowlist and forbids wor
       const policies = clone(exactPolicies);
       policies[scope].bindings.push(unexpected);
       assert.throws(
-        () => assertExactManagedIamPolicies({ contract, projectNumber: PROJECT_NUMBER, policiesByScope: policies }),
+        () => assertExactManagedIamPolicies({
+          contract, projectNumber: PROJECT_NUMBER, policiesByScope: policies, enabledApis: allEnabledApis,
+        }),
         (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
       );
     });
@@ -1605,7 +1670,9 @@ test('managed IAM final readback is an exact per-scope allowlist and forbids wor
     const policies = clone(exactPolicies);
     policies['service-account:hkbuddy-v1-build'].bindings = [];
     assert.throws(
-      () => assertExactManagedIamPolicies({ contract, projectNumber: PROJECT_NUMBER, policiesByScope: policies }),
+      () => assertExactManagedIamPolicies({
+        contract, projectNumber: PROJECT_NUMBER, policiesByScope: policies, enabledApis: allEnabledApis,
+      }),
       (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
     );
   });
@@ -1616,7 +1683,9 @@ test('managed IAM final readback is an exact per-scope allowlist and forbids wor
       role !== 'roles/cloudbuild.serviceAgent'
     ));
     assert.throws(
-      () => assertExactManagedIamPolicies({ contract, projectNumber: PROJECT_NUMBER, policiesByScope: policies }),
+      () => assertExactManagedIamPolicies({
+        contract, projectNumber: PROJECT_NUMBER, policiesByScope: policies, enabledApis: allEnabledApis,
+      }),
       (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
     );
   });
@@ -1625,7 +1694,9 @@ test('managed IAM final readback is an exact per-scope allowlist and forbids wor
     const policies = clone(exactPolicies);
     policies.project.bindings = policies.project.bindings.filter(({ role }) => role !== 'roles/owner');
     assert.throws(
-      () => assertExactManagedIamPolicies({ contract, projectNumber: PROJECT_NUMBER, policiesByScope: policies }),
+      () => assertExactManagedIamPolicies({
+        contract, projectNumber: PROJECT_NUMBER, policiesByScope: policies, enabledApis: allEnabledApis,
+      }),
       (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
     );
   });
@@ -1637,7 +1708,9 @@ test('managed IAM final readback is an exact per-scope allowlist and forbids wor
         binding.role !== role || !binding.members.includes(member)
       ));
       assert.throws(
-        () => assertExactManagedIamPolicies({ contract, projectNumber: PROJECT_NUMBER, policiesByScope: policies }),
+        () => assertExactManagedIamPolicies({
+          contract, projectNumber: PROJECT_NUMBER, policiesByScope: policies, enabledApis: allEnabledApis,
+        }),
         (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
       );
     }
@@ -1653,11 +1726,45 @@ test('managed IAM final readback is an exact per-scope allowlist and forbids wor
     );
   });
 
+  await t.test('Cloud Build dependency agents are allowed only with their exact enabled APIs', () => {
+    const policy = { bindings: [
+      ...contract.project.protectedBindings.map(({ role, member }) => ({ role, members: [member] })),
+      {
+        role: 'roles/containerregistry.ServiceAgent',
+        members: [`serviceAccount:service-${PROJECT_NUMBER}@containerregistry.iam.gserviceaccount.com`],
+      },
+      {
+        role: 'roles/pubsub.serviceAgent',
+        members: [`serviceAccount:service-${PROJECT_NUMBER}@gcp-sa-pubsub.iam.gserviceaccount.com`],
+      },
+    ] };
+    const input = {
+      contract,
+      projectNumber: PROJECT_NUMBER,
+      policiesByScope: { project: policy },
+      scopes: ['project'],
+      requireProtectedBaseline: true,
+    };
+    assert.doesNotThrow(() => assertManagedIamPoliciesSubset({
+      ...input,
+      enabledApis: new Set(['containerregistry.googleapis.com', 'pubsub.googleapis.com']),
+    }));
+    assert.throws(
+      () => assertManagedIamPoliciesSubset({
+        ...input,
+        enabledApis: new Set(['cloudbuild.googleapis.com']),
+      }),
+      (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
+    );
+  });
+
   await t.test('conditional managed binding is not exact', () => {
     const policies = clone(exactPolicies);
     policies.project.bindings[0].condition = { title: 'temporary', expression: 'request.time < timestamp("2030-01-01T00:00:00Z")' };
     assert.throws(
-      () => assertExactManagedIamPolicies({ contract, projectNumber: PROJECT_NUMBER, policiesByScope: policies }),
+      () => assertExactManagedIamPolicies({
+        contract, projectNumber: PROJECT_NUMBER, policiesByScope: policies, enabledApis: allEnabledApis,
+      }),
       (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
     );
   });
@@ -1679,6 +1786,10 @@ test('pre-sensitive IAM subset audits reject foreign project owners and secret a
         contract, notificationChannel: CHANNEL,
         gcloud: async (args) => {
           gcloudCalls.push(args);
+          if (args[0] === 'services' && args[1] === 'list') return enabledServiceRows([]);
+          if (args[0] === 'iam' && args[1] === 'roles' && args[2] === 'list') {
+            return contract.resources.customRoles.map((role) => ({ ...role, deleted: false }));
+          }
           let scope;
           if (args[0] === 'projects') scope = 'project';
           else if (args[0] === 'storage') scope = `bucket:${GCP_IDENTITY.bucket}`;
@@ -1700,6 +1811,273 @@ test('pre-sensitive IAM subset audits reject foreign project owners and secret a
   }
 });
 
+test('post-baseline project IAM audits re-read enabled APIs before allowing dependency agents', async () => {
+  const contract = await contractFixture();
+  const dependencyPolicy = {
+    bindings: [
+      ...contract.project.protectedBindings.map(({ role, member }) => ({ role, members: [member] })),
+      {
+        role: 'roles/containerregistry.ServiceAgent',
+        members: [`serviceAccount:service-${PROJECT_NUMBER}@containerregistry.iam.gserviceaccount.com`],
+      },
+      {
+        role: 'roles/pubsub.serviceAgent',
+        members: [`serviceAccount:service-${PROJECT_NUMBER}@gcp-sa-pubsub.iam.gserviceaccount.com`],
+      },
+    ],
+  };
+  let enabledApis = ['containerregistry.googleapis.com', 'pubsub.googleapis.com'];
+  const plane = new GcpControlPlane({
+    contract, notificationChannel: CHANNEL,
+    gcloud: async (args) => {
+      if (args[0] === 'services' && args[1] === 'list') {
+        return enabledServiceRows(enabledApis);
+      }
+      if (args[0] === 'projects' && args[1] === 'get-iam-policy') return dependencyPolicy;
+      throw new Error('unexpected gcloud operation');
+    },
+    request: async () => { throw new Error('REST must not run'); },
+  });
+  plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
+
+  await plane.auditManagedIamPolicies({ projectOnly: true });
+  enabledApis = ['cloudbuild.googleapis.com'];
+  await assert.rejects(
+    () => plane.auditManagedIamPolicies({ projectOnly: true }),
+    (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
+  );
+});
+
+test('live IAM audits reject caller-supplied API snapshots instead of trusting stale authority', async () => {
+  const contract = await contractFixture();
+  const dependencyPolicy = {
+    bindings: [
+      ...contract.project.protectedBindings.map(({ role, member }) => ({ role, members: [member] })),
+      {
+        role: 'roles/containerregistry.ServiceAgent',
+        members: [`serviceAccount:service-${PROJECT_NUMBER}@containerregistry.iam.gserviceaccount.com`],
+      },
+    ],
+  };
+  const plane = new GcpControlPlane({
+    contract, notificationChannel: CHANNEL,
+    gcloud: async (args) => {
+      if (args[0] === 'projects' && args[1] === 'get-iam-policy') return dependencyPolicy;
+      if (args[0] === 'services' && args[1] === 'list') throw new Error('Service Usage unavailable');
+      throw new Error('unexpected gcloud operation');
+    },
+    request: async () => { throw new Error('REST must not run'); },
+  });
+  plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
+
+  await assert.rejects(
+    () => plane.auditManagedIamPolicies({
+      projectOnly: true,
+      enabledApis: new Set(['containerregistry.googleapis.com']),
+    }),
+    (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
+  );
+});
+
+test('enabled API inventory rejects malformed disabled contradictory or duplicate Service Usage rows', async (t) => {
+  const contract = await contractFixture();
+  const baselinePolicy = {
+    bindings: contract.project.protectedBindings.map(({ role, member }) => ({ role, members: [member] })),
+  };
+  const exactName = 'containerregistry.googleapis.com';
+  const exactResource = `projects/${PROJECT_NUMBER}/services/${exactName}`;
+  const cases = [
+    ['disabled', [{ config: { name: exactName }, name: exactResource, state: 'DISABLED' }]],
+    ['missing state', [{ config: { name: exactName }, name: exactResource }]],
+    ['wrong project', [{ config: { name: exactName }, name: `projects/999999999999/services/${exactName}`, state: 'ENABLED' }]],
+    ['contradictory name', [{ config: { name: exactName }, name: `projects/${PROJECT_NUMBER}/services/pubsub.googleapis.com`, state: 'ENABLED' }]],
+    ['non-string config name', [{ config: { name: null }, name: exactResource, state: 'ENABLED' }]],
+    ['duplicate service', enabledServiceRows([exactName, exactName])],
+  ];
+  for (const [name, rows] of cases) {
+    await t.test(name, async () => {
+      const plane = new GcpControlPlane({
+        contract, notificationChannel: CHANNEL,
+        gcloud: async (args) => {
+          if (args[0] === 'services' && args[1] === 'list') return rows;
+          if (args[0] === 'projects' && args[1] === 'get-iam-policy') return baselinePolicy;
+          throw new Error('unexpected gcloud operation');
+        },
+        request: async () => { throw new Error('REST must not run'); },
+      });
+      plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
+      await assert.rejects(
+        () => plane.auditManagedIamPolicies({ projectOnly: true }),
+        (error) => error.code === 'LIST_RESPONSE_AMBIGUOUS',
+      );
+    });
+  }
+});
+
+test('IAM audit rejects an owning API state transition across the policy snapshot', async () => {
+  const contract = await contractFixture();
+  const dependencyPolicy = {
+    bindings: [
+      ...contract.project.protectedBindings.map(({ role, member }) => ({ role, members: [member] })),
+      {
+        role: 'roles/containerregistry.ServiceAgent',
+        members: [`serviceAccount:service-${PROJECT_NUMBER}@containerregistry.iam.gserviceaccount.com`],
+      },
+    ],
+  };
+  let serviceRead = 0;
+  const plane = new GcpControlPlane({
+    contract, notificationChannel: CHANNEL,
+    gcloud: async (args) => {
+      if (args[0] === 'services' && args[1] === 'list') {
+        serviceRead += 1;
+        return enabledServiceRows(serviceRead === 1
+          ? ['containerregistry.googleapis.com']
+          : ['cloudbuild.googleapis.com']);
+      }
+      if (args[0] === 'projects' && args[1] === 'get-iam-policy') return dependencyPolicy;
+      throw new Error('unexpected gcloud operation');
+    },
+    request: async () => { throw new Error('REST must not run'); },
+  });
+  plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
+
+  await assert.rejects(
+    () => plane.auditManagedIamPolicies({ projectOnly: true }),
+    (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
+  );
+});
+
+test('pre-mutation audit rejects an older API snapshot even when the IAM bracket is stable', async () => {
+  const contract = await contractFixture();
+  const fixture = assetAuditControlPlane({ contract, assets: [] });
+  const originalGcloud = fixture.plane.gcloud;
+  let serviceRead = 0;
+  fixture.plane.gcloud = async (args, options) => {
+    if (args[0] === 'services' && args[1] === 'list') {
+      serviceRead += 1;
+      return enabledServiceRows(serviceRead === 1
+        ? ['iam.googleapis.com']
+        : ['iam.googleapis.com', 'compute.googleapis.com']);
+    }
+    return originalGcloud(args, options);
+  };
+
+  await assert.rejects(
+    () => fixture.plane.auditPreMutationState(),
+    (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
+  );
+  assert.equal(serviceRead, 3);
+  assert.equal(fixture.gcloudCalls.some((args) => args.includes('enable')
+    || args.includes('create') || args.includes('add-iam-policy-binding')), false);
+});
+
+test('final readback rejects dependency agents after their owning APIs become disabled', async () => {
+  const contract = await contractFixture();
+  const exactPolicies = exactManagedIamPolicies(contract);
+  const enabledApis = [
+    'cloudbuild.googleapis.com', 'artifactregistry.googleapis.com', 'compute.googleapis.com',
+    'servicenetworking.googleapis.com', 'sqladmin.googleapis.com', 'run.googleapis.com',
+    'aiplatform.googleapis.com', 'speech.googleapis.com', 'monitoring.googleapis.com',
+    'logging.googleapis.com',
+  ];
+  const policyFor = (args) => {
+    if (args[0] === 'projects') return exactPolicies.project;
+    if (args[0] === 'storage') return exactPolicies[`bucket:${args[3].slice('gs://'.length)}`];
+    if (args[0] === 'artifacts') return exactPolicies[`repository:${args[3]}`];
+    if (args[0] === 'secrets') return exactPolicies[`secret:${args[2]}`];
+    if (args[0] === 'iam' && args[1] === 'service-accounts') {
+      const account = contract.resources.serviceAccounts.find(({ email }) => email === args[3]);
+      return exactPolicies[`service-account:${account?.id}`];
+    }
+    throw new Error('unexpected IAM policy operation');
+  };
+  const plane = new GcpControlPlane({
+    contract, notificationChannel: CHANNEL,
+    gcloud: async (args) => {
+      if (args[0] === 'services' && args[1] === 'list') {
+        return enabledServiceRows(enabledApis);
+      }
+      if (args[0] === 'iam' && args[1] === 'roles' && args[2] === 'list') {
+        return contract.resources.customRoles.map((role) => ({ ...role, deleted: false }));
+      }
+      if (args.includes('get-iam-policy')) return policyFor(args);
+      throw new Error('unexpected gcloud operation');
+    },
+    request: async () => { throw new Error('REST must not run'); },
+  });
+  plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
+  plane.auditUserManagedServiceAccountKeys = async () => undefined;
+  plane.read = async () => ({ status: 'present', value: { exact: true } });
+  plane.compare = () => true;
+
+  await assert.rejects(
+    () => plane.finalReadback({
+      notificationChannel: CHANNEL,
+      secretVersions: {
+        [GCP_IDENTITY.secrets.dbAppUrl]: '1',
+        [GCP_IDENTITY.secrets.dbMigratorUrl]: '1',
+        [GCP_IDENTITY.secrets.session]: '1',
+        [GCP_IDENTITY.secrets.bootstrap]: '1',
+      },
+    }),
+    (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
+  );
+});
+
+test('final readback ends with a stable API-bracketed exact IAM decision', async () => {
+  const contract = await contractFixture();
+  const exactPolicies = exactManagedIamPolicies(contract);
+  let serviceRead = 0;
+  const policyFor = (args) => {
+    if (args[0] === 'projects') return exactPolicies.project;
+    if (args[0] === 'storage') return exactPolicies[`bucket:${args[3].slice('gs://'.length)}`];
+    if (args[0] === 'artifacts') return exactPolicies[`repository:${args[3]}`];
+    if (args[0] === 'secrets') return exactPolicies[`secret:${args[2]}`];
+    if (args[0] === 'iam' && args[1] === 'service-accounts') {
+      const account = contract.resources.serviceAccounts.find(({ email }) => email === args[3]);
+      return exactPolicies[`service-account:${account?.id}`];
+    }
+    throw new Error('unexpected IAM policy operation');
+  };
+  const plane = new GcpControlPlane({
+    contract, notificationChannel: CHANNEL,
+    gcloud: async (args) => {
+      if (args[0] === 'services' && args[1] === 'list') {
+        serviceRead += 1;
+        return enabledServiceRows(serviceRead === 1
+          ? AUTOMATIC_BINDING_APIS
+          : AUTOMATIC_BINDING_APIS.filter((name) => ![
+            'containerregistry.googleapis.com', 'pubsub.googleapis.com',
+          ].includes(name)));
+      }
+      if (args[0] === 'iam' && args[1] === 'roles' && args[2] === 'list') {
+        return contract.resources.customRoles.map((role) => ({ ...role, deleted: false }));
+      }
+      if (args.includes('get-iam-policy')) return policyFor(args);
+      throw new Error('unexpected gcloud operation');
+    },
+    request: async () => { throw new Error('REST must not run'); },
+  });
+  plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
+  plane.auditUserManagedServiceAccountKeys = async () => undefined;
+  plane.read = async () => ({ status: 'present', value: { exact: true } });
+  plane.compare = () => true;
+
+  await assert.rejects(
+    () => plane.finalReadback({
+      notificationChannel: CHANNEL,
+      secretVersions: {
+        [GCP_IDENTITY.secrets.dbAppUrl]: '1',
+        [GCP_IDENTITY.secrets.dbMigratorUrl]: '1',
+        [GCP_IDENTITY.secrets.session]: '1',
+        [GCP_IDENTITY.secrets.bootstrap]: '1',
+      },
+    }),
+    (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
+  );
+});
+
 test('pre-sensitive managed IAM audit reads the exact custom role definition before secrets', async () => {
   const contract = await contractFixture();
   const gcloudCalls = [];
@@ -1708,6 +2086,7 @@ test('pre-sensitive managed IAM audit reads the exact custom role definition bef
     contract, notificationChannel: CHANNEL,
     gcloud: async (args) => {
       gcloudCalls.push(args);
+      if (args[0] === 'services' && args[1] === 'list') return enabledServiceRows([]);
       if (args[0] === 'iam' && args[1] === 'roles' && args[2] === 'list') return [customRole];
       if (args.includes('get-iam-policy')) return { bindings: [] };
       throw new Error('unexpected gcloud operation');
@@ -2272,9 +2651,9 @@ function preflightGcloud({
       billingEnabled: true, billingAccountName: 'billingAccounts/01F9FD-24EA9B-A9232C',
       ...billingLinkResponse,
     };
-    if (args[0] === 'services' && args[1] === 'list') return [
-      { config: { name: 'iam.googleapis.com' } }, { config: { name: 'serviceusage.googleapis.com' } },
-    ];
+    if (args[0] === 'services' && args[1] === 'list') {
+      return enabledServiceRows(['iam.googleapis.com', 'serviceusage.googleapis.com']);
+    }
     if (args[0] === 'asset' && args[1] === 'search-all-resources') return [];
     if (args[0] === 'compute' && args[1] === 'networks' && args.includes('list')) return [{
       name: 'default', selfLink: `projects/${PROJECT}/global/networks/default`,
@@ -2453,9 +2832,9 @@ test('real control plane rejects each missing protected baseline binding before 
           if (args[0] === 'billing' && args[1] === 'projects') return {
             billingEnabled: true, billingAccountName: `billingAccounts/${GCP_IDENTITY.billingAccountId}`,
           };
-          if (args[0] === 'services' && args[1] === 'list') return [
-            { config: { name: 'iam.googleapis.com' } }, { config: { name: 'serviceusage.googleapis.com' } },
-          ];
+          if (args[0] === 'services' && args[1] === 'list') {
+            return enabledServiceRows(['iam.googleapis.com', 'serviceusage.googleapis.com']);
+          }
           if (args[0] === 'asset' && args[1] === 'search-all-resources') return [];
           if (args[0] === 'projects' && args[1] === 'get-iam-policy') return {
             bindings: contract.project.protectedBindings.filter((binding) => binding !== missing).map(({ role, member }) => ({ role, members: [member] })),
@@ -2515,7 +2894,9 @@ test('real control plane completes the no-channel discovery stage with only API 
       };
       if (args[0] === 'asset' && args[1] === 'search-all-resources') return [];
       if (args[0] === 'iam' && args.includes('list')) return [];
-      if (args[0] === 'services' && args[1] === 'list') return (apisEnabled ? allApis : enabledBefore).map((name) => ({ config: { name } }));
+      if (args[0] === 'services' && args[1] === 'list') {
+        return enabledServiceRows(apisEnabled ? allApis : enabledBefore);
+      }
       if (args[0] === 'services' && args[1] === 'enable') { apisEnabled = true; return {}; }
       throw notFound();
     },
@@ -2641,7 +3022,7 @@ test('Cloud Asset retrieval is exhaustive and exactly 1000 valid rows cannot imp
   assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
 });
 
-test('Cloud Asset managed identities require exact type name numeric project parent location and metadata shapes', async (t) => {
+test('Cloud Asset managed identities require exact type name numeric project field canonical parent and metadata shapes', async (t) => {
   const contract = await contractFixture();
   const exactService = cloudAsset();
   const cases = [
@@ -2685,6 +3066,106 @@ test('Cloud Asset managed identities require exact type name numeric project par
       );
     });
   }
+});
+
+test('live Monitoring channel identity composes project-ID REST names with numeric Cloud Asset names', async () => {
+  const contract = await contractFixture();
+  const channel = {
+    name: PROJECT_ID_CHANNEL,
+    displayName: 'HK Buddy V1 operations',
+    type: 'email',
+    enabled: true,
+    verificationStatus: 'VERIFIED',
+    labels: { email_address: 'admin@motionexp.com' },
+    userLabels: {
+      application: 'hong_kong_buddy',
+      environment: 'production_v1',
+      hkbuddy_contract: 'operations',
+    },
+  };
+  const fixture = assetAuditControlPlane({
+    contract,
+    assets: [cloudAsset({
+      name: `//monitoring.googleapis.com/projects/${PROJECT_NUMBER}/notificationChannels/123456789`,
+      assetType: 'monitoring.googleapis.com/NotificationChannel',
+      project: `projects/${PROJECT_NUMBER}`,
+      displayName: 'HK Buddy V1 operations',
+      labels: { email_address: 'admin@motionexp.com' },
+      location: 'global',
+      parentFullResourceName: `//cloudresourcemanager.googleapis.com/projects/${PROJECT}`,
+      parentAssetType: 'cloudresourcemanager.googleapis.com/Project',
+      state: 'VERIFICATION_STATUS_VERIFIED',
+    })],
+    enabledApis: ['iam.googleapis.com', 'serviceusage.googleapis.com', 'monitoring.googleapis.com'],
+    restRows: {
+      '/alertPolicies': { alertPolicies: [] },
+      '/notificationChannels': ({ url }) => (
+        url.includes('pageSize=1000') ? { notificationChannels: [channel] } : channel
+      ),
+    },
+  });
+
+  await fixture.plane.auditPreMutationState({ notificationChannel: PROJECT_ID_CHANNEL });
+  assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+});
+
+test('an omitted default verification enum is classified as an unverified managed channel', async () => {
+  const contract = await contractFixture();
+  const fixture = assetAuditControlPlane({
+    contract,
+    assets: [],
+    enabledApis: ['iam.googleapis.com', 'serviceusage.googleapis.com', 'monitoring.googleapis.com'],
+    restRows: {
+      '/alertPolicies': { alertPolicies: [] },
+      '/notificationChannels': { notificationChannels: [{
+        name: PROJECT_ID_CHANNEL,
+        displayName: 'HK Buddy V1 operations',
+        type: 'email',
+        enabled: true,
+        labels: { email_address: 'admin@motionexp.com' },
+        userLabels: {
+          application: 'hong_kong_buddy',
+          environment: 'production_v1',
+          hkbuddy_contract: 'operations',
+        },
+      }] },
+    },
+  });
+
+  await assert.rejects(
+    () => fixture.plane.auditPreMutationState(),
+    (error) => error.code === 'RESOURCE_COLLISION',
+  );
+});
+
+test('Monitoring inventory rejects a managed channel for a different email address', async () => {
+  const contract = await contractFixture();
+  const fixture = assetAuditControlPlane({
+    contract,
+    assets: [],
+    enabledApis: ['iam.googleapis.com', 'serviceusage.googleapis.com', 'monitoring.googleapis.com'],
+    restRows: {
+      '/alertPolicies': { alertPolicies: [] },
+      '/notificationChannels': { notificationChannels: [{
+        name: PROJECT_ID_CHANNEL,
+        displayName: 'HK Buddy V1 operations',
+        type: 'email',
+        enabled: true,
+        verificationStatus: 'VERIFIED',
+        labels: { email_address: 'attacker@example.test' },
+        userLabels: {
+          application: 'hong_kong_buddy',
+          environment: 'production_v1',
+          hkbuddy_contract: 'operations',
+        },
+      }] },
+    },
+  });
+
+  await assert.rejects(
+    () => fixture.plane.auditPreMutationState(),
+    (error) => error.code === 'RESOURCE_COLLISION',
+  );
 });
 
 test('every exact managed top-level Cloud Asset identity is rejected on every wrong asset type', async (t) => {
@@ -2825,11 +3306,11 @@ test('enabled inventory rejects foreign managed display markers and malformed KR
   const cases = [
     {
       name: 'alert policy foreign display with generated ID', enabledApis: ['iam.googleapis.com', 'monitoring.googleapis.com'],
-      restRows: { '/alertPolicies': { alertPolicies: [{ name: `projects/${PROJECT_NUMBER}/alertPolicies/1`, displayName: 'HK Buddy V1 foreign policy', userLabels: {} }] }, '/notificationChannels': { notificationChannels: [] } },
+      restRows: { '/alertPolicies': { alertPolicies: [{ name: `projects/${PROJECT}/alertPolicies/1`, displayName: 'HK Buddy V1 foreign policy', userLabels: {} }] }, '/notificationChannels': { notificationChannels: [] } },
     },
     {
       name: 'notification channel foreign display with generated ID', enabledApis: ['iam.googleapis.com', 'monitoring.googleapis.com'],
-      restRows: { '/alertPolicies': { alertPolicies: [] }, '/notificationChannels': { notificationChannels: [{ name: `projects/${PROJECT_NUMBER}/notificationChannels/1`, displayName: 'HK Buddy V1 foreign operations', type: 'email', enabled: true, verificationStatus: 'VERIFIED', userLabels: {} }] } },
+      restRows: { '/alertPolicies': { alertPolicies: [] }, '/notificationChannels': { notificationChannels: [{ name: `projects/${PROJECT}/notificationChannels/1`, displayName: 'HK Buddy V1 foreign operations', type: 'email', enabled: true, verificationStatus: 'VERIFIED', userLabels: {} }] } },
     },
     {
       name: 'budget foreign display with generated ID', enabledApis: ['iam.googleapis.com', 'billingbudgets.googleapis.com'],
@@ -2872,12 +3353,12 @@ test('Monitoring policies channels and budgets reject the complete managed-name 
       await t.test(`${resource}: ${displayName}`, async () => {
         const monitoring = resource !== 'budget';
         const restRows = resource === 'policy' ? {
-          '/alertPolicies': { alertPolicies: [{ name: `projects/${PROJECT_NUMBER}/alertPolicies/1`, displayName, userLabels: {} }] },
+          '/alertPolicies': { alertPolicies: [{ name: `projects/${PROJECT}/alertPolicies/1`, displayName, userLabels: {} }] },
           '/notificationChannels': { notificationChannels: [] },
         } : resource === 'channel' ? {
           '/alertPolicies': { alertPolicies: [] },
           '/notificationChannels': { notificationChannels: [{
-            name: `projects/${PROJECT_NUMBER}/notificationChannels/1`, displayName,
+            name: `projects/${PROJECT}/notificationChannels/1`, displayName,
             type: 'email', enabled: true, verificationStatus: 'VERIFIED', userLabels: {},
           }] },
         } : {
@@ -3153,6 +3634,7 @@ test('preflight verifies an enabled target-project Monitoring channel and fails 
         return {
           name: CHANNEL, displayName: 'HK Buddy V1 operations',
           userLabels: { application: 'hong_kong_buddy', environment: 'production_v1', hkbuddy_contract: 'operations' },
+          labels: { email_address: 'admin@motionexp.com' },
           type: 'email', enabled: true, verificationStatus: 'VERIFIED',
         };
       },
@@ -3161,6 +3643,57 @@ test('preflight verifies an enabled target-project Monitoring channel and fails 
     assert.equal(result.exitCode, 0);
     assert.equal(result.publicReport.alertChannel, 'verified');
     assert.deepEqual(requests, [{ method: 'GET', url: `https://monitoring.googleapis.com/v3/${CHANNEL}` }]);
+  });
+
+  await t.test('numeric channel alias is normalized to the project-ID name returned by Monitoring', async () => {
+    const fixture = preflightGcloud({ projectPresent: true });
+    const requests = [];
+    const result = await runGcpPreflight({
+      argv: [`--notification-channel=${NUMERIC_CHANNEL}`],
+      contract: await contractFixture(),
+      gcloud: fixture.gcloud,
+      getRestPrincipal: async () => 'admin@motionexp.com',
+      request: async (input) => {
+        requests.push(input);
+        return {
+          name: PROJECT_ID_CHANNEL,
+          displayName: 'HK Buddy V1 operations',
+          userLabels: {
+            application: 'hong_kong_buddy', environment: 'production_v1', hkbuddy_contract: 'operations',
+          },
+          labels: { email_address: 'admin@motionexp.com' },
+          type: 'email', enabled: true, verificationStatus: 'VERIFIED',
+        };
+      },
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.publicReport.alertChannel, 'verified');
+    assert.deepEqual(requests, [{
+      method: 'GET', url: `https://monitoring.googleapis.com/v3/${PROJECT_ID_CHANNEL}`,
+    }]);
+  });
+
+  await t.test('verified channel for a different email address is rejected', async () => {
+    const fixture = preflightGcloud({ projectPresent: true });
+    const result = await runGcpPreflight({
+      argv: [`--notification-channel=${CHANNEL}`],
+      contract: await contractFixture(),
+      gcloud: fixture.gcloud,
+      getRestPrincipal: async () => 'admin@motionexp.com',
+      request: async () => ({
+        name: CHANNEL,
+        displayName: 'HK Buddy V1 operations',
+        userLabels: {
+          application: 'hong_kong_buddy', environment: 'production_v1', hkbuddy_contract: 'operations',
+        },
+        labels: { email_address: 'attacker@example.test' },
+        type: 'email', enabled: true, verificationStatus: 'VERIFIED',
+      }),
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.publicReport.code, 'ALERT_CHANNEL_UNVERIFIED');
   });
 
   await t.test('unverified channel', async () => {
