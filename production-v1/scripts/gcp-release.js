@@ -7228,6 +7228,8 @@ export async function runGcpRelease({
       let journalIntent = null;
       let journalAfterSha256 = null;
       let mutationAdapter = null;
+      let mutationOrdinal = null;
+      let finalPublicMutation = false;
       const restartingMutation = existingJournalIntent?.operationId === member.id;
       if (member.id === 'candidate-privacy-publish'
         || member.id === 'promote-privacy-publish') {
@@ -7351,9 +7353,9 @@ export async function runGcpRelease({
         if (pendingJournal !== null) {
           throw new Error('Prior release mutation lacks an authoritative checkpoint');
         }
-        const mutationOrdinal = restartingMutation
+        mutationOrdinal = restartingMutation
           ? existingJournalIntent.payload.mutationOrdinal : journalMutationCount + 1;
-        const finalPublicMutation = finalPublicMutations.some(({ operationId }) => (
+        finalPublicMutation = finalPublicMutations.some(({ operationId }) => (
           operationId === member.id
         ));
         if (selection.phase === 'promote' && finalPublicMutation && !restartingMutation) {
@@ -7436,7 +7438,6 @@ export async function runGcpRelease({
           existingJournalIntent = null;
           restartAdoptions.add(member.id);
         } else {
-          let proofExpiredAfterIntent = false;
           try {
             finalMutationGuard?.beforeOperation(member.id);
             journalIntent = await stateStore.appendIntent({
@@ -7451,22 +7452,11 @@ export async function runGcpRelease({
               beforeSha256: canonicalSha256(beforeState),
               afterSha256: journalAfterSha256,
             }, { operationId: member.id });
-            const postIntentNow = selection.phase === 'promote' && finalPublicMutation
-              ? now() : null;
-            proofExpiredAfterIntent = postIntentNow !== null
-              && promotionProofExpired(promotionPrivacyReference, postIntentNow);
             if (mutationAdapter.finalPublicMutation) {
               finalMutationGuard?.afterOperation(member.id);
             }
           } catch (error) {
             error.code = 'RELEASE_JOURNAL_WRITE_FAILED';
-            throw error;
-          }
-          if (proofExpiredAfterIntent) {
-            journalMutationCount = mutationOrdinal;
-            await closePromotionAttemptForReproof(stateStore);
-            const error = new Error('Promotion privacy proof expired while publishing final intent');
-            error.code = 'PROMOTION_REPROOF_REQUIRED';
             throw error;
           }
         }
@@ -7478,38 +7468,58 @@ export async function runGcpRelease({
           operationId: member.id,
           restarting: restartingMutation,
         };
-        if (!restartingMutation) mutationAttempted = true;
       }
-      if (!restartingMutation && member.id === 'candidate-deploy') candidateDeployMutationAttempted = true;
-      if (!restartingMutation && member.id === 'candidate-private-iam-grant') candidateIamMutationAttempted = true;
-      if (!restartingMutation && member.id === 'promote-stable-deploy') promotionStableMutationAttempted = true;
-      if (!restartingMutation && member.id === 'promote-public-service') promotionIamMutationAttempted = true;
-      if (!restartingMutation && member.id === 'promote-traffic') promotionTrafficMutationAttempted = true;
       let receipt;
       let canonicalServiceAbsence = false;
-      try {
-        const restartObservation = restartingMutation
-          ? journalRestartObservation(member, plan) : null;
-        const operationArgv = member.id === 'build-readback'
+      const restartObservation = restartingMutation
+        ? journalRestartObservation(member, plan) : null;
+      const operationArgv = member.id === 'build-readback'
+        ? [
+          'builds', 'describe', buildReceipt?.buildId,
+          `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+        ]
+        : (member.id === 'migration-execution-readback'
           ? [
-            'builds', 'describe', buildReceipt?.buildId,
+            'run', 'jobs', 'executions', 'describe', migrationExecutionName,
             `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
           ]
-          : (member.id === 'migration-execution-readback'
+          : (selection.phase === 'acceptance' && member.id.endsWith('-execution-readback')
             ? [
-              'run', 'jobs', 'executions', 'describe', migrationExecutionName,
+              'run', 'jobs', 'executions', 'describe',
+              acceptanceExecutionNames[member.id.slice(0, -'-execution-readback'.length)],
               `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
             ]
-            : (selection.phase === 'acceptance' && member.id.endsWith('-execution-readback')
-              ? [
-                'run', 'jobs', 'executions', 'describe',
-                acceptanceExecutionNames[member.id.slice(0, -'-execution-readback'.length)],
-                `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
-              ]
-              : member.argv));
+            : member.argv));
+      if (mutationAdapter !== null && !restartingMutation
+        && selection.phase === 'promote' && finalPublicMutation) {
+        const postIntentNow = now();
+        if (promotionProofExpired(promotionPrivacyReference, postIntentNow)) {
+          journalMutationCount = mutationOrdinal;
+          await closePromotionAttemptForReproof(stateStore);
+          const error = new Error('Promotion privacy proof expired while publishing final intent');
+          error.code = 'PROMOTION_REPROOF_REQUIRED';
+          throw error;
+        }
+      }
+      try {
         try {
           if (!restartingMutation) {
-            receipt = await executor(operationArgv);
+            if (mutationAdapter === null) {
+              receipt = await executor(operationArgv);
+            } else {
+              let execution;
+              try {
+                execution = executor(operationArgv);
+              } finally {
+                mutationAttempted = true;
+                if (member.id === 'candidate-deploy') candidateDeployMutationAttempted = true;
+                if (member.id === 'candidate-private-iam-grant') candidateIamMutationAttempted = true;
+                if (member.id === 'promote-stable-deploy') promotionStableMutationAttempted = true;
+                if (member.id === 'promote-public-service') promotionIamMutationAttempted = true;
+                if (member.id === 'promote-traffic') promotionTrafficMutationAttempted = true;
+              }
+              receipt = await execution;
+            }
           } else if (restartObservation.mode === 'blocked') {
             throw new Error('Release restart lacks an authoritative correlation identity');
           } else if (restartObservation.mode === 'deferred-absence') {

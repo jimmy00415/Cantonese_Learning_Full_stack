@@ -437,9 +437,49 @@ export async function runPinnedPlaywrightFlow({
   const nativePlayback = [];
   const mediaPlayback = [];
   const webAudioContexts = new Map();
-  const webAudioSources = new Set();
-  const webAudioDestinations = new Set();
+  const webAudioNodes = new Map();
+  const webAudioEdges = new Map();
   const webAudioConnections = new Set();
+  const webAudioNodeMap = (contextId) => {
+    if (!webAudioNodes.has(contextId)) webAudioNodes.set(contextId, new Map());
+    return webAudioNodes.get(contextId);
+  };
+  const webAudioEdgeMap = (contextId) => {
+    if (!webAudioEdges.has(contextId)) webAudioEdges.set(contextId, new Map());
+    return webAudioEdges.get(contextId);
+  };
+  const webAudioPathReachesDestination = (contextId) => {
+    const nodes = webAudioNodes.get(contextId);
+    const edges = webAudioEdges.get(contextId);
+    if (!nodes || !edges) return false;
+    const destinations = new Set();
+    const pending = [];
+    for (const [nodeId, node] of nodes.entries()) {
+      if (/AudioDestination/i.test(node.nodeType)) destinations.add(nodeId);
+      if (node.numberOfInputs === 0 && node.numberOfOutputs > 0) pending.push(nodeId);
+    }
+    if (destinations.size === 0 || pending.length === 0) return false;
+    const adjacency = new Map();
+    for (const { sourceId, destinationId } of edges.values()) {
+      if (!adjacency.has(sourceId)) adjacency.set(sourceId, new Set());
+      adjacency.get(sourceId).add(destinationId);
+    }
+    const visited = new Set();
+    while (pending.length > 0) {
+      const nodeId = pending.shift();
+      if (visited.has(nodeId)) continue;
+      visited.add(nodeId);
+      if (destinations.has(nodeId)) return true;
+      for (const destinationId of adjacency.get(nodeId) ?? []) pending.push(destinationId);
+    }
+    return false;
+  };
+  const refreshWebAudioPath = (contextId) => {
+    const reachesDestination = webAudioPathReachesDestination(contextId);
+    if (reachesDestination) webAudioConnections.add(contextId);
+    else webAudioConnections.delete(contextId);
+    return reachesDestination;
+  };
   let primaryPage = null;
   let abortNextMessage = false;
   let explicitPlayStarted = false;
@@ -600,23 +640,41 @@ export async function runPinnedPlaywrightFlow({
       });
       if (audioContext.contextState === 'running'
         && audioContext.contextType === 'realtime'
-        && webAudioConnections.has(audioContext.contextId) && !explicitPlayStarted) {
+        && refreshWebAudioPath(audioContext.contextId) && !explicitPlayStarted) {
         failures.push('preplay-webaudio');
       }
     });
     pageCdp.on('WebAudio.audioNodeCreated', ({ node }) => {
-      if (/AudioBufferSource|Oscillator/i.test(node?.nodeType ?? '')) {
-        webAudioSources.add(`${node.contextId}:${node.nodeId}`);
-      }
-      if (/AudioDestination/i.test(node?.nodeType ?? '')) {
-        webAudioDestinations.add(`${node.contextId}:${node.nodeId}`);
-      }
+      if (!node?.contextId || !node?.nodeId || typeof node.nodeType !== 'string') return;
+      webAudioNodeMap(node.contextId).set(node.nodeId, {
+        nodeType: node.nodeType,
+        numberOfInputs: node.numberOfInputs,
+        numberOfOutputs: node.numberOfOutputs,
+      });
+      refreshWebAudioPath(node.contextId);
     });
-    pageCdp.on('WebAudio.nodesConnected', ({ contextId, sourceId, destinationId }) => {
-      const sourceKey = `${contextId}:${sourceId}`;
-      const destinationKey = `${contextId}:${destinationId}`;
-      if (webAudioSources.has(sourceKey) && webAudioDestinations.has(destinationKey)) {
-        webAudioConnections.add(contextId);
+    pageCdp.on('WebAudio.audioNodeWillBeDestroyed', ({ contextId, nodeId }) => {
+      webAudioNodes.get(contextId)?.delete(nodeId);
+      const edges = webAudioEdges.get(contextId);
+      if (edges) {
+        for (const [key, edge] of edges.entries()) {
+          if (edge.sourceId === nodeId || edge.destinationId === nodeId) edges.delete(key);
+        }
+      }
+      refreshWebAudioPath(contextId);
+    });
+    pageCdp.on('WebAudio.contextWillBeDestroyed', ({ contextId }) => {
+      webAudioContexts.delete(contextId);
+      webAudioNodes.delete(contextId);
+      webAudioEdges.delete(contextId);
+      webAudioConnections.delete(contextId);
+    });
+    pageCdp.on('WebAudio.nodesConnected', ({
+      contextId, sourceId, destinationId, sourceOutputIndex, destinationInputIndex,
+    }) => {
+      const key = JSON.stringify([sourceId, destinationId, sourceOutputIndex, destinationInputIndex]);
+      webAudioEdgeMap(contextId).set(key, { sourceId, destinationId, sourceOutputIndex, destinationInputIndex });
+      if (refreshWebAudioPath(contextId)) {
         const contextState = webAudioContexts.get(contextId);
         if (contextState?.state === 'running' && contextState.type === 'realtime'
           && !explicitPlayStarted) failures.push('preplay-webaudio');
@@ -627,6 +685,20 @@ export async function runPinnedPlaywrightFlow({
           );
         }
       }
+    });
+    pageCdp.on('WebAudio.nodesDisconnected', ({
+      contextId, sourceId, destinationId, sourceOutputIndex, destinationInputIndex,
+    }) => {
+      const edges = webAudioEdges.get(contextId);
+      if (!edges) return;
+      for (const [key, edge] of edges.entries()) {
+        if (edge.sourceId !== sourceId) continue;
+        if (destinationId !== null && destinationId !== undefined && edge.destinationId !== destinationId) continue;
+        if (sourceOutputIndex !== undefined && edge.sourceOutputIndex !== sourceOutputIndex) continue;
+        if (destinationInputIndex !== undefined && edge.destinationInputIndex !== destinationInputIndex) continue;
+        edges.delete(key);
+      }
+      refreshWebAudioPath(contextId);
     });
     await pageCdp.send('Runtime.enable');
     await pageCdp.send('Page.enable');

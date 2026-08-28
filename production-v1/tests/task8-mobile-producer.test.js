@@ -549,6 +549,7 @@ test('isolated browser witness rejects data, blob, preloaded, and WebAudio playb
     blob: `<script>attack.onclick=async()=>{const blob=await fetch('data:audio/wav;base64,${audioData}').then(r=>r.blob());const audio=new Audio(URL.createObjectURL(blob));audio.hidden=true;document.body.append(audio);await audio.play()}</script>`,
     preloaded: '<audio id="hidden" hidden preload="auto" src="/audio.wav"></audio><script>attack.onclick=()=>hidden.play()</script>',
     webaudio: '<script>attack.onclick=async()=>{const context=new AudioContext();const buffer=context.createBuffer(1,16000,16000);buffer.getChannelData(0).fill(.1);const source=context.createBufferSource();source.buffer=buffer;source.connect(context.destination);source.start()}</script>',
+    'webaudio-intermediate': '<script>attack.onclick=async()=>{const context=new AudioContext();const buffer=context.createBuffer(1,16000,16000);buffer.getChannelData(0).fill(.1);const source=context.createBufferSource();const gain=context.createGain();source.buffer=buffer;source.connect(gain);gain.connect(context.destination);source.start()}</script>',
   };
   for (const [name, attack] of Object.entries(attacks)) {
     const candidate = createServer((request, response) => {
