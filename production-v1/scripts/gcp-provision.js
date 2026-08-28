@@ -505,12 +505,20 @@ function safeArgv(argv) {
   return argv;
 }
 
+function nonInteractiveGcloudArgs(prefixArgs, argv) {
+  const args = [...safeArgv(prefixArgs), ...safeArgv(argv)];
+  const quietCount = args.filter((value) => value === '--quiet').length;
+  if (quietCount > 1) throw new Error('gcloud non-interactive argv is invalid');
+  if (quietCount === 0) args.push('--quiet');
+  return args;
+}
+
 export function createGcloudExecutor({ executable, prefixArgs = [], execFile = execFileAsync } = {}) {
   if (typeof executable !== 'string' || !executable
     || !Array.isArray(prefixArgs) || prefixArgs.some((value) => typeof value !== 'string')
     || typeof execFile !== 'function') throw new Error('gcloud executor configuration is invalid');
   return async (argv, { maxBuffer = 1024 * 1024 } = {}) => {
-    const args = [...safeArgv(prefixArgs), ...safeArgv(argv)];
+    const args = nonInteractiveGcloudArgs(prefixArgs, argv);
     if (!Number.isSafeInteger(maxBuffer) || maxBuffer < 1 || maxBuffer > 32 * 1024 * 1024) {
       throw new Error('gcloud output limit is invalid');
     }
@@ -649,10 +657,10 @@ export function createGcloudAuthenticatedRequest({
     if (environmentOverride) throw commandError('GCLOUD_AUTH_OVERRIDE');
     let result;
     try {
-      result = await execFile(executable, [
-        ...safeArgv(prefixArgs), 'config', 'list',
+      result = await execFile(executable, nonInteractiveGcloudArgs(prefixArgs, [
+        'config', 'list',
         '--format=json', `--project=${PROJECT}`,
-      ], { encoding: 'utf8', maxBuffer: 64 * 1024, windowsHide: true });
+      ]), { encoding: 'utf8', maxBuffer: 64 * 1024, windowsHide: true });
     } catch (cause) {
       throw commandError(classifyTransportError(cause));
     }
@@ -679,10 +687,10 @@ export function createGcloudAuthenticatedRequest({
     await assertNoAuthOverrides();
     let result;
     try {
-      result = await execFile(executable, [
-        ...safeArgv(prefixArgs), 'auth', 'print-access-token',
+      result = await execFile(executable, nonInteractiveGcloudArgs(prefixArgs, [
+        'auth', 'print-access-token',
         `--account=${account}`, `--project=${PROJECT}`,
-      ], { encoding: 'utf8', maxBuffer: 64 * 1024, windowsHide: true });
+      ]), { encoding: 'utf8', maxBuffer: 64 * 1024, windowsHide: true });
     } catch (cause) {
       throw commandError(classifyTransportError(cause));
     }
@@ -798,7 +806,7 @@ export function createDefaultGcloudTextExecutor({
   const { executable, prefixArgs } = resolveDefaultGcloudLaunch(environment);
   if (typeof execFile !== 'function') throw new Error('gcloud executor configuration is invalid');
   return async (argv, { signal, maxBuffer = 1024 * 1024 } = {}) => {
-    const args = [...safeArgv(prefixArgs), ...safeArgv(argv)];
+    const args = nonInteractiveGcloudArgs(prefixArgs, argv);
     if (!Number.isSafeInteger(maxBuffer) || maxBuffer < 1 || maxBuffer > 4 * 1024 * 1024) {
       throw new Error('gcloud text output limit is invalid');
     }

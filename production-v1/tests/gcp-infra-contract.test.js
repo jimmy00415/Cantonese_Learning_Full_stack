@@ -11,6 +11,7 @@ import {
   assertCidrAvailable,
   assertResourceContract,
   createAuthenticatedRequest,
+  createDefaultGcloudTextExecutor,
   createGcloudExecutor,
   createGcloudAuthenticatedRequest,
   ensureExactResource,
@@ -527,9 +528,19 @@ test('gcloud execution is argv-only and rejects values that could disclose a sec
   assert.deepEqual(result, { ok: true });
   assert.deepEqual(calls, [{
     executable: 'python.exe',
-    args: ['C:/gcloud/lib/gcloud.py', 'projects', 'describe', PROJECT, `--project=${PROJECT}`, '--format=json'],
+    args: [
+      'C:/gcloud/lib/gcloud.py', 'projects', 'describe', PROJECT,
+      `--project=${PROJECT}`, '--format=json', '--quiet',
+    ],
     options: { encoding: 'utf8', maxBuffer: 1048576, windowsHide: true },
   }]);
+  assert.equal(calls[0].args.filter((value) => value === '--quiet').length, 1);
+  await executor(['projects', 'describe', PROJECT, `--project=${PROJECT}`, '--format=json', '--quiet']);
+  assert.equal(calls[1].args.filter((value) => value === '--quiet').length, 1);
+  await assert.rejects(
+    () => executor(['projects', 'describe', PROJECT, '--quiet', '--quiet']),
+    /non-interactive|quiet|argv/i,
+  );
   await assert.rejects(() => executor(`projects describe ${PROJECT}`), /argv array/);
   await assert.rejects(() => executor(['sql', 'users', 'create', '--password=hunter2']), /secret-bearing argv/);
   await assert.rejects(() => executor(['run', 'deploy', 'postgres://user:pass@example.test/db']), /secret-bearing argv/);
@@ -546,6 +557,31 @@ test('gcloud execution is argv-only and rejects values that could disclose a sec
   await assert.rejects(
     () => permissionExecutor(['projects', 'describe', PROJECT, `--project=${PROJECT}`, '--format=json']),
     (error) => error.code === 'FORBIDDEN',
+  );
+});
+
+test('gcloud text execution is explicitly non-interactive exactly once', async () => {
+  const calls = [];
+  const executor = createDefaultGcloudTextExecutor({
+    environment: {
+      V1_GCP_PYTHON_EXECUTABLE: 'C:\\runtime\\python.exe',
+      V1_GCLOUD_PY_PATH: 'C:\\sdk\\gcloud.py',
+    },
+    execFile: async (executable, args, options) => {
+      calls.push({ executable, args, options });
+      return { stdout: 'admin@motionexp.com\n', stderr: '' };
+    },
+  });
+
+  assert.equal(await executor(['config', 'get-value', 'account', `--project=${PROJECT}`]),
+    'admin@motionexp.com\n');
+  await executor([
+    'auth', 'print-identity-token', '--audiences=https://candidate.example.test', '--quiet',
+  ]);
+  assert.deepEqual(calls.map((call) => call.args.filter((value) => value === '--quiet').length), [1, 1]);
+  await assert.rejects(
+    () => executor(['config', 'get-value', 'account', '--quiet', '--quiet']),
+    /non-interactive|quiet|argv/i,
   );
 });
 
@@ -820,12 +856,16 @@ test('default-style HTTPS authentication reuses the exact gcloud account without
   assert.equal(execCalls.length, 2);
   assert.deepEqual(execCalls[0].args, [
     'C:/gcloud/lib/gcloud.py', 'config', 'list',
-    '--format=json', `--project=${PROJECT}`,
+    '--format=json', `--project=${PROJECT}`, '--quiet',
   ]);
   assert.deepEqual(execCalls[1].args, [
     'C:/gcloud/lib/gcloud.py', 'auth', 'print-access-token',
-    '--account=admin@motionexp.com', `--project=${PROJECT}`,
+    '--account=admin@motionexp.com', `--project=${PROJECT}`, '--quiet',
   ]);
+  assert.deepEqual(
+    execCalls.map((call) => call.args.filter((value) => value === '--quiet').length),
+    [1, 1],
+  );
   assert.deepEqual(tokenInfoCalls, ['sensitive-bearer-token']);
   assert.equal(JSON.stringify(execCalls).includes('sensitive-bearer-token'), false);
   assert.equal(JSON.stringify(execCalls).includes('body-only'), false);
