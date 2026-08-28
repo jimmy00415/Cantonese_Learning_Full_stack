@@ -187,7 +187,7 @@ export function validateTask8ReadinessRecord(record, {
       || record.trafficState !== 'candidate-service-private-100'
       || !['stable-absent', 'stable-prior-100'].includes(record.stableTrafficState)
       || record.trafficPercent !== 100 || !Number.isFinite(occurredAt)
-      || !Number.isFinite(expiresAt) || current < occurredAt - 30_000 || current > expiresAt
+      || !Number.isFinite(expiresAt) || current < occurredAt - 30_000 || current >= expiresAt
       || !exactKeys(record.privacyProofs, ['end', 'start'])) fail();
     const start = normalizedPrivacyLocator(record.privacyProofs.start);
     const end = normalizedPrivacyLocator(record.privacyProofs.end);

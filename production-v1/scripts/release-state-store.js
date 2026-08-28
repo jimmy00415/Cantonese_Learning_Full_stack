@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { constants as fsConstants } from 'node:fs';
 import {
   link, lstat, mkdir, open, readFile, readdir, realpath, rename, unlink,
 } from 'node:fs/promises';
@@ -35,9 +36,9 @@ const CHECKPOINT_OUTCOMES = new Set([
   'applied', 'adopted-response-loss', 'adopted-restart', 'verified-noop',
 ]);
 const TERMINAL_STATUSES = new Set(['phase-complete', 'phase-blocked']);
-const RECORD_TYPES = new Set(['intent', 'checkpoint', 'terminal']);
-const JOURNAL_NAME = /^(\d{8})-(intent|checkpoint|terminal)\.json$/;
-const TEMP_NAME = /^(\d{8}-(?:intent|checkpoint|terminal)\.json)\.tmp-([0-9a-f]{32})$/;
+const RECORD_TYPES = new Set(['abort', 'intent', 'checkpoint', 'terminal']);
+const JOURNAL_NAME = /^(\d{8})-(abort|intent|checkpoint|terminal)\.json$/;
+const TEMP_NAME = /^(\d{8}-(?:abort|intent|checkpoint|terminal)\.json)\.tmp-([0-9a-f]{32})$/;
 const STALE_LOCK_NAME = /^\.release-state\.lock\.stale-([0-9a-f]{32})$/;
 const COMMON_KEYS = [
   'attemptId', 'createdAt', 'generation', 'operationId', 'payload', 'phase',
@@ -139,7 +140,9 @@ function assertSafeResult(value) {
 }
 
 function assertPublication(value) {
-  if (!exactKeys(value, ['artifacts', 'bundleSha256'])
+  const hasReceipt = isPlainObject(value) && Object.hasOwn(value, 'receipt');
+  if (!exactKeys(value, hasReceipt ? ['artifacts', 'bundleSha256', 'receipt']
+    : ['artifacts', 'bundleSha256'])
     || !Array.isArray(value.artifacts) || value.artifacts.length < 1
     || value.artifacts.length > 8
     || !DIGEST.test(String(value.bundleSha256 ?? ''))) fail();
@@ -164,6 +167,9 @@ function assertPublication(value) {
     paths.add(resolve(artifact.filePath));
     totalBytes += bytes.length;
   }
+  if (hasReceipt && (!isPlainObject(value.receipt)
+    || Buffer.byteLength(canonicalJson(value.receipt)) > 512 * 1024
+    || containsForbiddenPersistedSecret(value.receipt))) fail();
   if (totalBytes > 12 * 1024 * 1024
     || sha256(canonicalJson(value.artifacts)) !== value.bundleSha256) fail();
 }
@@ -193,6 +199,12 @@ function assertCheckpointPayload(payload) {
     || !CHECKPOINT_OUTCOMES.has(payload.outcome)
     || !DIGEST.test(String(payload.observationSha256 ?? ''))) fail();
   assertSafeResult(payload.safeResult);
+}
+
+function assertAbortPayload(payload) {
+  if (!exactKeys(payload, ['intentRecordSha256', 'reason'])
+    || !DIGEST.test(String(payload.intentRecordSha256 ?? ''))
+    || payload.reason !== 'expired-before-final-mutation') fail();
 }
 
 function assertTerminalState(value) {
@@ -242,6 +254,7 @@ function assertRecordShape(record) {
     || containsForbiddenPersistedSecret(record)) fail();
   if (record.recordType === 'intent') assertIntentPayload(record.payload);
   if (record.recordType === 'checkpoint') assertCheckpointPayload(record.payload);
+  if (record.recordType === 'abort') assertAbortPayload(record.payload);
   if (record.recordType === 'terminal') assertTerminalPayload(record.payload);
   if ((record.recordType === 'terminal') !== (record.operationId === null)) fail();
   if (recordHash(record) !== record.recordSha256) fail();
@@ -316,6 +329,10 @@ export function validateJournalRecords(records, { allowOpenIntent = true } = {})
         openIntent = null;
         checkpointCount += 1;
         lastCheckpoint = record;
+      } else if (record.recordType === 'abort') {
+        if (openIntent === null || record.operationId !== openIntent.operationId
+          || record.payload.intentRecordSha256 !== openIntent.recordSha256) fail();
+        openIntent = null;
       } else {
         if (openIntent !== null || lastCheckpoint === null
           || record.payload.checkpointRecordSha256 !== lastCheckpoint.recordSha256
@@ -344,6 +361,109 @@ export function validateJournalRecords(records, { allowOpenIntent = true } = {})
 function pathWithin(parent, child) {
   const member = relative(resolve(parent), resolve(child));
   return member === '' || (!member.startsWith('..') && !isAbsolute(member));
+}
+
+function statIdentityMatches(left, right) {
+  const comparable = (value) => typeof value === 'bigint'
+    || (typeof value === 'number' && Number.isFinite(value));
+  return comparable(left?.dev) && comparable(left?.ino)
+    && comparable(right?.dev) && comparable(right?.ino)
+    && left.dev === right.dev && left.ino === right.ino;
+}
+
+function ordinaryFile(metadata) {
+  return metadata?.isFile?.() === true && metadata?.isSymbolicLink?.() !== true
+    && metadataSize(metadata) !== null;
+}
+
+function metadataSize(metadata) {
+  if (typeof metadata?.size === 'bigint') {
+    if (metadata.size < 0n || metadata.size > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+    return Number(metadata.size);
+  }
+  return Number.isSafeInteger(metadata?.size) && metadata.size >= 0 ? metadata.size : null;
+}
+
+function exactMetadataSize(metadata, expected) {
+  return metadataSize(metadata) === expected;
+}
+
+function canonicalPathMatches(actual, expected) {
+  const normalize = (value) => process.platform === 'win32' ? value.toLowerCase() : value;
+  return normalize(resolve(actual)) === normalize(resolve(expected));
+}
+
+export async function readBoundedOrdinaryFile(filePath, {
+  expectedByteLength = null,
+  maximumBytes = 4 * 1024 * 1024,
+  afterOpen = null,
+} = {}) {
+  if (!isAbsolute(filePath) || !Number.isSafeInteger(maximumBytes) || maximumBytes < 1
+    || (expectedByteLength !== null
+      && (!Number.isSafeInteger(expectedByteLength) || expectedByteLength < 1
+        || expectedByteLength > maximumBytes))
+    || (afterOpen !== null && typeof afterOpen !== 'function')) {
+    throw new Error('Bounded ordinary file read input is invalid');
+  }
+  const parent = dirname(filePath);
+  const parentBefore = await lstat(parent, { bigint: true });
+  const parentRealBefore = await realpath(parent);
+  if (!parentBefore.isDirectory() || parentBefore.isSymbolicLink()
+    || !canonicalPathMatches(parentRealBefore, parent)) {
+    throw new Error('Bounded ordinary file parent is invalid');
+  }
+  // An initial ENOENT is intentionally preserved so a create-only publisher can
+  // distinguish absence from any identity drift after the path was observed.
+  const pathBefore = await lstat(filePath, { bigint: true });
+  if (!ordinaryFile(pathBefore)) throw new Error('Bounded ordinary file is invalid');
+  const byteLength = expectedByteLength ?? metadataSize(pathBefore);
+  if (byteLength < 1 || byteLength > maximumBytes || !exactMetadataSize(pathBefore, byteLength)) {
+    throw new Error('Bounded ordinary file length is invalid');
+  }
+  const noFollow = Number.isInteger(fsConstants.O_NOFOLLOW) ? fsConstants.O_NOFOLLOW : 0;
+  let handle;
+  try {
+    handle = await open(filePath, fsConstants.O_RDONLY | noFollow);
+    const opened = await handle.stat({ bigint: true });
+    const pathOpened = await lstat(filePath, { bigint: true });
+    if (!ordinaryFile(opened) || !exactMetadataSize(opened, byteLength) || !ordinaryFile(pathOpened)
+      || !exactMetadataSize(pathOpened, byteLength) || !statIdentityMatches(pathBefore, opened)
+      || !statIdentityMatches(pathOpened, opened)) {
+      throw new Error('Bounded ordinary file identity changed');
+    }
+    await afterOpen?.();
+    const bytes = Buffer.allocUnsafe(byteLength + 1);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const result = await handle.read(bytes, offset, bytes.length - offset, offset);
+      if (!Number.isSafeInteger(result?.bytesRead) || result.bytesRead < 0
+        || result.bytesRead > bytes.length - offset) {
+        throw new Error('Bounded ordinary file read is invalid');
+      }
+      if (result.bytesRead === 0) break;
+      offset += result.bytesRead;
+    }
+    if (offset !== byteLength) throw new Error('Bounded ordinary file size changed');
+    const descriptorAfter = await handle.stat({ bigint: true });
+    const pathAfter = await lstat(filePath, { bigint: true });
+    const parentAfter = await lstat(parent, { bigint: true });
+    const parentRealAfter = await realpath(parent);
+    if (!ordinaryFile(descriptorAfter) || !exactMetadataSize(descriptorAfter, byteLength)
+      || !ordinaryFile(pathAfter) || !exactMetadataSize(pathAfter, byteLength)
+      || !parentAfter.isDirectory() || parentAfter.isSymbolicLink()
+      || !statIdentityMatches(opened, descriptorAfter)
+      || !statIdentityMatches(pathAfter, descriptorAfter)
+      || !statIdentityMatches(parentBefore, parentAfter)
+      || !canonicalPathMatches(parentRealAfter, parent)
+      || !canonicalPathMatches(parentRealBefore, parentRealAfter)) {
+      throw new Error('Bounded ordinary file identity changed');
+    }
+    return Buffer.from(bytes.subarray(0, byteLength));
+  } catch (error) {
+    throw new Error('Bounded ordinary file changed or could not be read', { cause: error });
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
 }
 
 async function assertNoSymlinkPath(target) {
@@ -384,13 +504,21 @@ async function syncDirectory(directory) {
   }
 }
 
-export async function writeAtomicCreateOnly(filePath, bytes, { tempId = randomUUID().replaceAll('-', '') } = {}) {
+export async function writeAtomicCreateOnly(filePath, bytes, {
+  tempId = randomUUID().replaceAll('-', ''),
+  afterTempSync = null,
+} = {}) {
   if (!isAbsolute(filePath) || !OPERATION_ATTEMPT_ID.test(String(tempId ?? ''))
-    || !Buffer.isBuffer(bytes) || bytes.length < 1) {
+    || !Buffer.isBuffer(bytes) || bytes.length < 1
+    || (afterTempSync !== null && typeof afterTempSync !== 'function')) {
     throw new Error('Atomic create-only write input is invalid');
   }
   const parent = dirname(filePath);
-  await assertNoSymlinkPath(parent);
+  const parentRealBefore = await assertNoSymlinkPath(parent);
+  const parentBefore = await lstat(parent, { bigint: true });
+  if (!parentBefore.isDirectory() || parentBefore.isSymbolicLink()) {
+    throw new Error('Atomic create-only parent is invalid');
+  }
   try {
     await lstat(filePath);
     throw new Error('Atomic create-only target exists');
@@ -404,8 +532,35 @@ export async function writeAtomicCreateOnly(filePath, bytes, { tempId = randomUU
     handle = await open(temporaryPath, 'wx', 0o600);
     await handle.writeFile(bytes);
     await handle.sync();
+    const temporaryDescriptor = await handle.stat({ bigint: true });
+    const temporaryBefore = await lstat(temporaryPath, { bigint: true });
+    if (!ordinaryFile(temporaryDescriptor) || !exactMetadataSize(temporaryDescriptor, bytes.length)
+      || !ordinaryFile(temporaryBefore) || !exactMetadataSize(temporaryBefore, bytes.length)
+      || !statIdentityMatches(temporaryDescriptor, temporaryBefore)) {
+      throw new Error('Atomic create-only temporary identity changed');
+    }
     await handle.close();
     handle = null;
+    await afterTempSync?.();
+    let parentBeforePublish;
+    let parentRealBeforePublish;
+    let temporaryBeforePublish;
+    try {
+      parentBeforePublish = await lstat(parent, { bigint: true });
+      parentRealBeforePublish = await realpath(parent);
+      temporaryBeforePublish = await lstat(temporaryPath, { bigint: true });
+    } catch (error) {
+      throw new Error('Atomic create-only parent or temporary identity changed', { cause: error });
+    }
+    if (!parentBeforePublish.isDirectory() || parentBeforePublish.isSymbolicLink()
+      || !statIdentityMatches(parentBefore, parentBeforePublish)
+      || !canonicalPathMatches(parentRealBefore, parentRealBeforePublish)
+      || !canonicalPathMatches(parentRealBeforePublish, parent)
+      || !ordinaryFile(temporaryBeforePublish)
+      || !exactMetadataSize(temporaryBeforePublish, bytes.length)
+      || !statIdentityMatches(temporaryDescriptor, temporaryBeforePublish)) {
+      throw new Error('Atomic create-only parent or temporary identity changed');
+    }
     try {
       // Node has no portable rename-no-replace primitive. A same-directory hard link
       // is the atomic, create-only publication operation; unlinking the temp leaves
@@ -417,7 +572,23 @@ export async function writeAtomicCreateOnly(filePath, bytes, { tempId = randomUU
     }
     published = true;
     const finalHandle = await open(filePath, 'r+');
-    try { await finalHandle.sync(); } finally { await finalHandle.close(); }
+    try {
+      const finalDescriptor = await finalHandle.stat({ bigint: true });
+      const finalPathMetadata = await lstat(filePath, { bigint: true });
+      const parentAfter = await lstat(parent, { bigint: true });
+      const parentRealAfter = await realpath(parent);
+      if (!ordinaryFile(finalDescriptor) || !exactMetadataSize(finalDescriptor, bytes.length)
+        || !ordinaryFile(finalPathMetadata) || !exactMetadataSize(finalPathMetadata, bytes.length)
+        || !statIdentityMatches(temporaryDescriptor, finalDescriptor)
+        || !statIdentityMatches(finalPathMetadata, finalDescriptor)
+        || !parentAfter.isDirectory() || parentAfter.isSymbolicLink()
+        || !statIdentityMatches(parentBefore, parentAfter)
+        || !canonicalPathMatches(parentRealBefore, parentRealAfter)
+        || !canonicalPathMatches(parentRealAfter, parent)) {
+        throw new Error('Atomic create-only publication identity changed');
+      }
+      await finalHandle.sync();
+    } finally { await finalHandle.close(); }
     await unlink(temporaryPath);
     return Object.freeze({ directorySync: await syncDirectory(parent) });
   } finally {
@@ -705,9 +876,16 @@ export async function openReleaseStateStore({
         if (intent?.recordType !== 'intent') fail();
         return append(envelope('checkpoint', intent.operationId, payload));
       },
+      async appendAbort(payload) {
+        const intent = records.at(-1);
+        if (intent?.recordType !== 'intent') fail();
+        return append(envelope('abort', intent.operationId, payload));
+      },
       async appendTerminal(payload) {
-        const checkpoint = records.at(-1);
-        if (checkpoint?.recordType !== 'checkpoint') fail();
+        const previous = records.at(-1);
+        if (!['abort', 'checkpoint'].includes(previous?.recordType)
+          || !records.some((record) => record.recordType === 'checkpoint'
+            && record.attemptId === effectiveAttemptId)) fail();
         return append(finalizeJournalRecord(envelope('terminal', null, payload), {
           terminalState: payload.terminalState,
         }));

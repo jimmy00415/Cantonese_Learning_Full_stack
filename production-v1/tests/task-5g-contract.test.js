@@ -1019,9 +1019,9 @@ function createPrivacyHarness({ mutate = () => undefined } = {}) {
     if (command.startsWith('asset analyze-iam-policy ')) {
       const permission = argv.includes('--permissions=run.routes.invoke');
       const expandedRoles = argv.includes('--expand-roles');
-      assert.notEqual(permission, expandedRoles, 'analysis must choose exactly one query mode');
-      const value = structuredClone(permission
-        ? fixtures.analyses.permission : fixtures.analyses.expandedRoles);
+      assert.equal(permission, true, 'every analysis must query the invoke permission');
+      const value = structuredClone(expandedRoles
+        ? fixtures.analyses.expandedRoles : fixtures.analyses.permission);
       value.mainAnalysis.analysisQuery.identitySelector.identity = argv
         .find((member) => member.startsWith('--identity='))
         .slice('--identity='.length);
@@ -1166,14 +1166,17 @@ test('privacy command plan is read-only and hard-gates exact live prerequisites'
       expandedRoles: [
         'asset', 'analyze-iam-policy', `--organization=${GCP_IDENTITY.organizationId}`,
         `--full-resource-name=${CANDIDATE_RESOURCE}`, `--identity=${principal}`,
-        '--expand-roles', '--show-response',
+        '--permissions=run.routes.invoke', '--expand-roles', '--show-response',
         '--billing-project=tech-demo-433408', '--format=json', '--quiet',
       ],
     }]),
   ));
   for (const pair of Object.values(plan.assetAnalyses)) {
     assert.equal(pair.permission.includes('--expand-roles'), false);
-    assert.equal(pair.expandedRoles.some((member) => member.startsWith('--permissions=')), false);
+    assert.deepEqual(
+      pair.expandedRoles.filter((member) => member.startsWith('--permissions=')),
+      ['--permissions=run.routes.invoke'],
+    );
     assert.equal(pair.permission.some((member) => member.startsWith('--project=')), false);
     assert.equal(pair.expandedRoles.some((member) => member.startsWith('--project=')), false);
   }
@@ -1301,6 +1304,17 @@ test('controlled privacy producer proves inherited IAM, both edges, and exact lo
     now: new Date(PRIVACY_NOW),
   }), true);
   assert.deepEqual(finalizeCandidatePrivacyProof(proof), proof);
+  const nonzeroResultProof = structuredClone(proof);
+  nonzeroResultProof.cloudAsset.analyses.allUsers.resultCount = 1;
+  const refinalizedNonzeroResultProof = finalizeCandidatePrivacyProof(nonzeroResultProof);
+  assert.throws(() => validateCandidatePrivacyProof(refinalizedNonzeroResultProof, {
+    binding: harness.binding,
+    now: new Date(PRIVACY_NOW),
+  }), /Candidate privacy proof failed/);
+  assert.throws(() => validateCandidatePrivacyProof(proof, {
+    binding: harness.binding,
+    now: new Date(proof.expiresAt),
+  }), /Candidate privacy proof failed/);
   const serialized = JSON.stringify(proof);
   assert.equal(serialized.includes(harness.fixtures.token), false);
   assert.equal(serialized.includes('Bearer '), false);
@@ -1767,6 +1781,11 @@ test('readiness producer runs fresh privacy and authoritative live/ready evidenc
     sourceArchiveSha256,
     now: new Date(PRIVACY_NOW),
   }), true);
+  assert.throws(() => validateTask8ReadinessRecord(result.record, {
+    binding: harness.binding,
+    sourceArchiveSha256,
+    now: new Date(result.record.expiresAt),
+  }), /Task 8 readiness production failed/);
   assert.deepEqual(finalizeTask8ReadinessRecord(result.record), result.record);
   assert.equal(harness.tokenCalls.length, 4, 'two privacy proofs and two health probes mint in memory');
   assert.equal(harness.logRequests.filter(({ path }) => path === '/api/health/live').length, 5);

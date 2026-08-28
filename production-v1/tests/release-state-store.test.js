@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -10,6 +10,7 @@ import {
   finalizeJournalRecord,
   journalFileName,
   openReleaseStateStore,
+  readBoundedOrdinaryFile,
   recoverJournalTemp,
   validateJournalRecords,
   writeAtomicCreateOnly,
@@ -159,6 +160,50 @@ test('atomic create-only writer publishes exact bytes privately and refuses repl
   }
 });
 
+test('bounded ordinary-file adoption binds intended length and rejects a same-byte pathname swap', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hkbuddy-bounded-adoption-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const filePath = join(root, 'artifact.json');
+  const displaced = join(root, 'artifact.original.json');
+  const intended = Buffer.from('{"safe":true}\n');
+  await writeFile(filePath, intended);
+
+  assert.deepEqual(await readBoundedOrdinaryFile(filePath, {
+    expectedByteLength: intended.length, maximumBytes: 1024,
+  }), intended);
+  await assert.rejects(() => readBoundedOrdinaryFile(filePath, {
+    expectedByteLength: intended.length + 1, maximumBytes: 1024,
+  }), /ordinary file|length|size/i);
+
+  await assert.rejects(() => readBoundedOrdinaryFile(filePath, {
+    expectedByteLength: intended.length,
+    maximumBytes: 1024,
+    afterOpen: async () => {
+      await rename(filePath, displaced);
+      await writeFile(filePath, intended);
+    },
+  }), /ordinary file|changed|identity/i);
+  assert.deepEqual(await readFile(filePath), intended);
+});
+
+test('atomic create-only publication rejects parent replacement after temp durability', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hkbuddy-publication-parent-swap-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const stateDirectory = join(root, 'state');
+  const displacedDirectory = join(root, 'state.displaced');
+  const filePath = join(stateDirectory, 'artifact.json');
+  await mkdir(stateDirectory);
+
+  await assert.rejects(() => writeAtomicCreateOnly(filePath, Buffer.from('{"safe":true}\n'), {
+    tempId: '4'.repeat(32),
+    afterTempSync: async () => {
+      await rename(stateDirectory, displacedDirectory);
+      await mkdir(stateDirectory);
+    },
+  }), /parent|identity|changed/i);
+  await assert.rejects(() => readFile(filePath), { code: 'ENOENT' });
+});
+
 test('one valid contiguous crash temp is recovered and every ambiguous temp set is rejected', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'hkbuddy-state-recovery-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -295,6 +340,64 @@ test('state store appends one exact intent-checkpoint-terminal attempt', async (
   });
   assert.equal(validateJournalRecords(store.records), true);
   await store.close();
+});
+
+test('state store closes one unperformed intent with an abort and permits a new attempt', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hkbuddy-state-abort-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const receiptDirectory = join(root, 'receipts');
+  await mkdir(receiptDirectory);
+  const store = await openReleaseStateStore({
+    receiptDirectory,
+    releaseSha: RELEASE_SHA,
+    releaseIdentitySha256: RELEASE_IDENTITY,
+    phase: 'promote',
+    phasePlanSha256: PLAN_SHA,
+    attemptId: ATTEMPT_ID,
+    receiptHeadSha256: RECEIPT_HEAD,
+    now: () => new Date(CREATED_AT),
+    allowTemporaryState: true,
+  });
+  const proofIntent = await store.appendIntent(common().payload, {
+    operationId: 'promote-privacy-publish',
+  });
+  const proofCheckpoint = await store.appendCheckpoint({
+    intentRecordSha256: proofIntent.recordSha256,
+    classification: 'after', outcome: 'applied', observationSha256: '2'.repeat(64),
+    safeResult: { kind: 'artifact-bundle', artifactCount: 1, bundleSha256: '2'.repeat(64) },
+  });
+  const finalIntent = await store.appendIntent({
+    ...common().payload,
+    mutationOrdinal: 2,
+  }, { operationId: 'promote-traffic' });
+  await store.appendAbort({
+    intentRecordSha256: finalIntent.recordSha256,
+    reason: 'expired-before-final-mutation',
+  });
+  await store.appendTerminal({
+    status: 'phase-blocked', checkpointRecordSha256: proofCheckpoint.recordSha256,
+    receiptSha256: '4'.repeat(64),
+    terminalState: { code: 'PROMOTION_REPROOF_REQUIRED', mutationCount: 1, phase: 'promote' },
+    mutationCount: 1, responseLossOperationIds: [],
+  });
+  assert.equal(validateJournalRecords(store.records), true);
+  await store.close();
+
+  const nextAttemptId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const next = await openReleaseStateStore({
+    receiptDirectory,
+    releaseSha: RELEASE_SHA,
+    releaseIdentitySha256: RELEASE_IDENTITY,
+    phase: 'promote',
+    phasePlanSha256: PLAN_SHA,
+    attemptId: nextAttemptId,
+    receiptHeadSha256: RECEIPT_HEAD,
+    now: () => new Date(CREATED_AT),
+    allowTemporaryState: true,
+  });
+  assert.equal(next.attemptId, nextAttemptId);
+  assert.equal(next.records.at(-1).recordType, 'terminal');
+  await next.close();
 });
 
 test('state store reopens one matching in-flight attempt and rejects plan drift', async (t) => {

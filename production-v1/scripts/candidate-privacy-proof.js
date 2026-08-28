@@ -252,7 +252,7 @@ export function createCandidatePrivacyCommandPlan(rawBinding) {
         expandedRoles: frozenArgv(
           'asset', 'analyze-iam-policy', `--organization=${binding.organizationId}`,
           `--full-resource-name=${resource}`, `--identity=${principal}`,
-          '--expand-roles', '--show-response',
+          `--permissions=${INVOKE_PERMISSION}`, '--expand-roles', '--show-response',
           `--billing-project=${QUOTA_PROJECT}`, '--format=json', '--quiet',
         ),
       },
@@ -1359,7 +1359,7 @@ export function validateCandidatePrivacyProof(record, { binding: rawBinding, now
       || record.schemaVersion !== SCHEMA_VERSION || record.proofType !== 'candidate-effective-privacy'
       || record.result !== 'pass' || !DIGEST.test(String(record.artifactSha256 ?? ''))
       || !Number.isFinite(observed) || !Number.isFinite(expires)
-      || expires - observed !== MAXIMUM_AGE_MS || current < observed - 30_000 || current > expires
+      || expires - observed !== MAXIMUM_AGE_MS || current < observed - 30_000 || current >= expires
       || !exact(record.binding, proofBinding(binding))) fail();
     if (!exactKeys(record.controlPlane, ['afterSha256', 'beforeSha256', 'stable'])
       || record.controlPlane.stable !== true
@@ -1392,7 +1392,7 @@ export function validateCandidatePrivacyProof(record, { binding: rawBinding, now
       || !Object.values(record.cloudAsset.analyses).every((analysis) => (
         exactKeys(analysis, ['fullyExplored', 'nonCriticalErrorCount', 'responseSha256', 'resultCount'])
         && analysis.fullyExplored === true && analysis.nonCriticalErrorCount === 0
-        && Number.isSafeInteger(analysis.resultCount) && analysis.resultCount >= 0
+        && analysis.resultCount === 0
         && DIGEST.test(String(analysis.responseSha256 ?? ''))
       ))) fail();
     if (!exactKeys(record.troubleshooter, ['decision', 'responseSha256'])

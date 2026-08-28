@@ -21,7 +21,9 @@ import {
   recoverTerminalFromReceipt,
   validateReconciliationPrefix,
 } from './release-reconciliation.js';
-import { openReleaseStateStore, writeAtomicCreateOnly } from './release-state-store.js';
+import {
+  openReleaseStateStore, readBoundedOrdinaryFile, writeAtomicCreateOnly,
+} from './release-state-store.js';
 import { GCP_IDENTITY } from '../src/gcp-identity.js';
 import { finalizeReleaseEvidenceRecord } from '../src/services/release-evidence.js';
 import { finalizeEvidenceRecord } from '../src/services/voice-evidence.js';
@@ -340,8 +342,8 @@ export function assertTask8Evidence(value, { stableTrafficState, now = new Date(
     if (now !== null) {
       const current = new Date(now).getTime();
       if (!Number.isFinite(current)
-        || current < startObserved - 30_000 || current > Date.parse(start.expiresAt)
-        || current < endObserved - 30_000 || current > Date.parse(end.expiresAt)) {
+        || current < startObserved - 30_000 || current >= Date.parse(start.expiresAt)
+        || current < endObserved - 30_000 || current >= Date.parse(end.expiresAt)) {
         throw releaseContractError();
       }
     }
@@ -882,6 +884,14 @@ async function writeStableServiceSpecFile(plan) {
 function promotionIamRestorePolicyPath(plan, attemptId) {
   if (!UUID.test(String(attemptId ?? ''))) throw new Error('promotion IAM restore attempt is invalid');
   return join(dirname(plan.sourceArchive), `${plan.stableRevision}.iam-restore.${attemptId}.json`);
+}
+
+function promotionAttemptPrivacyProofPath(plan, attemptId) {
+  if (!UUID.test(String(attemptId ?? ''))) throw new Error('promotion privacy attempt is invalid');
+  return join(
+    plan.releaseReceiptDirectory,
+    `promotion-privacy-proof.${String(attemptId).toLowerCase()}.json`,
+  );
 }
 
 async function writePromotionIamRestorePolicyFile(plan, policy, { attemptId } = {}) {
@@ -2559,7 +2569,9 @@ export async function validateEvidenceArtifactFile(value, { releaseSha, kind = n
     metadata = await lstat(value.filePath);
     if (!metadata.isFile() || metadata.isSymbolicLink()
       || metadata.size < 2 || metadata.size > 1024 * 1024) throw new Error('invalid size');
-    contents = await readFile(value.filePath);
+    contents = await readBoundedOrdinaryFile(value.filePath, {
+      expectedByteLength: metadata.size, maximumBytes: 1024 * 1024,
+    });
   } catch { throw new Error('Evidence artifact file is invalid'); }
   const textValue = contents.toString('utf8');
   if (!Buffer.from(textValue, 'utf8').equals(contents)
@@ -2618,7 +2630,9 @@ export async function inspectCollectedEvidenceArtifact(filePath, { releaseSha, k
     metadata = await lstat(filePath);
     if (!metadata.isFile() || metadata.isSymbolicLink()
       || metadata.size < 2 || metadata.size > 1024 * 1024) throw new Error('invalid file');
-    contents = await readFile(filePath);
+    contents = await readBoundedOrdinaryFile(filePath, {
+      expectedByteLength: metadata.size, maximumBytes: 1024 * 1024,
+    });
   } catch { throw new Error('Collected evidence artifact is invalid'); }
   const textValue = contents.toString('utf8');
   if (!Buffer.from(textValue, 'utf8').equals(contents)
@@ -3129,7 +3143,9 @@ async function readExactJsonArtifact(entry, errorMessage) {
     if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size < 2 || metadata.size > 4 * 1024 * 1024) {
       throw new Error('invalid artifact');
     }
-    bytes = await readFile(entry.filePath);
+    bytes = await readBoundedOrdinaryFile(entry.filePath, {
+      expectedByteLength: metadata.size, maximumBytes: 4 * 1024 * 1024,
+    });
   } catch { throw new Error(errorMessage); }
   if (createHash('sha256').update(bytes).digest('hex') !== entry.objectSha256) {
     throw new Error(errorMessage);
@@ -3220,21 +3236,28 @@ export async function validateTask8EvidenceArtifact(entry, phase, plan, {
   const errorMessage = `Task 8 ${phase} evidence is invalid`;
   const { record } = await readExactJsonArtifact(entry, errorMessage);
   if (record?.artifactSha256 !== entry.artifactSha256) throw new Error(errorMessage);
+  const workloadStartClock = phase === 'workload'
+    ? new Date(gateWindow?.gateStartedAt) : null;
+  const workloadEndClock = phase === 'workload'
+    ? new Date(gateWindow?.gateEndedAt) : null;
   const privacyStart = await validatePrivacyProofArtifact(
     entry.privacyProofs.start,
     plan,
-    historical ? new Date(entry.privacyProofs.start.observedAt) : now,
+    phase === 'workload' ? workloadStartClock
+      : (historical ? new Date(entry.privacyProofs.start.observedAt) : now),
     errorMessage,
     validatePrivacyProof,
   );
   const privacyEnd = await validatePrivacyProofArtifact(
     entry.privacyProofs.end,
     plan,
-    historical ? new Date(entry.privacyProofs.end.observedAt) : now,
+    phase === 'workload' ? workloadEndClock
+      : (historical ? new Date(entry.privacyProofs.end.observedAt) : now),
     errorMessage,
     validatePrivacyProof,
   );
-  const validationNow = historical ? new Date(record.occurredAt) : now;
+  const validationNow = phase === 'workload' ? workloadEndClock
+    : (historical ? new Date(record.occurredAt) : now);
   if (privacyStart.binding.boundarySha256 !== privacyEnd.binding.boundarySha256
     || Date.parse(privacyEnd.occurredAt) <= Date.parse(privacyStart.occurredAt)) {
     throw new Error(errorMessage);
@@ -3414,13 +3437,27 @@ function validateReceiptOutputs(phase, outputs, plan) {
       throw new Error('Release evidence receipt outputs are invalid');
     }
   } else if (phase === 'candidate') {
+    let privacyProof;
+    try { privacyProof = assertPrivacyProofReference(outputs?.privacyProof); } catch {
+      throw new Error('Release candidate receipt outputs are invalid');
+    }
+    const expectedPrivacyProof = {
+      schemaVersion: 3,
+      filePath: plan.candidatePrivacyProofPath,
+      artifactSha256: privacyProof.artifactSha256,
+      objectSha256: privacyProof.objectSha256,
+      boundarySha256: candidatePrivacyBoundarySha256(candidatePrivacyBinding(plan)),
+      observedAt: privacyProof.observedAt,
+      expiresAt: privacyProof.expiresAt,
+    };
     if (!exactKeys(outputs, [
       'access', 'candidateContractSha256', 'candidateService', 'imageDigest', 'origin',
-      'privacyProof', 'publicInvoker', 'priorRelease', 'revision', 'stableService', 'stableTrafficState',
+      'privacyProof', 'privacyProofReferenceSha256', 'publicInvoker', 'priorRelease', 'revision', 'stableService', 'stableTrafficState',
       'tag', 'trafficPercent', 'trafficState',
     ])
       || !exact(outputs.access, plan.candidateAccess)
       || outputs.candidateContractSha256 !== canonicalSha256(plan.expectedCandidate)
+      || outputs.privacyProofReferenceSha256 !== canonicalSha256(privacyProof)
       || outputs.candidateService !== CANDIDATE_SERVICE || outputs.stableService !== STABLE_SERVICE
       || outputs.stableTrafficState !== plan.expectedStable.initialTrafficState
       || outputs.imageDigest !== plan.imageDigest || outputs.origin !== plan.candidateOrigin
@@ -3428,9 +3465,7 @@ function validateReceiptOutputs(phase, outputs, plan) {
       || outputs.trafficPercent !== candidateTrafficPercent(plan)
       || outputs.trafficState !== candidateTrafficState(plan)
       || outputs.publicInvoker !== false
-      || outputs.privacyProof.filePath !== plan.candidatePrivacyProofPath
-      || outputs.privacyProof.boundarySha256
-        !== candidatePrivacyBoundarySha256(candidatePrivacyBinding(plan))
+      || !exact(privacyProof, expectedPrivacyProof)
       || !exact(outputs.priorRelease, plan.previousRevision === null ? null : {
         image: plan.previousImage,
         imageDigest: plan.previousImageDigest,
@@ -3530,7 +3565,9 @@ async function loadReleaseReceiptFiles(plan, { through }) {
     if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size < 2 || metadata.size > 1024 * 1024) {
       throw new Error('Release receipt chain is invalid');
     }
-    const bytes = await readFile(filePath);
+    const bytes = await readBoundedOrdinaryFile(filePath, {
+      expectedByteLength: metadata.size, maximumBytes: 1024 * 1024,
+    });
     const raw = bytes.toString('utf8');
     if (!Buffer.from(raw).equals(bytes)) throw new Error('Release receipt chain is invalid');
     const receipt = JSON.parse(raw);
@@ -3656,7 +3693,10 @@ async function loadExistingReleasePhaseReceipt(
   }
   if (ACTION_RECEIPT_PHASES.has(phase)) {
     assertReceiptIdempotencyMetadata(await lstat(filePath));
-    const bytes = await readFile(filePath);
+    const metadata = await lstat(filePath);
+    const bytes = await readBoundedOrdinaryFile(filePath, {
+      expectedByteLength: metadata.size, maximumBytes: 1024 * 1024,
+    });
     const raw = bytes.toString('utf8');
     if (!Buffer.from(raw).equals(bytes)) throw new Error('Release action receipt is invalid');
     const receipt = JSON.parse(raw);
@@ -3673,11 +3713,14 @@ async function loadExistingReleasePhaseReceipt(
   return receipts.at(-1);
 }
 
-export function assertReceiptIdempotencyMetadata(metadata) {
+export function assertReceiptIdempotencyMetadata(metadata, expectedByteLength = null) {
   if (!metadata || typeof metadata.isFile !== 'function'
     || typeof metadata.isSymbolicLink !== 'function'
     || !metadata.isFile() || metadata.isSymbolicLink()) {
     throw new Error('Existing release receipt must be a regular non-symlink file');
+  }
+  if (expectedByteLength !== null && metadata.size !== expectedByteLength) {
+    throw new Error('Existing release receipt has the wrong intended byte length');
   }
   return true;
 }
@@ -3685,7 +3728,7 @@ export function assertReceiptIdempotencyMetadata(metadata) {
 export async function persistReleaseReceipt(plan, receipt, {
   writeCreateOnly = writeAtomicCreateOnly,
   lstatExisting = lstat,
-  readExisting = readFile,
+  readExisting = null,
 } = {}) {
   const filePath = receipt?.receiptType === 'action-outcome'
     ? releaseActionReceiptPath(plan, receipt.phase, receipt.attemptId)
@@ -3702,9 +3745,14 @@ export async function persistReleaseReceipt(plan, receipt, {
     await writeCreateOnly(filePath, Buffer.from(contents));
   } catch (error) {
     if (!/exists/i.test(String(error?.message ?? ''))) throw error;
-    assertReceiptIdempotencyMetadata(await lstatExisting(filePath));
-    const existing = await readExisting(filePath);
-    if (!existing.equals(Buffer.from(contents))) throw new Error('Release receipt already exists with different bytes');
+    const intended = Buffer.from(contents);
+    assertReceiptIdempotencyMetadata(await lstatExisting(filePath), intended.length);
+    const existing = readExisting
+      ? await readExisting(filePath)
+      : await readBoundedOrdinaryFile(filePath, {
+        expectedByteLength: intended.length, maximumBytes: 1024 * 1024,
+      });
+    if (!existing.equals(intended)) throw new Error('Release receipt already exists with different bytes');
   }
   return true;
 }
@@ -3751,6 +3799,9 @@ function releasePhaseReceiptOutputs(phase, plan, context) {
     imageDigest: plan.imageDigest,
     origin: plan.candidateOrigin,
     privacyProof: assertPrivacyProofReference(context.candidatePrivacyReference),
+    privacyProofReferenceSha256: canonicalSha256(
+      assertPrivacyProofReference(context.candidatePrivacyReference),
+    ),
     publicInvoker: false,
     priorRelease: plan.previousRevision === null ? null : Object.freeze({
       image: plan.previousImage,
@@ -4670,6 +4721,118 @@ async function readStableStagedControlPlaneState(executor, plan, { publicIam = f
   return Object.freeze({ service, revision, artifact, iam });
 }
 
+async function validatePromotionFinalBarrier({
+  executor,
+  plan,
+  priorReceipts,
+  promotionPrivacyReference,
+  now,
+  verifyTask8Evidence,
+  verifyReleasePrivacyArtifact,
+  validateReleasePrivacyProof,
+}) {
+  const current = now();
+  if (!(current instanceof Date) || !Number.isFinite(current.getTime())) {
+    throw new Error('Promotion final barrier clock is invalid');
+  }
+  await verifyReleasePrivacyArtifact(
+    promotionPrivacyReference,
+    plan,
+    current,
+    'Promotion privacy proof is invalid',
+    validateReleasePrivacyProof,
+  );
+  validateReleaseReceiptChain(priorReceipts, plan, { through: 'mobile' });
+  const candidateReceipt = priorReceipts.find(({ phase }) => phase === 'candidate');
+  const candidateProof = candidateReceipt?.outputs?.privacyProof;
+  if (!candidateProof) throw new Error('Candidate privacy receipt is unavailable');
+  await verifyReleasePrivacyArtifact(
+    candidateProof,
+    plan,
+    new Date(candidateProof.observedAt),
+    'Candidate privacy proof is invalid',
+    validateReleasePrivacyProof,
+  );
+  for (const phase of ['readiness', 'workload', 'mobile']) {
+    const workloadExecution = phase === 'workload'
+      ? priorReceipts.find((value) => value.phase === 'workload')?.outputs?.execution
+      : null;
+    const verified = await verifyTask8Evidence(plan.task8Evidence[phase], phase, plan, {
+      now: current,
+      historical: true,
+      gateWindow: workloadExecution ? {
+        gateStartedAt: workloadExecution.gateStartedAt,
+        gateEndedAt: workloadExecution.gateEndedAt,
+      } : null,
+    });
+    if (verified !== true && !(phase === 'workload' && verified
+      && typeof verified === 'object' && !Array.isArray(verified))) {
+      throw new Error('Promotion evidence boundary drifted');
+    }
+  }
+  const authority = await executor([
+    'auth', 'list', '--filter=status:ACTIVE', '--format=json',
+  ]);
+  if (!Array.isArray(authority) || authority.length !== 1
+    || authority[0]?.account !== PROMOTION_AUTHORITY || authority[0]?.status !== 'ACTIVE') {
+    throw new Error('Public promotion authority is not approved');
+  }
+  const candidate = await readCandidateControlPlaneState(executor, plan);
+  const stable = await readStableStagedControlPlaneState(executor, plan, {
+    publicIam: plan.previousRevision !== null,
+  });
+  return Object.freeze({
+    current: current.toISOString(),
+    candidate,
+    stable,
+    promotionPrivacyReference,
+    predecessorReceiptSha256: priorReceipts.at(-1)?.receiptSha256 ?? null,
+  });
+}
+
+function promotionProofExpired(reference, current) {
+  const currentMs = current instanceof Date ? current.getTime() : Number.NaN;
+  return !Number.isFinite(currentMs) || currentMs >= Date.parse(reference?.expiresAt);
+}
+
+async function closePromotionAttemptForReproof(stateStore) {
+  if (!stateStore || typeof stateStore.appendTerminal !== 'function') {
+    throw new Error('Promotion re-proof journal is unavailable');
+  }
+  const currentAttempt = stateStore.attemptId;
+  const openIntent = stateStore.records.at(-1)?.recordType === 'intent'
+    ? stateStore.records.at(-1) : null;
+  if (openIntent) {
+    if (typeof stateStore.appendAbort !== 'function') {
+      throw new Error('Promotion re-proof abort journal is unavailable');
+    }
+    await stateStore.appendAbort({
+      intentRecordSha256: openIntent.recordSha256,
+      reason: 'expired-before-final-mutation',
+    });
+  }
+  const checkpoints = stateStore.records.filter((record) => (
+    record.attemptId === currentAttempt && record.recordType === 'checkpoint'
+  ));
+  const checkpoint = checkpoints.at(-1);
+  if (!checkpoint) throw new Error('Promotion re-proof checkpoint is unavailable');
+  const terminalState = {
+    code: 'PROMOTION_REPROOF_REQUIRED',
+    phase: 'promote',
+    mutationCount: checkpoints.length,
+  };
+  await stateStore.appendTerminal({
+    status: 'phase-blocked',
+    checkpointRecordSha256: checkpoint.recordSha256,
+    receiptSha256: canonicalSha256(terminalState),
+    terminalState,
+    mutationCount: checkpoints.length,
+    responseLossOperationIds: checkpoints
+      .filter(({ payload }) => ['adopted-response-loss', 'adopted-restart'].includes(payload.outcome))
+      .map(({ operationId }) => operationId),
+  });
+}
+
 function parseArguments(argv, releaseSha) {
   if (!Array.isArray(argv) || !RELEASE_SHA.test(String(releaseSha ?? ''))) return null;
   let phase = null;
@@ -4993,11 +5156,9 @@ async function publishPrivacyArtifact(artifact, {
   const intended = Buffer.from(publication.artifacts[0].contentsBase64, 'base64');
   let adopted = false;
   try {
-    const metadata = await lstat(artifact.filePath);
-    if (!metadata.isFile() || metadata.isSymbolicLink()) {
-      throw new Error('Privacy publication target is not an ordinary file');
-    }
-    const existing = await readFile(artifact.filePath);
+    const existing = await readBoundedOrdinaryFile(artifact.filePath, {
+      expectedByteLength: intended.length, maximumBytes: 4 * 1024 * 1024,
+    });
     if (!existing.equals(intended)) throw new Error('Privacy publication bytes drifted');
     adopted = true;
   } catch (error) {
@@ -5237,11 +5398,9 @@ async function publishControlledReadinessArtifacts(execution, {
   for (const artifact of publication.artifacts) {
     const intended = Buffer.from(artifact.contentsBase64, 'base64');
     try {
-      const metadata = await lstat(artifact.filePath);
-      if (!metadata.isFile() || metadata.isSymbolicLink()) {
-        throw new Error('Readiness publication target is not an ordinary file');
-      }
-      const existing = await readFile(artifact.filePath);
+      const existing = await readBoundedOrdinaryFile(artifact.filePath, {
+        expectedByteLength: intended.length, maximumBytes: 4 * 1024 * 1024,
+      });
       if (!existing.equals(intended)) throw new Error('Readiness publication bytes drifted');
       adopted = true;
     } catch (error) {
@@ -5570,11 +5729,9 @@ async function publishControlledMobileArtifacts(execution, {
   for (const artifact of publication.artifacts) {
     const intended = Buffer.from(artifact.contentsBase64, 'base64');
     try {
-      const metadata = await lstat(artifact.filePath);
-      if (!metadata.isFile() || metadata.isSymbolicLink()) {
-        throw new Error('Mobile publication target is not an ordinary file');
-      }
-      const existing = await readFile(artifact.filePath);
+      const existing = await readBoundedOrdinaryFile(artifact.filePath, {
+        expectedByteLength: intended.length, maximumBytes: 4 * 1024 * 1024,
+      });
       if (!existing.equals(intended)) throw new Error('Mobile publication bytes drifted');
       adopted = true;
     } catch (error) {
@@ -5601,22 +5758,190 @@ async function cleanupControlledReadinessArtifacts(paths) {
   return true;
 }
 
-async function publishControlledWorkloadArtifacts(execution) {
-  const published = [];
-  try {
-    for (const artifact of [
-      execution.artifacts.privacyStart,
-      execution.artifacts.privacyEnd,
-      execution.artifacts.workload,
-    ]) {
-      await writeAtomicCreateOnly(artifact.filePath, Buffer.from(artifact.contents));
-      published.push(artifact.filePath);
-    }
-    return Object.freeze([...published]);
-  } catch (error) {
-    error.publishedWorkloadPaths = published;
-    throw error;
+function controlledWorkloadPublication(execution) {
+  const artifacts = [
+    ['privacy-start', execution.artifacts.privacyStart],
+    ['privacy-end', execution.artifacts.privacyEnd],
+    ['evidence', execution.artifacts.workload],
+  ].map(([role, artifact]) => {
+    const bytes = Buffer.from(artifact.contents);
+    return Object.freeze({
+      role,
+      filePath: artifact.filePath,
+      byteLength: bytes.length,
+      objectSha256: createHash('sha256').update(bytes).digest('hex'),
+      contentsBase64: bytes.toString('base64'),
+    });
+  });
+  return Object.freeze({
+    artifacts: Object.freeze(artifacts),
+    bundleSha256: canonicalSha256(artifacts),
+    receipt: Object.freeze({
+      attestation: execution.attestation,
+      evidence: execution.evidence,
+      execution: execution.execution,
+    }),
+  });
+}
+
+function controlledWorkloadFromPublication(plan, publication, {
+  validatePrivacyProof = validateCandidatePrivacyProof,
+} = {}) {
+  if (!publication || !Array.isArray(publication.artifacts)
+    || !exactKeys(publication, ['artifacts', 'bundleSha256', 'receipt'])
+    || publication.bundleSha256 !== canonicalSha256(publication.artifacts)
+    || !exactKeys(publication.receipt, ['attestation', 'evidence', 'execution'])
+    || containsForbiddenPersistedSecret(publication)) {
+    throw new Error('Workload publication intent is invalid');
   }
+  const byRole = Object.fromEntries(publication.artifacts.map((artifact) => {
+    const bytes = Buffer.from(artifact.contentsBase64, 'base64');
+    if (bytes.length !== artifact.byteLength
+      || bytes.toString('base64') !== artifact.contentsBase64
+      || createHash('sha256').update(bytes).digest('hex') !== artifact.objectSha256) {
+      throw new Error('Workload publication intent is invalid');
+    }
+    return [artifact.role, { ...artifact, contents: bytes.toString('utf8') }];
+  }));
+  if (!exactKeys(byRole, ['evidence', 'privacy-end', 'privacy-start'])) {
+    throw new Error('Workload publication intent is invalid');
+  }
+  const expectedPaths = {
+    evidence: plan.task8Evidence.workload.filePath,
+    'privacy-start': plan.task8Evidence.workload.privacyProofs.start.filePath,
+    'privacy-end': plan.task8Evidence.workload.privacyProofs.end.filePath,
+  };
+  for (const [role, artifact] of Object.entries(byRole)) {
+    if (artifact.filePath !== expectedPaths[role]) {
+      throw new Error('Workload publication intent is invalid');
+    }
+  }
+  let record;
+  let privacyStart;
+  let privacyEnd;
+  try {
+    record = JSON.parse(byRole.evidence.contents);
+    privacyStart = JSON.parse(byRole['privacy-start'].contents);
+    privacyEnd = JSON.parse(byRole['privacy-end'].contents);
+  } catch { throw new Error('Workload publication intent is invalid'); }
+  const { evidence, execution, attestation } = publication.receipt;
+  if (!exact(evidence, {
+    ...plan.task8Evidence.workload,
+    artifactSha256: record.artifactSha256,
+    objectSha256: byRole.evidence.objectSha256,
+    privacyProofs: evidence?.privacyProofs,
+  }) || !exactKeys(execution, [
+    'acceptanceWindowId', 'attemptId', 'gateEndedAt', 'gateStartedAt',
+    'networkWitnessSha256', 'observedRequestCount',
+  ])) throw new Error('Workload publication intent is invalid');
+  for (const [boundary, proof, artifact, clock] of [
+    ['start', privacyStart, byRole['privacy-start'], execution.gateStartedAt],
+    ['end', privacyEnd, byRole['privacy-end'], execution.gateEndedAt],
+  ]) {
+    const reference = evidence.privacyProofs?.[boundary];
+    if (!exact(assertPrivacyProofReference(reference), {
+      ...reference, filePath: artifact.filePath, objectSha256: artifact.objectSha256,
+    }) || proof.artifactSha256 !== reference.artifactSha256
+      || proof.binding?.boundarySha256 !== reference.boundarySha256
+      || proof.occurredAt !== reference.observedAt || proof.expiresAt !== reference.expiresAt) {
+      throw new Error('Workload publication intent is invalid');
+    }
+    validatePrivacyProof(proof, { binding: candidatePrivacyBinding(plan), now: new Date(clock) });
+  }
+  const validatedAttestation = validateLatencyAcceptanceRecord(
+    record, plan, new Date(execution.gateEndedAt),
+  );
+  if (!exact(validatedAttestation, attestation)
+    || execution.acceptanceWindowId !== attestation.acceptanceWindowId) {
+    throw new Error('Workload publication intent is invalid');
+  }
+  return Object.freeze({
+    attestation,
+    evidence,
+    execution,
+    artifacts: Object.freeze({
+      privacyStart: Object.freeze({
+        filePath: byRole['privacy-start'].filePath,
+        contents: byRole['privacy-start'].contents,
+        reference: evidence.privacyProofs.start,
+      }),
+      privacyEnd: Object.freeze({
+        filePath: byRole['privacy-end'].filePath,
+        contents: byRole['privacy-end'].contents,
+        reference: evidence.privacyProofs.end,
+      }),
+      workload: Object.freeze({
+        filePath: byRole.evidence.filePath,
+        contents: Buffer.from(byRole.evidence.contents),
+        artifactSha256: record.artifactSha256,
+        objectSha256: byRole.evidence.objectSha256,
+      }),
+    }),
+  });
+}
+
+async function publishControlledWorkloadArtifacts(execution, {
+  stateStore,
+  releaseJournalAttemptId,
+  existingIntent = null,
+  writeArtifact = writeAtomicCreateOnly,
+}) {
+  if (!stateStore || typeof stateStore.appendIntent !== 'function'
+    || typeof stateStore.appendCheckpoint !== 'function') {
+    throw new Error('Workload publication journal is unavailable');
+  }
+  const operationId = 'workload-evidence-publish';
+  const expectedPublication = controlledWorkloadPublication(execution);
+  let intent = existingIntent;
+  let publication = expectedPublication;
+  if (intent !== null) {
+    if (intent.recordType !== 'intent' || intent.operationId !== operationId
+      || intent.payload?.reconcileKind !== 'local-artifact-create'
+      || !exact(intent.payload.publication, expectedPublication)) {
+      throw new Error('Workload publication intent drifted');
+    }
+    publication = intent.payload.publication;
+  } else {
+    intent = await stateStore.appendIntent({
+      mutationOrdinal: 1,
+      operationAttemptId: createHash('sha256').update([
+        releaseJournalAttemptId, operationId, '1',
+      ].join('\0')).digest('hex').slice(0, 32),
+      commandSha256: canonicalSha256(publication.artifacts.map(({ role, filePath }) => ({
+        role, filePath,
+      }))),
+      reconcileKind: 'local-artifact-create',
+      beforeSha256: canonicalSha256({ state: 'absent' }),
+      afterSha256: canonicalSha256(publication),
+      publication,
+    }, { operationId });
+  }
+  let adopted = false;
+  for (const artifact of publication.artifacts) {
+    const intended = Buffer.from(artifact.contentsBase64, 'base64');
+    try {
+      const existing = await readBoundedOrdinaryFile(artifact.filePath, {
+        expectedByteLength: intended.length, maximumBytes: 4 * 1024 * 1024,
+      });
+      if (!existing.equals(intended)) throw new Error('Workload publication bytes drifted');
+      adopted = true;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+      await writeArtifact(artifact.filePath, intended);
+    }
+  }
+  const observationSha256 = canonicalSha256(publication);
+  await stateStore.appendCheckpoint({
+    intentRecordSha256: intent.recordSha256,
+    classification: 'after',
+    outcome: adopted ? 'adopted-restart' : 'applied',
+    observationSha256,
+    safeResult: {
+      kind: 'artifact-bundle', artifactCount: publication.artifacts.length,
+      bundleSha256: publication.bundleSha256,
+    },
+  });
+  return Object.freeze(publication.artifacts.map(({ filePath }) => filePath));
 }
 
 async function executeControlledWorkload(plan, {
@@ -5809,6 +6134,7 @@ export async function runGcpRelease({
   workloadPrivacyNonce = systemRandomUUID,
   workloadPrivacySleep,
   workloadPrivacyProofRunner = runCandidatePrivacyProof,
+  validateWorkloadPrivacyProof = validateCandidatePrivacyProof,
   produceWorkloadPrivacyArtifact = executeCandidatePrivacyArtifact,
   produceReleasePrivacyArtifact = executeCandidatePrivacyArtifact,
   releasePrivacyFetch = globalThis.fetch,
@@ -6151,31 +6477,90 @@ export async function runGcpRelease({
     }
   }
   if (selection.phase === 'workload') {
+    let workloadStage = 'journal';
     try {
       if (!unresolvedTask8Contract(plan.task8Evidence.workload)) {
         const error = new Error('Pre-existing workload evidence is forbidden');
         error.code = 'WORKLOAD_PREBUILT_EVIDENCE_FORBIDDEN';
         throw error;
       }
-      workloadPrivacyExecutor = execute ?? createDefaultGcloudExecutor({ environment });
-      let tokenExecutor = workloadPrivacyTokenExecutor;
-      if (tokenExecutor === undefined) {
-        tokenExecutor = createIdentityTokenExecutor(resolveDefaultGcloudLaunch(environment));
+      if (typeof openStateStore !== 'function' || typeof journalAttemptId !== 'function') {
+        throw new Error('Release journal is unavailable');
       }
-      workloadExecution = await executeControlledWorkload(plan, {
-        environment,
-        executor: workloadPrivacyExecutor,
-        executeWorkload,
-        workloadFetch,
-        randomUUID,
+      releaseJournalAttemptId = journalAttemptId();
+      stateStore = await openStateStore({
+        receiptDirectory: plan.releaseReceiptDirectory,
+        releaseSha: plan.releaseSha,
+        releaseIdentitySha256: plan.releaseIdentitySha256,
+        phase: selection.phase,
+        phasePlanSha256: canonicalSha256({
+          releaseIdentitySha256: plan.releaseIdentitySha256,
+          phase: 'workload',
+          operationId: 'workload-evidence-publish',
+          paths: [
+            plan.task8Evidence.workload.privacyProofs.start.filePath,
+            plan.task8Evidence.workload.privacyProofs.end.filePath,
+            plan.task8Evidence.workload.filePath,
+          ],
+        }),
+        attemptId: releaseJournalAttemptId,
+        receiptHeadSha256: priorReceipts.at(-1)?.receiptSha256 ?? null,
         now,
-        tokenExecutor,
-        privacyFetch: workloadPrivacyFetch,
-        privacyNonce: workloadPrivacyNonce,
-        privacySleep: workloadPrivacySleep,
-        privacyProofRunner: workloadPrivacyProofRunner,
-        producePrivacyArtifact: produceWorkloadPrivacyArtifact,
+        workspaceRoot: APP_ROOT,
       });
+      if (!stateStore || !Array.isArray(stateStore.records)
+        || !['appendIntent', 'appendCheckpoint', 'appendTerminal', 'close']
+          .every((key) => typeof stateStore[key] === 'function')) {
+        throw new Error('Release journal is invalid');
+      }
+      releaseJournalAttemptId = stateStore.attemptId ?? releaseJournalAttemptId;
+      const lastTerminalIndex = stateStore.records.findLastIndex(
+        (record) => record.recordType === 'terminal',
+      );
+      openJournalRecords = stateStore.records.slice(lastTerminalIndex + 1);
+      if (openJournalRecords.length > 0) {
+        validateReconciliationPrefix({
+          operationIds: ['workload-evidence-publish'], records: openJournalRecords,
+        });
+        hasOpenJournalAttempt = true;
+        existingJournalIntent = openJournalRecords.at(-1)?.recordType === 'intent'
+          ? openJournalRecords.at(-1) : null;
+        journalMutationCount = openJournalRecords.some(({ recordType }) => (
+          recordType === 'checkpoint'
+        )) ? 1 : 0;
+        const publicationIntent = openJournalRecords.find(({ recordType, operationId }) => (
+          recordType === 'intent' && operationId === 'workload-evidence-publish'
+        ));
+        if (!publicationIntent) throw new Error('Workload publication intent is unavailable');
+        workloadExecution = controlledWorkloadFromPublication(
+          plan, publicationIntent.payload.publication,
+          { validatePrivacyProof: validateWorkloadPrivacyProof },
+        );
+        resumeOperationId = existingJournalIntent?.operationId ?? null;
+      } else {
+        workloadStage = 'executor';
+        workloadPrivacyExecutor = execute ?? createDefaultGcloudExecutor({ environment });
+        let tokenExecutor = workloadPrivacyTokenExecutor;
+        if (tokenExecutor === undefined) {
+          tokenExecutor = createIdentityTokenExecutor(resolveDefaultGcloudLaunch(environment));
+        }
+        workloadStage = 'producer';
+        workloadExecution = await executeControlledWorkload(plan, {
+          environment,
+          executor: workloadPrivacyExecutor,
+          executeWorkload,
+          workloadFetch,
+          randomUUID,
+          now,
+          tokenExecutor,
+          privacyFetch: workloadPrivacyFetch,
+          privacyNonce: workloadPrivacyNonce,
+          privacySleep: workloadPrivacySleep,
+          privacyProofRunner: workloadPrivacyProofRunner,
+          producePrivacyArtifact: produceWorkloadPrivacyArtifact,
+        });
+      }
+      workloadStage = 'plan';
       plan = buildReleasePlan({
         ...input,
         task8Evidence: {
@@ -6184,9 +6569,37 @@ export async function runGcpRelease({
         },
       }, { phase: selection.phase });
       selected = plan.operations.filter(({ phase }) => phase === selection.phase);
+      workloadStage = 'predecessor-chain';
       validateReleaseReceiptChain(priorReceipts, plan, { through: 'readiness' });
+      workloadStage = 'publish';
+      if (journalMutationCount === 0) {
+        workloadPublishedPaths = await publishControlledWorkloadArtifacts(workloadExecution, {
+          stateStore,
+          releaseJournalAttemptId,
+          existingIntent: existingJournalIntent,
+          writeArtifact: writeControlledArtifact,
+        });
+        journalMutationCount = 1;
+        existingJournalIntent = null;
+        resumeOperationId = null;
+        openJournalRecords = stateStore.records;
+      }
+      workloadStage = 'verify';
+      const verified = await verifyTask8Evidence(
+        workloadExecution.evidence, 'workload', plan, {
+          now: now(),
+          gateWindow: {
+            gateStartedAt: workloadExecution.execution.gateStartedAt,
+            gateEndedAt: workloadExecution.execution.gateEndedAt,
+          },
+        },
+      );
+      if (verified !== true && !exact(verified, workloadExecution.attestation)) {
+        throw new Error('Published workload evidence differs from controlled execution');
+      }
       task8Attestations.workload = workloadExecution.attestation;
     } catch (error) {
+      await stateStore?.close().catch(() => undefined);
       return publish(writeOutput, 1, {
         status: 'failed',
         code: [
@@ -6194,7 +6607,7 @@ export async function runGcpRelease({
           'WORKLOAD_CONTROLLED_ARTIFACT_INVALID',
           'WORKLOAD_CONTROLLED_NETWORK_INVALID',
         ].includes(error?.code) || String(error?.code ?? '').startsWith('WORKLOAD_CONTROLLED_NETWORK_')
-          ? error.code : 'WORKLOAD_CONTROLLED_EXECUTION_INVALID',
+          ? error.code : `WORKLOAD_CONTROLLED_${workloadStage.toUpperCase()}_INVALID`,
         mutationPerformed: false,
         releaseSha: plan.releaseSha, phase: selection.phase, completed: [],
       });
@@ -6391,6 +6804,8 @@ export async function runGcpRelease({
   const collectedObjectReceipts = new Map();
   const candidateReadbacks = {};
   let candidatePrivacyReference = null;
+  let promotionPrivacyReference = null;
+  let promotionBarrierSha256 = null;
   const promotionReadbacks = {};
   const promotionStableReadbacks = {};
   let buildReceipt = null;
@@ -6435,38 +6850,6 @@ export async function runGcpRelease({
       });
     }
   }
-  if (selection.phase === 'workload') {
-    try {
-      workloadPublishedPaths = await publishControlledWorkloadArtifacts(workloadExecution);
-      const verified = await verifyTask8Evidence(
-        workloadExecution.evidence, 'workload', plan, {
-          now: now(),
-          gateWindow: {
-            gateStartedAt: workloadExecution.execution.gateStartedAt,
-            gateEndedAt: workloadExecution.execution.gateEndedAt,
-          },
-        },
-      );
-      if (verified !== true && !exact(verified, workloadExecution.attestation)) {
-        throw new Error('Published workload evidence differs from controlled execution');
-      }
-    } catch (error) {
-      let cleanupFailed = false;
-      const published = error?.publishedWorkloadPaths ?? workloadPublishedPaths;
-      if (published.length > 0) {
-        try {
-          await cleanupControlledReadinessArtifacts(published);
-          workloadPublishedPaths = [];
-        } catch { cleanupFailed = true; }
-      }
-      return publish(writeOutput, 1, {
-        status: 'failed',
-        code: cleanupFailed ? 'WORKLOAD_EVIDENCE_CLEANUP_FAILED' : 'WORKLOAD_EVIDENCE_PUBLISH_FAILED',
-        mutationPerformed: false,
-        releaseSha: plan.releaseSha, phase: selection.phase, completed: [],
-      });
-    }
-  }
   try {
     if (reconstructCheckpointedPhase) {
       const checkpoint = openJournalRecords.at(-1);
@@ -6481,6 +6864,16 @@ export async function runGcpRelease({
             !== openJournalRecords.find(({ recordType }) => recordType === 'intent')
               ?.payload?.publication?.bundleSha256) {
           throw new Error('Checkpointed readiness publication differs from its intent');
+        }
+      } else if (selection.phase === 'workload' && checkpoint?.recordType === 'checkpoint'
+        && checkpoint.payload?.safeResult?.kind === 'artifact-bundle') {
+        const workloadPublicationIntent = openJournalRecords.find(
+          ({ recordType }) => recordType === 'intent',
+        )?.payload?.publication;
+        if (checkpoint.payload.safeResult.artifactCount !== 3
+          || checkpoint.payload.safeResult.bundleSha256 !== workloadPublicationIntent?.bundleSha256
+          || checkpoint.payload.observationSha256 !== canonicalSha256(workloadPublicationIntent)) {
+          throw new Error('Checkpointed workload publication differs from its intent');
         }
       } else if (selection.phase === 'mobile' && checkpoint?.recordType === 'checkpoint'
         && checkpoint.payload?.safeResult?.kind === 'artifact-bundle') {
@@ -6638,6 +7031,20 @@ export async function runGcpRelease({
           privacyIntent.payload.publication,
           { now: new Date(proofRecord.occurredAt), validatePrivacyProof: validateReleasePrivacyProof },
         ).reference;
+      } else if (selection.phase === 'promote' && checkpoint?.recordType === 'checkpoint') {
+        const privacyIntent = openJournalRecords.find(({ recordType, operationId }) => (
+          recordType === 'intent' && operationId === 'promote-privacy-publish'
+        ));
+        if (!privacyIntent) throw new Error('Checkpointed promotion privacy proof is unavailable');
+        const proofRecord = JSON.parse(Buffer.from(
+          privacyIntent.payload.publication.artifacts[0].contentsBase64, 'base64',
+        ).toString('utf8'));
+        promotionPrivacyReference = privacyArtifactFromPublication(
+          plan,
+          { filePath: promotionAttemptPrivacyProofPath(plan, releaseJournalAttemptId) },
+          privacyIntent.payload.publication,
+          { now: new Date(proofRecord.occurredAt), validatePrivacyProof: validateReleasePrivacyProof },
+        ).reference;
       } else {
         throw new Error('Checkpointed release phase cannot reconstruct its receipt');
       }
@@ -6728,7 +7135,8 @@ export async function runGcpRelease({
           ? existingJournalIntent.payload.mutationOrdinal : journalMutationCount + 1;
         const locator = Object.freeze({
           filePath: member.id === 'candidate-privacy-publish'
-            ? plan.candidatePrivacyProofPath : plan.promotionPrivacyProofPath,
+            ? plan.candidatePrivacyProofPath
+            : promotionAttemptPrivacyProofPath(plan, releaseJournalAttemptId),
         });
         try {
           if (member.id === 'promote-privacy-publish') {
@@ -6770,12 +7178,21 @@ export async function runGcpRelease({
             const proofRecord = JSON.parse(Buffer.from(
               existingJournalIntent.payload.publication.artifacts[0].contentsBase64, 'base64',
             ).toString('utf8'));
+            const current = now();
+            const expired = promotionProofExpired({ expiresAt: proofRecord.expiresAt }, current);
             artifact = privacyArtifactFromPublication(
               plan,
               locator,
               existingJournalIntent.payload.publication,
-              { now: new Date(proofRecord.occurredAt), validatePrivacyProof: validateReleasePrivacyProof },
+              {
+                now: expired && member.id === 'promote-privacy-publish'
+                  ? new Date(proofRecord.occurredAt) : current,
+                validatePrivacyProof: validateReleasePrivacyProof,
+              },
             );
+            if (expired && member.id !== 'promote-privacy-publish') {
+              throw new Error('Candidate privacy proof expired before publication recovery');
+            }
           } else {
             let tokenExecutor = releasePrivacyTokenExecutor;
             if (tokenExecutor === undefined) {
@@ -6809,10 +7226,18 @@ export async function runGcpRelease({
             writeArtifact: writeReleasePrivacyArtifact,
           });
           if (member.id === 'candidate-privacy-publish') candidatePrivacyReference = reference;
+          else promotionPrivacyReference = reference;
           journalMutationCount = mutationOrdinal;
           existingJournalIntent = null;
           completed.push(member.id);
           activeOperationId = null;
+          if (member.id === 'promote-privacy-publish'
+            && promotionProofExpired(reference, now())) {
+            await closePromotionAttemptForReproof(stateStore);
+            const error = new Error('Promotion privacy proof expired before final mutation');
+            error.code = 'PROMOTION_REPROOF_REQUIRED';
+            throw error;
+          }
           continue;
         } catch (error) {
           if (String(error?.message ?? '').includes('journal')
@@ -6828,6 +7253,61 @@ export async function runGcpRelease({
         }
         const mutationOrdinal = restartingMutation
           ? existingJournalIntent.payload.mutationOrdinal : journalMutationCount + 1;
+        const finalPublicMutation = finalPublicMutations.some(({ operationId }) => (
+          operationId === member.id
+        ));
+        if (selection.phase === 'promote' && finalPublicMutation && !restartingMutation) {
+          if (promotionPrivacyReference === null) {
+            const proofIntent = openJournalRecords.find(({ recordType, operationId }) => (
+              recordType === 'intent' && operationId === 'promote-privacy-publish'
+            ));
+            if (!proofIntent) throw new Error('Promotion privacy publication is unavailable');
+            const locator = Object.freeze({
+              filePath: promotionAttemptPrivacyProofPath(plan, releaseJournalAttemptId),
+            });
+            promotionPrivacyReference = privacyArtifactFromPublication(
+              plan,
+              locator,
+              proofIntent.payload.publication,
+              {
+                now: new Date(JSON.parse(Buffer.from(
+                  proofIntent.payload.publication.artifacts[0].contentsBase64, 'base64',
+                ).toString('utf8')).occurredAt),
+                validatePrivacyProof: validateReleasePrivacyProof,
+              },
+            ).reference;
+          }
+          const barrierNow = now();
+          if (promotionProofExpired(promotionPrivacyReference, barrierNow)) {
+            await closePromotionAttemptForReproof(stateStore);
+            const error = new Error('Promotion privacy proof expired before final mutation');
+            error.code = 'PROMOTION_REPROOF_REQUIRED';
+            throw error;
+          }
+          const barrier = await validatePromotionFinalBarrier({
+            executor,
+            plan,
+            priorReceipts,
+            promotionPrivacyReference,
+            now: () => barrierNow,
+            verifyTask8Evidence,
+            verifyReleasePrivacyArtifact,
+            validateReleasePrivacyProof,
+          });
+          promotionBarrierSha256 = canonicalSha256(barrier);
+          Object.assign(promotionStableReadbacks, {
+            artifact: barrier.stable.artifact,
+            revision: barrier.stable.revision,
+            service: barrier.stable.service,
+          });
+          mutationBeforeObservations.set(member.id,
+            member.id === 'promote-public-service' ? barrier.stable.iam : barrier.stable.service);
+          if (member.id === 'promote-public-service') {
+            promotionIamBaseline = normalizeServiceIamPolicy(
+              barrier.stable.iam, { requireEtag: true },
+            );
+          }
+        }
         mutationAdapter = createReleaseMutationAdapter(plan, member, () => ({
           acceptanceExecutionReceipts,
           buildReceipt,
@@ -6855,7 +7335,9 @@ export async function runGcpRelease({
               operationAttemptId: createHash('sha256').update([
                 releaseJournalAttemptId, member.id, String(mutationOrdinal),
               ].join('\0')).digest('hex').slice(0, 32),
-              commandSha256: canonicalSha256(member.argv),
+              commandSha256: selection.phase === 'promote' && finalPublicMutation
+                ? canonicalSha256({ argv: member.argv, promotionBarrierSha256 })
+                : canonicalSha256(member.argv),
               reconcileKind: journalReconcileKind(member.id),
               beforeSha256: canonicalSha256(beforeState),
               afterSha256: journalAfterSha256,
@@ -7019,6 +7501,31 @@ export async function runGcpRelease({
             || (member.id === 'promote-stable-service-precheck' && plan.previousRevision === null);
           if (!canonicalServiceAbsence || !absenceRead) throw error;
           receipt = null;
+        }
+      }
+      if (selection.phase === 'promote' && restartingMutation
+        && finalPublicMutations.some(({ operationId: finalOperationId }) => (
+          finalOperationId === member.id
+        ))) {
+        let restartAfterSha256 = null;
+        try {
+          restartAfterSha256 = canonicalSha256(
+            pendingJournal.adapter.canonicalState('after', receipt),
+          );
+        } catch {
+          restartAfterSha256 = null;
+        }
+        if (restartAfterSha256 !== pendingJournal.afterSha256) {
+          const restartBeforeSha256 = canonicalSha256(
+            pendingJournal.adapter.canonicalState('before', receipt),
+          );
+          if (restartBeforeSha256 === pendingJournal.intent.payload.beforeSha256) {
+            await closePromotionAttemptForReproof(stateStore);
+            const error = new Error('Unperformed promotion intent requires a fresh proof');
+            error.code = 'PROMOTION_REPROOF_REQUIRED';
+            throw error;
+          }
+          throw new Error('Promotion restart state is neither the intended before nor after state');
         }
       }
       if (member.id === 'build-submit') {
@@ -7359,6 +7866,17 @@ export async function runGcpRelease({
           const canonicalAfter = pendingJournal.adapter.canonicalState('after', observedAfter);
           const observationSha256 = canonicalSha256(canonicalAfter);
           if (observationSha256 !== pendingJournal.afterSha256) {
+            const canonicalBefore = pendingJournal.adapter.canonicalState('before', observedAfter);
+            if (selection.phase === 'promote' && pendingJournal.restarting
+              && finalPublicMutations.some(({ operationId: finalOperationId }) => (
+                finalOperationId === pendingJournal.operationId
+              ))
+              && canonicalSha256(canonicalBefore) === pendingJournal.intent.payload.beforeSha256) {
+              await closePromotionAttemptForReproof(stateStore);
+              const error = new Error('Unperformed promotion intent requires a fresh proof');
+              error.code = 'PROMOTION_REPROOF_REQUIRED';
+              throw error;
+            }
             throw new Error('Authoritative mutation state differs from the durable intent');
           }
           await stateStore.appendCheckpoint({
@@ -7372,6 +7890,7 @@ export async function runGcpRelease({
           });
           pendingJournal = null;
         } catch (error) {
+          if (error?.code === 'PROMOTION_REPROOF_REQUIRED') throw error;
           error.code = 'RELEASE_JOURNAL_WRITE_FAILED';
           throw error;
         }
@@ -7386,6 +7905,14 @@ export async function runGcpRelease({
       validateCandidateControlPlaneReadbacks(candidateReadbacks, plan);
     }
   } catch (phaseError) {
+    if (phaseError?.code === 'PROMOTION_REPROOF_REQUIRED') {
+      await stateStore?.close().catch(() => undefined);
+      return publish(writeOutput, 1, {
+        status: 'failed', code: 'PROMOTION_REPROOF_REQUIRED', mutationPerformed: mutationAttempted,
+        releaseSha: plan.releaseSha, phase: selection.phase, completed,
+        resumeBoundary: activeOperationId,
+      });
+    }
     if (phaseError?.code === 'RELEASE_JOURNAL_WRITE_FAILED') {
       await stateStore?.close().catch(() => undefined);
       return publish(writeOutput, 1, {
@@ -7480,19 +8007,10 @@ export async function runGcpRelease({
       }
       publicReport.phaseReceipt = phaseReceipt;
     } catch (error) {
-      let cleanupFailed = false;
-      if (selection.phase === 'workload' && workloadPublishedPaths.length > 0) {
-        try {
-          await cleanupControlledReadinessArtifacts(workloadPublishedPaths);
-          workloadPublishedPaths = [];
-        } catch { cleanupFailed = true; }
-      }
       await stateStore?.close().catch(() => undefined);
       return publish(writeOutput, 1, {
-        status: 'failed', code: cleanupFailed
-          ? 'WORKLOAD_EVIDENCE_CLEANUP_FAILED'
-          : (error?.code === 'RELEASE_JOURNAL_WRITE_FAILED'
-            ? 'RELEASE_JOURNAL_WRITE_FAILED' : 'RELEASE_RECEIPT_WRITE_FAILED'),
+        status: 'failed', code: error?.code === 'RELEASE_JOURNAL_WRITE_FAILED'
+          ? 'RELEASE_JOURNAL_WRITE_FAILED' : 'RELEASE_RECEIPT_WRITE_FAILED',
         mutationPerformed: mutationAttempted,
         releaseSha: plan.releaseSha, phase: selection.phase, completed,
       });
@@ -7509,7 +8027,9 @@ async function readManifest(filePath) {
   if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 128 * 1024) {
     throw releaseContractError();
   }
-  const raw = await readFile(filePath, 'utf8');
+  const raw = (await readBoundedOrdinaryFile(filePath, {
+    expectedByteLength: metadata.size, maximumBytes: 128 * 1024,
+  })).toString('utf8');
   if (Buffer.byteLength(raw, 'utf8') > 128 * 1024) throw releaseContractError();
   const parsed = JSON.parse(raw);
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)

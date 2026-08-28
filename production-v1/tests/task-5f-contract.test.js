@@ -222,6 +222,8 @@ function receiptOutputs(plan, phase) {
   };
   if (phase === 'candidate') return {
     access: structuredClone(plan.candidateAccess),
+    privacyProofReferenceSha256: createHash('sha256')
+      .update(JSON.stringify(canonicalFixture(candidatePrivacyReference(plan)))).digest('hex'),
     candidateContractSha256: createHash('sha256')
       .update(JSON.stringify(canonicalFixture(plan.expectedCandidate))).digest('hex'),
     candidateService: CANDIDATE_SERVICE,
