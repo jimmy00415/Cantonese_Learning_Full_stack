@@ -1341,7 +1341,6 @@ function validateComputeNetworksAndSubnets(networks, subnets) {
 export function validateComputeAddressInventory({ addresses, networks, subnets } = {}) {
   const { networkLinks, subnetsByLink } = validateComputeNetworksAndSubnets(networks, subnets);
   if (!Array.isArray(addresses)) throw commandError('CIDR_AUDIT_INVALID');
-  const names = new Set();
   const selfLinks = new Set();
   for (const item of addresses) {
     if (!plainComputeRow(item) || typeof item.name !== 'string' || !COMPUTE_NAME.test(item.name)
@@ -1350,12 +1349,11 @@ export function validateComputeAddressInventory({ addresses, networks, subnets }
       || !['IPV4', 'IPV6'].includes(item.ipVersion)
       || !INTERNAL_ADDRESS_STATUSES.has(item.status)
       || (Object.hasOwn(item, 'kind') && item.kind !== 'compute#address')
-      || names.has(item.name) || selfLinks.has(item.selfLink)) {
+      || selfLinks.has(item.selfLink)) {
       throw commandError('CIDR_AUDIT_INVALID');
     }
     const regional = Object.hasOwn(item, 'region');
     if (!exactAddressScope(item, regional)) throw commandError('CIDR_AUDIT_INVALID');
-    names.add(item.name);
     selfLinks.add(item.selfLink);
     if (item.addressType === 'INTERNAL') internalAddressCidr(item, networkLinks, subnetsByLink);
     else validateExternalAddress(item, subnetsByLink);

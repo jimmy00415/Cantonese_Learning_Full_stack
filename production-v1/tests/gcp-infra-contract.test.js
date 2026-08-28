@@ -1189,6 +1189,31 @@ test('CIDR audit accepts regional subnet name reuse and still rejects duplicate 
   }), (error) => error.code === 'CIDR_AUDIT_INVALID');
 });
 
+test('CIDR audit accepts regional address name reuse and still rejects duplicate regional identities', () => {
+  const network = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/default`;
+  const address = (regionName, value) => {
+    const region = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/regions/${regionName}`;
+    return {
+      name: 'shared-static', address: value,
+      addressType: 'EXTERNAL', ipVersion: 'IPV4', networkTier: 'PREMIUM',
+      status: 'RESERVED', region, selfLink: `${region}/addresses/shared-static`,
+    };
+  };
+  const first = address('asia-east1', '203.0.113.1');
+  const second = address('asia-east2', '203.0.113.2');
+  const exact = {
+    desired: '10.24.0.0/26', network,
+    networks: [{ name: 'default', selfLink: network }],
+    subnets: [], routes: [], addresses: [first, second],
+  };
+
+  assert.doesNotThrow(() => assertCidrAvailable(exact));
+  assert.throws(() => assertCidrAvailable({
+    ...exact,
+    addresses: [first, { ...first, address: '203.0.113.3' }],
+  }), (error) => error.code === 'CIDR_AUDIT_INVALID');
+});
+
 test('monitoring aggregation groups Cloud Run and Cloud SQL metrics by their real resource label', () => {
   assert.equal(monitoringGroupByField('run.googleapis.com/request_count'), 'resource.label.service_name');
   assert.equal(monitoringGroupByField('cloudsql.googleapis.com/database/cpu/utilization'), 'resource.label.database_id');
