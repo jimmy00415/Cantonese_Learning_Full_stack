@@ -12,6 +12,7 @@ import {
   validateCandidateControlPlaneReadbacks,
 } from '../scripts/gcp-release.js';
 import { assertCidrAvailable } from '../scripts/gcp-provision.js';
+import { candidatePrivacyBoundarySha256 } from '../scripts/candidate-privacy-proof.js';
 import { GCP_IDENTITY } from '../src/gcp-identity.js';
 
 const PROJECT = GCP_IDENTITY.projectId;
@@ -137,6 +138,34 @@ function canonicalFixture(value) {
   return value;
 }
 
+function candidatePrivacyReference(plan) {
+  return {
+    schemaVersion: 3,
+    filePath: plan.candidatePrivacyProofPath,
+    artifactSha256: '1'.repeat(64),
+    objectSha256: '2'.repeat(64),
+    boundarySha256: candidatePrivacyBoundarySha256({
+      projectId: PROJECT,
+      projectNumber: PROJECT_NUMBER,
+      organizationId: GCP_IDENTITY.organizationId,
+      region: REGION,
+      releaseSha: plan.releaseSha,
+      imageDigest: plan.imageDigest,
+      image: plan.expectedCandidate.image,
+      candidateService: plan.candidateService,
+      candidateRevision: plan.candidateRevision,
+      candidateTag: plan.candidateTag,
+      candidateOrigin: plan.candidateOrigin,
+      candidateAudience: plan.candidateServiceOrigin,
+      acceptanceServiceAccount: GCP_IDENTITY.serviceAccounts.acceptance,
+      operator: 'admin@motionexp.com',
+      expectedCandidate: plan.expectedCandidate,
+    }),
+    observedAt: '2026-08-26T08:00:00.000Z',
+    expiresAt: '2026-08-26T08:05:00.000Z',
+  };
+}
+
 function receiptOutputs(plan, phase) {
   if (phase === 'build') return {
     buildConfigSha256: plan.buildConfigSha256,
@@ -198,6 +227,7 @@ function receiptOutputs(plan, phase) {
     candidateService: CANDIDATE_SERVICE,
     imageDigest: plan.imageDigest,
     origin: plan.candidateOrigin,
+    privacyProof: candidatePrivacyReference(plan),
     publicInvoker: false,
     priorRelease: plan.previousRevision === null ? null : {
       image: plan.previousImage,

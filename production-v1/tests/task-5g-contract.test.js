@@ -581,6 +581,7 @@ test('Task 8 schema v3 locators bind exact start and end privacy proofs', () => 
   };
   assert.deepEqual(assertTask8Evidence(valid, {
     stableTrafficState: 'stable-prior-100',
+    now: new Date('2026-08-27T08:02:00.000Z'),
   }), valid);
 
   for (const mutate of [
@@ -595,8 +596,19 @@ test('Task 8 schema v3 locators bind exact start and end privacy proofs', () => 
     mutate(candidate);
     assert.throws(() => assertTask8Evidence(candidate, {
       stableTrafficState: 'stable-prior-100',
+      now: new Date('2026-08-27T08:02:00.000Z'),
     }), /GCP release contract is invalid/);
   }
+  const identical = structuredClone(valid);
+  identical.readiness.privacyProofs.end = structuredClone(identical.readiness.privacyProofs.start);
+  assert.throws(() => assertTask8Evidence(identical, {
+    stableTrafficState: 'stable-prior-100',
+    now: new Date('2026-08-27T08:02:00.000Z'),
+  }), /GCP release contract is invalid/);
+  assert.throws(() => assertTask8Evidence(valid, {
+    stableTrafficState: 'stable-prior-100',
+    now: new Date('2026-08-27T08:07:00.000Z'),
+  }), /GCP release contract is invalid/);
 });
 
 test('candidate private invocation is acceptance-SA-only and never grants token creation', () => {
@@ -698,6 +710,9 @@ function privacyRuntimeSpec(expected) {
     containerConcurrency: expected.concurrency,
     timeoutSeconds: `${expected.timeoutSeconds}s`,
     containers: [{
+      name: 'hkbuddy-v1-api-1',
+      workingDir: '/app',
+      ports: [{ name: 'http1', containerPort: 8080 }],
       image: expected.image,
       resources: { limits: { cpu: String(expected.cpu), memory: expected.memory } },
       env: Object.entries(expected.environment).map(([name, value]) => ({ name, value })),
@@ -716,6 +731,7 @@ function privacyServiceReadback(binding) {
     metadata: {
       name: binding.candidateService,
       namespace: binding.projectNumber,
+      generation: 7,
       labels: { 'cloud.googleapis.com/location': binding.region },
       annotations: {
         'run.googleapis.com/ingress': 'all',
@@ -731,9 +747,11 @@ function privacyServiceReadback(binding) {
       traffic: [{ revisionName: binding.candidateRevision, percent: 100, tag: binding.candidateTag }],
     },
     status: {
+      address: { url: binding.candidateAudience },
       conditions: [{ type: 'Ready', status: 'True' }],
       latestCreatedRevisionName: binding.candidateRevision,
       latestReadyRevisionName: binding.candidateRevision,
+      observedGeneration: 7,
       traffic: [{
         revisionName: binding.candidateRevision,
         percent: 100,
@@ -753,6 +771,7 @@ function privacyRevisionReadback(binding) {
     metadata: {
       name: binding.candidateRevision,
       namespace: binding.projectNumber,
+      generation: 11,
       labels: {
         'cloud.googleapis.com/location': binding.region,
         'serving.knative.dev/configuration': binding.candidateService,
@@ -764,7 +783,9 @@ function privacyRevisionReadback(binding) {
     status: {
       conditions: [{ type: 'Ready', status: 'True' }],
       imageDigest: binding.image,
-      containerStatuses: [{ imageDigest: binding.image }],
+      desiredReplicas: 1,
+      observedGeneration: 11,
+      serviceName: binding.candidateService,
     },
   };
 }
@@ -808,6 +829,7 @@ function privacyFixtures(binding = basePrivacyBinding()) {
     name: `organizations/${binding.organizationId}`,
     displayName: 'motionexp.com',
     lifecycleState: 'ACTIVE',
+    creationTime: '2020-01-01T00:00:00.000Z',
   };
   const project = {
     projectId: binding.projectId,
@@ -834,19 +856,12 @@ function privacyFixtures(binding = basePrivacyBinding()) {
       fullResourceName: CANDIDATE_RESOURCE,
       policies: [
         { attachedResource: CANDIDATE_RESOURCE, policy: servicePolicy },
-        {
-          attachedResource: `//cloudresourcemanager.googleapis.com/projects/${binding.projectNumber}`,
-          policy: projectPolicy,
-        },
-        {
-          attachedResource: `//cloudresourcemanager.googleapis.com/organizations/${binding.organizationId}`,
-          policy: organizationPolicy,
-        },
       ],
     }],
   };
   const analysis = (kind) => ({
     fullyExplored: true,
+    serviceAccountImpersonationAnalysis: [],
     mainAnalysis: {
       analysisQuery: {
         scope: `organizations/${binding.organizationId}`,
@@ -876,10 +891,10 @@ function privacyFixtures(binding = basePrivacyBinding()) {
         access: 'GRANTED',
         relevance: 'HIGH',
         role: 'roles/run.servicesInvoker',
-        rolePermission: 'INCLUDED',
+        rolePermission: 'ROLE_PERMISSION_INCLUDED',
         memberships: {
           [`serviceAccount:${binding.acceptanceServiceAccount}`]: {
-            membership: 'INCLUDED', relevance: 'HIGH',
+            membership: 'MEMBERSHIP_INCLUDED', relevance: 'HIGH',
           },
         },
       }],
@@ -933,12 +948,26 @@ function effectivePolicyFor(fixtures, binding) {
     attachedResource: `//cloudresourcemanager.googleapis.com/organizations/${binding.organizationId}`,
     policy: fixtures.organizationPolicy,
   });
-  return { policyResults: [{ fullResourceName: CANDIDATE_RESOURCE, policies }] };
+  const present = policies.filter(({ attachedResource, policy }) => (
+    attachedResource === CANDIDATE_RESOURCE
+      || (policy.bindings?.length ?? 0) > 0
+      || (policy.auditConfigs?.length ?? 0) > 0
+  ));
+  return { policyResults: [{ fullResourceName: CANDIDATE_RESOURCE, policies: present }] };
 }
 
 function createPrivacyHarness({ mutate = () => undefined } = {}) {
   const binding = basePrivacyBinding();
   const fixtures = privacyFixtures(binding);
+  fixtures.readyData = {
+    status: 'ready',
+    productionReady: true,
+    boundary: 'production-v1',
+    checks: [
+      'configuration', 'release-evidence', 'llm-smoke', 'database', 'media',
+      'corpus', 'retention', 'dispatcher', 'runtime',
+    ].map((name) => ({ name, status: 'ready' })),
+  };
   mutate(fixtures, binding);
   const calls = [];
   const tokenCalls = [];
@@ -1015,8 +1044,10 @@ function createPrivacyHarness({ mutate = () => undefined } = {}) {
     if (command.startsWith('logging read ')) {
       const filter = argv[2];
       assert.equal(filter.includes(`logName=\"${RUN_REQUEST_LOG}\"`), true);
-      assert.equal(filter.includes(`timestamp>=\"2026-08-27T07:59:30.000Z\"`), true);
-      assert.equal(filter.includes(`timestamp<=\"2026-08-27T08:05:00.000Z\"`), true);
+      const lower = filter.match(/timestamp>="([^"]+)"/u)?.[1];
+      const upper = filter.match(/timestamp<="([^"]+)"/u)?.[1];
+      assert.equal(Number.isFinite(Date.parse(lower)), true);
+      assert.equal(Date.parse(upper) - Date.parse(lower), 5 * 60_000 + 30_000);
       assert.equal(argv.includes('--freshness=5m'), false);
       assert.equal(argv.includes('--limit=2'), true);
       const trace = /trace=\"projects\/[^/]+\/traces\/([0-9a-f]{32})\"/.exec(filter)?.[1];
@@ -1045,7 +1076,7 @@ function createPrivacyHarness({ mutate = () => undefined } = {}) {
         },
         httpRequest: {
           requestMethod: 'GET',
-          requestUrl: `${binding.candidateOrigin}/api/health/live`,
+          requestUrl: `${binding.candidateOrigin}${probe.path}`,
           status: probe.kind === 'anonymous' ? 403 : 200,
           userAgent: probe.userAgent,
           latency: '0.012345678s',
@@ -1068,8 +1099,9 @@ function createPrivacyHarness({ mutate = () => undefined } = {}) {
   const fetch = async (url, options) => {
     const traceId = String(options.headers['X-Cloud-Trace-Context']).split('/')[0];
     const kind = Object.hasOwn(options.headers, 'Authorization') ? 'authenticated' : 'anonymous';
-    logRequests.push({ kind, traceId, userAgent: options.headers['User-Agent'] });
-    assert.equal(url, `${binding.candidateOrigin}/api/health/live`);
+    const path = new URL(url).pathname;
+    logRequests.push({ kind, path, traceId, userAgent: options.headers['User-Agent'] });
+    assert.equal(['/api/health/live', '/api/health/ready'].includes(path), true);
     assert.equal(options.method, 'GET');
     assert.equal(options.redirect, 'manual');
     assert.equal(options.credentials, 'omit');
@@ -1087,7 +1119,9 @@ function createPrivacyHarness({ mutate = () => undefined } = {}) {
       status: 200,
       headers: fakeHeaders({ 'content-type': 'application/json; charset=utf-8' }),
       json: async () => ({
-        data: { status: 'ok', version: '0.1.0' },
+        data: path === '/api/health/live'
+          ? { status: 'ok', version: '0.1.0' }
+          : structuredClone(fixtures.readyData),
         error: null,
         requestId: '123e4567-e89b-42d3-a456-426614174000',
       }),
@@ -1194,6 +1228,13 @@ test('identity-token transport reads exactly one raw JWT line without using the 
     options: { encoding: 'utf8', maxBuffer: 64 * 1024, windowsHide: true },
   }]);
 
+  const impersonationWarning = `WARNING: This command is using service account impersonation. All API calls will be executed as [${ACCEPTANCE_SERVICE_ACCOUNT}].\n`;
+  const warningExecutor = createIdentityTokenExecutor({
+    executable: 'python.exe',
+    execFile: async () => ({ stdout: `${token}\n`, stderr: impersonationWarning }),
+  });
+  assert.equal(await warningExecutor(plan.token), token);
+
   for (const stdout of [token, ` ${token}\n`, `${token}\n\n`, `${token}\nextra\n`]) {
     const invalid = createIdentityTokenExecutor({
       executable: 'python.exe',
@@ -1208,6 +1249,19 @@ test('identity-token transport reads exactly one raw JWT line without using the 
   await assert.rejects(() => transportError(plan.token), (error) => (
     error.message === 'Candidate privacy proof failed' && !error.message.includes(token)
   ));
+  for (const stderr of [
+    impersonationWarning.replace(ACCEPTANCE_SERVICE_ACCOUNT, 'foreign@example.com'),
+    `${impersonationWarning}extra warning\n`,
+    `WARNING: ${token}\n`,
+  ]) {
+    const invalidWarning = createIdentityTokenExecutor({
+      executable: 'python.exe',
+      execFile: async () => ({ stdout: `${token}\n`, stderr }),
+    });
+    await assert.rejects(() => invalidWarning(plan.token), (error) => (
+      error.message === 'Candidate privacy proof failed' && !error.message.includes(token)
+    ));
+  }
 });
 
 test('controlled privacy producer proves inherited IAM, both edges, and exact logs without persisting credentials', async () => {
@@ -1237,6 +1291,7 @@ test('controlled privacy producer proves inherited IAM, both edges, and exact lo
   assert.equal(proof.controlPlane.stable, true);
   assert.equal(proof.controlPlane.beforeSha256, proof.controlPlane.afterSha256);
   assert.equal(proof.cloudAsset.analyses.allUsers.fullyExplored, true);
+  assert.equal(proof.cloudAsset.analyses.allUsers.resultCount, 0);
   assert.equal(proof.cloudAsset.analyses.allAuthenticatedUsers.resultCount, 0);
   assert.equal(proof.edge.anonymous.status, 403);
   assert.equal(proof.edge.authenticated.status, 200);
@@ -1308,9 +1363,6 @@ test('privacy producer traverses two folders and resolves predefined, project, a
       delete analysis.mainAnalysis.analysisResults;
       delete analysis.mainAnalysis.nonCriticalErrors;
     }
-    fixtures.analyses.expandedRoles.mainAnalysis.analysisResults = [{
-      accessControlLists: [{ accesses: [{ permission: 'logging.logEntries.list' }] }],
-    }];
   } });
   const proof = await runCandidatePrivacyProof({
     binding: harness.binding, executor: harness.executor, tokenExecutor: harness.tokenExecutor,
@@ -1348,10 +1400,10 @@ test('privacy producer accepts allowlisted IAM audit config and harmless server-
       enumerable: true,
       get: () => String(++resourceVersion),
     });
-    let revisionGeneration = 0;
-    Object.defineProperty(fixtures.revision.metadata, 'generation', {
+    let revisionResourceVersion = 0;
+    Object.defineProperty(fixtures.revision.metadata, 'resourceVersion', {
       enumerable: true,
-      get: () => ++revisionGeneration,
+      get: () => String(++revisionResourceVersion),
     });
   } });
   const proof = await runCandidatePrivacyProof({
@@ -1365,6 +1417,52 @@ test('privacy producer accepts allowlisted IAM audit config and harmless server-
   });
   assert.equal(proof.result, 'pass');
   assert.equal(proof.controlPlane.beforeSha256, proof.controlPlane.afterSha256);
+});
+
+test('privacy producer accepts SDK 553 organization, folder, IAM, analysis, revision, and ingestion shapes', async () => {
+  const { runCandidatePrivacyProof } = await import('../scripts/candidate-privacy-proof.js');
+  const harness = createPrivacyHarness({ mutate: (fixtures, binding) => {
+    fixtures.project.parent = { type: 'folder', id: '1001' };
+    fixtures.folders = {
+      1001: {
+        descriptor: {
+          name: 'folders/1001', parent: `organizations/${binding.organizationId}`,
+          lifecycleState: 'ACTIVE', tags: { environment: 'production' },
+        },
+        policy: { version: 1, etag: 'BwYAAw==' },
+      },
+    };
+    fixtures.projectPolicy = {
+      version: 3,
+      etag: 'BwYAAQ==',
+      bindings: [{
+        role: 'roles/logging.viewer', members: ['allUsers'],
+        condition: {
+          title: 'metadata-only', description: 'does not grant invocation',
+          expression: 'request.time < timestamp("2030-01-01T00:00:00Z")',
+          location: 'global',
+        },
+      }],
+    };
+    fixtures.roleDefinitions['roles/logging.viewer'] = {
+      name: 'roles/logging.viewer', stage: 'GA', deleted: false,
+      includedPermissions: ['logging.logEntries.list'],
+    };
+    fixtures.effectivePolicy = effectivePolicyFor(fixtures, binding);
+    fixtures.logEmptyPolls = 4;
+  } });
+  const proof = await runCandidatePrivacyProof({
+    binding: harness.binding,
+    executor: harness.executor,
+    tokenExecutor: harness.tokenExecutor,
+    fetch: harness.fetch,
+    now: () => new Date(PRIVACY_NOW),
+    nonce: harness.nonce,
+    sleep: harness.sleep,
+  });
+  assert.equal(proof.result, 'pass');
+  assert.equal(proof.cloudAsset.analyses.allUsers.resultCount, 0);
+  assert.equal(Math.max(...harness.logPolls.values()), 5);
 });
 
 test('privacy producer fails closed on incomplete effective policy, inherited public invoke, edge, or log drift', async (t) => {
@@ -1444,14 +1542,24 @@ test('privacy producer fails closed on incomplete effective policy, inherited pu
         includedPermissions: ['resourcemanager.projects.get'],
       };
     }],
-    ['effective IAM omits project policy', (fixtures) => {
-      fixtures.effectivePolicy.policyResults[0].policies.splice(1, 1);
+    ['effective IAM omits nonempty project policy', (fixtures) => {
+      fixtures.projectPolicy.bindings = [{ role: 'roles/logging.viewer', members: ['user:a@example.com'] }];
     }],
     ['effective IAM adds foreign policy', (fixtures) => {
       fixtures.effectivePolicy.policyResults[0].policies.push({
         attachedResource: '//cloudresourcemanager.googleapis.com/projects/999999999999',
         policy: { version: 1, etag: 'BwYAZA==' },
       });
+    }],
+    ['effective IAM duplicates an attached policy', (fixtures) => {
+      fixtures.effectivePolicy.policyResults[0].policies.push(
+        structuredClone(fixtures.effectivePolicy.policyResults[0].policies[0]),
+      );
+    }],
+    ['effective IAM reorders nonempty direct policies', (fixtures, binding) => {
+      fixtures.projectPolicy.bindings = [{ role: 'roles/logging.viewer', members: ['user:a@example.com'] }];
+      fixtures.effectivePolicy = effectivePolicyFor(fixtures, binding);
+      fixtures.effectivePolicy.policyResults[0].policies.reverse();
     }],
     ['incomplete Asset analysis', (fixtures) => {
       fixtures.analyses.permission.mainAnalysis.fullyExplored = false;
@@ -1467,12 +1575,22 @@ test('privacy producer fails closed on incomplete effective policy, inherited pu
         fullyExplored: true, analysisResults: [{}], nonCriticalErrors: [],
       };
     }],
+    ['impersonation analysis object is not the repeated SDK field', (fixtures) => {
+      fixtures.analyses.permission.serviceAccountImpersonationAnalysis = {
+        fullyExplored: true,
+      };
+    }],
     ['permission Asset analysis result', (fixtures) => {
       fixtures.analyses.permission.mainAnalysis.analysisResults = [{}];
     }],
     ['expanded-role Asset invoke result', (fixtures) => {
       fixtures.analyses.expandedRoles.mainAnalysis.analysisResults = [{
         accessControlLists: [{ accesses: [{ permission: 'run.routes.invoke' }] }],
+      }];
+    }],
+    ['expanded-role Asset unrelated result', (fixtures) => {
+      fixtures.analyses.expandedRoles.mainAnalysis.analysisResults = [{
+        accessControlLists: [{ accesses: [{ permission: 'logging.logEntries.list' }] }],
       }];
     }],
     ['ambiguous Troubleshooter', (fixtures) => { fixtures.troubleshooter.access = 'UNKNOWN'; }],
@@ -1532,8 +1650,24 @@ test('privacy producer fails closed on incomplete effective policy, inherited pu
     ['candidate revision project drift', (fixtures) => {
       fixtures.revision.metadata.namespace = '999999999999';
     }],
-    ['candidate revision container-status unknown field', (fixtures) => {
-      fixtures.revision.status.containerStatuses[0].unknown = true;
+    ['candidate service observed-generation drift', (fixtures) => {
+      fixtures.service.status.observedGeneration = 6;
+    }],
+    ['candidate service address drift', (fixtures) => {
+      fixtures.service.status.address.url = 'https://foreign.example';
+    }],
+    ['candidate revision observed-generation drift', (fixtures) => {
+      fixtures.revision.status.observedGeneration = 10;
+    }],
+    ['candidate container working-directory drift between reads', (fixtures) => {
+      let reads = 0;
+      Object.defineProperty(fixtures.service.spec.template.spec.containers[0], 'workingDir', {
+        enumerable: true,
+        get: () => (++reads > 1 ? '/foreign' : '/app'),
+      });
+    }],
+    ['candidate revision desired replica drift', (fixtures) => {
+      fixtures.revision.status.desiredReplicas = 2;
     }],
   ];
   for (const [name, mutate] of cases) {
@@ -1548,6 +1682,125 @@ test('privacy producer fails closed on incomplete effective policy, inherited pu
         nonce: harness.nonce,
         sleep: harness.sleep,
       }), /Candidate privacy proof failed/);
+    });
+  }
+});
+
+test('privacy producer refuses a proof when its original evidence window expires during readback', async () => {
+  const { runCandidatePrivacyProof } = await import('../scripts/candidate-privacy-proof.js');
+  const harness = createPrivacyHarness({ mutate: (fixtures) => { fixtures.logEmptyPolls = 0; } });
+  const startedAt = Date.parse(PRIVACY_NOW);
+  let clockCalls = 0;
+  await assert.rejects(() => runCandidatePrivacyProof({
+    binding: harness.binding,
+    executor: harness.executor,
+    tokenExecutor: harness.tokenExecutor,
+    fetch: harness.fetch,
+    now: () => new Date(clockCalls++ < 3 ? startedAt : startedAt + 5 * 60_000),
+    nonce: harness.nonce,
+    sleep: harness.sleep,
+  }), /Candidate privacy proof failed/);
+  assert.equal(clockCalls, 4, 'the producer must capture one final post-readback clock');
+});
+
+function unresolvedReadinessEntry() {
+  const entry = task8V3Entry('readiness');
+  entry.filePath = 'C:\\release\\controlled-readiness.json';
+  entry.artifactSha256 = '0'.repeat(64);
+  entry.objectSha256 = '0'.repeat(64);
+  for (const [boundary, reference] of Object.entries(entry.privacyProofs)) {
+    reference.filePath = `C:\\release\\controlled-readiness-privacy-${boundary}.json`;
+    reference.artifactSha256 = '0'.repeat(64);
+    reference.objectSha256 = '0'.repeat(64);
+    reference.boundarySha256 = '0'.repeat(64);
+  }
+  return entry;
+}
+
+test('readiness producer runs fresh privacy and authoritative live/ready evidence without accepting JSON', async (t) => {
+  const {
+    finalizeTask8ReadinessRecord,
+    runTask8Readiness,
+    validateTask8ReadinessRecord,
+  } = await import('../scripts/task8-readiness-producer.js');
+  const sourceArchiveSha256 = 'e'.repeat(64);
+  const run = async ({ mutate = () => undefined, entry = unresolvedReadinessEntry() } = {}) => {
+    const harness = createPrivacyHarness({ mutate });
+    let clockMilliseconds = Date.parse(PRIVACY_NOW);
+    const result = await runTask8Readiness({
+      binding: harness.binding,
+      evidenceContract: entry,
+      sourceArchiveSha256,
+      executor: harness.executor,
+      tokenExecutor: harness.tokenExecutor,
+      fetch: harness.fetch,
+      now: () => new Date(clockMilliseconds++),
+      nonce: harness.nonce,
+      sleep: harness.sleep,
+    });
+    return { harness, result };
+  };
+
+  const { harness, result } = await run();
+  assert.equal(result.record.schemaVersion, 3);
+  assert.equal(result.record.gate, 'readiness');
+  assert.equal(result.record.result, 'pass');
+  assert.equal(result.record.controlPlane.stable, true);
+  assert.equal(result.record.controlPlane.beforeSha256, result.record.controlPlane.afterSha256);
+  assert.deepEqual(result.record.readiness.checks.map(({ name }) => name), [
+    'configuration', 'release-evidence', 'llm-smoke', 'database', 'media',
+    'corpus', 'retention', 'dispatcher', 'runtime',
+  ]);
+  assert.equal(result.record.probes.live.status, 200);
+  assert.equal(result.record.probes.ready.status, 200);
+  assert.notEqual(
+    result.record.privacyProofs.start.artifactSha256,
+    result.record.privacyProofs.end.artifactSha256,
+  );
+  assert.deepEqual(Object.keys(result.artifacts), ['privacyStart', 'privacyEnd', 'readiness']);
+  assert.equal(result.artifacts.readiness.contents, `${JSON.stringify(result.record, null, 2)}\n`);
+  assert.equal(result.evidence.artifactSha256, result.record.artifactSha256);
+  assert.equal(result.evidence.objectSha256, sha256(result.artifacts.readiness.contents));
+  assert.deepEqual(result.evidence.privacyProofs, result.record.privacyProofs);
+  assert.equal(validateTask8ReadinessRecord(result.record, {
+    binding: harness.binding,
+    sourceArchiveSha256,
+    now: new Date(PRIVACY_NOW),
+  }), true);
+  assert.deepEqual(finalizeTask8ReadinessRecord(result.record), result.record);
+  assert.equal(harness.tokenCalls.length, 4, 'two privacy proofs and two health probes mint in memory');
+  assert.equal(harness.logRequests.filter(({ path }) => path === '/api/health/live').length, 5);
+  assert.equal(harness.logRequests.filter(({ path }) => path === '/api/health/ready').length, 1);
+  const serialized = JSON.stringify(result);
+  assert.equal(serialized.includes(harness.fixtures.token), false);
+  assert.equal(serialized.includes('Authorization'), false);
+
+  const prebuilt = unresolvedReadinessEntry();
+  prebuilt.artifactSha256 = '7'.repeat(64);
+  let prebuiltCalls = 0;
+  await assert.rejects(() => runTask8Readiness({
+    binding: basePrivacyBinding(),
+    evidenceContract: prebuilt,
+    sourceArchiveSha256,
+    executor: async () => { prebuiltCalls += 1; },
+    tokenExecutor: async () => { prebuiltCalls += 1; },
+    fetch: async () => { prebuiltCalls += 1; },
+    now: () => new Date(PRIVACY_NOW),
+    nonce: () => 'unused',
+    sleep: async () => undefined,
+  }), /Task 8 readiness production failed/);
+  assert.equal(prebuiltCalls, 0);
+
+  for (const [name, mutate] of [
+    ['missing component', (fixtures) => { fixtures.readyData.checks.pop(); }],
+    ['extra component', (fixtures) => { fixtures.readyData.checks.push({ name: 'extra', status: 'ready' }); }],
+    ['reordered component', (fixtures) => { fixtures.readyData.checks.reverse(); }],
+    ['not-ready component', (fixtures) => { fixtures.readyData.checks[3].status = 'not-ready'; }],
+    ['wrong readiness boundary', (fixtures) => { fixtures.readyData.boundary = 'local-preview-only'; }],
+    ['readiness unknown field', (fixtures) => { fixtures.readyData.unknown = true; }],
+  ]) {
+    await t.test(name, async () => {
+      await assert.rejects(() => run({ mutate }), /Task 8 readiness production failed/);
     });
   }
 });

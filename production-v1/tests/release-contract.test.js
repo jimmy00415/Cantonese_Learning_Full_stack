@@ -21,6 +21,14 @@ import {
   LATENCY_ACCEPTANCE_CONTRACT,
   finalizeLatencyAcceptanceRecord,
 } from '../scripts/production-latency-workload.js';
+import { candidatePrivacyBoundarySha256 } from '../scripts/candidate-privacy-proof.js';
+import { finalizeTask8ReadinessRecord } from '../scripts/task8-readiness-producer.js';
+import {
+  MOBILE_BROWSER_CONTRACT,
+  MOBILE_CHECK_IDS,
+  MOBILE_WAV_CONTRACT,
+  finalizeTask8MobileRecord,
+} from '../scripts/task8-mobile-producer.js';
 import {
   buildReleasePlan,
   containsForbiddenPersistedSecret,
@@ -43,6 +51,7 @@ import {
   validateReleaseJobReadback,
   validateServiceIamReceipt,
   validateTrafficReceipt,
+  validateTask8EvidenceArtifact,
 } from '../scripts/gcp-release.js';
 
 const PROJECT = 'motion-expert-hk-ltd-webpage';
@@ -169,6 +178,34 @@ function task8Entry(phase, stableTrafficState) {
       start: task8PrivacyProofReference(phase, 'start'),
       end: task8PrivacyProofReference(phase, 'end'),
     },
+  };
+}
+
+function candidatePrivacyReference(plan) {
+  return {
+    schemaVersion: 3,
+    filePath: plan.candidatePrivacyProofPath,
+    artifactSha256: '1'.repeat(64),
+    objectSha256: '2'.repeat(64),
+    boundarySha256: candidatePrivacyBoundarySha256({
+      projectId: PROJECT,
+      projectNumber: PROJECT_NUMBER,
+      organizationId: GCP_IDENTITY.organizationId,
+      region: REGION,
+      releaseSha: plan.releaseSha,
+      imageDigest: plan.imageDigest,
+      image: plan.expectedCandidate.image,
+      candidateService: plan.candidateService,
+      candidateRevision: plan.candidateRevision,
+      candidateTag: plan.candidateTag,
+      candidateOrigin: plan.candidateOrigin,
+      candidateAudience: plan.candidateServiceOrigin,
+      acceptanceServiceAccount: ACCEPTANCE_SA,
+      operator: 'admin@motionexp.com',
+      expectedCandidate: plan.expectedCandidate,
+    }),
+    observedAt: '2026-08-26T08:00:00.000Z',
+    expiresAt: '2026-08-26T08:05:00.000Z',
   };
 }
 
@@ -831,6 +868,7 @@ function fixtureReceiptOutputs(plan, phase) {
     candidateService: CANDIDATE_SERVICE,
     imageDigest: plan.imageDigest,
     origin: plan.candidateOrigin,
+    privacyProof: candidatePrivacyReference(plan),
     publicInvoker: false,
     priorRelease: plan.previousRevision === null ? null : {
       image: plan.previousImage,
@@ -860,6 +898,8 @@ function fixtureReceiptOutputs(plan, phase) {
     output.execution = {
       acceptanceWindowId: createHash('sha256').update('acceptance-window').digest('hex'),
       attemptId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      gateStartedAt: '2026-08-26T08:00:00.000Z',
+      gateEndedAt: '2026-08-26T08:09:00.000Z',
       networkWitnessSha256: createHash('sha256').update('network-witness').digest('hex'),
       observedRequestCount: 592,
     };
@@ -897,8 +937,289 @@ function fixtureReceiptChain(plan, through) {
   throw new Error('unknown fixture receipt phase');
 }
 
-function createTestStateStore({ attemptId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' } = {}) {
-  const records = [];
+function controlledReadinessExecution(plan) {
+  const binding = {
+    projectId: PROJECT,
+    projectNumber: PROJECT_NUMBER,
+    organizationId: GCP_IDENTITY.organizationId,
+    region: REGION,
+    releaseSha: plan.releaseSha,
+    imageDigest: plan.imageDigest,
+    image: plan.expectedCandidate.image,
+    candidateService: plan.candidateService,
+    candidateRevision: plan.candidateRevision,
+    candidateTag: plan.candidateTag,
+    candidateOrigin: plan.candidateOrigin,
+    candidateAudience: plan.candidateServiceOrigin,
+    acceptanceServiceAccount: ACCEPTANCE_SA,
+    operator: 'admin@motionexp.com',
+    expectedCandidate: plan.expectedCandidate,
+  };
+  const boundarySha256 = candidatePrivacyBoundarySha256(binding);
+  const entry = plan.task8Evidence.readiness;
+  const privacyArtifact = (boundary, digit, observedAt) => {
+    const contents = `${JSON.stringify({
+      schemaVersion: 3, proofType: 'controlled-test-privacy', artifactSha256: digit.repeat(64),
+    }, null, 2)}\n`;
+    return {
+      contents,
+      reference: {
+        schemaVersion: 3,
+        filePath: entry.privacyProofs[boundary].filePath,
+        artifactSha256: digit.repeat(64),
+        objectSha256: createHash('sha256').update(contents).digest('hex'),
+        boundarySha256,
+        observedAt,
+        expiresAt: new Date(Date.parse(observedAt) + 5 * 60_000).toISOString(),
+      },
+    };
+  };
+  const privacyStart = privacyArtifact('start', '1', '2026-08-27T08:00:00.000Z');
+  const privacyEnd = privacyArtifact('end', '2', '2026-08-27T08:01:00.000Z');
+  const readiness = {
+    status: 'ready', productionReady: true, boundary: 'production-v1',
+    checks: [
+      'configuration', 'release-evidence', 'llm-smoke', 'database', 'media',
+      'corpus', 'retention', 'dispatcher', 'runtime',
+    ].map((name) => ({ name, status: 'ready' })),
+  };
+  const record = finalizeTask8ReadinessRecord({
+    schemaVersion: 3,
+    gate: 'readiness',
+    result: 'pass',
+    occurredAt: privacyStart.reference.observedAt,
+    expiresAt: privacyStart.reference.expiresAt,
+    commitSha: plan.releaseSha,
+    sourceArchiveSha256: plan.sourceArchiveSha256,
+    imageDigest: plan.imageDigest,
+    candidateService: plan.candidateService,
+    candidateRevision: plan.candidateRevision,
+    candidateTag: plan.candidateTag,
+    candidateOrigin: plan.candidateOrigin,
+    stableService: plan.stableService,
+    trafficState: 'candidate-service-private-100',
+    stableTrafficState: plan.expectedStable.initialTrafficState,
+    trafficPercent: 100,
+    privacyProofs: { start: privacyStart.reference, end: privacyEnd.reference },
+    controlPlane: {
+      stable: true, beforeSha256: '3'.repeat(64), afterSha256: '3'.repeat(64),
+    },
+    probes: {
+      live: {
+        status: 200, responseSha256: '4'.repeat(64), logSha256: '5'.repeat(64),
+        traceSha256: '6'.repeat(64), userAgentSha256: '7'.repeat(64),
+      },
+      ready: {
+        status: 200, responseSha256: '8'.repeat(64), logSha256: '9'.repeat(64),
+        traceSha256: 'a'.repeat(64), userAgentSha256: 'b'.repeat(64),
+      },
+    },
+    readiness,
+  });
+  const readinessContents = `${JSON.stringify(record, null, 2)}\n`;
+  const evidence = {
+    ...entry,
+    artifactSha256: record.artifactSha256,
+    objectSha256: createHash('sha256').update(readinessContents).digest('hex'),
+    privacyProofs: structuredClone(record.privacyProofs),
+  };
+  return {
+    record,
+    evidence,
+    artifacts: {
+      privacyStart: { ...privacyStart, filePath: privacyStart.reference.filePath },
+      privacyEnd: { ...privacyEnd, filePath: privacyEnd.reference.filePath },
+      readiness: {
+        filePath: evidence.filePath,
+        contents: readinessContents,
+        artifactSha256: evidence.artifactSha256,
+        objectSha256: evidence.objectSha256,
+      },
+    },
+  };
+}
+
+function controlledMobileExecution(plan) {
+  const entry = plan.task8Evidence.mobile;
+  const boundarySha256 = candidatePrivacyBoundarySha256({
+    projectId: PROJECT,
+    projectNumber: PROJECT_NUMBER,
+    organizationId: GCP_IDENTITY.organizationId,
+    region: REGION,
+    releaseSha: plan.releaseSha,
+    imageDigest: plan.imageDigest,
+    image: plan.expectedCandidate.image,
+    candidateService: plan.candidateService,
+    candidateRevision: plan.candidateRevision,
+    candidateTag: plan.candidateTag,
+    candidateOrigin: plan.candidateOrigin,
+    candidateAudience: plan.candidateServiceOrigin,
+    acceptanceServiceAccount: ACCEPTANCE_SA,
+    operator: 'admin@motionexp.com',
+    expectedCandidate: plan.expectedCandidate,
+  });
+  const privacyArtifact = (boundary, digit, observedAt) => {
+    const proof = { schemaVersion: 3, artifactSha256: digit.repeat(64) };
+    const contents = `${JSON.stringify(proof, null, 2)}\n`;
+    return {
+      filePath: entry.privacyProofs[boundary].filePath,
+      contents,
+      reference: {
+        schemaVersion: 3,
+        filePath: entry.privacyProofs[boundary].filePath,
+        artifactSha256: proof.artifactSha256,
+        objectSha256: createHash('sha256').update(contents).digest('hex'),
+        boundarySha256,
+        observedAt,
+        expiresAt: new Date(Date.parse(observedAt) + 5 * 60_000).toISOString(),
+      },
+    };
+  };
+  const privacyStart = privacyArtifact('start', '1', '2026-08-27T08:00:00.000Z');
+  const privacyEnd = privacyArtifact('end', '2', '2026-08-27T08:01:00.000Z');
+  const screenshots = ['first-visit', 'text-source', 'voice-transcript', 'mobile-safe-area']
+    .map((id, index) => {
+      const contents = Buffer.alloc(128, index + 1);
+      return {
+        id,
+        filePath: join(dirname(entry.filePath), `mobile-${id}.png`),
+        contents,
+        metadata: {
+          width: 390,
+          height: 844,
+          rawSha256: createHash('sha256').update(contents).digest('hex'),
+          pixelSha256: ['8', '9', 'a', 'b'][index].repeat(64),
+          colorCount: 128,
+          luminanceSpan: 96,
+          luminanceVariance: 512,
+          dominantRatio: 0.2,
+          nonDominantRatio: 0.8,
+          byteLength: contents.length,
+        },
+      };
+    });
+  const record = finalizeTask8MobileRecord({
+    schemaVersion: 3,
+    gate: 'mobile',
+    result: 'pass',
+    occurredAt: privacyStart.reference.observedAt,
+    expiresAt: privacyStart.reference.expiresAt,
+    commitSha: plan.releaseSha,
+    sourceArchiveSha256: plan.sourceArchiveSha256,
+    imageDigest: plan.imageDigest,
+    candidateService: plan.candidateService,
+    candidateRevision: plan.candidateRevision,
+    candidateTag: plan.candidateTag,
+    candidateOrigin: plan.candidateOrigin,
+    stableService: plan.stableService,
+    trafficState: 'candidate-service-private-100',
+    stableTrafficState: plan.expectedStable.initialTrafficState,
+    trafficPercent: 100,
+    privacyProofs: { start: privacyStart.reference, end: privacyEnd.reference },
+    controlPlane: { stable: true, beforeSha256: '3'.repeat(64), afterSha256: '3'.repeat(64) },
+    browser: MOBILE_BROWSER_CONTRACT,
+    fixture: MOBILE_WAV_CONTRACT,
+    viewport: { width: 390, height: 844, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
+    access: structuredClone(plan.candidateAccess),
+    finalNavigationUrl: plan.candidateOrigin,
+    checks: MOBILE_CHECK_IDS.map((id) => ({ id, derived: true })),
+    screenshots: screenshots.map(({ id, filePath, metadata }) => ({ id, filePath, ...metadata })),
+    network: { eventCount: 2, traceSha256: '4'.repeat(64) },
+  });
+  const contents = `${JSON.stringify(record, null, 2)}\n`;
+  const evidence = {
+    ...entry,
+    artifactSha256: record.artifactSha256,
+    objectSha256: createHash('sha256').update(contents).digest('hex'),
+    privacyProofs: structuredClone(record.privacyProofs),
+  };
+  return {
+    record,
+    evidence,
+    artifacts: {
+      privacyStart,
+      screenshots,
+      privacyEnd,
+      mobile: {
+        filePath: evidence.filePath,
+        contents,
+        artifactSha256: evidence.artifactSha256,
+        objectSha256: evidence.objectSha256,
+      },
+    },
+  };
+}
+
+function controlledWorkloadPrivacyArtifact(plan, locator, boundary) {
+  const digit = boundary === 'start' ? 'c' : 'd';
+  const observedAt = boundary === 'start'
+    ? '2026-08-26T08:04:00.000Z' : '2026-08-26T08:06:00.000Z';
+  const record = {
+    schemaVersion: 3,
+    proofType: 'controlled-test-privacy',
+    artifactSha256: digit.repeat(64),
+  };
+  const contents = `${JSON.stringify(record, null, 2)}\n`;
+  return {
+    filePath: locator.filePath,
+    contents,
+    reference: {
+      schemaVersion: 3,
+      filePath: locator.filePath,
+      artifactSha256: record.artifactSha256,
+      objectSha256: createHash('sha256').update(contents).digest('hex'),
+      boundarySha256: candidatePrivacyBoundarySha256({
+        projectId: PROJECT,
+        projectNumber: PROJECT_NUMBER,
+        organizationId: GCP_IDENTITY.organizationId,
+        region: REGION,
+        releaseSha: plan.releaseSha,
+        imageDigest: plan.imageDigest,
+        image: plan.expectedCandidate.image,
+        candidateService: plan.candidateService,
+        candidateRevision: plan.candidateRevision,
+        candidateTag: plan.candidateTag,
+        candidateOrigin: plan.candidateOrigin,
+        candidateAudience: plan.candidateServiceOrigin,
+        acceptanceServiceAccount: ACCEPTANCE_SA,
+        operator: 'admin@motionexp.com',
+        expectedCandidate: plan.expectedCandidate,
+      }),
+      observedAt,
+      expiresAt: new Date(Date.parse(observedAt) + 5 * 60_000).toISOString(),
+    },
+  };
+}
+
+function controlledReleasePrivacyArtifact(plan, locator) {
+  const reference = candidatePrivacyReference(plan);
+  const proof = {
+    schemaVersion: 3,
+    proofType: 'controlled-release-test-privacy',
+    artifactSha256: createHash('sha256').update(locator.filePath).digest('hex'),
+    binding: { boundarySha256: reference.boundarySha256 },
+    occurredAt: '2026-08-27T08:00:00.000Z',
+    expiresAt: '2026-08-27T08:05:00.000Z',
+  };
+  const contents = `${JSON.stringify(proof, null, 2)}\n`;
+  return {
+    filePath: locator.filePath,
+    contents,
+    reference: {
+      schemaVersion: 3,
+      filePath: locator.filePath,
+      artifactSha256: proof.artifactSha256,
+      objectSha256: createHash('sha256').update(contents).digest('hex'),
+      boundarySha256: reference.boundarySha256,
+      observedAt: proof.occurredAt,
+      expiresAt: proof.expiresAt,
+    },
+  };
+}
+
+function createTestStateStore({
+  attemptId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', records = [],
+} = {}) {
   const append = (record) => {
     const stored = {
       ...structuredClone(record),
@@ -965,12 +1286,55 @@ async function appendTestMutationIntent(store, {
   }, { operationId });
 }
 
+async function appendTestPrivacyCheckpoint(store, {
+  operationId, mutationOrdinal, plan,
+}) {
+  const locator = {
+    filePath: operationId === 'candidate-privacy-publish'
+      ? plan.candidatePrivacyProofPath : plan.promotionPrivacyProofPath,
+  };
+  const artifact = controlledReleasePrivacyArtifact(plan, locator);
+  const bytes = Buffer.from(artifact.contents);
+  const artifacts = [{
+    role: 'privacy-proof',
+    filePath: locator.filePath,
+    byteLength: bytes.length,
+    objectSha256: createHash('sha256').update(bytes).digest('hex'),
+    contentsBase64: bytes.toString('base64'),
+  }];
+  const bundleSha256 = createHash('sha256')
+    .update(JSON.stringify(canonicalFixture(artifacts))).digest('hex');
+  const intent = await store.appendIntent({
+    mutationOrdinal,
+    operationAttemptId: String(mutationOrdinal).repeat(32).slice(0, 32),
+    commandSha256: createHash('sha256').update(operationId).digest('hex'),
+    reconcileKind: 'local-artifact-create',
+    beforeSha256: createHash('sha256').update('absent').digest('hex'),
+    afterSha256: bundleSha256,
+    publication: { artifacts, bundleSha256 },
+  }, { operationId });
+  await store.appendCheckpoint({
+    intentRecordSha256: intent.recordSha256,
+    classification: 'after',
+    outcome: 'applied',
+    observationSha256: bundleSha256,
+    safeResult: { kind: 'artifact-bundle', artifactCount: 1, bundleSha256 },
+  });
+}
+
 function runGcpRelease(options) {
   return runGcpReleaseImpl({
     loadReceipts: async (plan, { through }) => fixtureReceiptChain(plan, through),
     persistReceipt: async () => true,
     verifyEvidence: async () => true,
     verifyTask8Evidence: async () => true,
+    verifyReleasePrivacyArtifact: async () => true,
+    validateReleasePrivacyProof: () => true,
+    releasePrivacyTokenExecutor: async () => 'unused',
+    produceReleasePrivacyArtifact: async ({ plan, locator }) => (
+      controlledReleasePrivacyArtifact(plan, locator)
+    ),
+    writeReleasePrivacyArtifact: async () => true,
     openStateStore: async () => createTestStateStore(),
     ...options,
   });
@@ -1449,6 +1813,9 @@ test('candidate phase feeds raw Service JSON through gcloud 553-compatible secre
     },
   }, plan));
   assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  assert.equal(result.publicReport.phaseReceipt.outputs.privacyProof.filePath,
+    plan.candidatePrivacyProofPath);
+  assert.match(result.publicReport.phaseReceipt.outputs.privacyProof.objectSha256, /^[0-9a-f]{64}$/);
   const invalid = structuredClone(plan.candidateServiceSpec);
   invalid.spec.template.spec.containers[0].volumeMounts[1].mountPath
     = invalid.spec.template.spec.containers[0].volumeMounts[0].mountPath;
@@ -3013,6 +3380,9 @@ test('all-checkpoint candidate restart reconstructs exact private Service and IA
       },
     });
   }
+  await appendTestPrivacyCheckpoint(store, {
+    operationId: 'candidate-privacy-publish', mutationOrdinal: 3, plan,
+  });
   const calls = [];
   let persisted = null;
   const result = await runGcpRelease({
@@ -3109,7 +3479,7 @@ test('candidate receipt-write crash hashes authoritative readbacks and ignores o
   });
   assert.equal(first.exitCode, 1);
   assert.equal(first.publicReport.code, 'RELEASE_RECEIPT_WRITE_FAILED');
-  assert.equal(store.records.filter(({ recordType }) => recordType === 'checkpoint').length, 2);
+  assert.equal(store.records.filter(({ recordType }) => recordType === 'checkpoint').length, 3);
   assert.equal(store.records.some(({ recordType }) => recordType === 'terminal'), false);
 
   const restartCalls = [];
@@ -3319,7 +3689,11 @@ test('candidate IAM restart reconstructs exact candidate readbacks and never rep
     mutationOrdinal: 2,
     reconcileKind: 'cloud-run-service-iam',
   });
-  store.appendIntent = async () => { throw new Error('restart must not append another intent'); };
+  const appendCandidateRestartIntent = store.appendIntent;
+  store.appendIntent = async (payload, options) => {
+    assert.equal(options.operationId, 'candidate-privacy-publish');
+    return appendCandidateRestartIntent(payload, options);
+  };
   const input = releaseInput({ previousRevision: null, previousImageDigest: null });
   const plan = buildReleasePlan(input);
   const calls = [];
@@ -3562,10 +3936,18 @@ test('later promotion performs no cloud mutation after the final traffic mutatio
   let stableState = stablePriorReadback(plan);
   let trafficAttempted = false;
   let postTrafficDescribeCount = 0;
+  let promotionPrivacyProduced = false;
+  const store = createTestStateStore();
 
   const result = await runGcpRelease({
     argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`],
     input,
+    openStateStore: async () => store,
+    produceReleasePrivacyArtifact: async ({ plan: privacyPlan, locator }) => {
+      assert.deepEqual(stableState, stableStagedReadback(plan));
+      promotionPrivacyProduced = true;
+      return controlledReleasePrivacyArtifact(privacyPlan, locator);
+    },
     writeStableSpec: async () => true,
     execute: async (argv) => {
       calls.push(argv);
@@ -3587,6 +3969,10 @@ test('later promotion performs no cloud mutation after the final traffic mutatio
       }
       if (argv.includes('update-traffic')
         && argv.includes(`--to-revisions=${plan.stableRevision}=100`)) {
+        assert.equal(promotionPrivacyProduced, true);
+        assert.equal(store.records.some(({ recordType, operationId }) => (
+          recordType === 'checkpoint' && operationId === 'promote-privacy-publish'
+        )), true);
         trafficAttempted = true;
         stableState = stablePromotedReadback(plan);
         throw new Error('promotion traffic response was lost');
@@ -3632,9 +4018,12 @@ test('later-traffic restart adopts exact promoted service truth without a second
     reconcileKind: 'cloud-run-service-replace',
     plan,
   });
+  await appendTestPrivacyCheckpoint(store, {
+    operationId: 'promote-privacy-publish', mutationOrdinal: 2, plan,
+  });
   await appendTestMutationIntent(store, {
     operationId: 'promote-traffic',
-    mutationOrdinal: 2,
+    mutationOrdinal: 3,
     reconcileKind: 'cloud-run-traffic',
     plan,
   });
@@ -3920,20 +4309,25 @@ test('first promotion IAM response loss never triggers an automatic restore muta
 });
 
 test('first public-IAM restart rereads exact staged service state without repeating the final grant', async () => {
+  const input = releaseInput({ previousRevision: null, previousImageDigest: null });
+  const plan = buildReleasePlan(input);
   const store = createTestStateStore();
   await appendTestMutationCheckpoint(store, {
     operationId: 'promote-stable-deploy',
     mutationOrdinal: 1,
     reconcileKind: 'cloud-run-service-replace',
+    plan,
+  });
+  await appendTestPrivacyCheckpoint(store, {
+    operationId: 'promote-privacy-publish', mutationOrdinal: 2, plan,
   });
   await appendTestMutationIntent(store, {
     operationId: 'promote-public-service',
-    mutationOrdinal: 2,
+    mutationOrdinal: 3,
     reconcileKind: 'cloud-run-service-iam',
+    plan,
   });
   store.appendIntent = async () => { throw new Error('restart must not append another intent'); };
-  const input = releaseInput({ previousRevision: null, previousImageDigest: null });
-  const plan = buildReleasePlan(input);
   const calls = [];
   const result = await runGcpRelease({
     argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`],
@@ -4415,8 +4809,8 @@ test('receipt idempotency metadata rejects symlinks and non-files before byte re
   }), true);
 });
 
-test('receipt idempotency rejects an EEXIST symlink before reading existing bytes', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'hkbuddy-receipt-symlink-'));
+test('receipt idempotency rejects an EEXIST directory junction before reading target bytes', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'hkbuddy-receipt-junction-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const sourceArchive = join(directory, 'source.tar.gz');
   const input = releaseInput({
@@ -4426,22 +4820,19 @@ test('receipt idempotency rejects an EEXIST symlink before reading existing byte
   const plan = buildReleasePlan(input);
   const receipt = fixtureReceiptChain(plan, 'build')[0];
   await mkdir(plan.releaseReceiptDirectory);
-  const target = join(directory, 'forged-receipt.json');
-  await writeFile(target, `${JSON.stringify(receipt, null, 2)}\n`);
-  try {
-    await symlink(target, plan.releaseReceiptPaths.build, 'file');
-  } catch (error) {
-    if (['EPERM', 'EACCES'].includes(error?.code)) {
-      t.skip('file symlink creation is unavailable');
-      return;
-    }
-    throw error;
-  }
+  const target = join(directory, 'forged-receipt-directory');
+  await mkdir(target);
+  await writeFile(join(target, 'target-bytes.json'), `${JSON.stringify(receipt, null, 2)}\n`);
+  await symlink(target, plan.releaseReceiptPaths.build, 'junction');
   const module = await import('../scripts/gcp-release.js');
+  let reads = 0;
   await assert.rejects(
-    () => module.persistReleaseReceipt(plan, receipt),
+    () => module.persistReleaseReceipt(plan, receipt, {
+      readExisting: async () => { reads += 1; throw new Error('target bytes were read'); },
+    }),
     /receipt|symlink/i,
   );
+  assert.equal(reads, 0);
 });
 
 test('Cloud Build receipt requires the exact generation-bound SHA256 source provenance', () => {
@@ -4821,6 +5212,545 @@ test('promotion revalidates every Task 8 artifact before any control-plane call'
   assert.equal(result.publicReport.mutationPerformed, false);
 });
 
+test('candidate and promotion privacy proof operations fence their phase boundaries', () => {
+  for (const previousRevision of [null, `${STABLE_SERVICE}-111111111111`]) {
+    const plan = buildReleasePlan(releaseInput(previousRevision === null ? {
+      previousRevision: null, previousImageDigest: null,
+    } : { previousRevision }), { phase: 'promote' });
+    const candidate = plan.operations.filter(({ phase }) => phase === 'candidate');
+    assert.equal(candidate.at(-1).id, 'candidate-privacy-publish');
+    assert.equal(candidate.at(-2).id, 'candidate-private-iam-readback');
+    const promotion = plan.operations.filter(({ phase }) => phase === 'promote');
+    const privacyIndex = promotion.findIndex(({ id }) => id === 'promote-privacy-publish');
+    const finalId = previousRevision === null ? 'promote-public-service' : 'promote-traffic';
+    assert.ok(privacyIndex > 0);
+    assert.equal(promotion[privacyIndex + 1].id, finalId);
+    assert.deepEqual(promotion.slice(privacyIndex + 1).filter(({ id }) => (
+      ['promote-public-service', 'promote-traffic', 'promote-stable-deploy'].includes(id)
+    )).map(({ id }) => id), [finalId]);
+  }
+});
+
+test('default Task 8 verifier reads and hash-binds both privacy files before accepting workload evidence', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'hkbuddy-task8-privacy-files-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const record = validWorkloadAcceptanceRecord();
+  const contents = `${JSON.stringify(record, null, 2)}\n`;
+  const base = releaseInput();
+  const workload = {
+    ...base.task8Evidence.workload,
+    filePath: join(directory, 'workload.json'),
+    artifactSha256: record.artifactSha256,
+    objectSha256: createHash('sha256').update(contents).digest('hex'),
+    privacyProofs: Object.fromEntries(['start', 'end'].map((boundary) => [boundary, {
+      ...base.task8Evidence.workload.privacyProofs[boundary],
+      filePath: join(directory, `privacy-${boundary}.json`),
+    }])),
+  };
+  await writeFile(workload.filePath, contents);
+  const input = releaseInput({
+    task8Evidence: { ...base.task8Evidence, workload },
+  });
+  const plan = buildReleasePlan(input, { phase: 'workload' });
+  const options = {
+    now: new Date('2026-08-26T08:05:00.000Z'),
+    gateWindow: {
+      gateStartedAt: '2026-08-26T08:00:00.000Z',
+      gateEndedAt: '2026-08-26T08:05:00.000Z',
+    },
+  };
+  await assert.rejects(
+    () => validateTask8EvidenceArtifact(workload, 'workload', plan, options),
+    /Task 8 workload evidence is invalid/,
+  );
+  await writeFile(workload.privacyProofs.start.filePath, '{}\n');
+  await writeFile(workload.privacyProofs.end.filePath, '{}\n');
+  await assert.rejects(
+    () => validateTask8EvidenceArtifact(workload, 'workload', plan, options),
+    /Task 8 workload evidence is invalid/,
+  );
+});
+
+test('historical Task 8 proofs are validated at their recorded gate instants, not promotion time', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'hkbuddy-task8-historical-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const record = validWorkloadAcceptanceRecord();
+  const contents = `${JSON.stringify(record, null, 2)}\n`;
+  const base = releaseInput();
+  const calls = [];
+  const privacyProofs = {};
+  const boundarySha256 = '1'.repeat(64);
+  for (const [boundary, observedAt] of [
+    ['start', '2026-08-26T08:00:00.000Z'],
+    ['end', '2026-08-26T08:10:00.000Z'],
+  ]) {
+    const proof = {
+      schemaVersion: 3,
+      artifactSha256: createHash('sha256').update(`privacy-${boundary}`).digest('hex'),
+      binding: { boundarySha256 },
+      occurredAt: observedAt,
+      expiresAt: new Date(Date.parse(observedAt) + 5 * 60_000).toISOString(),
+    };
+    const bytes = `${JSON.stringify(proof, null, 2)}\n`;
+    const filePath = join(directory, `privacy-${boundary}.json`);
+    await writeFile(filePath, bytes);
+    privacyProofs[boundary] = {
+      ...base.task8Evidence.workload.privacyProofs[boundary],
+      filePath,
+      artifactSha256: proof.artifactSha256,
+      objectSha256: createHash('sha256').update(bytes).digest('hex'),
+      boundarySha256,
+      observedAt,
+      expiresAt: proof.expiresAt,
+    };
+  }
+  const workload = {
+    ...base.task8Evidence.workload,
+    filePath: join(directory, 'workload.json'),
+    artifactSha256: record.artifactSha256,
+    objectSha256: createHash('sha256').update(contents).digest('hex'),
+    privacyProofs,
+  };
+  await writeFile(workload.filePath, contents);
+  const plan = buildReleasePlan(releaseInput({
+    task8Evidence: { ...base.task8Evidence, workload },
+  }), { phase: 'promote' });
+  const verified = await validateTask8EvidenceArtifact(workload, 'workload', plan, {
+    now: new Date('2026-09-26T08:10:00.000Z'),
+    historical: true,
+    gateWindow: {
+      gateStartedAt: '2026-08-26T08:00:00.000Z',
+      gateEndedAt: '2026-08-26T08:09:00.000Z',
+    },
+    validatePrivacyProof: (_proof, { now }) => {
+      calls.push(new Date(now).toISOString());
+      return true;
+    },
+  });
+  assert.notEqual(verified, false);
+  assert.deepEqual(calls, [
+    '2026-08-26T08:00:00.000Z',
+    '2026-08-26T08:10:00.000Z',
+  ]);
+});
+
+test('readiness wrapper validates against a post-producer clock and rejects expired output', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'hkbuddy-readiness-post-clock-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const base = releaseInput();
+  const unresolved = {
+    ...base.task8Evidence.readiness,
+    filePath: join(directory, 'readiness.json'),
+    artifactSha256: '0'.repeat(64),
+    objectSha256: '0'.repeat(64),
+    privacyProofs: Object.fromEntries(['start', 'end'].map((boundary) => [boundary, {
+      ...base.task8Evidence.readiness.privacyProofs[boundary],
+      filePath: join(directory, `privacy-${boundary}.json`),
+      artifactSha256: '0'.repeat(64),
+      objectSha256: '0'.repeat(64),
+      boundarySha256: '0'.repeat(64),
+    }])),
+  };
+  const input = releaseInput({
+    task8Evidence: { ...base.task8Evidence, readiness: unresolved },
+  });
+  const fixture = controlledReadinessExecution(buildReleasePlan(input, { phase: 'readiness' }));
+  let producerCalls = 0;
+  const instants = [
+    new Date('2026-08-27T08:00:00.000Z'),
+    new Date('2026-08-27T08:06:00.000Z'),
+  ];
+  const result = await runGcpRelease({
+    argv: ['--phase=readiness', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    loadReceipts: async (plan, { through }) => fixtureReceiptChain(plan, through),
+    executeReadiness: async ({ now: producerNow }) => {
+      producerCalls += 1;
+      producerNow();
+      return fixture;
+    },
+    readinessTokenExecutor: async () => 'unused',
+    execute: async () => { throw new Error('must remain inert'); },
+    now: () => instants.shift() ?? new Date('2026-08-27T08:06:00.000Z'),
+    writeOutput: () => undefined,
+  });
+  assert.equal(producerCalls, 1, JSON.stringify(result.publicReport));
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.publicReport.code, 'READINESS_CONTROLLED_OUTPUT_INVALID');
+});
+
+test('readiness receipt is created only from one controlled fresh producer run', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'hkbuddy-controlled-readiness-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const base = releaseInput();
+  const unresolved = {
+    ...base.task8Evidence.readiness,
+    filePath: join(directory, 'readiness.json'),
+    artifactSha256: '0'.repeat(64),
+    objectSha256: '0'.repeat(64),
+    privacyProofs: Object.fromEntries(['start', 'end'].map((boundary) => [boundary, {
+      ...base.task8Evidence.readiness.privacyProofs[boundary],
+      filePath: join(directory, `privacy-${boundary}.json`),
+      artifactSha256: '0'.repeat(64),
+      objectSha256: '0'.repeat(64),
+      boundarySha256: '0'.repeat(64),
+    }])),
+  };
+  const input = releaseInput({
+    task8Evidence: { ...base.task8Evidence, readiness: unresolved },
+  });
+  const fixtureExecution = controlledReadinessExecution(
+    buildReleasePlan(input, { phase: 'readiness' }),
+  );
+  assert.equal(fixtureExecution.evidence.filePath, unresolved.filePath);
+  let producerCalls = 0;
+  let persisted = null;
+  let persistedPlan = null;
+  const result = await runGcpRelease({
+    argv: ['--phase=readiness', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    loadReceipts: async (plan, { through }) => fixtureReceiptChain(plan, through),
+    executeReadiness: async ({ plan }) => {
+      producerCalls += 1;
+      return controlledReadinessExecution(plan);
+    },
+    readinessTokenExecutor: async () => { throw new Error('injected producer owns token transport'); },
+    verifyTask8Evidence: async (entry, phase) => {
+      assert.equal(phase, 'readiness');
+      assert.notEqual(entry.artifactSha256, '0'.repeat(64));
+      assert.equal(await readFile(entry.filePath, 'utf8').then((value) => value.length > 0), true);
+      return true;
+    },
+    execute: async () => { throw new Error('controlled readiness fixture must not call gcloud'); },
+    persistReceipt: async (plan, receipt) => {
+      persistedPlan = plan;
+      persisted = receipt;
+      return true;
+    },
+    now: () => new Date('2026-08-27T08:02:00.000Z'),
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  assert.equal(result.publicReport.mutationPerformed, false);
+  assert.equal(producerCalls, 1);
+  assert.ok(persisted);
+  assert.notEqual(persisted.outputs.artifactSha256, '0'.repeat(64));
+  assert.notEqual(persisted.outputs.objectSha256, '0'.repeat(64));
+  assert.deepEqual(persisted.outputs.privacyProofs, persistedPlan.task8Evidence.readiness.privacyProofs);
+  assert.equal((await readFile(unresolved.filePath, 'utf8')).endsWith('\n'), true);
+  assert.equal((await readFile(unresolved.privacyProofs.start.filePath, 'utf8')).endsWith('\n'), true);
+  assert.equal((await readFile(unresolved.privacyProofs.end.filePath, 'utf8')).endsWith('\n'), true);
+
+  const prebuiltInput = releaseInput({
+    task8Evidence: {
+      ...base.task8Evidence,
+      readiness: { ...unresolved, artifactSha256: '7'.repeat(64) },
+    },
+  });
+  const prebuilt = await runGcpRelease({
+    argv: ['--phase=readiness', `--confirm-release=${RELEASE_SHA}`],
+    input: prebuiltInput,
+    loadReceipts: async (plan, { through }) => fixtureReceiptChain(plan, through),
+    executeReadiness: async () => { producerCalls += 1; throw new Error('must remain inert'); },
+    execute: async () => { throw new Error('must remain inert'); },
+    writeOutput: () => undefined,
+  });
+  assert.equal(prebuilt.exitCode, 1);
+  assert.equal(prebuilt.publicReport.code, 'READINESS_PREBUILT_EVIDENCE_FORBIDDEN');
+  assert.equal(producerCalls, 1);
+});
+
+test('readiness publication journals exact bytes before every write and adopts all crash boundaries', async (t) => {
+  for (const crashAfter of [1, 2, 3]) {
+    await t.test(`crash after artifact ${crashAfter}`, async (st) => {
+      const directory = await mkdtemp(join(tmpdir(), `hkbuddy-readiness-crash-${crashAfter}-`));
+      st.after(() => rm(directory, { recursive: true, force: true }));
+      const base = releaseInput();
+      const unresolved = {
+        ...base.task8Evidence.readiness,
+        filePath: join(directory, 'readiness.json'),
+        artifactSha256: '0'.repeat(64),
+        objectSha256: '0'.repeat(64),
+        privacyProofs: Object.fromEntries(['start', 'end'].map((boundary) => [boundary, {
+          ...base.task8Evidence.readiness.privacyProofs[boundary],
+          filePath: join(directory, `privacy-${boundary}.json`),
+          artifactSha256: '0'.repeat(64),
+          objectSha256: '0'.repeat(64),
+          boundarySha256: '0'.repeat(64),
+        }])),
+      };
+      const input = releaseInput({
+        task8Evidence: { ...base.task8Evidence, readiness: unresolved },
+      });
+      const fixture = controlledReadinessExecution(buildReleasePlan(input, { phase: 'readiness' }));
+      const records = [];
+      let producerCalls = 0;
+      let writes = 0;
+      const first = await runGcpRelease({
+        argv: ['--phase=readiness', `--confirm-release=${RELEASE_SHA}`],
+        input,
+        loadReceipts: async (plan, { through }) => fixtureReceiptChain(plan, through),
+        executeReadiness: async () => { producerCalls += 1; return fixture; },
+        readinessTokenExecutor: async () => 'unused',
+        openStateStore: async () => createTestStateStore({ records }),
+        writeControlledArtifact: async (filePath, bytes) => {
+          assert.equal(records.at(-1)?.recordType, 'intent');
+          await writeFile(filePath, bytes, { flag: 'wx' });
+          writes += 1;
+          if (writes === crashAfter) throw new Error('simulated publication crash');
+        },
+        verifyTask8Evidence: async () => true,
+        execute: async () => { throw new Error('must remain inert'); },
+        now: () => new Date('2026-08-27T08:02:00.000Z'),
+        writeOutput: () => undefined,
+      });
+      assert.equal(first.exitCode, 1);
+      assert.equal(records.length, 1);
+      assert.equal(records[0].recordType, 'intent');
+      assert.equal(records[0].payload.reconcileKind, 'local-artifact-create');
+      assert.equal(records[0].payload.publication.artifacts.length, 3);
+
+      if (crashAfter === 1) {
+        const firstArtifact = records[0].payload.publication.artifacts[0];
+        await writeFile(firstArtifact.filePath, 'foreign-bytes');
+        const rejectOptions = {
+          argv: ['--phase=readiness', `--confirm-release=${RELEASE_SHA}`],
+          input,
+          loadReceipts: async (plan, { through }) => fixtureReceiptChain(plan, through),
+          executeReadiness: async () => { producerCalls += 1; throw new Error('must not rerun'); },
+          readinessTokenExecutor: async () => 'unused',
+          openStateStore: async () => createTestStateStore({ records }),
+          verifyTask8Evidence: async () => true,
+          execute: async () => { throw new Error('must remain inert'); },
+          now: () => new Date('2026-08-27T08:02:00.000Z'),
+          writeOutput: () => undefined,
+        };
+        const foreign = await runGcpRelease(rejectOptions);
+        assert.equal(foreign.exitCode, 1);
+        assert.equal(foreign.publicReport.code, 'READINESS_CONTROLLED_PUBLISH_INVALID');
+        assert.equal(await readFile(firstArtifact.filePath, 'utf8'), 'foreign-bytes');
+
+        await rm(firstArtifact.filePath);
+        const junctionTarget = join(directory, 'foreign-junction-target');
+        await mkdir(junctionTarget);
+        await writeFile(join(junctionTarget, 'target-bytes'), 'must-not-be-adopted');
+        await symlink(junctionTarget, firstArtifact.filePath, 'junction');
+        let publicationWrites = 0;
+        const junction = await runGcpRelease({
+          ...rejectOptions,
+          writeControlledArtifact: async () => { publicationWrites += 1; return true; },
+        });
+        assert.equal(junction.exitCode, 1);
+        assert.equal(junction.publicReport.code, 'READINESS_CONTROLLED_PUBLISH_INVALID');
+        assert.equal(publicationWrites, 0);
+        await rm(firstArtifact.filePath);
+        await writeFile(firstArtifact.filePath, Buffer.from(firstArtifact.contentsBase64, 'base64'), {
+          flag: 'wx',
+        });
+      }
+
+      let persisted = null;
+      const resumed = await runGcpRelease({
+        argv: ['--phase=readiness', `--confirm-release=${RELEASE_SHA}`],
+        input,
+        loadReceipts: async (plan, { through }) => fixtureReceiptChain(plan, through),
+        executeReadiness: async () => { producerCalls += 1; throw new Error('must not rerun'); },
+        readinessTokenExecutor: async () => 'unused',
+        openStateStore: async () => createTestStateStore({ records }),
+        verifyTask8Evidence: async () => true,
+        execute: async () => { throw new Error('must remain inert'); },
+        persistReceipt: async (_plan, receipt) => { persisted = receipt; return true; },
+        now: () => new Date('2026-08-27T08:02:00.000Z'),
+        writeOutput: () => undefined,
+      });
+      assert.equal(resumed.exitCode, 0, JSON.stringify(resumed.publicReport));
+      assert.equal(producerCalls, 1);
+      assert.ok(persisted);
+      assert.deepEqual(records.map(({ recordType }) => recordType), [
+        'intent', 'checkpoint', 'terminal',
+      ]);
+      for (const filePath of [
+        unresolved.privacyProofs.start.filePath,
+        unresolved.privacyProofs.end.filePath,
+        unresolved.filePath,
+      ]) assert.equal((await readFile(filePath, 'utf8')).endsWith('\n'), true);
+    });
+  }
+});
+
+test('mobile phase rejects prebuilt evidence and publishes only one controlled journaled run', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'hkbuddy-controlled-mobile-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const base = releaseInput();
+  const unresolved = {
+    ...base.task8Evidence.mobile,
+    filePath: join(directory, 'mobile.json'),
+    artifactSha256: '0'.repeat(64),
+    objectSha256: '0'.repeat(64),
+    privacyProofs: Object.fromEntries(['start', 'end'].map((boundary) => [boundary, {
+      ...base.task8Evidence.mobile.privacyProofs[boundary],
+      filePath: join(directory, `mobile-privacy-${boundary}.json`),
+      artifactSha256: '0'.repeat(64),
+      objectSha256: '0'.repeat(64),
+      boundarySha256: '0'.repeat(64),
+    }])),
+  };
+  const input = releaseInput({
+    task8Evidence: { ...base.task8Evidence, mobile: unresolved },
+  });
+  const initialPlan = buildReleasePlan(input, { phase: 'mobile' });
+  const fixture = controlledMobileExecution(initialPlan);
+  const records = [];
+  let persisted = null;
+  let producerCalls = 0;
+  let privacyCalls = 0;
+  let controlPlaneCalls = 0;
+  const result = await runGcpRelease({
+    argv: ['--phase=mobile', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    loadReceipts: async () => fixtureReceiptChain(initialPlan, 'workload'),
+    openStateStore: async () => createTestStateStore({ records }),
+    execute: async () => { throw new Error('injected mobile adapters own all live reads'); },
+    mobileTokenExecutor: async () => 't'.repeat(64),
+    produceMobilePrivacyArtifact: async ({ locator }) => {
+      privacyCalls += 1;
+      return locator.filePath.endsWith('start.json')
+        ? fixture.artifacts.privacyStart : fixture.artifacts.privacyEnd;
+    },
+    captureMobileControlPlane: async () => {
+      controlPlaneCalls += 1;
+      return { stable: true, sha256: '3'.repeat(64) };
+    },
+    executeMobile: async (options) => {
+      producerCalls += 1;
+      await options.producePrivacyArtifact('start');
+      await options.captureControlPlane();
+      await options.captureControlPlane();
+      await options.producePrivacyArtifact('end');
+      return fixture;
+    },
+    writeControlledArtifact: async (filePath, bytes) => {
+      await writeFile(filePath, bytes, { flag: 'wx' });
+      return true;
+    },
+    verifyTask8Evidence: async (entry, phase) => {
+      assert.equal(phase, 'mobile');
+      assert.equal((await readFile(entry.filePath, 'utf8')).endsWith('\n'), true);
+      return true;
+    },
+    persistReceipt: async (_plan, receipt) => { persisted = receipt; return true; },
+    now: () => new Date('2026-08-27T08:02:00.000Z'),
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  assert.equal(producerCalls, 1);
+  assert.equal(privacyCalls, 2);
+  assert.equal(controlPlaneCalls, 2);
+  assert.equal(records[0].operationId, 'mobile-evidence-publish');
+  assert.equal(records[0].payload.reconcileKind, 'local-artifact-create');
+  assert.equal(records[0].payload.publication.artifacts.length, 7);
+  assert.deepEqual(records[0].payload.publication.artifacts.map(({ role }) => role), [
+    'privacy-start', 'screenshot', 'screenshot', 'screenshot', 'screenshot',
+    'privacy-end', 'evidence',
+  ]);
+  assert.equal(persisted.outputs.artifactSha256, fixture.evidence.artifactSha256);
+  assert.deepEqual(persisted.outputs.privacyProofs, fixture.evidence.privacyProofs);
+
+  let forbiddenProducerCalls = 0;
+  const prebuiltPlan = buildReleasePlan(base, { phase: 'mobile' });
+  const rejected = await runGcpRelease({
+    argv: ['--phase=mobile', `--confirm-release=${RELEASE_SHA}`],
+    input: base,
+    loadReceipts: async () => fixtureReceiptChain(prebuiltPlan, 'workload'),
+    openStateStore: async () => createTestStateStore(),
+    executeMobile: async () => { forbiddenProducerCalls += 1; throw new Error('must remain inert'); },
+    writeOutput: () => undefined,
+  });
+  assert.equal(rejected.exitCode, 1);
+  assert.equal(rejected.publicReport.code, 'MOBILE_PREBUILT_EVIDENCE_FORBIDDEN');
+  assert.equal(forbiddenProducerCalls, 0);
+});
+
+test('mobile publication adopts only the exact journaled bytes after a partial crash', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'hkbuddy-mobile-restart-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const base = releaseInput();
+  const unresolved = {
+    ...base.task8Evidence.mobile,
+    filePath: join(directory, 'mobile.json'),
+    artifactSha256: '0'.repeat(64),
+    objectSha256: '0'.repeat(64),
+    privacyProofs: Object.fromEntries(['start', 'end'].map((boundary) => [boundary, {
+      ...base.task8Evidence.mobile.privacyProofs[boundary],
+      filePath: join(directory, `mobile-privacy-${boundary}.json`),
+      artifactSha256: '0'.repeat(64), objectSha256: '0'.repeat(64),
+      boundarySha256: '0'.repeat(64),
+    }])),
+  };
+  const input = releaseInput({ task8Evidence: { ...base.task8Evidence, mobile: unresolved } });
+  const plan = buildReleasePlan(input, { phase: 'mobile' });
+  const fixture = controlledMobileExecution(plan);
+  const records = [];
+  let producerCalls = 0;
+  let writes = 0;
+  const common = {
+    argv: ['--phase=mobile', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    loadReceipts: async () => fixtureReceiptChain(plan, 'workload'),
+    mobileTokenExecutor: async () => 't'.repeat(64),
+    produceMobilePrivacyArtifact: async ({ locator }) => (
+      locator.filePath.endsWith('start.json')
+        ? fixture.artifacts.privacyStart : fixture.artifacts.privacyEnd
+    ),
+    captureMobileControlPlane: async () => ({ stable: true, sha256: '3'.repeat(64) }),
+    verifyTask8Evidence: async () => true,
+    now: () => new Date('2026-08-27T08:02:00.000Z'),
+    writeOutput: () => undefined,
+  };
+  const crashed = await runGcpRelease({
+    ...common,
+    openStateStore: async () => createTestStateStore({ records }),
+    execute: async () => { throw new Error('injected mobile adapters own all live reads'); },
+    executeMobile: async (options) => {
+      producerCalls += 1;
+      await options.producePrivacyArtifact('start');
+      await options.captureControlPlane();
+      await options.captureControlPlane();
+      await options.producePrivacyArtifact('end');
+      return fixture;
+    },
+    writeControlledArtifact: async (filePath, bytes) => {
+      writes += 1;
+      await writeFile(filePath, bytes, { flag: 'wx' });
+      if (writes === 3) throw new Error('simulated publication crash');
+      return true;
+    },
+  });
+  assert.equal(crashed.exitCode, 1);
+  assert.equal(crashed.publicReport.code, 'MOBILE_CONTROLLED_PUBLISH_INVALID');
+  assert.equal(records.filter(({ recordType }) => recordType === 'intent').length, 1);
+  assert.equal(records.some(({ recordType }) => recordType === 'checkpoint'), false);
+
+  const resumed = await runGcpRelease({
+    ...common,
+    openStateStore: async () => createTestStateStore({ records }),
+    executeMobile: async () => { producerCalls += 1; throw new Error('must not rerun'); },
+    writeControlledArtifact: async (filePath, bytes) => {
+      await writeFile(filePath, bytes, { flag: 'wx' });
+      return true;
+    },
+    persistReceipt: async () => true,
+  });
+  assert.equal(resumed.exitCode, 0, JSON.stringify(resumed.publicReport));
+  assert.equal(producerCalls, 1);
+  assert.equal(records.filter(({ recordType }) => recordType === 'intent').length, 1);
+  assert.equal(records.find(({ recordType }) => recordType === 'checkpoint').payload.outcome,
+    'adopted-restart');
+  for (const artifact of records[0].payload.publication.artifacts) {
+    assert.equal((await readFile(artifact.filePath)).toString('base64'), artifact.contentsBase64);
+  }
+});
+
 test('workload phase rejects every pre-existing artifact even with a complete-looking record and 200 matching logs', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'hkbuddy-workload-gate-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -4939,6 +5869,13 @@ test('workload receipt is created only by one controlled immutable run with witn
         filePath: workloadPath,
         artifactSha256: '0'.repeat(64),
         objectSha256: '0'.repeat(64),
+        privacyProofs: Object.fromEntries(['start', 'end'].map((boundary) => [boundary, {
+          ...base.task8Evidence.workload.privacyProofs[boundary],
+          filePath: join(directory, `privacy-${boundary}.json`),
+          artifactSha256: '0'.repeat(64),
+          objectSha256: '0'.repeat(64),
+          boundarySha256: '0'.repeat(64),
+        }])),
       },
     },
   });
@@ -4951,6 +5888,7 @@ test('workload receipt is created only by one controlled immutable run with witn
   const attemptId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
   let persisted = null;
   let runnerCalls = 0;
+  let privacyProducerCalls = 0;
   let publishedBeforeRunnerCompleted = false;
   let runnerCompleted = false;
   const result = await runGcpRelease({
@@ -4987,6 +5925,24 @@ test('workload receipt is created only by one controlled immutable run with witn
           : options.headers?.Range === 'bytes=0-3' ? 206 : 200;
       return { status };
     },
+    workloadPrivacyTokenExecutor: async () => { throw new Error('injected privacy producer owns token transport'); },
+    produceWorkloadPrivacyArtifact: async ({ plan: privacyPlan, locator }) => {
+      privacyProducerCalls += 1;
+      const boundary = locator.filePath.endsWith('privacy-start.json') ? 'start' : 'end';
+      return controlledWorkloadPrivacyArtifact(privacyPlan, locator, boundary);
+    },
+    verifyTask8Evidence: async (entry, phase, _releasePlan, { gateWindow }) => {
+      assert.equal(phase, 'workload');
+      assert.deepEqual(gateWindow, {
+        gateStartedAt: '2026-08-26T08:05:00.000Z',
+        gateEndedAt: '2026-08-26T08:05:00.000Z',
+      });
+      for (const reference of [entry.privacyProofs.start, entry.privacyProofs.end]) {
+        const bytes = await readFile(reference.filePath);
+        assert.equal(createHash('sha256').update(bytes).digest('hex'), reference.objectSha256);
+      }
+      return true;
+    },
     execute: async (argv) => {
       assert.deepEqual(argv.slice(0, 2), ['logging', 'read']);
       return controlPlaneLogEntries(record);
@@ -5001,6 +5957,7 @@ test('workload receipt is created only by one controlled immutable run with witn
   });
   assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
   assert.equal(runnerCalls, 1);
+  assert.equal(privacyProducerCalls, 2);
   assert.equal(publishedBeforeRunnerCompleted, false);
   assert.equal((await readFile(workloadPath, 'utf8')), contents);
   assert.equal(persisted.outputs.artifactSha256, record.artifactSha256);
@@ -5009,6 +5966,9 @@ test('workload receipt is created only by one controlled immutable run with witn
   assert.equal(persisted.outputs.execution.attemptId, attemptId);
   assert.equal(persisted.outputs.execution.acceptanceWindowId,
     record.rawReceipts.acceptanceWindowId);
+  assert.deepEqual(persisted.outputs.privacyProofs, result.publicReport.phaseReceipt.outputs.privacyProofs);
+  assert.equal((await readFile(input.task8Evidence.workload.privacyProofs.start.filePath, 'utf8')).endsWith('\n'), true);
+  assert.equal((await readFile(input.task8Evidence.workload.privacyProofs.end.filePath, 'utf8')).endsWith('\n'), true);
   assert.match(persisted.outputs.execution.networkWitnessSha256, /^[0-9a-f]{64}$/);
   assert.equal(JSON.stringify(persisted).includes('Authorization'), false);
   assert.equal(JSON.stringify(persisted).includes('Bearer'), false);
@@ -5026,6 +5986,13 @@ test('valid-looking constants and 200 request logs cannot create a receipt witho
         filePath: join(directory, 'workload.json'),
         artifactSha256: '0'.repeat(64),
         objectSha256: '0'.repeat(64),
+        privacyProofs: Object.fromEntries(['start', 'end'].map((boundary) => [boundary, {
+          ...base.task8Evidence.workload.privacyProofs[boundary],
+          filePath: join(directory, `privacy-${boundary}.json`),
+          artifactSha256: '0'.repeat(64),
+          objectSha256: '0'.repeat(64),
+          boundarySha256: '0'.repeat(64),
+        }])),
       },
     },
   });
@@ -5048,6 +6015,14 @@ test('valid-looking constants and 200 request logs cannot create a receipt witho
       };
     },
     workloadFetch: async () => ({ status: 200 }),
+    workloadPrivacyTokenExecutor: async () => { throw new Error('injected privacy producer owns token transport'); },
+    produceWorkloadPrivacyArtifact: async ({ plan: privacyPlan, locator }) => (
+      controlledWorkloadPrivacyArtifact(
+        privacyPlan,
+        locator,
+        locator.filePath.endsWith('privacy-start.json') ? 'start' : 'end',
+      )
+    ),
     execute: async (argv) => { calls.push(argv); return controlPlaneLogEntries(record); },
     persistReceipt: async () => { persisted = true; return true; },
     now: () => new Date('2026-08-26T08:05:00.000Z'),
@@ -5099,6 +6074,13 @@ test('real-shape migration, authenticated workload, and tag-free promotion share
         filePath: workloadPath,
         artifactSha256: '0'.repeat(64),
         objectSha256: '0'.repeat(64),
+        privacyProofs: Object.fromEntries(['start', 'end'].map((boundary) => [boundary, {
+          ...base.task8Evidence.workload.privacyProofs[boundary],
+          filePath: join(directory, `privacy-${boundary}.json`),
+          artifactSha256: '0'.repeat(64),
+          objectSha256: '0'.repeat(64),
+          boundarySha256: '0'.repeat(64),
+        }])),
       },
     },
   });
@@ -5180,6 +6162,18 @@ test('real-shape migration, authenticated workload, and tag-free promotion share
           : options.headers?.Range === 'bytes=0-3' ? 206 : 200;
       return { status };
     },
+    workloadPrivacyTokenExecutor: async () => { throw new Error('injected privacy producer owns token transport'); },
+    produceWorkloadPrivacyArtifact: async ({ plan: privacyPlan, locator }) => (
+      controlledWorkloadPrivacyArtifact(
+        privacyPlan,
+        locator,
+        locator.filePath.endsWith('privacy-start.json') ? 'start' : 'end',
+      )
+    ),
+    verifyTask8Evidence: async (_entry, phase) => {
+      assert.equal(phase, 'workload');
+      return true;
+    },
     execute: async (argv) => {
       assert.deepEqual(argv.slice(0, 2), ['logging', 'read']);
       return controlPlaneLogEntries(workloadRecord);
@@ -5197,6 +6191,7 @@ test('real-shape migration, authenticated workload, and tag-free promotion share
         filePath: workloadPath,
         artifactSha256: workloadRecord.artifactSha256,
         objectSha256: createHash('sha256').update(workloadBytes).digest('hex'),
+        privacyProofs: structuredClone(receipts.at(-1).outputs.privacyProofs),
       },
     },
   });

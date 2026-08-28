@@ -29,6 +29,7 @@ const RECONCILE_KINDS = new Set([
   'secret-version-add',
   'gcs-object-write',
   'gcs-object-delete',
+  'local-artifact-create',
 ]);
 const CHECKPOINT_OUTCOMES = new Set([
   'applied', 'adopted-response-loss', 'adopted-restart', 'verified-noop',
@@ -127,20 +128,60 @@ function assertSafeResult(value) {
       || !/^[1-9][0-9]*$/.test(String(value.generation ?? ''))) fail();
     return;
   }
+  if (value.kind === 'artifact-bundle') {
+    if (!exactKeys(value, ['artifactCount', 'bundleSha256', 'kind'])
+      || !Number.isSafeInteger(value.artifactCount) || value.artifactCount < 1
+      || value.artifactCount > 8
+      || !DIGEST.test(String(value.bundleSha256 ?? ''))) fail();
+    return;
+  }
   fail();
 }
 
+function assertPublication(value) {
+  if (!exactKeys(value, ['artifacts', 'bundleSha256'])
+    || !Array.isArray(value.artifacts) || value.artifacts.length < 1
+    || value.artifacts.length > 8
+    || !DIGEST.test(String(value.bundleSha256 ?? ''))) fail();
+  const paths = new Set();
+  let totalBytes = 0;
+  for (const artifact of value.artifacts) {
+    if (!exactKeys(artifact, [
+      'byteLength', 'contentsBase64', 'filePath', 'objectSha256', 'role',
+    ])
+      || !isAbsolute(artifact.filePath) || artifact.filePath.length > 1024
+      || !['evidence', 'privacy-end', 'privacy-start', 'privacy-proof', 'screenshot'].includes(artifact.role)
+      || paths.has(resolve(artifact.filePath))
+      || !Number.isSafeInteger(artifact.byteLength) || artifact.byteLength < 1
+      || artifact.byteLength > 4 * 1024 * 1024
+      || typeof artifact.contentsBase64 !== 'string'
+      || artifact.contentsBase64.length > 6 * 1024 * 1024
+      || !DIGEST.test(String(artifact.objectSha256 ?? ''))) fail();
+    const bytes = Buffer.from(artifact.contentsBase64, 'base64');
+    if (bytes.length !== artifact.byteLength
+      || bytes.toString('base64') !== artifact.contentsBase64
+      || sha256(bytes) !== artifact.objectSha256) fail();
+    paths.add(resolve(artifact.filePath));
+    totalBytes += bytes.length;
+  }
+  if (totalBytes > 12 * 1024 * 1024
+    || sha256(canonicalJson(value.artifacts)) !== value.bundleSha256) fail();
+}
+
 function assertIntentPayload(payload) {
-  if (!exactKeys(payload, [
+  const expectedKeys = [
     'afterSha256', 'beforeSha256', 'commandSha256', 'mutationOrdinal',
     'operationAttemptId', 'reconcileKind',
-  ])
+  ];
+  const localPublication = payload?.reconcileKind === 'local-artifact-create';
+  if (!exactKeys(payload, localPublication ? [...expectedKeys, 'publication'] : expectedKeys)
     || !Number.isSafeInteger(payload.mutationOrdinal) || payload.mutationOrdinal < 1
     || !OPERATION_ATTEMPT_ID.test(String(payload.operationAttemptId ?? ''))
     || !DIGEST.test(String(payload.commandSha256 ?? ''))
     || !RECONCILE_KINDS.has(payload.reconcileKind)
     || !DIGEST.test(String(payload.beforeSha256 ?? ''))
     || !DIGEST.test(String(payload.afterSha256 ?? ''))) fail();
+  if (localPublication) assertPublication(payload.publication);
 }
 
 function assertCheckpointPayload(payload) {

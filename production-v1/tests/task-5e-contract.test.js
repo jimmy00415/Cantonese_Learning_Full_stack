@@ -183,6 +183,7 @@ test('every release candidate is private 100 percent on only the candidate servi
     'candidate-private-iam-baseline-readback',
     'candidate-private-iam-grant',
     'candidate-private-iam-readback',
+    'candidate-privacy-publish',
   ]);
   assert.equal(operations.some(({ argv }) => (
     argv[0] === 'run' && argv[1] === 'services' && argv[3] === STABLE_SERVICE

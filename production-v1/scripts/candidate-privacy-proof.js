@@ -21,8 +21,13 @@ const SAFE_ETAG = /^(?:[A-Za-z0-9+/]{4}){1,255}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+
 const SAFE_ROLE = /^(?:roles\/[A-Za-z0-9_.-]{1,128}|(?:projects\/[a-z][a-z0-9-]{4,61}[a-z0-9]|organizations\/[1-9]\d*)\/roles\/[A-Za-z0-9_.-]{1,128})$/u;
 const PUBLIC_PRINCIPALS = new Set(['allUsers', 'allAuthenticatedUsers']);
 const execFileAsync = promisify(execFileCallback);
-const LOG_POLL_ATTEMPTS = 3;
-const LOG_POLL_INTERVAL_MS = 1_000;
+const LOG_POLL_INTERVAL_MS = 5_000;
+const LOG_POLL_ATTEMPTS = Math.ceil(MAXIMUM_AGE_MS / LOG_POLL_INTERVAL_MS) + 1;
+const READINESS_COMPONENTS = Object.freeze([
+  'configuration', 'release-evidence', 'llm-smoke', 'database', 'media',
+  'corpus', 'retention', 'dispatcher', 'runtime',
+]);
+const SAFE_READINESS_TOKEN = /^[a-z0-9][a-z0-9._-]{0,79}$/iu;
 
 function fail() {
   throw new Error('Candidate privacy proof failed');
@@ -87,13 +92,16 @@ function normalizedStringMap(value) {
 }
 
 function normalizedExpectedCandidate(value, binding) {
-  if (!exactKeys(value, [
+  const expectedKeys = [
+    ...(value?.access === undefined ? [] : ['access']),
     'concurrency', 'cpu', 'cpuThrottling', 'environment', 'executionEnvironment', 'image',
     'invokerIamDisabled', 'maxInstances', 'memory', 'minInstances', 'network', 'probes',
     'project', 'region', 'revision', 'secretEnvironment', 'secretMounts', 'service',
     'serviceAccount', 'startupCpuBoost', 'subnet', 'tag', 'timeoutSeconds', 'traffic',
     'trafficState', 'vpcEgress',
-  ]) || value.project !== binding.projectId || value.region !== binding.region
+    ...(value?.iam === undefined ? [] : ['iam']),
+  ];
+  if (!exactKeys(value, expectedKeys) || value.project !== binding.projectId || value.region !== binding.region
     || value.service !== binding.candidateService || value.revision !== binding.candidateRevision
     || value.tag !== binding.candidateTag || value.image !== binding.image
     || value.invokerIamDisabled !== false || value.trafficState !== 'candidate-service-private-100'
@@ -111,7 +119,15 @@ function normalizedExpectedCandidate(value, binding) {
     || value.network !== GCP_IDENTITY.network || value.subnet !== GCP_IDENTITY.subnet
     || value.vpcEgress !== 'private-ranges-only'
     || !exactKeys(value.probes, ['liveness', 'readiness', 'startup'])
-    || !safeObject(value.secretEnvironment) || !safeObject(value.secretMounts)) fail();
+    || !safeObject(value.secretEnvironment) || !safeObject(value.secretMounts)
+    || (value.access !== undefined && !exact(value.access, {
+      authenticated: true,
+      audience: binding.candidateAudience,
+      issuer: 'https://accounts.google.com',
+      subjectSha256: createHash('sha256').update(binding.acceptanceServiceAccount).digest('hex'),
+      taggedUrl: binding.candidateOrigin,
+    }))
+    || (value.iam !== undefined && !exact(value.iam, { policy: 'candidate-private' }))) fail();
   const environment = normalizedStringMap(value.environment);
   const secretEnvironment = {};
   for (const [name, member] of Object.entries(value.secretEnvironment)) {
@@ -123,7 +139,7 @@ function normalizedExpectedCandidate(value, binding) {
   }
   const secretMounts = {};
   for (const [name, member] of Object.entries(value.secretMounts)) {
-    if (!/^[a-z][a-z0-9-]{0,62}$/u.test(name)
+    if (!/^[a-z][A-Za-z0-9]{0,62}$/u.test(name)
       || !exactKeys(member, ['path', 'readOnly', 'secret', 'version'])
       || typeof member.path !== 'string' || !member.path.startsWith('/')
       || member.readOnly !== true || typeof member.secret !== 'string'
@@ -308,8 +324,12 @@ function validatePolicy(value) {
       || new Set(binding.members).size !== binding.members.length) fail();
     let condition;
     if (binding.condition !== undefined) {
-      const conditionKeys = Object.hasOwn(binding.condition, 'description')
-        ? ['description', 'expression', 'title'] : ['expression', 'title'];
+      const conditionKeys = [
+        ...(Object.hasOwn(binding.condition, 'description') ? ['description'] : []),
+        'expression',
+        ...(Object.hasOwn(binding.condition, 'location') ? ['location'] : []),
+        'title',
+      ];
       if (value.version !== 3 || !exactKeys(binding.condition, conditionKeys)
         || Object.values(binding.condition).some((member) => (
           typeof member !== 'string' || member.length < 1 || member.length > 4096
@@ -371,22 +391,42 @@ function validateProject(value, binding) {
 }
 
 function normalizedFolder(value, folderId) {
-  const allowedKeys = new Set(['createTime', 'displayName', 'lifecycleState', 'name', 'parent', 'updateTime']);
+  const allowedKeys = new Set([
+    'createTime', 'displayName', 'lifecycleState', 'name', 'parent', 'tags', 'updateTime',
+  ]);
+  const tags = value?.tags ?? {};
   if (!safeObject(value) || Object.keys(value).some((key) => !allowedKeys.has(key))
     || value.name !== `folders/${folderId}`
     || !/^(?:folders|organizations)\/[1-9]\d*$/u.test(String(value.parent ?? ''))
-    || value.lifecycleState !== 'ACTIVE') fail();
-  return deepFreeze({ name: value.name, parent: value.parent, lifecycleState: value.lifecycleState });
+    || value.lifecycleState !== 'ACTIVE' || !safeObject(tags)
+    || Object.entries(tags).some(([key, member]) => (
+      typeof key !== 'string' || key.length < 1 || key.length > 512 || /[\u0000\r\n]/u.test(key)
+        || typeof member !== 'string' || member.length < 1 || member.length > 512
+        || /[\u0000\r\n]/u.test(member)
+    ))) fail();
+  return deepFreeze({
+    name: value.name, parent: value.parent, lifecycleState: value.lifecycleState,
+    ...(value.tags === undefined ? {} : { tags: canonical(tags) }),
+  });
 }
 
 function normalizedOrganization(value, binding) {
   const allowedKeys = new Set([
-    'createTime', 'directoryCustomerId', 'displayName', 'lifecycleState', 'name', 'owner', 'updateTime',
+    'createTime', 'creationTime', 'directoryCustomerId', 'displayName', 'lifecycleState', 'name',
+    'owner', 'updateTime',
   ]);
+  const timestamp = value?.creationTime ?? value?.createTime;
   if (!safeObject(value) || Object.keys(value).some((key) => !allowedKeys.has(key))
     || value.name !== `organizations/${binding.organizationId}`
-    || value.lifecycleState !== 'ACTIVE') fail();
-  return deepFreeze({ name: value.name, lifecycleState: value.lifecycleState });
+    || value.lifecycleState !== 'ACTIVE'
+    || (value.creationTime !== undefined && value.createTime !== undefined)
+    || (timestamp !== undefined && (!Number.isFinite(Date.parse(timestamp))
+      || new Date(Date.parse(timestamp)).toISOString() !== timestamp))) fail();
+  return deepFreeze({
+    name: value.name,
+    lifecycleState: value.lifecycleState,
+    ...(timestamp === undefined ? {} : { creationTime: timestamp }),
+  });
 }
 
 async function readHierarchySnapshot(binding, plan, executor) {
@@ -443,7 +483,7 @@ function validateEffectivePolicy(value, binding, snapshot) {
   if (!exactKeys(result, ['fullResourceName', 'policies'])
     || result.fullResourceName !== candidateResource(binding)
     || !Array.isArray(result.policies)) fail();
-  const expected = [
+  const allExpected = [
     { attachedResource: candidateResource(binding), policy: snapshot.policies.service },
     {
       attachedResource: `//cloudresourcemanager.googleapis.com/projects/${binding.projectNumber}`,
@@ -458,6 +498,10 @@ function validateEffectivePolicy(value, binding, snapshot) {
       policy: snapshot.policies.organization,
     },
   ];
+  const expected = allExpected.filter(({ attachedResource, policy }) => (
+    attachedResource === candidateResource(binding)
+      || policy.bindings.length > 0 || policy.auditConfigs.length > 0
+  ));
   const policies = result.policies.map((member) => {
     if (!exactKeys(member, ['attachedResource', 'policy'])
       || typeof member.attachedResource !== 'string') fail();
@@ -540,14 +584,14 @@ function validateAssetAnalysis(value, { principal, binding, kind }) {
     if (allowResults && containsExactString(results, INVOKE_PERMISSION)) fail();
     return results;
   };
-  validateAnalysis(value.mainAnalysis, { requireQuery: true, allowResults: kind === 'expandedRoles' });
+  const mainResults = validateAnalysis(value.mainAnalysis, {
+    requireQuery: true, allowResults: false,
+  });
   if (value.serviceAccountImpersonationAnalysis !== undefined) {
-    if (Object.hasOwn(value.serviceAccountImpersonationAnalysis, 'analysisQuery')) fail();
-    validateAnalysis(value.serviceAccountImpersonationAnalysis, {
-      requireQuery: false, allowResults: false,
-    });
+    if (!Array.isArray(value.serviceAccountImpersonationAnalysis)
+      || value.serviceAccountImpersonationAnalysis.length !== 0) fail();
   }
-  return deepFreeze(canonical(value));
+  return deepFreeze({ response: canonical(value), resultCount: mainResults.length });
 }
 
 function validateAssetAnalysisPair(value, { principal, binding }) {
@@ -560,9 +604,11 @@ function validateAssetAnalysisPair(value, { principal, binding }) {
   });
   return deepFreeze({
     fullyExplored: true,
-    resultCount: 0,
+    resultCount: expandedRoles.resultCount,
     nonCriticalErrorCount: 0,
-    responseSha256: canonicalSha256({ permission, expandedRoles }),
+    responseSha256: canonicalSha256({
+      permission: permission.response, expandedRoles: expandedRoles.response,
+    }),
   });
 }
 
@@ -570,7 +616,7 @@ function containsForbiddenTroubleshooterState(value) {
   if (typeof value === 'string') {
     return [
       'ACCESS_STATE_UNSPECIFIED', 'CONDITIONAL', 'INFO_DENIED', 'UNKNOWN', 'UNSPECIFIED',
-    ].includes(value);
+    ].includes(value) || value.endsWith('_UNKNOWN') || value.endsWith('_UNSPECIFIED');
   }
   if (Array.isArray(value)) return value.some(containsForbiddenTroubleshooterState);
   if (!value || typeof value !== 'object') return false;
@@ -601,7 +647,7 @@ function validateTroubleshooter(value, binding) {
       if (!safeObject(explanation) || Object.keys(explanation).some((key) => !allowedKeys.has(key))
         || !['GRANTED', 'NOT_GRANTED'].includes(explanation.access)
         || !SAFE_ROLE.test(String(explanation.role ?? ''))
-        || !['INCLUDED', 'NOT_INCLUDED'].includes(explanation.rolePermission)
+        || !['ROLE_PERMISSION_INCLUDED', 'ROLE_PERMISSION_NOT_INCLUDED'].includes(explanation.rolePermission)
         || !['HIGH', 'HEURISTIC_RELEVANCE', 'NORMAL'].includes(explanation.relevance)
         || (explanation.rolePermissionRelevance !== undefined
           && !['HIGH', 'HEURISTIC_RELEVANCE', 'NORMAL'].includes(explanation.rolePermissionRelevance))
@@ -609,15 +655,16 @@ function validateTroubleshooter(value, binding) {
       for (const [member, membership] of Object.entries(explanation.memberships)) {
         if (typeof member !== 'string' || member.length < 1 || member.length > 512
           || !exactKeys(membership, ['membership', 'relevance'])
-          || !['INCLUDED', 'NOT_INCLUDED', 'UNKNOWN'].includes(membership.membership)
+          || !['MEMBERSHIP_INCLUDED', 'MEMBERSHIP_NOT_INCLUDED'].includes(membership.membership)
           || !['HIGH', 'HEURISTIC_RELEVANCE', 'NORMAL'].includes(membership.relevance)) fail();
       }
       const acceptance = explanation.memberships[`serviceAccount:${binding.acceptanceServiceAccount}`];
       if (policy.fullResourceName === candidateResource(binding) && policy.access === 'GRANTED'
         && policy.relevance === 'HIGH' && explanation.access === 'GRANTED'
         && explanation.relevance === 'HIGH' && explanation.role === INVOKER_ROLE
-        && explanation.rolePermission === 'INCLUDED'
-        && acceptance?.membership === 'INCLUDED' && acceptance?.relevance === 'HIGH') witness = true;
+        && explanation.rolePermission === 'ROLE_PERMISSION_INCLUDED'
+        && acceptance?.membership === 'MEMBERSHIP_INCLUDED'
+        && acceptance?.relevance === 'HIGH') witness = true;
     }
   }
   if (!witness) fail();
@@ -676,10 +723,20 @@ export function createIdentityTokenExecutor({
         || argv[1] !== 'print-identity-token' || argv.some((member) => (
           typeof member !== 'string' || /[\u0000\r\n]/u.test(member)
         ))) fail();
+      const impersonationFlags = argv.filter((member) => (
+        member.startsWith('--impersonate-service-account=')
+      ));
+      if (impersonationFlags.length !== 1) fail();
+      const impersonatedServiceAccount = impersonationFlags[0]
+        .slice('--impersonate-service-account='.length);
+      if (impersonatedServiceAccount.length < 1 || impersonatedServiceAccount.length > 512
+        || /[\s\u0000]/u.test(impersonatedServiceAccount)) fail();
       const result = await execFile(executable, [...prefixArgs, ...argv], {
         encoding: 'utf8', maxBuffer: 64 * 1024, windowsHide: true,
       });
-      if (String(result?.stderr ?? '') !== '') fail();
+      const stderr = String(result?.stderr ?? '');
+      const warning = `WARNING: This command is using service account impersonation. All API calls will be executed as [${impersonatedServiceAccount}].`;
+      if (![ '', `${warning}\n`, `${warning}\r\n` ].includes(stderr)) fail();
       const stdout = String(result?.stdout ?? '');
       if (!stdout.endsWith('\n')) fail();
       const token = stdout.slice(0, -1).endsWith('\r')
@@ -724,7 +781,32 @@ async function anonymousProbe(fetch, url, probe) {
   return response.status;
 }
 
-async function authenticatedProbe(fetch, url, probe, token) {
+function normalizedHealthBody(body, path) {
+  if (!exactKeys(body, ['data', 'error', 'requestId'])
+    || body.error !== null || !UUID.test(String(body.requestId ?? ''))) fail();
+  if (path === '/api/health/live') {
+    if (!exact(body.data, { status: 'ok', version: '0.1.0' })) fail();
+    return deepFreeze({ status: 'ok', version: '0.1.0' });
+  }
+  if (path !== '/api/health/ready' || !exactKeys(body.data, [
+    'boundary', 'checks', 'productionReady', 'status',
+  ]) || body.data.status !== 'ready' || body.data.productionReady !== true
+    || body.data.boundary !== 'production-v1' || !Array.isArray(body.data.checks)
+    || body.data.checks.length !== READINESS_COMPONENTS.length) fail();
+  const checks = body.data.checks.map((check, index) => {
+    const keys = check?.version === undefined ? ['name', 'status'] : ['name', 'status', 'version'];
+    if (!exactKeys(check, keys) || check.name !== READINESS_COMPONENTS[index]
+      || check.status !== 'ready' || (check.version !== undefined
+        && (!SAFE_READINESS_TOKEN.test(check.version) || DIGEST.test(check.version)))) fail();
+    return deepFreeze({ name: check.name, status: 'ready', ...(check.version === undefined
+      ? {} : { version: check.version }) });
+  });
+  return deepFreeze({
+    status: 'ready', productionReady: true, boundary: 'production-v1', checks,
+  });
+}
+
+async function authenticatedProbe(fetch, url, probe, token, path) {
   const options = commonFetchOptions(probe);
   options.headers.Authorization = `Bearer ${token}`;
   const response = await fetch(url, options);
@@ -732,10 +814,12 @@ async function authenticatedProbe(fetch, url, probe, token) {
     || !/^application\/json(?:;\s*charset=utf-8)?$/iu.test(String(response.headers?.get?.('content-type') ?? ''))) fail();
   let body;
   try { body = await response.json(); } catch { fail(); }
-  if (!exactKeys(body, ['data', 'error', 'requestId'])
-    || !exact(body.data, { status: 'ok', version: '0.1.0' })
-    || body.error !== null || !UUID.test(String(body.requestId ?? ''))) fail();
-  return response.status;
+  const data = normalizedHealthBody(body, path);
+  return deepFreeze({
+    status: response.status,
+    responseSha256: canonicalSha256(body),
+    ...(path === '/api/health/ready' ? { readiness: data } : {}),
+  });
 }
 
 function logWindow(observedAt) {
@@ -745,8 +829,8 @@ function logWindow(observedAt) {
   };
 }
 
-function logFilter(binding, probe, status, observedAt) {
-  const url = `${binding.candidateOrigin}/api/health/live`;
+function logFilter(binding, probe, status, observedAt, path) {
+  const url = `${binding.candidateOrigin}${path}`;
   const window = logWindow(observedAt);
   return [
     `logName="projects/${binding.projectId}/logs/run.googleapis.com%2Frequests"`,
@@ -765,9 +849,9 @@ function logFilter(binding, probe, status, observedAt) {
   ].join(' AND ');
 }
 
-function logArgv(binding, probe, status, observedAt) {
+function logArgv(binding, probe, status, observedAt, path) {
   return frozenArgv(
-    'logging', 'read', logFilter(binding, probe, status, observedAt),
+    'logging', 'read', logFilter(binding, probe, status, observedAt, path),
     `--project=${binding.projectId}`, '--limit=2', '--order=asc', '--format=json',
   );
 }
@@ -777,7 +861,7 @@ function validByteCount(value) {
     || (typeof value === 'string' && /^(?:0|[1-9]\d*)$/u.test(value));
 }
 
-function validateRequestLog(value, binding, probe, status, now) {
+function validateRequestLog(value, binding, probe, status, now, path) {
   if (!Array.isArray(value) || value.length !== 1) fail();
   const entry = value[0];
   const allowedEntryKeys = new Set([
@@ -808,7 +892,7 @@ function validateRequestLog(value, binding, probe, status, now) {
     || !exact(entry.resource, { type: 'cloud_run_revision', labels: expectedLabels })
     || !safeObject(http) || Object.keys(http).some((key) => !allowedHttpKeys.has(key))
     || http.requestMethod !== 'GET'
-    || http.requestUrl !== `${binding.candidateOrigin}/api/health/live`
+    || http.requestUrl !== `${binding.candidateOrigin}${path}`
     || http.status !== status || http.userAgent !== probe.userAgent
     || !Number.isFinite(observed) || observed < Date.parse(window.start) || observed > Date.parse(window.end)
     || (received !== null && (!Number.isFinite(received) || received < observed
@@ -837,12 +921,22 @@ function validateRequestLog(value, binding, probe, status, now) {
   });
 }
 
-async function readRequestLog({ executor, binding, probe, status, observedAt, sleep }) {
+async function readRequestLog({ executor, binding, probe, status, observedAt, sleep, path, clock }) {
+  const deadline = observedAt.getTime() + MAXIMUM_AGE_MS;
   for (let attempt = 0; attempt < LOG_POLL_ATTEMPTS; attempt += 1) {
-    const value = await execute(executor, logArgv(binding, probe, status, observedAt));
+    const current = clock();
+    if (!(current instanceof Date) || !Number.isFinite(current.getTime())
+      || current.getTime() > deadline) fail();
+    const value = await execute(executor, logArgv(binding, probe, status, observedAt, path));
     if (!Array.isArray(value)) fail();
-    if (value.length > 0) return validateRequestLog(value, binding, probe, status, observedAt);
-    if (attempt + 1 < LOG_POLL_ATTEMPTS) await sleep(LOG_POLL_INTERVAL_MS);
+    if (value.length > 0) {
+      return validateRequestLog(value, binding, probe, status, observedAt, path);
+    }
+    if (attempt + 1 < LOG_POLL_ATTEMPTS) {
+      const remaining = deadline - current.getTime();
+      if (remaining <= 0) fail();
+      await sleep(Math.min(LOG_POLL_INTERVAL_MS, remaining));
+    }
   }
   fail();
 }
@@ -909,6 +1003,15 @@ function normalizeRuntime(metadata, spec, expected) {
   if (!safeObject(container) || Object.keys(container).some((key) => !containerKeys.has(key))
     || (container.command !== undefined && (!Array.isArray(container.command) || container.command.length !== 0))
     || (container.args !== undefined && (!Array.isArray(container.args) || container.args.length !== 0))) fail();
+  const ports = container.ports ?? [];
+  if ((container.name !== undefined && (typeof container.name !== 'string'
+      || !/^[a-z][a-z0-9-]{0,62}$/u.test(container.name)))
+    || (container.workingDir !== undefined && (typeof container.workingDir !== 'string'
+      || !container.workingDir.startsWith('/') || container.workingDir.length > 4096
+      || /[\u0000\r\n]/u.test(container.workingDir)))
+    || !Array.isArray(ports) || ports.length > 1
+    || ports.some((port) => !exactKeys(port, ['containerPort', 'name'])
+      || port.name !== 'http1' || normalizedInteger(port.containerPort, { minimum: 1 }) !== 8080)) fail();
   const environment = {};
   const secretEnvironment = {};
   for (const member of container.env ?? []) {
@@ -926,6 +1029,7 @@ function normalizeRuntime(metadata, spec, expected) {
     } else fail();
   }
   const secretMounts = {};
+  const seenMountNames = new Set();
   const volumes = spec.volumes ?? [];
   const mounts = container.volumeMounts ?? [];
   if (!Array.isArray(volumes) || !Array.isArray(mounts)) fail();
@@ -934,23 +1038,29 @@ function normalizeRuntime(metadata, spec, expected) {
       ? ['mountPath', 'name'] : ['mountPath', 'name', 'readOnly'];
     if (!exactKeys(mount, mountKeys) || typeof mount.name !== 'string'
       || typeof mount.mountPath !== 'string' || mount.readOnly === false
-      || Object.hasOwn(secretMounts, mount.name)) fail();
+      || seenMountNames.has(mount.name)) fail();
+    seenMountNames.add(mount.name);
     const volume = volumes.find(({ name } = {}) => name === mount.name);
     if (!exactKeys(volume, ['name', 'secret'])
       || !exactKeys(volume.secret, ['items', 'secretName'])
       || !Array.isArray(volume.secret.items) || volume.secret.items.length !== 1
       || !exactKeys(volume.secret.items[0], ['key', 'path'])) fail();
-    secretMounts[mount.name] = {
+    const normalizedMount = {
       path: `${mount.mountPath.replace(/\/$/u, '')}/${volume.secret.items[0].path}`,
       secret: volume.secret.secretName,
       version: String(volume.secret.items[0].key),
       readOnly: true,
     };
+    const matches = Object.entries(expected.secretMounts).filter(([, member]) => (
+      exact(member, normalizedMount)
+    ));
+    if (matches.length !== 1 || Object.hasOwn(secretMounts, matches[0][0])) fail();
+    secretMounts[matches[0][0]] = normalizedMount;
   }
   if (volumes.length !== mounts.length) fail();
   const limits = container.resources?.limits;
   if (!exactKeys(container.resources, ['limits']) || !exactKeys(limits, ['cpu', 'memory'])) fail();
-  const normalized = {
+  const runtime = {
     image: container.image,
     serviceAccount: spec.serviceAccountName,
     executionEnvironment: annotations['run.googleapis.com/execution-environment'],
@@ -979,8 +1089,20 @@ function normalizeRuntime(metadata, spec, expected) {
     'minInstances', 'maxInstances', 'cpuThrottling', 'startupCpuBoost', 'timeoutSeconds',
     'network', 'subnet', 'vpcEgress', 'environment', 'secretEnvironment', 'secretMounts', 'probes',
   ].map((key) => [key, expected[key]]));
-  if (!exact(normalized, expectedRuntime)) fail();
-  return deepFreeze(normalized);
+  if (!exact(runtime, expectedRuntime)) fail();
+  return deepFreeze({
+    ...runtime,
+    container: {
+      ...(container.name === undefined ? {} : { name: container.name }),
+      ...(container.workingDir === undefined ? {} : { workingDir: container.workingDir }),
+      ...(container.ports === undefined ? {} : {
+        ports: ports.map((port) => ({
+          name: port.name,
+          containerPort: normalizedInteger(port.containerPort, { minimum: 1 }),
+        })),
+      }),
+    },
+  });
 }
 
 function validateReadyConditions(value) {
@@ -1009,6 +1131,7 @@ function validateServiceReadback(value, binding) {
     || Object.keys(value.metadata).some((key) => !metadataKeys.has(key))
     || value.metadata.name !== binding.candidateService
     || String(value.metadata.namespace) !== binding.projectNumber) fail();
+  const generation = normalizedInteger(value.metadata.generation, { minimum: 1 });
   const labels = value.metadata.labels ?? {};
   const annotations = value.metadata.annotations ?? {};
   const allowedServiceAnnotations = new Set([
@@ -1042,7 +1165,10 @@ function validateServiceReadback(value, binding) {
   ]);
   if (!safeObject(value.status) || Object.keys(value.status).some((key) => !statusKeys.has(key))) fail();
   validateReadyConditions(value.status.conditions);
-  if (value.status.latestCreatedRevisionName !== binding.candidateRevision
+  const observedGeneration = normalizedInteger(value.status.observedGeneration, { minimum: 1 });
+  if (observedGeneration !== generation
+    || !exact(value.status.address, { url: binding.candidateAudience })
+    || value.status.latestCreatedRevisionName !== binding.candidateRevision
     || value.status.latestReadyRevisionName !== binding.candidateRevision
     || value.status.url !== binding.candidateAudience
     || !Array.isArray(value.status.traffic) || value.status.traffic.length !== 1
@@ -1056,6 +1182,8 @@ function validateServiceReadback(value, binding) {
     project: binding.projectId,
     region: binding.region,
     service: binding.candidateService,
+    generation,
+    address: binding.candidateAudience,
     invokerIamDisabled: false,
     ingress: 'all',
     revision: binding.candidateRevision,
@@ -1078,28 +1206,31 @@ function validateRevisionReadback(value, binding) {
     || Object.keys(value.metadata).some((key) => !metadataKeys.has(key))
     || value.metadata.name !== binding.candidateRevision
     || String(value.metadata.namespace) !== binding.projectNumber) fail();
+  const generation = normalizedInteger(value.metadata.generation, { minimum: 1 });
   const labels = value.metadata.labels;
   if (!safeObject(labels) || labels['cloud.googleapis.com/location'] !== binding.region
     || labels['serving.knative.dev/configuration'] !== binding.candidateService
     || labels['serving.knative.dev/service'] !== binding.candidateService) fail();
   const runtime = normalizeRuntime(value.metadata, value.spec, binding.expectedCandidate);
   const statusKeys = new Set([
-    'conditions', 'containerStatuses', 'imageDigest', 'logUrl', 'observedGeneration',
+    'conditions', 'desiredReplicas', 'imageDigest', 'logUrl', 'observedGeneration', 'serviceName',
   ]);
   if (!safeObject(value.status) || Object.keys(value.status).some((key) => !statusKeys.has(key))) fail();
   validateReadyConditions(value.status.conditions);
-  const containerStatuses = value.status.containerStatuses ?? [];
-  if (value.status.imageDigest !== binding.image || !Array.isArray(containerStatuses)
-    || containerStatuses.length < 1 || containerStatuses.some((member) => (
-      !safeObject(member) || Object.keys(member).some((key) => !['imageDigest', 'name'].includes(key))
-        || member.imageDigest !== binding.image
-        || (member.name !== undefined && (typeof member.name !== 'string' || member.name.length < 1))
-    ))) fail();
+  const observedGeneration = normalizedInteger(value.status.observedGeneration, { minimum: 1 });
+  const desiredReplicas = normalizedInteger(value.status.desiredReplicas, { minimum: 1 });
+  if (observedGeneration !== generation || desiredReplicas !== 1
+    || value.status.imageDigest !== binding.image || value.status.serviceName !== binding.candidateService
+    || (value.status.logUrl !== undefined && (typeof value.status.logUrl !== 'string'
+      || !value.status.logUrl.startsWith('https://') || value.status.logUrl.length > 4096
+      || /[\u0000\r\n]/u.test(value.status.logUrl)))) fail();
   return deepFreeze({
     project: binding.projectId,
     region: binding.region,
     service: binding.candidateService,
     revision: binding.candidateRevision,
+    generation,
+    desiredReplicas,
     image: binding.image,
     ready: true,
     runtime,
@@ -1134,6 +1265,52 @@ async function readCandidateControlPlane(binding, plan, executor) {
   return deepFreeze({ service, revision, artifact, iam });
 }
 
+export async function readCandidateControlPlaneSnapshot({ binding: rawBinding, executor } = {}) {
+  try {
+    const binding = normalizedBinding(rawBinding);
+    const state = await readCandidateControlPlane(
+      binding, createCandidatePrivacyCommandPlan(binding), executor,
+    );
+    return deepFreeze({ state, stateSha256: canonicalSha256(state) });
+  } catch {
+    fail();
+  }
+}
+
+export async function runCandidateAuthenticatedHealthProbe({
+  binding: rawBinding,
+  path,
+  executor,
+  tokenExecutor,
+  fetch,
+  now = () => new Date(),
+  nonce,
+  sleep = defaultSleep,
+} = {}) {
+  try {
+    const binding = normalizedBinding(rawBinding);
+    if (!['/api/health/live', '/api/health/ready'].includes(path)
+      || typeof tokenExecutor !== 'function' || typeof fetch !== 'function'
+      || typeof now !== 'function' || typeof nonce !== 'function' || typeof sleep !== 'function') fail();
+    const observedAt = now();
+    if (!(observedAt instanceof Date) || !Number.isFinite(observedAt.getTime())) fail();
+    const plan = createCandidatePrivacyCommandPlan(binding);
+    const token = await tokenExecutor([...plan.token]);
+    if (typeof token !== 'string') fail();
+    decodeTokenClaims(token, binding, observedAt);
+    const probe = probeIdentity(nonce, path === '/api/health/live' ? 'readiness-live' : 'readiness-ready');
+    const response = await authenticatedProbe(
+      fetch, `${binding.candidateOrigin}${path}`, probe, token, path,
+    );
+    const log = await readRequestLog({
+      executor, binding, probe, status: response.status, observedAt, sleep, path, clock: now,
+    });
+    return deepFreeze({ ...response, ...log });
+  } catch {
+    fail();
+  }
+}
+
 function proofBinding(binding) {
   const value = {
     projectId: binding.projectId,
@@ -1152,6 +1329,14 @@ function proofBinding(binding) {
     candidateResource: candidateResource(binding),
   };
   return deepFreeze({ ...value, boundarySha256: canonicalSha256(value) });
+}
+
+export function candidatePrivacyBoundarySha256(rawBinding) {
+  try {
+    return proofBinding(normalizedBinding(rawBinding)).boundarySha256;
+  } catch {
+    fail();
+  }
 }
 
 export function finalizeCandidatePrivacyProof(record) {
@@ -1207,7 +1392,8 @@ export function validateCandidatePrivacyProof(record, { binding: rawBinding, now
       || !Object.values(record.cloudAsset.analyses).every((analysis) => (
         exactKeys(analysis, ['fullyExplored', 'nonCriticalErrorCount', 'responseSha256', 'resultCount'])
         && analysis.fullyExplored === true && analysis.nonCriticalErrorCount === 0
-        && analysis.resultCount === 0 && DIGEST.test(String(analysis.responseSha256 ?? ''))
+        && Number.isSafeInteger(analysis.resultCount) && analysis.resultCount >= 0
+        && DIGEST.test(String(analysis.responseSha256 ?? ''))
       ))) fail();
     if (!exactKeys(record.troubleshooter, ['decision', 'responseSha256'])
       || record.troubleshooter.decision !== 'GRANTED'
@@ -1280,20 +1466,25 @@ export async function runCandidatePrivacyProof({
     if (typeof token !== 'string') fail();
     const tokenIdentity = decodeTokenClaims(token, binding, observedAt);
     const authenticatedIdentity = probeIdentity(nonce, 'authenticated');
-    const authenticatedStatus = await authenticatedProbe(
-      fetch, endpoint, authenticatedIdentity, token,
+    const authenticatedResponse = await authenticatedProbe(
+      fetch, endpoint, authenticatedIdentity, token, '/api/health/live',
     );
+    const authenticatedStatus = authenticatedResponse.status;
     const anonymousLog = await readRequestLog({
       executor, binding, probe: anonymousIdentity, status: anonymousStatus, observedAt, sleep,
+      path: '/api/health/live', clock: now,
     });
     const authenticatedLog = await readRequestLog({
       executor, binding, probe: authenticatedIdentity, status: authenticatedStatus,
-      observedAt, sleep,
+      observedAt, sleep, path: '/api/health/live', clock: now,
     });
     const afterControlPlane = await readCandidateControlPlane(binding, plan, executor);
     if (!exact(beforeControlPlane, afterControlPlane)) fail();
     const secondSnapshot = await readHierarchySnapshot(binding, plan, executor);
     if (!exact(firstSnapshot, secondSnapshot)) fail();
+    const completedAt = now();
+    if (!(completedAt instanceof Date) || !Number.isFinite(completedAt.getTime())
+      || completedAt.getTime() >= observedAt.getTime() + MAXIMUM_AGE_MS) fail();
 
     const occurredAt = observedAt.toISOString();
     const proof = finalizeCandidatePrivacyProof({
@@ -1336,7 +1527,7 @@ export async function runCandidatePrivacyProof({
         authenticated: { status: authenticatedStatus, ...authenticatedLog },
       },
     });
-    validateCandidatePrivacyProof(proof, { binding, now: observedAt });
+    validateCandidatePrivacyProof(proof, { binding, now: completedAt });
     return proof;
   } catch {
     fail();

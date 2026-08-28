@@ -8,7 +8,13 @@ import { promisify } from 'node:util';
 import { createGzip } from 'node:zlib';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { createDefaultGcloudExecutor } from './gcp-provision.js';
+import { createDefaultGcloudExecutor, resolveDefaultGcloudLaunch } from './gcp-provision.js';
+import {
+  candidatePrivacyBoundarySha256,
+  createIdentityTokenExecutor,
+  runCandidatePrivacyProof,
+  validateCandidatePrivacyProof,
+} from './candidate-privacy-proof.js';
 import { containsForbiddenPersistedSecret } from './persisted-secret-contract.js';
 import {
   createFinalMutationGuard,
@@ -25,6 +31,15 @@ import {
   normalizeControlPlaneTurnReceipts,
   runLatencyAcceptance,
 } from './production-latency-workload.js';
+import {
+  runTask8Readiness,
+  validateTask8ReadinessRecord,
+} from './task8-readiness-producer.js';
+import {
+  runTask8Mobile,
+  validateTask8MobileRecord,
+} from './task8-mobile-producer.js';
+import { inspectPngEvidence } from './png-evidence.js';
 
 const PROJECT = GCP_IDENTITY.projectId;
 const REGION = GCP_IDENTITY.region;
@@ -67,24 +82,6 @@ const RECEIPT_PHASES = Object.freeze([
   'readiness', 'workload', 'mobile',
 ]);
 const ACTION_RECEIPT_PHASES = new Set(['candidate-cleanup', 'promote', 'rollback']);
-const MOBILE_CHECK_IDS = Object.freeze([
-  'first-visit',
-  'response-language-mode-change',
-  'text-send',
-  'editable-voice-transcript',
-  'assistant-audio-ready-no-autoplay',
-  'verified-official-source',
-  'unsupported-honest-handoff',
-  'retry-reload-retention',
-  'consent',
-  'clear-conversation',
-  'keyboard-focus',
-  'bottom-safe-area',
-  'no-horizontal-overflow',
-]);
-const MOBILE_SCREENSHOT_IDS = Object.freeze([
-  'first-visit', 'text-source', 'voice-transcript', 'mobile-safe-area',
-]);
 const APP_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const execFileAsync = promisify(execFile);
 
@@ -311,7 +308,7 @@ function assertPrivacyProofReference(value) {
   return Object.freeze({ ...value });
 }
 
-export function assertTask8Evidence(value, { stableTrafficState } = {}) {
+export function assertTask8Evidence(value, { stableTrafficState, now = new Date() } = {}) {
   if (!exactKeys(value, ['mobile', 'readiness', 'workload'])) throw releaseContractError();
   return Object.freeze(Object.fromEntries(Object.entries(value).map(([key, entry]) => {
     if (!exactKeys(entry, [
@@ -329,7 +326,25 @@ export function assertTask8Evidence(value, { stableTrafficState } = {}) {
       || !exactKeys(entry.privacyProofs, ['end', 'start'])) throw releaseContractError();
     const start = assertPrivacyProofReference(entry.privacyProofs.start);
     const end = assertPrivacyProofReference(entry.privacyProofs.end);
-    if (Date.parse(end.observedAt) < Date.parse(start.observedAt)) throw releaseContractError();
+    const startObserved = Date.parse(start.observedAt);
+    const endObserved = Date.parse(end.observedAt);
+    const unresolvedPair = [start, end].every((reference) => (
+      reference.artifactSha256 === '0'.repeat(64)
+        && reference.objectSha256 === '0'.repeat(64)
+        && reference.boundarySha256 === '0'.repeat(64)
+    ));
+    if (endObserved <= startObserved
+      || start.filePath === end.filePath
+      || (!unresolvedPair && (start.artifactSha256 === end.artifactSha256
+        || start.objectSha256 === end.objectSha256))) throw releaseContractError();
+    if (now !== null) {
+      const current = new Date(now).getTime();
+      if (!Number.isFinite(current)
+        || current < startObserved - 30_000 || current > Date.parse(start.expiresAt)
+        || current < endObserved - 30_000 || current > Date.parse(end.expiresAt)) {
+        throw releaseContractError();
+      }
+    }
     return [key, Object.freeze({
       ...entry, privacyProofs: Object.freeze({ start, end }),
     })];
@@ -948,7 +963,9 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
   const previousImageDigest = input.previousImageDigest;
   const releaseSha = input.releaseSha;
   const stableTrafficState = previousRevision === null ? 'stable-absent' : 'stable-prior-100';
-  const task8Evidence = assertTask8Evidence(input.task8Evidence, { stableTrafficState });
+  const task8Evidence = assertTask8Evidence(input.task8Evidence, {
+    stableTrafficState, now: null,
+  });
   const acceptanceOutputs = unresolvedAcceptanceOutputs
     ? assertAcceptanceOutputs(Object.fromEntries(Object.entries(
       expectedAcceptanceObjects(releaseSha, input.acceptanceRunId),
@@ -1200,6 +1217,8 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       join(releaseReceiptDirectory, `${String(index + 1).padStart(2, '0')}-${receiptPhase}.json`),
     ]),
   ));
+  const candidatePrivacyProofPath = join(releaseReceiptDirectory, 'candidate-privacy-proof.json');
+  const promotionPrivacyProofPath = join(releaseReceiptDirectory, 'promotion-privacy-proof.json');
   const jobDeployArgv = (contract) => [
     'run', 'jobs', 'deploy', contract.job, `--project=${PROJECT}`, `--region=${REGION}`,
     `--image=${contract.image}`, `--service-account=${contract.serviceAccount}`,
@@ -1357,6 +1376,9 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       'run', 'services', 'get-iam-policy', CANDIDATE_SERVICE,
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
+    operation('candidate', 'candidate-privacy-publish', [
+      'local-artifact-create', candidatePrivacyProofPath,
+    ]),
     operation('candidate-cleanup', 'candidate-cleanup-service-precheck', [
       'run', 'services', 'describe', CANDIDATE_SERVICE,
       `--project=${PROJECT}`, `--region=${REGION}`,
@@ -1447,6 +1469,11 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
         'run', 'services', 'get-iam-policy', STABLE_SERVICE,
         `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
       ]),
+    ] : []),
+    operation('promote', 'promote-privacy-publish', [
+      'local-artifact-create', promotionPrivacyProofPath,
+    ]),
+    ...(previousRevision === null ? [
       operation('promote', 'promote-public-service', [
         'run', 'services', 'add-iam-policy-binding', STABLE_SERVICE, '--member=allUsers',
         '--role=roles/run.invoker', `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
@@ -1569,6 +1596,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
   });
   return Object.freeze({
     project: PROJECT,
+    projectNumber: input.projectNumber,
     region: REGION,
     releaseSha,
     sourceArchive: input.sourceArchive,
@@ -1598,6 +1626,8 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     releaseIdentitySha256,
     releaseReceiptDirectory,
     releaseReceiptPaths,
+    candidatePrivacyProofPath,
+    promotionPrivacyProofPath,
     task8Evidence,
     acceptanceOutputs,
     acceptanceEvidenceOutput: Object.freeze({
@@ -3141,76 +3171,132 @@ async function validateBoundFile(value, { json = false, png = false } = {}) {
   return parsed;
 }
 
-async function validateTask8EvidenceArtifact(entry, phase, plan, { now }) {
+function candidatePrivacyBinding(plan) {
+  return Object.freeze({
+    projectId: PROJECT,
+    projectNumber: plan.projectNumber,
+    organizationId: GCP_IDENTITY.organizationId,
+    region: REGION,
+    releaseSha: plan.releaseSha,
+    imageDigest: plan.imageDigest,
+    image: plan.expectedCandidate.image,
+    candidateService: CANDIDATE_SERVICE,
+    candidateRevision: plan.candidateRevision,
+    candidateTag: plan.candidateTag,
+    candidateOrigin: plan.candidateOrigin,
+    candidateAudience: plan.candidateServiceOrigin,
+    acceptanceServiceAccount: ACCEPTANCE_SERVICE_ACCOUNT,
+    operator: PROMOTION_AUTHORITY,
+    expectedCandidate: plan.expectedCandidate,
+  });
+}
+
+async function validatePrivacyProofArtifact(
+  reference,
+  plan,
+  now,
+  errorMessage,
+  validatePrivacyProof = validateCandidatePrivacyProof,
+) {
+  const { record } = await readExactJsonArtifact(reference, errorMessage);
+  if (record?.artifactSha256 !== reference.artifactSha256
+    || record?.binding?.boundarySha256 !== reference.boundarySha256
+    || record?.occurredAt !== reference.observedAt
+    || record?.expiresAt !== reference.expiresAt) throw new Error(errorMessage);
+  try {
+    validatePrivacyProof(record, { binding: candidatePrivacyBinding(plan), now });
+  } catch {
+    throw new Error(errorMessage);
+  }
+  return record;
+}
+
+export async function validateTask8EvidenceArtifact(entry, phase, plan, {
+  now,
+  gateWindow = null,
+  historical = false,
+  validatePrivacyProof = validateCandidatePrivacyProof,
+}) {
   const errorMessage = `Task 8 ${phase} evidence is invalid`;
   const { record } = await readExactJsonArtifact(entry, errorMessage);
   if (record?.artifactSha256 !== entry.artifactSha256) throw new Error(errorMessage);
+  const privacyStart = await validatePrivacyProofArtifact(
+    entry.privacyProofs.start,
+    plan,
+    historical ? new Date(entry.privacyProofs.start.observedAt) : now,
+    errorMessage,
+    validatePrivacyProof,
+  );
+  const privacyEnd = await validatePrivacyProofArtifact(
+    entry.privacyProofs.end,
+    plan,
+    historical ? new Date(entry.privacyProofs.end.observedAt) : now,
+    errorMessage,
+    validatePrivacyProof,
+  );
+  const validationNow = historical ? new Date(record.occurredAt) : now;
+  if (privacyStart.binding.boundarySha256 !== privacyEnd.binding.boundarySha256
+    || Date.parse(privacyEnd.occurredAt) <= Date.parse(privacyStart.occurredAt)) {
+    throw new Error(errorMessage);
+  }
   if (phase === 'workload') {
-    try { return validateLatencyAcceptanceRecord(record, plan, now); } catch { throw new Error(errorMessage); }
+    try {
+      if (!exactKeys(gateWindow, ['gateEndedAt', 'gateStartedAt'])
+        || !Number.isFinite(Date.parse(gateWindow.gateStartedAt))
+        || !Number.isFinite(Date.parse(gateWindow.gateEndedAt))
+        || Date.parse(gateWindow.gateEndedAt) < Date.parse(gateWindow.gateStartedAt)
+        || Date.parse(privacyStart.occurredAt) > Date.parse(gateWindow.gateStartedAt)
+        || Date.parse(privacyEnd.occurredAt) < Date.parse(gateWindow.gateEndedAt)
+        || Date.parse(record.occurredAt) < Date.parse(gateWindow.gateStartedAt)
+        || Date.parse(record.occurredAt) > Date.parse(gateWindow.gateEndedAt)) throw new Error(errorMessage);
+      return validateLatencyAcceptanceRecord(record, plan, validationNow);
+    } catch { throw new Error(errorMessage); }
   }
-  if (finalizeReleaseEvidenceRecord(record).artifactSha256 !== record.artifactSha256
-    || record.commitSha !== plan.releaseSha || record.sourceArchiveSha256 !== plan.sourceArchiveSha256
-    || record.imageDigest !== plan.imageDigest || record.candidateRevision !== plan.candidateRevision
-    || record.candidateTag !== plan.candidateTag || record.candidateOrigin !== plan.candidateOrigin
-    || record.trafficPercent !== candidateTrafficPercent(plan)
-    || record.candidateService !== CANDIDATE_SERVICE || record.stableService !== STABLE_SERVICE
-    || record.trafficState !== candidateTrafficState(plan)
-    || record.stableTrafficState !== plan.expectedStable.initialTrafficState
-    || record.result !== 'pass'
-    || !recentEvidenceTime(record.occurredAt, now)) throw new Error(errorMessage);
   if (phase === 'readiness') {
-    if (!exactKeys(record, [
-      'artifactSha256', 'candidateOrigin', 'candidateRevision', 'candidateService', 'candidateTag',
-      'checks', 'commitSha', 'gate', 'imageDigest', 'occurredAt', 'result', 'schemaVersion',
-      'sourceArchiveSha256', 'stableService', 'stableTrafficState', 'trafficPercent', 'trafficState',
-    ]) || record.schemaVersion !== 2 || record.gate !== 'readiness'
-      || !exact(record.checks, {
-        evidenceMounted: true,
-        liveStatus: 200,
-        observedReleaseSha: plan.releaseSha,
-        readyStatus: 200,
-        resourceContinuity: true,
+    try {
+      validateTask8ReadinessRecord(record, {
+        binding: candidatePrivacyBinding(plan),
+        sourceArchiveSha256: plan.sourceArchiveSha256,
+        now: validationNow,
+      });
+      if (!exact(record.privacyProofs, entry.privacyProofs)) throw new Error(errorMessage);
+      return true;
+    } catch {
+      throw new Error(errorMessage);
+    }
+  }
+  if (phase !== 'mobile') throw new Error(errorMessage);
+  try {
+    validateTask8MobileRecord(record, {
+      binding: candidatePrivacyBinding(plan),
+      sourceArchiveSha256: plan.sourceArchiveSha256,
+      boundarySha256: entry.privacyProofs.start.boundarySha256,
+      candidateAccess: plan.candidateAccess,
+      now: validationNow,
+    });
+    if (!exact(record.privacyProofs, entry.privacyProofs)) throw new Error(errorMessage);
+    for (const screenshot of record.screenshots) {
+      const metadata = await lstat(screenshot.filePath);
+      if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size !== screenshot.byteLength) {
+        throw new Error(errorMessage);
+      }
+      const bytes = await readFile(screenshot.filePath);
+      const inspected = inspectPngEvidence(bytes);
+      if (!exact(inspected, {
+        width: screenshot.width,
+        height: screenshot.height,
+        rawSha256: screenshot.rawSha256,
+        pixelSha256: screenshot.pixelSha256,
+        colorCount: screenshot.colorCount,
+        luminanceSpan: screenshot.luminanceSpan,
+        luminanceVariance: screenshot.luminanceVariance,
+        dominantRatio: screenshot.dominantRatio,
+        nonDominantRatio: screenshot.nonDominantRatio,
+        byteLength: screenshot.byteLength,
       })) throw new Error(errorMessage);
-    return true;
-  }
-  if (phase !== 'mobile' || !exactKeys(record, [
-    'access', 'artifactSha256', 'candidateOrigin', 'candidateRevision', 'candidateService',
-    'candidateTag', 'commitSha', 'finalNavigationUrl', 'gate', 'imageDigest', 'occurredAt',
-    'result', 'schemaVersion', 'screenshots', 'sourceArchiveSha256', 'stableService',
-    'stableTrafficState', 'trace', 'trafficPercent', 'trafficState', 'viewport',
-  ]) || record.schemaVersion !== 2 || record.gate !== 'mobile'
-    || !exact(record.access, plan.candidateAccess)
-    || record.finalNavigationUrl !== plan.candidateOrigin
-    || !exact(record.viewport, { width: 390, height: 844 })
-    || !Array.isArray(record.screenshots) || record.screenshots.length !== MOBILE_SCREENSHOT_IDS.length) {
+    }
+  } catch {
     throw new Error(errorMessage);
-  }
-  const trace = await validateBoundFile(record.trace, { json: true });
-  if (!exactKeys(trace, [
-    'access', 'candidateOrigin', 'candidateService', 'events', 'finalNavigationUrl',
-    'observedReleaseSha', 'schemaVersion', 'source', 'stableService', 'stableTrafficState',
-    'trafficPercent', 'trafficState', 'viewport',
-  ]) || trace.schemaVersion !== 2 || trace.source !== 'codex-in-app-browser'
-    || !exact(trace.access, plan.candidateAccess)
-    || trace.candidateOrigin !== plan.candidateOrigin || trace.finalNavigationUrl !== plan.candidateOrigin
-    || trace.candidateService !== CANDIDATE_SERVICE || trace.stableService !== STABLE_SERVICE
-    || trace.trafficState !== candidateTrafficState(plan)
-    || trace.stableTrafficState !== plan.expectedStable.initialTrafficState
-    || trace.observedReleaseSha !== plan.releaseSha
-    || trace.trafficPercent !== candidateTrafficPercent(plan)
-    || !exact(trace.viewport, { width: 390, height: 844 })
-    || !Array.isArray(trace.events) || trace.events.length !== MOBILE_CHECK_IDS.length
-    || !trace.events.every((event, index) => exactKeys(event, ['evidence', 'id', 'status'])
-      && event.id === MOBILE_CHECK_IDS[index] && event.status === 'passed'
-      && typeof event.evidence === 'string' && event.evidence.length >= 3 && event.evidence.length <= 240)) {
-    throw new Error(errorMessage);
-  }
-  for (const [index, screenshot] of record.screenshots.entries()) {
-    if (!exactKeys(screenshot, ['byteLength', 'filePath', 'id', 'sha256'])
-      || screenshot.id !== MOBILE_SCREENSHOT_IDS[index]) throw new Error(errorMessage);
-    const { id: ignored, ...binding } = screenshot;
-    void ignored;
-    await validateBoundFile(binding, { png: true });
   }
   return true;
 }
@@ -3330,7 +3416,7 @@ function validateReceiptOutputs(phase, outputs, plan) {
   } else if (phase === 'candidate') {
     if (!exactKeys(outputs, [
       'access', 'candidateContractSha256', 'candidateService', 'imageDigest', 'origin',
-      'publicInvoker', 'priorRelease', 'revision', 'stableService', 'stableTrafficState',
+      'privacyProof', 'publicInvoker', 'priorRelease', 'revision', 'stableService', 'stableTrafficState',
       'tag', 'trafficPercent', 'trafficState',
     ])
       || !exact(outputs.access, plan.candidateAccess)
@@ -3342,6 +3428,9 @@ function validateReceiptOutputs(phase, outputs, plan) {
       || outputs.trafficPercent !== candidateTrafficPercent(plan)
       || outputs.trafficState !== candidateTrafficState(plan)
       || outputs.publicInvoker !== false
+      || outputs.privacyProof.filePath !== plan.candidatePrivacyProofPath
+      || outputs.privacyProof.boundarySha256
+        !== candidatePrivacyBoundarySha256(candidatePrivacyBinding(plan))
       || !exact(outputs.priorRelease, plan.previousRevision === null ? null : {
         image: plan.previousImage,
         imageDigest: plan.previousImageDigest,
@@ -3375,10 +3464,16 @@ function validateReceiptOutputs(phase, outputs, plan) {
       || !exact(outputs.privacyProofs, expected.privacyProofs)
       || outputs.imageDigest !== plan.imageDigest
       || (phase === 'workload' && (!exactKeys(outputs.execution, [
-        'acceptanceWindowId', 'attemptId', 'networkWitnessSha256', 'observedRequestCount',
+        'acceptanceWindowId', 'attemptId', 'gateEndedAt', 'gateStartedAt',
+        'networkWitnessSha256', 'observedRequestCount',
       ])
         || !DIGEST.test(String(outputs.execution.acceptanceWindowId ?? ''))
         || !UUID.test(String(outputs.execution.attemptId ?? ''))
+        || !Number.isFinite(Date.parse(outputs.execution.gateStartedAt))
+        || !Number.isFinite(Date.parse(outputs.execution.gateEndedAt))
+        || Date.parse(outputs.execution.gateEndedAt) < Date.parse(outputs.execution.gateStartedAt)
+        || Date.parse(expected.privacyProofs.start.observedAt) > Date.parse(outputs.execution.gateStartedAt)
+        || Date.parse(expected.privacyProofs.end.observedAt) < Date.parse(outputs.execution.gateEndedAt)
         || !DIGEST.test(String(outputs.execution.networkWitnessSha256 ?? ''))
         || !Number.isSafeInteger(outputs.execution.observedRequestCount)
         || outputs.execution.observedRequestCount < 500
@@ -3587,7 +3682,11 @@ export function assertReceiptIdempotencyMetadata(metadata) {
   return true;
 }
 
-export async function persistReleaseReceipt(plan, receipt) {
+export async function persistReleaseReceipt(plan, receipt, {
+  writeCreateOnly = writeAtomicCreateOnly,
+  lstatExisting = lstat,
+  readExisting = readFile,
+} = {}) {
   const filePath = receipt?.receiptType === 'action-outcome'
     ? releaseActionReceiptPath(plan, receipt.phase, receipt.attemptId)
     : plan.releaseReceiptPaths[receipt.phase];
@@ -3600,11 +3699,11 @@ export async function persistReleaseReceipt(plan, receipt) {
   }
   const contents = `${JSON.stringify(receipt, null, 2)}\n`;
   try {
-    await writeAtomicCreateOnly(filePath, Buffer.from(contents));
+    await writeCreateOnly(filePath, Buffer.from(contents));
   } catch (error) {
     if (!/exists/i.test(String(error?.message ?? ''))) throw error;
-    assertReceiptIdempotencyMetadata(await lstat(filePath));
-    const existing = await readFile(filePath);
+    assertReceiptIdempotencyMetadata(await lstatExisting(filePath));
+    const existing = await readExisting(filePath);
     if (!existing.equals(Buffer.from(contents))) throw new Error('Release receipt already exists with different bytes');
   }
   return true;
@@ -3651,6 +3750,7 @@ function releasePhaseReceiptOutputs(phase, plan, context) {
     candidateService: CANDIDATE_SERVICE,
     imageDigest: plan.imageDigest,
     origin: plan.candidateOrigin,
+    privacyProof: assertPrivacyProofReference(context.candidatePrivacyReference),
     publicInvoker: false,
     priorRelease: plan.previousRevision === null ? null : Object.freeze({
       image: plan.previousImage,
@@ -3734,7 +3834,8 @@ function operationMayMutate(id) {
     || id === 'candidate-deploy' || id === 'candidate-private-iam-grant'
     || id === 'candidate-cleanup-delete' || id === 'promote-stable-deploy'
     || id === 'promote-public-service'
-    || id === 'promote-traffic' || id === 'rollback-traffic';
+    || id === 'promote-traffic' || id === 'rollback-traffic'
+    || id === 'candidate-privacy-publish' || id === 'promote-privacy-publish';
 }
 
 function journalReconcileKind(id) {
@@ -3746,6 +3847,9 @@ function journalReconcileKind(id) {
     return 'cloud-run-service-iam';
   }
   if (id === 'promote-traffic' || id === 'rollback-traffic') return 'cloud-run-traffic';
+  if (id === 'candidate-privacy-publish' || id === 'promote-privacy-publish') {
+    return 'local-artifact-create';
+  }
   if (id === 'candidate-cleanup-delete') return 'cloud-run-service-delete';
   if (id.endsWith('-deploy')) return 'cloud-run-job-replace';
   if (id.endsWith('-execute')) return 'cloud-run-job-execute';
@@ -3812,6 +3916,13 @@ function mutationSpec(plan, operationId) {
     policy: 'candidate-private',
     role: CANDIDATE_INVOKER_ROLE,
     service: CANDIDATE_SERVICE,
+  });
+  if (operationId === 'candidate-privacy-publish'
+    || operationId === 'promote-privacy-publish') return Object.freeze({
+    boundarySha256: candidatePrivacyBoundarySha256(candidatePrivacyBinding(plan)),
+    filePath: operationId === 'candidate-privacy-publish'
+      ? plan.candidatePrivacyProofPath : plan.promotionPrivacyProofPath,
+    proofType: operationId === 'candidate-privacy-publish' ? 'candidate' : 'promotion',
   });
   if (operationId === 'candidate-cleanup-delete') return Object.freeze({
     candidateRevision: plan.candidateRevision,
@@ -3930,6 +4041,11 @@ function plannedMutationAfterObservation(plan, operationId) {
     kind: 'cloud-run-service-iam',
     service: CANDIDATE_SERVICE,
   });
+  if (operationId === 'candidate-privacy-publish'
+    || operationId === 'promote-privacy-publish') return Object.freeze({
+    kind: 'local-privacy-proof',
+    ...mutationSpec(plan, operationId),
+  });
   if (operationId === 'promote-public-service') return Object.freeze({
     bindings: Object.freeze([Object.freeze({
       members: Object.freeze(['allUsers']), role: 'roles/run.invoker',
@@ -3940,6 +4056,11 @@ function plannedMutationAfterObservation(plan, operationId) {
   if (operationId === 'candidate-cleanup-delete') return Object.freeze({
     kind: 'cloud-run-service-absence', service: CANDIDATE_SERVICE, state: 'absent',
   });
+  if (operationId === 'candidate-privacy-publish'
+    || operationId === 'promote-privacy-publish') {
+    if (!exact(observed, expected)) throw new Error('Local privacy proof observation differs from plan');
+    return expected;
+  }
   if (operationId === 'promote-traffic' || operationId === 'rollback-traffic') {
     const revision = operationId === 'promote-traffic'
       ? plan.stableRevision : plan.previousRevision;
@@ -4394,6 +4515,8 @@ function journalCheckpointBoundary(operationId) {
   if (operationId === 'promote-stable-deploy') return 'promote-stable-artifact-readback';
   if (operationId === 'promote-public-service') return 'promote-public-iam-readback';
   if (operationId === 'promote-traffic') return 'promote-readback';
+  if (operationId === 'candidate-privacy-publish'
+    || operationId === 'promote-privacy-publish') return operationId;
   if (operationId === 'rollback-traffic') return 'rollback-readback';
   if (operationId === 'migration-execute') return 'migration-execution-readback';
   if (operationId.endsWith('-execute')) {
@@ -4715,22 +4838,836 @@ async function assertControlledWorkloadTargetAbsent(entry) {
   return true;
 }
 
+function unresolvedTask8Contract(entry) {
+  return entry.artifactSha256 === '0'.repeat(64)
+    && entry.objectSha256 === '0'.repeat(64)
+    && ['start', 'end'].every((boundary) => {
+      const reference = entry.privacyProofs[boundary];
+      return reference.artifactSha256 === '0'.repeat(64)
+        && reference.objectSha256 === '0'.repeat(64)
+        && reference.boundarySha256 === '0'.repeat(64);
+    });
+}
+
+async function assertControlledReadinessTargetsAbsent(entry) {
+  try {
+    for (const filePath of [
+      entry.privacyProofs.start.filePath,
+      entry.privacyProofs.end.filePath,
+      entry.filePath,
+    ]) await assertControlledWorkloadTargetAbsent({ filePath });
+  } catch (cause) {
+    const error = new Error('Pre-existing readiness evidence is forbidden', { cause });
+    error.code = 'READINESS_PREBUILT_EVIDENCE_FORBIDDEN';
+    throw error;
+  }
+  return true;
+}
+
+async function executeCandidatePrivacyArtifact({
+  plan,
+  locator,
+  executor,
+  tokenExecutor,
+  fetch,
+  now,
+  nonce,
+  sleep,
+  privacyProofRunner,
+}) {
+  const binding = candidatePrivacyBinding(plan);
+  const proof = await privacyProofRunner({
+    binding, executor, tokenExecutor, fetch, now, nonce, sleep,
+  });
+  const observedNow = now();
+  if (!(observedNow instanceof Date) || !Number.isFinite(observedNow.getTime())) {
+    throw new Error('Controlled privacy clock is invalid');
+  }
+  validateCandidatePrivacyProof(proof, { binding, now: observedNow });
+  const contents = `${JSON.stringify(proof, null, 2)}\n`;
+  const reference = Object.freeze({
+    schemaVersion: 3,
+    filePath: locator.filePath,
+    artifactSha256: proof.artifactSha256,
+    objectSha256: createHash('sha256').update(contents).digest('hex'),
+    boundarySha256: proof.binding.boundarySha256,
+    observedAt: proof.occurredAt,
+    expiresAt: proof.expiresAt,
+  });
+  if (reference.boundarySha256 !== candidatePrivacyBoundarySha256(binding)
+    || containsForbiddenPersistedSecret(proof)) {
+    throw new Error('Controlled privacy output is invalid');
+  }
+  return Object.freeze({ filePath: locator.filePath, contents, reference });
+}
+
+function privacyPublication(artifact) {
+  const bytes = Buffer.from(artifact.contents);
+  const artifacts = [Object.freeze({
+    role: 'privacy-proof',
+    filePath: artifact.filePath,
+    byteLength: bytes.length,
+    objectSha256: createHash('sha256').update(bytes).digest('hex'),
+    contentsBase64: bytes.toString('base64'),
+  })];
+  return Object.freeze({
+    artifacts: Object.freeze(artifacts),
+    bundleSha256: canonicalSha256(artifacts),
+  });
+}
+
+function privacyArtifactFromPublication(plan, locator, publication, {
+  now,
+  validatePrivacyProof = validateCandidatePrivacyProof,
+} = {}) {
+  if (!publication || !Array.isArray(publication.artifacts)
+    || publication.artifacts.length !== 1
+    || publication.bundleSha256 !== canonicalSha256(publication.artifacts)) {
+    throw new Error('Privacy publication intent is invalid');
+  }
+  const artifact = publication.artifacts[0];
+  const bytes = Buffer.from(artifact.contentsBase64, 'base64');
+  if (artifact.role !== 'privacy-proof' || artifact.filePath !== locator.filePath
+    || bytes.length !== artifact.byteLength || bytes.toString('base64') !== artifact.contentsBase64
+    || createHash('sha256').update(bytes).digest('hex') !== artifact.objectSha256) {
+    throw new Error('Privacy publication intent is invalid');
+  }
+  let proof;
+  try { proof = JSON.parse(bytes.toString('utf8')); } catch {
+    throw new Error('Privacy publication intent is invalid');
+  }
+  const reference = Object.freeze({
+    schemaVersion: 3,
+    filePath: locator.filePath,
+    artifactSha256: proof.artifactSha256,
+    objectSha256: artifact.objectSha256,
+    boundarySha256: proof.binding?.boundarySha256,
+    observedAt: proof.occurredAt,
+    expiresAt: proof.expiresAt,
+  });
+  validatePrivacyProof(proof, { binding: candidatePrivacyBinding(plan), now });
+  if (reference.boundarySha256 !== candidatePrivacyBoundarySha256(candidatePrivacyBinding(plan))
+    || containsForbiddenPersistedSecret(proof)) {
+    throw new Error('Privacy publication intent is invalid');
+  }
+  return Object.freeze({
+    filePath: locator.filePath,
+    contents: bytes.toString('utf8'),
+    reference,
+  });
+}
+
+async function publishPrivacyArtifact(artifact, {
+  stateStore,
+  operationId,
+  mutationOrdinal,
+  releaseJournalAttemptId,
+  existingIntent = null,
+  writeArtifact = writeAtomicCreateOnly,
+}) {
+  const expectedPublication = privacyPublication(artifact);
+  let publication = expectedPublication;
+  let intent = existingIntent;
+  if (intent !== null) {
+    if (intent.recordType !== 'intent' || intent.operationId !== operationId
+      || intent.payload?.reconcileKind !== 'local-artifact-create'
+      || !exact(intent.payload.publication, expectedPublication)) {
+      throw new Error('Privacy publication intent drifted');
+    }
+    publication = intent.payload.publication;
+  } else {
+    intent = await stateStore.appendIntent({
+      mutationOrdinal,
+      operationAttemptId: createHash('sha256').update([
+        releaseJournalAttemptId, operationId, String(mutationOrdinal),
+      ].join('\0')).digest('hex').slice(0, 32),
+      commandSha256: canonicalSha256({
+        operationId, filePath: artifact.filePath,
+      }),
+      reconcileKind: 'local-artifact-create',
+      beforeSha256: canonicalSha256({ state: 'absent' }),
+      afterSha256: publication.bundleSha256,
+      publication,
+    }, { operationId });
+  }
+  const intended = Buffer.from(publication.artifacts[0].contentsBase64, 'base64');
+  let adopted = false;
+  try {
+    const metadata = await lstat(artifact.filePath);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      throw new Error('Privacy publication target is not an ordinary file');
+    }
+    const existing = await readFile(artifact.filePath);
+    if (!existing.equals(intended)) throw new Error('Privacy publication bytes drifted');
+    adopted = true;
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+    await writeArtifact(artifact.filePath, intended);
+  }
+  await stateStore.appendCheckpoint({
+    intentRecordSha256: intent.recordSha256,
+    classification: 'after',
+    outcome: adopted ? 'adopted-restart' : 'applied',
+    observationSha256: publication.bundleSha256,
+    safeResult: {
+      kind: 'artifact-bundle', artifactCount: 1, bundleSha256: publication.bundleSha256,
+    },
+  });
+  return artifact.reference;
+}
+
+function validateControlledReadinessExecution(value, plan, now) {
+  if (!exactKeys(value, ['artifacts', 'evidence', 'record'])
+    || !exactKeys(value.artifacts, ['privacyEnd', 'privacyStart', 'readiness'])
+    || !exactKeys(value.evidence, [
+      'artifactSha256', 'candidateService', 'filePath', 'objectSha256', 'privacyProofs',
+      'schemaVersion', 'stableService', 'stableTrafficState', 'trafficState',
+    ]) || value.evidence.schemaVersion !== 3
+    || value.evidence.filePath !== plan.task8Evidence.readiness.filePath
+    || value.evidence.candidateService !== CANDIDATE_SERVICE
+    || value.evidence.stableService !== STABLE_SERVICE
+    || value.evidence.trafficState !== candidateTrafficState(plan)
+    || value.evidence.stableTrafficState !== plan.expectedStable.initialTrafficState
+    || value.evidence.artifactSha256 !== value.record?.artifactSha256
+    || !DIGEST.test(String(value.evidence.objectSha256 ?? ''))
+    || !exact(value.evidence.privacyProofs, value.record?.privacyProofs)
+    || containsForbiddenPersistedSecret(value)) {
+    throw new Error('Controlled readiness output is invalid');
+  }
+  validateTask8ReadinessRecord(value.record, {
+    binding: candidatePrivacyBinding(plan),
+    sourceArchiveSha256: plan.sourceArchiveSha256,
+    now,
+  });
+  const readinessContents = `${JSON.stringify(value.record, null, 2)}\n`;
+  const readiness = value.artifacts.readiness;
+  if (!exactKeys(readiness, ['artifactSha256', 'contents', 'filePath', 'objectSha256'])
+    || readiness.filePath !== value.evidence.filePath
+    || readiness.contents !== readinessContents
+    || readiness.artifactSha256 !== value.evidence.artifactSha256
+    || readiness.objectSha256 !== value.evidence.objectSha256
+    || createHash('sha256').update(readiness.contents).digest('hex') !== readiness.objectSha256) {
+    throw new Error('Controlled readiness output is invalid');
+  }
+  for (const [key, boundary] of [['privacyStart', 'start'], ['privacyEnd', 'end']]) {
+    const artifact = value.artifacts[key];
+    const reference = value.evidence.privacyProofs[boundary];
+    if (!exactKeys(artifact, ['contents', 'filePath', 'reference'])
+      || artifact.filePath !== reference.filePath || !exact(artifact.reference, reference)
+      || typeof artifact.contents !== 'string' || artifact.contents.length < 2
+      || artifact.contents.length > 4 * 1024 * 1024 || !artifact.contents.endsWith('\n')
+      || createHash('sha256').update(artifact.contents).digest('hex') !== reference.objectSha256) {
+      throw new Error('Controlled readiness output is invalid');
+    }
+    let record;
+    try { record = JSON.parse(artifact.contents); } catch { throw new Error('Controlled readiness output is invalid'); }
+    if (record?.artifactSha256 !== reference.artifactSha256
+      || containsForbiddenPersistedSecret(record)) throw new Error('Controlled readiness output is invalid');
+  }
+  return Object.freeze(value);
+}
+
+async function executeControlledReadiness(plan, {
+  environment,
+  executor,
+  executeReadiness,
+  readinessFetch,
+  readinessTokenExecutor,
+  readinessNonce,
+  readinessSleep,
+  now,
+}) {
+  const entry = plan.task8Evidence.readiness;
+  if (!unresolvedTask8Contract(entry)) {
+    const error = new Error('Pre-existing readiness evidence is forbidden');
+    error.code = 'READINESS_PREBUILT_EVIDENCE_FORBIDDEN';
+    throw error;
+  }
+  await assertControlledReadinessTargetsAbsent(entry);
+  if (typeof executor !== 'function' || typeof executeReadiness !== 'function'
+    || typeof readinessFetch !== 'function' || typeof readinessNonce !== 'function') {
+    throw new Error('Controlled readiness execution input is invalid');
+  }
+  let tokenExecutor = readinessTokenExecutor;
+  if (tokenExecutor === undefined) {
+    tokenExecutor = createIdentityTokenExecutor(resolveDefaultGcloudLaunch(environment));
+  }
+  if (typeof tokenExecutor !== 'function') throw new Error('Controlled readiness token transport is invalid');
+  let result;
+  try {
+    result = await executeReadiness({
+      plan,
+      binding: candidatePrivacyBinding(plan),
+      evidenceContract: entry,
+      sourceArchiveSha256: plan.sourceArchiveSha256,
+      executor,
+      tokenExecutor,
+      fetch: readinessFetch,
+      now,
+      nonce: readinessNonce,
+      sleep: readinessSleep,
+    });
+  } catch (error) {
+    error.code = 'READINESS_CONTROLLED_PRODUCER_FAILED';
+    throw error;
+  }
+  try {
+    const observedNow = now();
+    return validateControlledReadinessExecution(result, plan, observedNow);
+  } catch (error) {
+    error.code = 'READINESS_CONTROLLED_OUTPUT_INVALID';
+    throw error;
+  }
+}
+
+function controlledReadinessPublication(execution) {
+  const artifacts = [
+    ['privacy-start', execution.artifacts.privacyStart],
+    ['privacy-end', execution.artifacts.privacyEnd],
+    ['evidence', execution.artifacts.readiness],
+  ].map(([role, artifact]) => {
+    const bytes = Buffer.from(artifact.contents);
+    return Object.freeze({
+      role,
+      filePath: artifact.filePath,
+      byteLength: bytes.length,
+      objectSha256: createHash('sha256').update(bytes).digest('hex'),
+      contentsBase64: bytes.toString('base64'),
+    });
+  });
+  return Object.freeze({
+    artifacts: Object.freeze(artifacts),
+    bundleSha256: canonicalSha256(artifacts),
+  });
+}
+
+function controlledReadinessFromPublication(plan, publication) {
+  if (!publication || !Array.isArray(publication.artifacts)
+    || publication.bundleSha256 !== canonicalSha256(publication.artifacts)) {
+    throw new Error('Readiness publication intent is invalid');
+  }
+  const byRole = Object.fromEntries(publication.artifacts.map((artifact) => {
+    const bytes = Buffer.from(artifact.contentsBase64, 'base64');
+    if (bytes.length !== artifact.byteLength
+      || bytes.toString('base64') !== artifact.contentsBase64
+      || createHash('sha256').update(bytes).digest('hex') !== artifact.objectSha256) {
+      throw new Error('Readiness publication intent is invalid');
+    }
+    return [artifact.role, { ...artifact, contents: bytes.toString('utf8') }];
+  }));
+  if (!exactKeys(byRole, ['evidence', 'privacy-end', 'privacy-start'])) {
+    throw new Error('Readiness publication intent is invalid');
+  }
+  let record;
+  try { record = JSON.parse(byRole.evidence.contents); } catch {
+    throw new Error('Readiness publication intent is invalid');
+  }
+  const evidence = Object.freeze({
+    ...plan.task8Evidence.readiness,
+    artifactSha256: record.artifactSha256,
+    objectSha256: byRole.evidence.objectSha256,
+    privacyProofs: structuredClone(record.privacyProofs),
+  });
+  const execution = {
+    record,
+    evidence,
+    artifacts: {
+      privacyStart: {
+        filePath: byRole['privacy-start'].filePath,
+        contents: byRole['privacy-start'].contents,
+        reference: record.privacyProofs?.start,
+      },
+      privacyEnd: {
+        filePath: byRole['privacy-end'].filePath,
+        contents: byRole['privacy-end'].contents,
+        reference: record.privacyProofs?.end,
+      },
+      readiness: {
+        filePath: byRole.evidence.filePath,
+        contents: byRole.evidence.contents,
+        artifactSha256: record.artifactSha256,
+        objectSha256: byRole.evidence.objectSha256,
+      },
+    },
+  };
+  return validateControlledReadinessExecution(
+    execution, plan, new Date(record.occurredAt),
+  );
+}
+
+async function publishControlledReadinessArtifacts(execution, {
+  stateStore,
+  releaseJournalAttemptId,
+  existingIntent = null,
+  writeArtifact = writeAtomicCreateOnly,
+}) {
+  if (!stateStore || typeof stateStore.appendIntent !== 'function'
+    || typeof stateStore.appendCheckpoint !== 'function') {
+    throw new Error('Readiness publication journal is unavailable');
+  }
+  const operationId = 'readiness-evidence-publish';
+  const expectedPublication = controlledReadinessPublication(execution);
+  let intent = existingIntent;
+  let publication = expectedPublication;
+  if (intent !== null) {
+    if (intent.recordType !== 'intent' || intent.operationId !== operationId
+      || intent.payload?.reconcileKind !== 'local-artifact-create') {
+      throw new Error('Readiness publication intent is invalid');
+    }
+    publication = intent.payload.publication;
+    if (!exact(publication, expectedPublication)) {
+      throw new Error('Readiness publication intent drifted');
+    }
+  } else {
+    intent = await stateStore.appendIntent({
+      mutationOrdinal: 1,
+      operationAttemptId: createHash('sha256').update([
+        releaseJournalAttemptId, operationId, '1',
+      ].join('\0')).digest('hex').slice(0, 32),
+      commandSha256: canonicalSha256(publication.artifacts.map(({ role, filePath }) => ({
+        role, filePath,
+      }))),
+      reconcileKind: 'local-artifact-create',
+      beforeSha256: canonicalSha256({ state: 'absent' }),
+      afterSha256: publication.bundleSha256,
+      publication,
+    }, { operationId });
+  }
+  let adopted = false;
+  for (const artifact of publication.artifacts) {
+    const intended = Buffer.from(artifact.contentsBase64, 'base64');
+    try {
+      const metadata = await lstat(artifact.filePath);
+      if (!metadata.isFile() || metadata.isSymbolicLink()) {
+        throw new Error('Readiness publication target is not an ordinary file');
+      }
+      const existing = await readFile(artifact.filePath);
+      if (!existing.equals(intended)) throw new Error('Readiness publication bytes drifted');
+      adopted = true;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+      await writeArtifact(artifact.filePath, intended);
+    }
+  }
+  await stateStore.appendCheckpoint({
+    intentRecordSha256: intent.recordSha256,
+    classification: 'after',
+    outcome: adopted ? 'adopted-restart' : 'applied',
+    observationSha256: publication.bundleSha256,
+    safeResult: {
+      kind: 'artifact-bundle',
+      artifactCount: publication.artifacts.length,
+      bundleSha256: publication.bundleSha256,
+    },
+  });
+  return Object.freeze(publication.artifacts.map(({ filePath }) => filePath));
+}
+
+function mobileScreenshotPaths(entry) {
+  return Object.freeze([
+    'first-visit', 'text-source', 'voice-transcript', 'mobile-safe-area',
+  ].map((id) => join(dirname(entry.filePath), `mobile-${id}.png`)));
+}
+
+async function captureMobileControlPlaneState({ plan, executor }) {
+  if (typeof executor !== 'function') throw new Error('Mobile control-plane reader is unavailable');
+  const candidate = await readCandidateControlPlaneState(executor, plan);
+  let stable;
+  if (plan.previousRevision === null) {
+    try {
+      await executor([
+        'run', 'services', 'describe', STABLE_SERVICE,
+        `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+      ]);
+      throw new Error('Stable service unexpectedly exists');
+    } catch (error) {
+      if (error?.code !== 'CLOUD_RUN_SERVICE_NOT_FOUND') throw error;
+      stable = { state: 'absent' };
+    }
+  } else {
+    const service = await executor([
+      'run', 'services', 'describe', STABLE_SERVICE,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ]);
+    validateStableService(service, plan);
+    const revision = await executor([
+      'run', 'revisions', 'describe', plan.previousRevision,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ]);
+    validatePriorRevisionReadback(revision, plan);
+    const artifact = await executor([
+      'artifacts', 'docker', 'images', 'describe', plan.previousImage,
+      `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
+    ]);
+    validateCandidateArtifact(artifact, plan.previousImage);
+    const iam = await executor([
+      'run', 'services', 'get-iam-policy', STABLE_SERVICE,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ]);
+    validateServiceIamReceipt(iam, { policy: 'stable-public', requireEtag: true });
+    stable = { service, revision, artifact, iam };
+  }
+  return Object.freeze({ stable: true, sha256: canonicalSha256({ candidate, stable }) });
+}
+
+function validateControlledMobileExecution(value, plan, observedNow) {
+  if (!exactKeys(value, ['artifacts', 'evidence', 'record'])
+    || !exactKeys(value.artifacts, ['mobile', 'privacyEnd', 'privacyStart', 'screenshots'])
+    || !exactKeys(value.evidence, [
+      'artifactSha256', 'candidateService', 'filePath', 'objectSha256', 'privacyProofs',
+      'schemaVersion', 'stableService', 'stableTrafficState', 'trafficState',
+    ]) || value.evidence.filePath !== plan.task8Evidence.mobile.filePath
+    || value.evidence.candidateService !== CANDIDATE_SERVICE
+    || value.evidence.stableService !== STABLE_SERVICE
+    || value.evidence.trafficState !== candidateTrafficState(plan)
+    || value.evidence.stableTrafficState !== plan.expectedStable.initialTrafficState
+    || !exact(value.evidence.privacyProofs, value.record.privacyProofs)) {
+    throw new Error('Controlled mobile output is invalid');
+  }
+  validateTask8MobileRecord(value.record, {
+    binding: candidatePrivacyBinding(plan),
+    sourceArchiveSha256: plan.sourceArchiveSha256,
+    boundarySha256: value.record.privacyProofs?.start?.boundarySha256,
+    candidateAccess: plan.candidateAccess,
+    now: observedNow,
+  });
+  const mobileContents = `${JSON.stringify(value.record, null, 2)}\n`;
+  if (!exactKeys(value.artifacts.mobile, [
+    'artifactSha256', 'contents', 'filePath', 'objectSha256',
+  ]) || value.artifacts.mobile.filePath !== value.evidence.filePath
+    || value.artifacts.mobile.contents !== mobileContents
+    || value.artifacts.mobile.artifactSha256 !== value.evidence.artifactSha256
+    || value.artifacts.mobile.objectSha256 !== value.evidence.objectSha256
+    || createHash('sha256').update(mobileContents).digest('hex') !== value.evidence.objectSha256
+    || !Array.isArray(value.artifacts.screenshots) || value.artifacts.screenshots.length !== 4) {
+    throw new Error('Controlled mobile output is invalid');
+  }
+  for (const [index, artifact] of value.artifacts.screenshots.entries()) {
+    const screenshot = value.record.screenshots[index];
+    if (!exactKeys(artifact, ['contents', 'filePath', 'id', 'metadata'])
+      || artifact.id !== screenshot.id || artifact.filePath !== screenshot.filePath
+      || !Buffer.isBuffer(artifact.contents)
+      || createHash('sha256').update(artifact.contents).digest('hex') !== screenshot.rawSha256
+      || !exact(artifact.metadata, {
+        width: screenshot.width,
+        height: screenshot.height,
+        rawSha256: screenshot.rawSha256,
+        pixelSha256: screenshot.pixelSha256,
+        colorCount: screenshot.colorCount,
+        luminanceSpan: screenshot.luminanceSpan,
+        luminanceVariance: screenshot.luminanceVariance,
+        dominantRatio: screenshot.dominantRatio,
+        nonDominantRatio: screenshot.nonDominantRatio,
+        byteLength: screenshot.byteLength,
+      })) throw new Error('Controlled mobile output is invalid');
+  }
+  for (const [key, boundary] of [['privacyStart', 'start'], ['privacyEnd', 'end']]) {
+    const artifact = value.artifacts[key];
+    let proof;
+    try { proof = JSON.parse(artifact?.contents); } catch { throw new Error('Controlled mobile output is invalid'); }
+    if (!exactKeys(artifact, ['contents', 'filePath', 'reference'])
+      || artifact.filePath !== value.evidence.privacyProofs[boundary].filePath
+      || !exact(artifact.reference, value.evidence.privacyProofs[boundary])
+      || proof.artifactSha256 !== artifact.reference.artifactSha256
+      || createHash('sha256').update(artifact.contents).digest('hex')
+        !== artifact.reference.objectSha256) throw new Error('Controlled mobile output is invalid');
+  }
+  if (containsForbiddenPersistedSecret(value)) throw new Error('Controlled mobile output is invalid');
+  return value;
+}
+
+async function executeControlledMobile(plan, {
+  environment,
+  executor,
+  executeMobile,
+  mobileTokenExecutor,
+  now,
+  producePrivacyArtifact,
+  privacyFetch,
+  privacyNonce,
+  privacySleep,
+  privacyProofRunner,
+  captureControlPlane,
+}) {
+  const entry = plan.task8Evidence.mobile;
+  if (!unresolvedTask8Contract(entry)) {
+    const error = new Error('Pre-existing mobile evidence is forbidden');
+    error.code = 'MOBILE_PREBUILT_EVIDENCE_FORBIDDEN';
+    throw error;
+  }
+  for (const filePath of [
+    entry.privacyProofs.start.filePath, entry.privacyProofs.end.filePath,
+    ...mobileScreenshotPaths(entry), entry.filePath,
+  ]) await assertControlledWorkloadTargetAbsent({ filePath });
+  if (typeof executor !== 'function' || typeof executeMobile !== 'function'
+    || typeof producePrivacyArtifact !== 'function' || typeof captureControlPlane !== 'function') {
+    throw new Error('Controlled mobile execution input is invalid');
+  }
+  let tokenExecutor = mobileTokenExecutor;
+  if (tokenExecutor === undefined) {
+    tokenExecutor = createIdentityTokenExecutor(resolveDefaultGcloudLaunch(environment));
+  }
+  if (typeof tokenExecutor !== 'function') throw new Error('Controlled mobile token transport is invalid');
+  const binding = candidatePrivacyBinding(plan);
+  const token = await tokenExecutor([
+    'auth', 'print-identity-token', binding.operator,
+    `--impersonate-service-account=${binding.acceptanceServiceAccount}`,
+    `--audiences=${binding.candidateAudience}`, '--include-email', '--quiet',
+  ]);
+  if (typeof token !== 'string' || token.length < 1 || token.length > 16_384 || /\s/u.test(token)) {
+    throw new Error('Controlled mobile token transport is invalid');
+  }
+  const privacyArguments = {
+    plan, executor, tokenExecutor, fetch: privacyFetch, now,
+    nonce: privacyNonce, sleep: privacySleep, privacyProofRunner,
+  };
+  const result = await executeMobile({
+    binding,
+    sourceArchiveSha256: plan.sourceArchiveSha256,
+    evidenceContract: entry,
+    stableService: STABLE_SERVICE,
+    stableTrafficState: plan.expectedStable.initialTrafficState,
+    candidateAccess: plan.candidateAccess,
+    authorization: `Bearer ${token}`,
+    producePrivacyArtifact: (boundary) => producePrivacyArtifact({
+      ...privacyArguments, locator: entry.privacyProofs[boundary],
+    }),
+    captureControlPlane: () => captureControlPlane({ plan, executor }),
+    now,
+  });
+  return validateControlledMobileExecution(result, plan, now());
+}
+
+function controlledMobilePublication(execution) {
+  const values = [
+    ['privacy-start', execution.artifacts.privacyStart],
+    ...execution.artifacts.screenshots.map((artifact) => ['screenshot', artifact]),
+    ['privacy-end', execution.artifacts.privacyEnd],
+    ['evidence', execution.artifacts.mobile],
+  ];
+  const artifacts = values.map(([role, artifact]) => {
+    const bytes = Buffer.from(artifact.contents);
+    return Object.freeze({
+      role,
+      filePath: artifact.filePath,
+      byteLength: bytes.length,
+      objectSha256: createHash('sha256').update(bytes).digest('hex'),
+      contentsBase64: bytes.toString('base64'),
+    });
+  });
+  return Object.freeze({
+    artifacts: Object.freeze(artifacts),
+    bundleSha256: canonicalSha256(artifacts),
+  });
+}
+
+function controlledMobileFromPublication(plan, publication, observedNow) {
+  if (!publication || !Array.isArray(publication.artifacts)
+    || publication.artifacts.length !== 7
+    || publication.bundleSha256 !== canonicalSha256(publication.artifacts)) {
+    throw new Error('Mobile publication intent is invalid');
+  }
+  const expectedPaths = [
+    plan.task8Evidence.mobile.privacyProofs.start.filePath,
+    ...mobileScreenshotPaths(plan.task8Evidence.mobile),
+    plan.task8Evidence.mobile.privacyProofs.end.filePath,
+    plan.task8Evidence.mobile.filePath,
+  ];
+  const expectedRoles = ['privacy-start', 'screenshot', 'screenshot', 'screenshot', 'screenshot', 'privacy-end', 'evidence'];
+  const bytes = publication.artifacts.map((artifact, index) => {
+    const value = Buffer.from(artifact.contentsBase64, 'base64');
+    if (artifact.filePath !== expectedPaths[index] || artifact.role !== expectedRoles[index]
+      || value.length !== artifact.byteLength || value.toString('base64') !== artifact.contentsBase64
+      || createHash('sha256').update(value).digest('hex') !== artifact.objectSha256) {
+      throw new Error('Mobile publication intent is invalid');
+    }
+    return value;
+  });
+  let record;
+  try { record = JSON.parse(bytes.at(-1).toString('utf8')); } catch {
+    throw new Error('Mobile publication intent is invalid');
+  }
+  const privacyArtifact = (index, boundary) => ({
+    filePath: expectedPaths[index],
+    contents: bytes[index].toString('utf8'),
+    reference: record.privacyProofs?.[boundary],
+  });
+  const screenshots = bytes.slice(1, 5).map((contents, index) => ({
+    id: record.screenshots?.[index]?.id,
+    filePath: expectedPaths[index + 1],
+    contents,
+    metadata: record.screenshots?.[index] && {
+      width: record.screenshots[index].width,
+      height: record.screenshots[index].height,
+      rawSha256: record.screenshots[index].rawSha256,
+      pixelSha256: record.screenshots[index].pixelSha256,
+      colorCount: record.screenshots[index].colorCount,
+      luminanceSpan: record.screenshots[index].luminanceSpan,
+      luminanceVariance: record.screenshots[index].luminanceVariance,
+      dominantRatio: record.screenshots[index].dominantRatio,
+      nonDominantRatio: record.screenshots[index].nonDominantRatio,
+      byteLength: record.screenshots[index].byteLength,
+    },
+  }));
+  const evidence = {
+    ...plan.task8Evidence.mobile,
+    artifactSha256: record.artifactSha256,
+    objectSha256: publication.artifacts.at(-1).objectSha256,
+    privacyProofs: record.privacyProofs,
+  };
+  return validateControlledMobileExecution({
+    record,
+    evidence,
+    artifacts: {
+      privacyStart: privacyArtifact(0, 'start'),
+      screenshots,
+      privacyEnd: privacyArtifact(5, 'end'),
+      mobile: {
+        filePath: expectedPaths[6],
+        contents: bytes[6].toString('utf8'),
+        artifactSha256: record.artifactSha256,
+        objectSha256: publication.artifacts[6].objectSha256,
+      },
+    },
+  }, plan, observedNow);
+}
+
+async function publishControlledMobileArtifacts(execution, {
+  stateStore,
+  releaseJournalAttemptId,
+  existingIntent = null,
+  writeArtifact = writeAtomicCreateOnly,
+}) {
+  if (!stateStore || typeof stateStore.appendIntent !== 'function'
+    || typeof stateStore.appendCheckpoint !== 'function') {
+    throw new Error('Mobile publication journal is unavailable');
+  }
+  const operationId = 'mobile-evidence-publish';
+  const expectedPublication = controlledMobilePublication(execution);
+  let intent = existingIntent;
+  let publication = expectedPublication;
+  if (intent !== null) {
+    if (intent.recordType !== 'intent' || intent.operationId !== operationId
+      || intent.payload?.reconcileKind !== 'local-artifact-create'
+      || !exact(intent.payload.publication, expectedPublication)) {
+      throw new Error('Mobile publication intent drifted');
+    }
+    publication = intent.payload.publication;
+  } else {
+    intent = await stateStore.appendIntent({
+      mutationOrdinal: 1,
+      operationAttemptId: createHash('sha256').update([
+        releaseJournalAttemptId, operationId, '1',
+      ].join('\0')).digest('hex').slice(0, 32),
+      commandSha256: canonicalSha256(publication.artifacts.map(({ role, filePath }) => ({ role, filePath }))),
+      reconcileKind: 'local-artifact-create',
+      beforeSha256: canonicalSha256({ state: 'absent' }),
+      afterSha256: publication.bundleSha256,
+      publication,
+    }, { operationId });
+  }
+  let adopted = false;
+  for (const artifact of publication.artifacts) {
+    const intended = Buffer.from(artifact.contentsBase64, 'base64');
+    try {
+      const metadata = await lstat(artifact.filePath);
+      if (!metadata.isFile() || metadata.isSymbolicLink()) {
+        throw new Error('Mobile publication target is not an ordinary file');
+      }
+      const existing = await readFile(artifact.filePath);
+      if (!existing.equals(intended)) throw new Error('Mobile publication bytes drifted');
+      adopted = true;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+      await writeArtifact(artifact.filePath, intended);
+    }
+  }
+  await stateStore.appendCheckpoint({
+    intentRecordSha256: intent.recordSha256,
+    classification: 'after',
+    outcome: adopted ? 'adopted-restart' : 'applied',
+    observationSha256: publication.bundleSha256,
+    safeResult: {
+      kind: 'artifact-bundle', artifactCount: publication.artifacts.length,
+      bundleSha256: publication.bundleSha256,
+    },
+  });
+  return Object.freeze(publication.artifacts.map(({ filePath }) => filePath));
+}
+
+async function cleanupControlledReadinessArtifacts(paths) {
+  for (const filePath of [...paths].reverse()) await rm(filePath);
+  for (const filePath of paths) await assertControlledWorkloadTargetAbsent({ filePath });
+  return true;
+}
+
+async function publishControlledWorkloadArtifacts(execution) {
+  const published = [];
+  try {
+    for (const artifact of [
+      execution.artifacts.privacyStart,
+      execution.artifacts.privacyEnd,
+      execution.artifacts.workload,
+    ]) {
+      await writeAtomicCreateOnly(artifact.filePath, Buffer.from(artifact.contents));
+      published.push(artifact.filePath);
+    }
+    return Object.freeze([...published]);
+  } catch (error) {
+    error.publishedWorkloadPaths = published;
+    throw error;
+  }
+}
+
 async function executeControlledWorkload(plan, {
-  environment, executeWorkload, workloadFetch, randomUUID, now,
+  environment,
+  executor,
+  executeWorkload,
+  workloadFetch,
+  randomUUID,
+  now,
+  tokenExecutor,
+  privacyFetch,
+  privacyNonce,
+  privacySleep,
+  privacyProofRunner,
+  producePrivacyArtifact,
 }) {
   const entry = plan.task8Evidence.workload;
-  if (entry.artifactSha256 !== '0'.repeat(64) || entry.objectSha256 !== '0'.repeat(64)) {
+  if (!unresolvedTask8Contract(entry)) {
     const error = new Error('Pre-existing workload evidence is forbidden');
     error.code = 'WORKLOAD_PREBUILT_EVIDENCE_FORBIDDEN';
     throw error;
   }
-  await assertControlledWorkloadTargetAbsent(entry);
+  for (const filePath of [
+    entry.privacyProofs.start.filePath, entry.privacyProofs.end.filePath, entry.filePath,
+  ]) await assertControlledWorkloadTargetAbsent({ filePath });
   const fixtureManifest = environment?.V1_LATENCY_ASR_FIXTURE_MANIFEST;
   const attemptId = typeof randomUUID === 'function' ? randomUUID() : null;
   if (!UUID.test(String(attemptId ?? '')) || !isAbsoluteFile(fixtureManifest)
     || !fixtureManifest.toLowerCase().endsWith('.json')
-    || typeof executeWorkload !== 'function' || typeof workloadFetch !== 'function') {
+    || typeof executor !== 'function' || typeof executeWorkload !== 'function'
+    || typeof workloadFetch !== 'function' || typeof tokenExecutor !== 'function'
+    || typeof privacyFetch !== 'function' || typeof privacyNonce !== 'function'
+    || typeof privacyProofRunner !== 'function' || typeof producePrivacyArtifact !== 'function') {
     throw new Error('Controlled workload execution input is invalid');
+  }
+  const privacyArguments = {
+    plan,
+    executor,
+    tokenExecutor,
+    fetch: privacyFetch,
+    now,
+    nonce: privacyNonce,
+    sleep: privacySleep,
+    privacyProofRunner,
+  };
+  const privacyStart = await producePrivacyArtifact({
+    ...privacyArguments, locator: entry.privacyProofs.start,
+  });
+  const gateStarted = now();
+  if (!(gateStarted instanceof Date) || !Number.isFinite(gateStarted.getTime())) {
+    throw new Error('Controlled workload clock is invalid');
   }
   let capture = null;
   const ledger = [];
@@ -4770,6 +5707,14 @@ async function executeControlledWorkload(plan, {
     },
     writeOutput: () => undefined,
   });
+  const gateEnded = now();
+  if (!(gateEnded instanceof Date) || !Number.isFinite(gateEnded.getTime())
+    || gateEnded.getTime() < gateStarted.getTime()) {
+    throw new Error('Controlled workload clock is invalid');
+  }
+  const privacyEnd = await producePrivacyArtifact({
+    ...privacyArguments, locator: entry.privacyProofs.end,
+  });
   if (result?.exitCode !== 0 || result?.publicReport?.code !== 'LATENCY_ACCEPTANCE_PASSED'
     || !capture || result.publicReport.artifactSha256 !== capture.record.artifactSha256
     || capture.filePath !== join(dirname(entry.filePath), `${plan.releaseSha}-${capture.record.artifactSha256}.json`)
@@ -4789,17 +5734,37 @@ async function executeControlledWorkload(plan, {
   }
   const contents = Buffer.from(capture.contents);
   const evidence = Object.freeze({
-    filePath: entry.filePath,
+    ...entry,
     artifactSha256: capture.record.artifactSha256,
     objectSha256: createHash('sha256').update(contents).digest('hex'),
+    privacyProofs: Object.freeze({
+      start: privacyStart.reference,
+      end: privacyEnd.reference,
+    }),
   });
+  if (Date.parse(privacyStart.reference.observedAt) > gateStarted.getTime()
+    || Date.parse(privacyEnd.reference.observedAt) < gateEnded.getTime()
+    || Date.parse(privacyEnd.reference.observedAt) <= Date.parse(privacyStart.reference.observedAt)) {
+    throw new Error('Controlled workload privacy proofs do not bracket execution');
+  }
   return Object.freeze({
     attestation,
-    contents,
+    artifacts: Object.freeze({
+      privacyStart,
+      privacyEnd,
+      workload: Object.freeze({
+        filePath: evidence.filePath,
+        contents,
+        artifactSha256: evidence.artifactSha256,
+        objectSha256: evidence.objectSha256,
+      }),
+    }),
     evidence,
     execution: Object.freeze({
       acceptanceWindowId: attestation.acceptanceWindowId,
       attemptId: attemptId.toLowerCase(),
+      gateStartedAt: gateStarted.toISOString(),
+      gateEndedAt: gateEnded.toISOString(),
       networkWitnessSha256: witness.networkWitnessSha256,
       observedRequestCount: witness.observedRequestCount,
     }),
@@ -4824,8 +5789,37 @@ export async function runGcpRelease({
   writeStableSpec = writeStableServiceSpecFile,
   writeIamRestorePolicy = writePromotionIamRestorePolicyFile,
   removeIamRestorePolicy = removePromotionIamRestorePolicyFile,
+  executeReadiness = runTask8Readiness,
+  readinessFetch = globalThis.fetch,
+  readinessTokenExecutor,
+  readinessNonce = systemRandomUUID,
+  readinessSleep,
+  executeMobile = runTask8Mobile,
+  mobileTokenExecutor,
+  mobilePrivacyFetch = globalThis.fetch,
+  mobilePrivacyNonce = systemRandomUUID,
+  mobilePrivacySleep,
+  mobilePrivacyProofRunner = runCandidatePrivacyProof,
+  produceMobilePrivacyArtifact = executeCandidatePrivacyArtifact,
+  captureMobileControlPlane = captureMobileControlPlaneState,
   executeWorkload = runLatencyAcceptance,
   workloadFetch = globalThis.fetch,
+  workloadPrivacyFetch = globalThis.fetch,
+  workloadPrivacyTokenExecutor,
+  workloadPrivacyNonce = systemRandomUUID,
+  workloadPrivacySleep,
+  workloadPrivacyProofRunner = runCandidatePrivacyProof,
+  produceWorkloadPrivacyArtifact = executeCandidatePrivacyArtifact,
+  produceReleasePrivacyArtifact = executeCandidatePrivacyArtifact,
+  releasePrivacyFetch = globalThis.fetch,
+  releasePrivacyTokenExecutor,
+  releasePrivacyNonce = systemRandomUUID,
+  releasePrivacySleep,
+  releasePrivacyProofRunner = runCandidatePrivacyProof,
+  validateReleasePrivacyProof = validateCandidatePrivacyProof,
+  verifyReleasePrivacyArtifact = validatePrivacyProofArtifact,
+  writeControlledArtifact = writeAtomicCreateOnly,
+  writeReleasePrivacyArtifact = writeAtomicCreateOnly,
   randomUUID = systemRandomUUID,
   loadReceipts = loadReleaseReceiptFiles,
   loadPhaseReceipt = loadExistingReleasePhaseReceipt,
@@ -4856,7 +5850,7 @@ export async function runGcpRelease({
       status: 'not-run', code: 'RELEASE_CONTRACT_INVALID', mutationPerformed: false,
     });
   }
-  const selected = plan.operations.filter(({ phase }) => phase === selection.phase);
+  let selected = plan.operations.filter(({ phase }) => phase === selection.phase);
   if (selection.phase === 'rollback'
     && (plan.previousRevision === null || plan.previousImageDigest === null)) {
     return publish(writeOutput, 1, {
@@ -4899,7 +5893,22 @@ export async function runGcpRelease({
   const receiptPhaseIndex = RECEIPT_PHASES.indexOf(selection.phase);
   const receiptBackedPhase = receiptPhaseIndex >= 0 || ACTION_RECEIPT_PHASES.has(selection.phase);
   const task8Attestations = {};
+  let readinessExecution = null;
+  let readinessExecutor = null;
+  let readinessPublishedPaths = [];
+  let mobileExecution = null;
+  let mobileExecutor = null;
+  let mobilePublishedPaths = [];
   let workloadExecution = null;
+  let workloadPrivacyExecutor = null;
+  let workloadPublishedPaths = [];
+  let stateStore = null;
+  let journalMutationCount = 0;
+  let releaseJournalAttemptId = null;
+  let existingJournalIntent = null;
+  let resumeOperationId = null;
+  let hasOpenJournalAttempt = false;
+  let openJournalRecords = [];
   try {
     if (selection.phase === 'promote') {
       if (typeof loadReceipts !== 'function') throw new Error('receipt loader unavailable');
@@ -4922,11 +5931,260 @@ export async function runGcpRelease({
       releaseSha: plan.releaseSha, phase: selection.phase, completed: [],
     });
   }
+  if (selection.phase === 'readiness') {
+    let readinessStage = 'journal';
+    try {
+      if (typeof openStateStore !== 'function' || typeof journalAttemptId !== 'function') {
+        throw new Error('Release journal is unavailable');
+      }
+      releaseJournalAttemptId = journalAttemptId();
+      stateStore = await openStateStore({
+        receiptDirectory: plan.releaseReceiptDirectory,
+        releaseSha: plan.releaseSha,
+        releaseIdentitySha256: plan.releaseIdentitySha256,
+        phase: selection.phase,
+        phasePlanSha256: canonicalSha256({
+          releaseIdentitySha256: plan.releaseIdentitySha256,
+          phase: 'readiness',
+          operationId: 'readiness-evidence-publish',
+          paths: [
+            plan.task8Evidence.readiness.privacyProofs.start.filePath,
+            plan.task8Evidence.readiness.privacyProofs.end.filePath,
+            plan.task8Evidence.readiness.filePath,
+          ],
+        }),
+        attemptId: releaseJournalAttemptId,
+        receiptHeadSha256: priorReceipts.at(-1)?.receiptSha256 ?? null,
+        now,
+        workspaceRoot: APP_ROOT,
+      });
+      if (!stateStore || !Array.isArray(stateStore.records)
+        || !['appendIntent', 'appendCheckpoint', 'appendTerminal', 'close']
+          .every((key) => typeof stateStore[key] === 'function')) {
+        throw new Error('Release journal is invalid');
+      }
+      releaseJournalAttemptId = stateStore.attemptId ?? releaseJournalAttemptId;
+      const lastTerminalIndex = stateStore.records.findLastIndex(
+        (record) => record.recordType === 'terminal',
+      );
+      openJournalRecords = stateStore.records.slice(lastTerminalIndex + 1);
+      if (openJournalRecords.length > 0) {
+        validateReconciliationPrefix({
+          operationIds: ['readiness-evidence-publish'], records: openJournalRecords,
+        });
+        hasOpenJournalAttempt = true;
+        existingJournalIntent = openJournalRecords.at(-1)?.recordType === 'intent'
+          ? openJournalRecords.at(-1) : null;
+        journalMutationCount = openJournalRecords.some(({ recordType }) => (
+          recordType === 'checkpoint'
+        )) ? 1 : 0;
+        const publicationIntent = openJournalRecords.find(({ recordType, operationId }) => (
+          recordType === 'intent' && operationId === 'readiness-evidence-publish'
+        ));
+        if (!publicationIntent) throw new Error('Readiness publication intent is unavailable');
+        readinessExecution = controlledReadinessFromPublication(
+          plan, publicationIntent.payload.publication,
+        );
+        resumeOperationId = existingJournalIntent?.operationId ?? null;
+      } else {
+        readinessStage = 'executor';
+        readinessExecutor = execute ?? createDefaultGcloudExecutor({ environment });
+        readinessStage = 'producer';
+        readinessExecution = await executeControlledReadiness(plan, {
+          environment,
+          executor: readinessExecutor,
+          executeReadiness,
+          readinessFetch,
+          readinessTokenExecutor,
+          readinessNonce,
+          readinessSleep,
+          now,
+        });
+      }
+      readinessStage = 'plan';
+      plan = buildReleasePlan({
+        ...input,
+        task8Evidence: {
+          ...input.task8Evidence,
+          readiness: readinessExecution.evidence,
+        },
+      }, { phase: selection.phase });
+      selected = plan.operations.filter(({ phase }) => phase === selection.phase);
+      readinessStage = 'predecessor-chain';
+      validateReleaseReceiptChain(priorReceipts, plan, { through: 'candidate' });
+      readinessStage = 'publish';
+      if (journalMutationCount === 0) {
+        readinessPublishedPaths = await publishControlledReadinessArtifacts(readinessExecution, {
+          stateStore,
+          releaseJournalAttemptId,
+          existingIntent: existingJournalIntent,
+          writeArtifact: writeControlledArtifact,
+        });
+        journalMutationCount = 1;
+        existingJournalIntent = null;
+        resumeOperationId = null;
+        openJournalRecords = stateStore.records;
+      }
+      task8Attestations.readiness = true;
+    } catch (error) {
+      await stateStore?.close().catch(() => undefined);
+      return publish(writeOutput, 1, {
+        status: 'failed',
+        code: error?.code === 'READINESS_PREBUILT_EVIDENCE_FORBIDDEN'
+            ? error.code
+            : String(error?.code ?? '').startsWith('READINESS_CONTROLLED_')
+              ? error.code
+              : `READINESS_CONTROLLED_${readinessStage.toUpperCase()}_INVALID`,
+        mutationPerformed: false,
+        releaseSha: plan.releaseSha, phase: selection.phase, completed: [],
+      });
+    }
+  }
+  if (selection.phase === 'mobile') {
+    let mobileStage = 'journal';
+    try {
+      if (typeof openStateStore !== 'function' || typeof journalAttemptId !== 'function') {
+        throw new Error('Release journal is unavailable');
+      }
+      releaseJournalAttemptId = journalAttemptId();
+      stateStore = await openStateStore({
+        receiptDirectory: plan.releaseReceiptDirectory,
+        releaseSha: plan.releaseSha,
+        releaseIdentitySha256: plan.releaseIdentitySha256,
+        phase: selection.phase,
+        phasePlanSha256: canonicalSha256({
+          releaseIdentitySha256: plan.releaseIdentitySha256,
+          phase: 'mobile',
+          operationId: 'mobile-evidence-publish',
+          paths: [
+            plan.task8Evidence.mobile.privacyProofs.start.filePath,
+            ...mobileScreenshotPaths(plan.task8Evidence.mobile),
+            plan.task8Evidence.mobile.privacyProofs.end.filePath,
+            plan.task8Evidence.mobile.filePath,
+          ],
+        }),
+        attemptId: releaseJournalAttemptId,
+        receiptHeadSha256: priorReceipts.at(-1)?.receiptSha256 ?? null,
+        now,
+        workspaceRoot: APP_ROOT,
+      });
+      if (!stateStore || !Array.isArray(stateStore.records)
+        || !['appendIntent', 'appendCheckpoint', 'appendTerminal', 'close']
+          .every((key) => typeof stateStore[key] === 'function')) {
+        throw new Error('Release journal is invalid');
+      }
+      releaseJournalAttemptId = stateStore.attemptId ?? releaseJournalAttemptId;
+      const lastTerminalIndex = stateStore.records.findLastIndex(
+        (record) => record.recordType === 'terminal',
+      );
+      openJournalRecords = stateStore.records.slice(lastTerminalIndex + 1);
+      if (openJournalRecords.length > 0) {
+        validateReconciliationPrefix({
+          operationIds: ['mobile-evidence-publish'], records: openJournalRecords,
+        });
+        hasOpenJournalAttempt = true;
+        existingJournalIntent = openJournalRecords.at(-1)?.recordType === 'intent'
+          ? openJournalRecords.at(-1) : null;
+        journalMutationCount = openJournalRecords.some(({ recordType }) => (
+          recordType === 'checkpoint'
+        )) ? 1 : 0;
+        const publicationIntent = openJournalRecords.find(({ recordType, operationId }) => (
+          recordType === 'intent' && operationId === 'mobile-evidence-publish'
+        ));
+        if (!publicationIntent) throw new Error('Mobile publication intent is unavailable');
+        mobileExecution = controlledMobileFromPublication(
+          plan, publicationIntent.payload.publication, now(),
+        );
+        resumeOperationId = existingJournalIntent?.operationId ?? null;
+      } else {
+        mobileStage = 'executor';
+        mobileExecutor = execute ?? createDefaultGcloudExecutor({ environment });
+        mobileStage = 'producer';
+        mobileExecution = await executeControlledMobile(plan, {
+          environment,
+          executor: mobileExecutor,
+          executeMobile,
+          mobileTokenExecutor,
+          now,
+          producePrivacyArtifact: produceMobilePrivacyArtifact,
+          privacyFetch: mobilePrivacyFetch,
+          privacyNonce: mobilePrivacyNonce,
+          privacySleep: mobilePrivacySleep,
+          privacyProofRunner: mobilePrivacyProofRunner,
+          captureControlPlane: captureMobileControlPlane,
+        });
+      }
+      mobileStage = 'plan';
+      plan = buildReleasePlan({
+        ...input,
+        task8Evidence: {
+          ...input.task8Evidence,
+          mobile: mobileExecution.evidence,
+        },
+      }, { phase: selection.phase });
+      selected = plan.operations.filter(({ phase }) => phase === selection.phase);
+      mobileStage = 'predecessor-chain';
+      validateReleaseReceiptChain(priorReceipts, plan, { through: 'workload' });
+      mobileStage = 'publish';
+      if (journalMutationCount === 0) {
+        mobilePublishedPaths = await publishControlledMobileArtifacts(mobileExecution, {
+          stateStore,
+          releaseJournalAttemptId,
+          existingIntent: existingJournalIntent,
+          writeArtifact: writeControlledArtifact,
+        });
+        journalMutationCount = 1;
+        existingJournalIntent = null;
+        resumeOperationId = null;
+        openJournalRecords = stateStore.records;
+      }
+      task8Attestations.mobile = true;
+    } catch (error) {
+      await stateStore?.close().catch(() => undefined);
+      return publish(writeOutput, 1, {
+        status: 'failed',
+        code: error?.code === 'MOBILE_PREBUILT_EVIDENCE_FORBIDDEN'
+          ? error.code : `MOBILE_CONTROLLED_${mobileStage.toUpperCase()}_INVALID`,
+        mutationPerformed: false,
+        releaseSha: plan.releaseSha, phase: selection.phase, completed: [],
+      });
+    }
+  }
   if (selection.phase === 'workload') {
     try {
+      if (!unresolvedTask8Contract(plan.task8Evidence.workload)) {
+        const error = new Error('Pre-existing workload evidence is forbidden');
+        error.code = 'WORKLOAD_PREBUILT_EVIDENCE_FORBIDDEN';
+        throw error;
+      }
+      workloadPrivacyExecutor = execute ?? createDefaultGcloudExecutor({ environment });
+      let tokenExecutor = workloadPrivacyTokenExecutor;
+      if (tokenExecutor === undefined) {
+        tokenExecutor = createIdentityTokenExecutor(resolveDefaultGcloudLaunch(environment));
+      }
       workloadExecution = await executeControlledWorkload(plan, {
-        environment, executeWorkload, workloadFetch, randomUUID, now,
+        environment,
+        executor: workloadPrivacyExecutor,
+        executeWorkload,
+        workloadFetch,
+        randomUUID,
+        now,
+        tokenExecutor,
+        privacyFetch: workloadPrivacyFetch,
+        privacyNonce: workloadPrivacyNonce,
+        privacySleep: workloadPrivacySleep,
+        privacyProofRunner: workloadPrivacyProofRunner,
+        producePrivacyArtifact: produceWorkloadPrivacyArtifact,
       });
+      plan = buildReleasePlan({
+        ...input,
+        task8Evidence: {
+          ...input.task8Evidence,
+          workload: workloadExecution.evidence,
+        },
+      }, { phase: selection.phase });
+      selected = plan.operations.filter(({ phase }) => phase === selection.phase);
+      validateReleaseReceiptChain(priorReceipts, plan, { through: 'readiness' });
       task8Attestations.workload = workloadExecution.attestation;
     } catch (error) {
       return publish(writeOutput, 1, {
@@ -4960,14 +6218,7 @@ export async function runGcpRelease({
       finalOperationId: finalPublicMutations[0].operationId,
       mutationOperationIds: mutationMembers.map(({ id }) => id),
     }) : null;
-  let stateStore = null;
-  let journalMutationCount = 0;
-  let releaseJournalAttemptId = null;
-  let existingJournalIntent = null;
-  let resumeOperationId = null;
-  let hasOpenJournalAttempt = false;
-  let openJournalRecords = [];
-  if (mutationMembers.length > 0) {
+  if (mutationMembers.length > 0 && stateStore === null) {
     try {
       if (typeof openStateStore !== 'function' || typeof journalAttemptId !== 'function') {
         throw new Error('Release journal is unavailable');
@@ -5093,7 +6344,17 @@ export async function runGcpRelease({
       if (typeof verifyTask8Evidence !== 'function') {
         throw new Error('Task 8 evidence verification failed');
       }
-      const verified = await verifyTask8Evidence(plan.task8Evidence[phase], phase, plan, { now: now() });
+      const workloadReceiptExecution = phase === 'workload'
+        ? priorReceipts.find((value) => value.phase === 'workload')?.outputs?.execution
+        : null;
+      const gateWindow = workloadReceiptExecution === null || workloadReceiptExecution === undefined
+        ? null : {
+          gateStartedAt: workloadReceiptExecution.gateStartedAt,
+          gateEndedAt: workloadReceiptExecution.gateEndedAt,
+        };
+      const verified = await verifyTask8Evidence(plan.task8Evidence[phase], phase, plan, {
+        now: now(), gateWindow, historical: selection.phase !== phase,
+      });
       if (verified !== true && !(phase === 'workload' && verified
         && typeof verified === 'object' && !Array.isArray(verified))) {
         throw new Error('Task 8 evidence verification failed');
@@ -5107,6 +6368,7 @@ export async function runGcpRelease({
       }
     }
   } catch {
+    await stateStore?.close().catch(() => undefined);
     return publish(writeOutput, 1, {
       status: 'failed', code: 'TASK8_EVIDENCE_INVALID', mutationPerformed: false,
       releaseSha: plan.releaseSha, phase: selection.phase, completed: [],
@@ -5114,7 +6376,7 @@ export async function runGcpRelease({
   }
   let executor;
   try {
-    executor = execute ?? (selected.length > 0 || task8Attestations.workload !== undefined
+    executor = readinessExecutor ?? mobileExecutor ?? workloadPrivacyExecutor ?? execute ?? (selected.length > 0 || task8Attestations.workload !== undefined
       ? createDefaultGcloudExecutor({ environment })
       : async () => { throw new Error('No control-plane operation is planned'); });
   } catch {
@@ -5128,6 +6390,7 @@ export async function runGcpRelease({
   const collectedEvidence = {};
   const collectedObjectReceipts = new Map();
   const candidateReadbacks = {};
+  let candidatePrivacyReference = null;
   const promotionReadbacks = {};
   const promotionStableReadbacks = {};
   let buildReceipt = null;
@@ -5147,7 +6410,6 @@ export async function runGcpRelease({
   let promotionStableMutationAttempted = false;
   let promotionIamMutationAttempted = false;
   let promotionTrafficMutationAttempted = false;
-  let workloadArtifactPublished = false;
   let candidateCleanupState = null;
   let activeOperationId = null;
   let resumeBoundaryReached = !hasOpenJournalAttempt;
@@ -5175,21 +6437,26 @@ export async function runGcpRelease({
   }
   if (selection.phase === 'workload') {
     try {
-      await assertControlledWorkloadTargetAbsent(workloadExecution.evidence);
-      await writeFile(workloadExecution.evidence.filePath, workloadExecution.contents, { flag: 'wx' });
-      workloadArtifactPublished = true;
-      const verified = await validateTask8EvidenceArtifact(
-        workloadExecution.evidence, 'workload', plan, { now: now() },
+      workloadPublishedPaths = await publishControlledWorkloadArtifacts(workloadExecution);
+      const verified = await verifyTask8Evidence(
+        workloadExecution.evidence, 'workload', plan, {
+          now: now(),
+          gateWindow: {
+            gateStartedAt: workloadExecution.execution.gateStartedAt,
+            gateEndedAt: workloadExecution.execution.gateEndedAt,
+          },
+        },
       );
-      if (!exact(verified, workloadExecution.attestation)) {
+      if (verified !== true && !exact(verified, workloadExecution.attestation)) {
         throw new Error('Published workload evidence differs from controlled execution');
       }
-    } catch {
+    } catch (error) {
       let cleanupFailed = false;
-      if (workloadArtifactPublished) {
+      const published = error?.publishedWorkloadPaths ?? workloadPublishedPaths;
+      if (published.length > 0) {
         try {
-          await rm(workloadExecution.evidence.filePath);
-          await assertControlledWorkloadTargetAbsent(workloadExecution.evidence);
+          await cleanupControlledReadinessArtifacts(published);
+          workloadPublishedPaths = [];
         } catch { cleanupFailed = true; }
       }
       return publish(writeOutput, 1, {
@@ -5206,6 +6473,22 @@ export async function runGcpRelease({
       if (ACTION_RECEIPT_PHASES.has(selection.phase)) {
         if (checkpoint?.recordType !== 'checkpoint') {
           throw new Error('Checkpointed action phase cannot reconstruct its outcome sidecar');
+        }
+      } else if (selection.phase === 'readiness' && checkpoint?.recordType === 'checkpoint'
+        && checkpoint.payload?.safeResult?.kind === 'artifact-bundle') {
+        if (checkpoint.payload.safeResult.artifactCount !== 3
+          || checkpoint.payload.safeResult.bundleSha256
+            !== openJournalRecords.find(({ recordType }) => recordType === 'intent')
+              ?.payload?.publication?.bundleSha256) {
+          throw new Error('Checkpointed readiness publication differs from its intent');
+        }
+      } else if (selection.phase === 'mobile' && checkpoint?.recordType === 'checkpoint'
+        && checkpoint.payload?.safeResult?.kind === 'artifact-bundle') {
+        if (checkpoint.payload.safeResult.artifactCount !== 7
+          || checkpoint.payload.safeResult.bundleSha256
+            !== openJournalRecords.find(({ recordType }) => recordType === 'intent')
+              ?.payload?.publication?.bundleSha256) {
+          throw new Error('Checkpointed mobile publication differs from its intent');
         }
       } else if (selection.phase === 'build' && checkpoint?.recordType === 'checkpoint'
         && checkpoint.payload?.safeResult?.kind === 'build') {
@@ -5342,12 +6625,29 @@ export async function runGcpRelease({
             observed,
           );
         }
+        const privacyIntent = openJournalRecords.find(({ recordType, operationId }) => (
+          recordType === 'intent' && operationId === 'candidate-privacy-publish'
+        ));
+        if (!privacyIntent) throw new Error('Checkpointed candidate privacy proof is unavailable');
+        const proofRecord = JSON.parse(Buffer.from(
+          privacyIntent.payload.publication.artifacts[0].contentsBase64, 'base64',
+        ).toString('utf8'));
+        candidatePrivacyReference = privacyArtifactFromPublication(
+          plan,
+          { filePath: plan.candidatePrivacyProofPath },
+          privacyIntent.payload.publication,
+          { now: new Date(proofRecord.occurredAt), validatePrivacyProof: validateReleasePrivacyProof },
+        ).reference;
       } else {
         throw new Error('Checkpointed release phase cannot reconstruct its receipt');
       }
     }
     if (selection.phase === 'candidate'
       && resumeOperationId === 'candidate-private-iam-grant') {
+      Object.assign(candidateReadbacks, await readCandidateControlPlaneState(executor, plan));
+    }
+    if (selection.phase === 'candidate'
+      && resumeOperationId === 'candidate-privacy-publish') {
       Object.assign(candidateReadbacks, await readCandidateControlPlaneState(executor, plan));
     }
     if (selection.phase === 'promote'
@@ -5422,6 +6722,106 @@ export async function runGcpRelease({
       let journalAfterSha256 = null;
       let mutationAdapter = null;
       const restartingMutation = existingJournalIntent?.operationId === member.id;
+      if (member.id === 'candidate-privacy-publish'
+        || member.id === 'promote-privacy-publish') {
+        const mutationOrdinal = restartingMutation
+          ? existingJournalIntent.payload.mutationOrdinal : journalMutationCount + 1;
+        const locator = Object.freeze({
+          filePath: member.id === 'candidate-privacy-publish'
+            ? plan.candidatePrivacyProofPath : plan.promotionPrivacyProofPath,
+        });
+        try {
+          if (member.id === 'promote-privacy-publish') {
+            const candidateReceipt = priorReceipts.find(({ phase }) => phase === 'candidate');
+            const candidateProof = candidateReceipt?.outputs?.privacyProof;
+            if (!candidateProof) throw new Error('Candidate privacy receipt is unavailable');
+            await verifyReleasePrivacyArtifact(
+              candidateProof,
+              plan,
+              new Date(candidateProof.observedAt),
+              'Candidate privacy proof is invalid',
+              validateReleasePrivacyProof,
+            );
+            for (const phase of ['readiness', 'workload', 'mobile']) {
+              const workloadReceiptExecution = phase === 'workload'
+                ? priorReceipts.find((value) => value.phase === 'workload')?.outputs?.execution
+                : null;
+              const verified = await verifyTask8Evidence(
+                plan.task8Evidence[phase], phase, plan, {
+                  now: now(),
+                  historical: true,
+                  gateWindow: workloadReceiptExecution ? {
+                    gateStartedAt: workloadReceiptExecution.gateStartedAt,
+                    gateEndedAt: workloadReceiptExecution.gateEndedAt,
+                  } : null,
+                },
+              );
+              if (verified !== true && !(phase === 'workload' && verified)) {
+                throw new Error('Promotion evidence boundary drifted');
+              }
+            }
+            await readCandidateControlPlaneState(executor, plan);
+            await readStableStagedControlPlaneState(executor, plan, {
+              publicIam: plan.previousRevision !== null,
+            });
+          }
+          let artifact;
+          if (restartingMutation) {
+            const proofRecord = JSON.parse(Buffer.from(
+              existingJournalIntent.payload.publication.artifacts[0].contentsBase64, 'base64',
+            ).toString('utf8'));
+            artifact = privacyArtifactFromPublication(
+              plan,
+              locator,
+              existingJournalIntent.payload.publication,
+              { now: new Date(proofRecord.occurredAt), validatePrivacyProof: validateReleasePrivacyProof },
+            );
+          } else {
+            let tokenExecutor = releasePrivacyTokenExecutor;
+            if (tokenExecutor === undefined) {
+              tokenExecutor = createIdentityTokenExecutor(resolveDefaultGcloudLaunch(environment));
+            }
+            artifact = await produceReleasePrivacyArtifact({
+              plan,
+              locator,
+              executor,
+              tokenExecutor,
+              fetch: releasePrivacyFetch,
+              now,
+              nonce: releasePrivacyNonce,
+              sleep: releasePrivacySleep,
+              privacyProofRunner: releasePrivacyProofRunner,
+            });
+            artifact = privacyArtifactFromPublication(
+              plan,
+              locator,
+              privacyPublication(artifact),
+              { now: now(), validatePrivacyProof: validateReleasePrivacyProof },
+            );
+            finalMutationGuard?.beforeOperation(member.id);
+          }
+          const reference = await publishPrivacyArtifact(artifact, {
+            stateStore,
+            operationId: member.id,
+            mutationOrdinal,
+            releaseJournalAttemptId,
+            existingIntent: restartingMutation ? existingJournalIntent : null,
+            writeArtifact: writeReleasePrivacyArtifact,
+          });
+          if (member.id === 'candidate-privacy-publish') candidatePrivacyReference = reference;
+          journalMutationCount = mutationOrdinal;
+          existingJournalIntent = null;
+          completed.push(member.id);
+          activeOperationId = null;
+          continue;
+        } catch (error) {
+          if (String(error?.message ?? '').includes('journal')
+            || String(error?.message ?? '').includes('intent')) {
+            error.code = 'RELEASE_JOURNAL_WRITE_FAILED';
+          }
+          throw error;
+        }
+      }
       if (operationMayMutate(member.id)) {
         if (pendingJournal !== null) {
           throw new Error('Prior release mutation lacks an authoritative checkpoint');
@@ -6008,7 +7408,7 @@ export async function runGcpRelease({
 
   }
   const publicReport = {
-    status: 'phase-complete', code: 'GCP_RELEASE_PHASE_COMPLETE', mutationPerformed: true,
+    status: 'phase-complete', code: 'GCP_RELEASE_PHASE_COMPLETE', mutationPerformed: mutationAttempted,
     releaseSha: plan.releaseSha, phase: selection.phase, completed,
   };
   if (selection.phase === 'inventory' || selection.phase === 'evidence') {
@@ -6039,9 +7439,10 @@ export async function runGcpRelease({
           {
             buildReceipt,
             migrationExecutionReceipt,
-            acceptanceExecutionReceipts,
-            collectedEvidence,
-            workloadExecution,
+             acceptanceExecutionReceipts,
+             collectedEvidence,
+             candidatePrivacyReference,
+             workloadExecution,
           },
           priorReceipts,
         );
@@ -6080,15 +7481,16 @@ export async function runGcpRelease({
       publicReport.phaseReceipt = phaseReceipt;
     } catch (error) {
       let cleanupFailed = false;
-      if (selection.phase === 'workload' && workloadArtifactPublished) {
+      if (selection.phase === 'workload' && workloadPublishedPaths.length > 0) {
         try {
-          await rm(workloadExecution.evidence.filePath);
-          await assertControlledWorkloadTargetAbsent(workloadExecution.evidence);
+          await cleanupControlledReadinessArtifacts(workloadPublishedPaths);
+          workloadPublishedPaths = [];
         } catch { cleanupFailed = true; }
       }
       await stateStore?.close().catch(() => undefined);
       return publish(writeOutput, 1, {
-        status: 'failed', code: cleanupFailed ? 'WORKLOAD_EVIDENCE_CLEANUP_FAILED'
+        status: 'failed', code: cleanupFailed
+          ? 'WORKLOAD_EVIDENCE_CLEANUP_FAILED'
           : (error?.code === 'RELEASE_JOURNAL_WRITE_FAILED'
             ? 'RELEASE_JOURNAL_WRITE_FAILED' : 'RELEASE_RECEIPT_WRITE_FAILED'),
         mutationPerformed: mutationAttempted,

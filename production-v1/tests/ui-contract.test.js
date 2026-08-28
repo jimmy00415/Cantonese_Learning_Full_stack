@@ -53,6 +53,18 @@ test('ui contract exposes one truthful mobile conversation and no legacy workspa
   assert.doesNotMatch(html, /aria-label="[^"]*(?:phone call|video call)|data-(?:online|presence|read-receipt)|class="[^"]*(?:online-dot|typing-dots|call-waveform)/i);
 });
 
+test('production shell presents the final plain-language privacy and data-use disclosure', async () => {
+  const html = await text('index.html');
+  assert.doesNotMatch(html, /Draft privacy notice/i);
+  assert.match(html, /<h3>Privacy and data use<\/h3>/i);
+  for (const disclosure of [
+    /Text you send may be processed by the configured AI provider/i,
+    /Voice is optional/i,
+    /transcript remains editable and unsent until you tap Send/i,
+    /Clear conversation[\s\S]{0,120}queue its stored data for deletion/i,
+  ]) assert.match(html, disclosure);
+});
+
 test('ui contract places one accessible reply selector immediately above the composer panel', async () => {
   const html = await text('index.html');
   const app = await text('app.js');
