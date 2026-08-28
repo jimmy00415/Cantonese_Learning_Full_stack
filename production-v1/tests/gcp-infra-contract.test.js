@@ -672,6 +672,11 @@ test('gcloud classifies canonical absence only when describe argv and resource i
       stderr: `ERROR: (gcloud.storage.buckets.describe) HTTPError 404: The specified bucket [gs://${GCP_IDENTITY.bucket}] does not exist.`,
     },
     {
+      name: 'Storage bucket current CLI',
+      argv: ['storage', 'buckets', 'describe', `gs://${GCP_IDENTITY.bucket}`, `--project=${PROJECT}`, '--format=json'],
+      stderr: `ERROR: (gcloud.storage.buckets.describe) gs://${GCP_IDENTITY.bucket} not found: 404.`,
+    },
+    {
       name: 'Secret Manager secret',
       argv: ['secrets', 'describe', GCP_IDENTITY.secrets.session, `--project=${PROJECT}`, '--format=json'],
       stderr: `ERROR: (gcloud.secrets.describe) NOT_FOUND: Secret [projects/${PROJECT}/secrets/${GCP_IDENTITY.secrets.session}] not found.`,
@@ -692,6 +697,14 @@ test('gcloud classifies canonical absence only when describe argv and resource i
       await assert.rejects(
         () => executorFor(fixture.stderr)(fixture.argv),
         (error) => error.code === 'NOT_FOUND',
+      );
+      await assert.rejects(
+        () => executorFor(`${fixture.stderr}\r\n\r\n`)(fixture.argv),
+        (error) => error.code === 'NOT_FOUND',
+      );
+      await assert.rejects(
+        () => executorFor(`${fixture.stderr}\r\n\r\n\r\n`)(fixture.argv),
+        (error) => error.code === 'TRANSPORT_AMBIGUOUS',
       );
       for (const argv of [
         fixture.argv.with(fixture.argv.indexOf(`--project=${PROJECT}`), '--project=foreign-project'),
@@ -1149,6 +1162,31 @@ test('CIDR audit validates complete Compute rows before filtering and requires p
       nextHopGateway: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/gateways/custom-gateway`,
     }],
   }), (error) => error.code === 'CIDR_OVERLAP');
+});
+
+test('CIDR audit accepts regional subnet name reuse and still rejects duplicate regional identities', () => {
+  const network = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/default`;
+  const asiaEast1 = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/regions/asia-east1`;
+  const asiaEast2 = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/regions/asia-east2`;
+  const first = {
+    name: 'default', network, region: asiaEast1,
+    selfLink: `${asiaEast1}/subnetworks/default`, ipCidrRange: '10.128.0.0/20',
+  };
+  const second = {
+    name: 'default', network, region: asiaEast2,
+    selfLink: `${asiaEast2}/subnetworks/default`, ipCidrRange: '10.170.0.0/20',
+  };
+  const exact = {
+    desired: '10.24.0.0/26', network,
+    networks: [{ name: 'default', selfLink: network }],
+    subnets: [first, second], routes: [], addresses: [],
+  };
+
+  assert.doesNotThrow(() => assertCidrAvailable(exact));
+  assert.throws(() => assertCidrAvailable({
+    ...exact,
+    subnets: [first, { ...first, ipCidrRange: '10.129.0.0/20' }],
+  }), (error) => error.code === 'CIDR_AUDIT_INVALID');
 });
 
 test('monitoring aggregation groups Cloud Run and Cloud SQL metrics by their real resource label', () => {

@@ -451,9 +451,13 @@ function canonicalDescribeAbsence(argv, stderr) {
       ['sql', 'databases', 'describe', GCP_IDENTITY.database, `--instance=${GCP_IDENTITY.cloudSqlInstance}`, projectFlag, formatFlag],
       `ERROR: (gcloud.sql.databases.describe) HTTPError 404: Database [projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}/databases/${GCP_IDENTITY.database}] was not found.`,
     ],
-    ...[GCP_IDENTITY.bucket, GCP_IDENTITY.buildSourceBucket].map((bucket) => [[
-      'storage', 'buckets', 'describe', `gs://${bucket}`, projectFlag, formatFlag,
-    ], `ERROR: (gcloud.storage.buckets.describe) HTTPError 404: The specified bucket [gs://${bucket}] does not exist.`]),
+    ...[GCP_IDENTITY.bucket, GCP_IDENTITY.buildSourceBucket].flatMap((bucket) => {
+      const argv = ['storage', 'buckets', 'describe', `gs://${bucket}`, projectFlag, formatFlag];
+      return [
+        [argv, `ERROR: (gcloud.storage.buckets.describe) HTTPError 404: The specified bucket [gs://${bucket}] does not exist.`],
+        [argv, `ERROR: (gcloud.storage.buckets.describe) gs://${bucket} not found: 404.`],
+      ];
+    }),
     ...Object.values(GCP_IDENTITY.secrets).map((secret) => [[
       'secrets', 'describe', secret, projectFlag, formatFlag,
     ], `ERROR: (gcloud.secrets.describe) NOT_FOUND: Secret [projects/${PROJECT}/secrets/${secret}] not found.`]),
@@ -462,7 +466,8 @@ function canonicalDescribeAbsence(argv, stderr) {
     ], `ERROR: (gcloud.run.jobs.describe) Cannot find job [${job}].`]),
   ];
   return descriptors.some(([expectedArgv, expectedStderr]) => (
-    exact(argv, expectedArgv) && stderr === expectedStderr
+    exact(argv, expectedArgv)
+      && (stderr === expectedStderr || stderr === `${expectedStderr}\n`)
   ));
 }
 
@@ -1318,19 +1323,17 @@ function validateComputeNetworksAndSubnets(networks, subnets) {
   const networkLinks = new Set(networks.map(({ selfLink }) => selfLink));
   if (networkLinks.size !== networks.length) throw commandError('CIDR_AUDIT_INVALID');
   const subnetsByLink = new Map();
-  const subnetNames = new Set();
   for (const item of subnets) {
     if (!plainComputeRow(item) || typeof item.name !== 'string' || !COMPUTE_NAME.test(item.name)
       || !networkLinks.has(item.network) || !canonicalCidr(item.ipCidrRange)
       || typeof item.region !== 'string' || !COMPUTE_REGION.test(item.region)
       || item.selfLink !== `${item.region}/subnetworks/${item.name}`
-      || subnetsByLink.has(item.selfLink) || subnetNames.has(item.name)) {
+      || subnetsByLink.has(item.selfLink)) {
       throw commandError('CIDR_AUDIT_INVALID');
     }
     if (Object.hasOwn(item, 'externalIpv6Prefix')
       && !canonicalIpv6Cidr(item.externalIpv6Prefix)) throw commandError('CIDR_AUDIT_INVALID');
     subnetsByLink.set(item.selfLink, item);
-    subnetNames.add(item.name);
   }
   return { networkLinks, subnetsByLink };
 }
