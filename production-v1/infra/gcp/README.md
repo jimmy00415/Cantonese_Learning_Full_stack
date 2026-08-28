@@ -579,3 +579,30 @@ identity, and ambiguous errors never count as absence.
 Neither recovery phase deletes database, media, evidence, protected baseline,
 or unrelated services. Drift or an unprovable response-loss state fails closed
 with the recovery boundary visible.
+
+## Stage D evidence and promotion barrier
+
+Stage D is implemented and locally contract-tested only; it does not authorize
+or attest a live GCP mutation. Candidate privacy proof publication is the final
+candidate operation, is journaled before create-only evidence publication, and
+is recorded in the candidate receipt. Historical proof validity is evaluated at
+the proof/gate clock, while readiness, workload, mobile, and candidate freshness
+are independently revalidated at promotion.
+
+Mobile acceptance accepts no prebuilt evidence. The release runner creates a
+fresh privacy-start proof, reads the candidate and stable control plane before
+the browser run, invokes the pinned producer, reads both services afterward,
+creates the privacy-end proof, validates the seven-artifact bundle, journals
+every intended byte, and only then publishes create-only. Exact prior bytes may
+be adopted after restart; foreign bytes, links/junctions, partial foreign state,
+or receipt drift fail closed. Immediately before the first stable/public
+mutation, the final promotion proof revalidates the candidate, the complete
+evidence chain, and the stable baseline. No cloud mutation is permitted after
+the final promotion mutation.
+
+The deterministic browser contract is Playwright `1.62.1`, Chromium revision
+`1234` / `151.0.7922.34`, `390x844` at DPR 1, four PNGs with unique encoded and
+decoded-pixel hashes, and canonical WAV SHA-256
+`ef989be190f7e9cef40b80516209d972eb08910263ddee3a44f52fdf84e534a7`.
+It is not real-iOS evidence. Real iOS, live candidate/provider/GCP proof,
+promotion, and stable/public acceptance remain explicit operator gates.

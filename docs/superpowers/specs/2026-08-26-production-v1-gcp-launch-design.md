@@ -471,3 +471,25 @@ migration 1 is additive; rollback never drops production data.
 - maps, indoor navigation, payments, or actions in official HKBU systems;
 - multiple Cloud Run replicas before a shared event fan-out contract exists;
 - changing or decommissioning the legacy product.
+
+## Stage D local acceptance closure (2026-08-28)
+
+The executable local contract now adds the missing final barriers without
+changing the live authorization boundary. Candidate privacy proof publication
+is receipt-bound, journal-first, create-only, and the last candidate operation.
+Historical proofs are validated at their recorded gate clocks; promotion
+freshness is a separate check. Readiness and mobile publication journal exact
+bytes before the first file create and recover only by adopting identical prior
+bytes. The mobile phase rejects prebuilt evidence and binds privacy-start,
+candidate/stable before-readbacks, a fresh product-flow browser run,
+candidate/stable after-readbacks, privacy-end, and the terminal receipt.
+
+The controlled browser evidence contract is Playwright `1.62.1`, Chromium
+revision `1234` / browser `151.0.7922.34`, isolated `390x844` DPR-1 mobile web,
+four PNG screenshots with both encoded and decoded-pixel uniqueness, and a fixed
+one-second PCM16LE 16 kHz mono WAV whose SHA-256 is
+`ef989be190f7e9cef40b80516209d972eb08910263ddee3a44f52fdf84e534a7`.
+It does not claim real-iOS Safari. The final post-staging privacy proof is
+validated directly before the first stable/public mutation; no cloud mutation
+follows the final promotion mutation. All live GCP, provider, real-iOS,
+promotion, public-IAM, and runtime-health gates remain unexecuted.

@@ -290,3 +290,23 @@ Wire enums are exactly `en | yue-Hant-HK | cmn-Hans-CN` and `text | voice`.
 - Governed questions cite current official evidence; unsupported questions do not guess or link an unrelated office.
 - PostgreSQL, private media lifecycle, provider evidence, readiness, security, retention, and workload gates pass on the same frozen SHA/resource identities.
 - The final handoff includes the live HTTPS link and a decode-verified QR code.
+
+## Stage D local implementation checkpoint (2026-08-28)
+
+- [x] Candidate privacy is the receipt-bound final candidate operation, with
+  journal-before-create-only publication and exact-byte restart adoption.
+- [x] Historical proof-at-gate validity is distinct from readiness/workload/
+  mobile/promotion freshness; drift, expiry at the relevant clock, or foreign
+  evidence fails closed.
+- [x] Mobile orchestration rejects prebuilt evidence and binds fresh privacy
+  boundaries, candidate/stable before-and-after readbacks, four decoded PNGs,
+  the canonical WAV fixture, create-only publication, and terminal receipt.
+- [x] Controlled browser evidence pins Playwright `1.62.1`, Chromium revision
+  `1234` / `151.0.7922.34`, `390x844` DPR 1, and four unique encoded plus
+  decoded-pixel hashes. It does not claim real-iOS Safari.
+- [x] The final post-staging privacy/stable/candidate/evidence proof runs directly
+  before the first stable/public mutation, and the controller forbids cloud
+  mutation after the terminal promotion mutation.
+- [ ] Run live candidate, provider, GCP, real-iOS, promotion, public-IAM, runtime,
+  rollback-drill, URL, and QR gates. This local checkpoint authorizes none of
+  those operations and makes no deployed-production claim.

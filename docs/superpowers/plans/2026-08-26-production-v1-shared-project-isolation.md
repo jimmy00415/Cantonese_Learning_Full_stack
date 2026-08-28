@@ -547,3 +547,23 @@ enabled Invoker IAM check rather than trusting IAM policy alone.
 Generate a QR code for the final stable HTTPS URL and
 report exact deployed revision, image digest, release commit, acceptance result,
 known shared-project boundary, URL, and QR artifact.
+
+## Stage D local implementation checkpoint (2026-08-28)
+
+- [x] Make candidate privacy receipt-bound and last in the candidate phase;
+  journal exact proof bytes before create-only publication and adopt only exact
+  prior bytes after restart.
+- [x] Journal readiness and all seven mobile artifacts before publication;
+  reject foreign bytes, links/junctions, incomplete bundles, prebuilt evidence,
+  and receipt drift without overwriting anything.
+- [x] Bind the fresh mobile chain to privacy start/end, candidate and stable
+  before/after readbacks, four structurally decoded PNG screenshots, and the
+  canonical WAV fixture. Pin Playwright `1.62.1`, Chromium revision `1234` /
+  `151.0.7922.34`, and `390x844` DPR 1; keep real iOS as a separate gate.
+- [x] Validate historical evidence at its recorded gate clock, then enforce
+  separate promotion freshness and a final post-staging proof immediately
+  before the first stable/public mutation. Forbid all cloud mutation after the
+  terminal promotion mutation.
+- [ ] Execute live shared-project/candidate/provider/real-iOS/promotion/public
+  acceptance. The Stage D checkpoint is local-only and authorizes no GCP,
+  provider, legacy, Azure, or public-IAM operation.

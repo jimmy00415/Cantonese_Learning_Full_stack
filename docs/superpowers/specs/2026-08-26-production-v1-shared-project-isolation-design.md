@@ -222,3 +222,24 @@ chain, revalidates the receipt-proven prior stable revision/image/service, and
 mutates only `hkbuddy-v1-api` traffic. It does not depend on the candidate
 service still existing. First-release rollback is unavailable and performs no
 control-plane call because no genuine prior V1 exists.
+
+## Stage D local acceptance closure (2026-08-28)
+
+The isolation contract now applies to the evidence filesystem as well as the
+shared cloud project. Candidate privacy, readiness, and the complete seven-file
+mobile bundle are journaled before create-only publication. A restart may adopt
+only exact intended bytes at an exact regular-file destination; foreign bytes,
+symbolic links, Windows junctions, incomplete foreign bundles, and receipt drift
+fail closed before evidence is trusted. The mobile phase rejects prebuilt
+evidence and makes fresh privacy boundaries plus before/after candidate and
+stable readbacks part of the receipt chain.
+
+Promotion separately distinguishes historical proof validity from current
+freshness. After stable staging and all readbacks, a final post-staging privacy
+proof and stable/candidate/evidence validation run directly before the first
+stable or public-IAM mutation. No later cloud mutation is allowed after the
+terminal promotion mutation. Local Chromium evidence is pinned to Playwright
+`1.62.1`, Chromium revision `1234` / `151.0.7922.34`, `390x844` DPR 1, four
+raw-and-pixel-unique decoded PNGs, and the fixed WAV SHA-256
+`ef989be190f7e9cef40b80516209d972eb08910263ddee3a44f52fdf84e534a7`.
+This remains a controlled mobile-web gate, not real-iOS or live-GCP acceptance.

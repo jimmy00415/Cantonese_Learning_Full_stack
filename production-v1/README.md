@@ -361,3 +361,26 @@ never edit,
 restarts, redeploys, migrates, or repoints `hkbuddy-pilot-0630`. No legacy app,
 protected shared-project state, or unrelated service is changed by candidate,
 promotion, or rollback.
+
+## Stage D controlled acceptance contract (local implementation only)
+
+The local release controller now treats candidate privacy as part of the
+receipt-bound candidate phase and validates each immutable proof against the
+clock recorded at its own gate. Readiness, workload, and mobile evidence remain
+promotion-fresh separately; a historical proof is not incorrectly expired by a
+later promotion clock. Candidate privacy publication, readiness publication,
+and the seven-file mobile evidence bundle are journaled before create-only
+publication, so a restart may adopt only byte-for-byte identical prior files.
+Foreign bytes, symbolic-link/junction destinations, incomplete bundles, or
+caller-supplied prebuilt evidence fail closed.
+
+The controlled mobile producer is pinned to Playwright `1.62.1`, Chromium
+revision `1234` / browser `151.0.7922.34`, a `390x844` DPR-1 isolated mobile
+context, and the canonical one-second PCM16LE 16 kHz mono WAV fixture with SHA-256
+`ef989be190f7e9cef40b80516209d972eb08910263ddee3a44f52fdf84e534a7`.
+It derives all thirteen checks from the product API/browser flow and requires
+four structurally decoded, visually diverse PNGs whose encoded and decoded-pixel
+hashes are each unique. This is deterministic Chromium mobile-web evidence, not
+a claim of real-iOS Safari acceptance. Real iOS, live GCP/provider evidence,
+promotion, public IAM, and production runtime health remain separate unexecuted
+operator gates.
