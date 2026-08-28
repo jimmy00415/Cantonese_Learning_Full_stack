@@ -19,7 +19,7 @@ const TEST_RELEASE_COMMIT = 'a'.repeat(40);
 const TEST_DATABASE_URL = 'postgres://localhost/v1';
 const TEST_GCS_PROJECT = 'motion-expert-hk-ltd-webpage';
 const TEST_GCS_BUCKET = 'hkbuddy-v1-582852715831-media';
-const TEST_POSTGRES_RESOURCE_ID = 'test-v1-postgres';
+const TEST_POSTGRES_RESOURCE_ID = '//sqladmin.googleapis.com/projects/motion-expert-hk-ltd-webpage/instances/hkbuddy-v1-pg/databases/hkbuddy_v1';
 const TEST_GCS_RESOURCE_ID = '//storage.googleapis.com/projects/_/buckets/hkbuddy-v1-582852715831-media';
 const TEST_LLM_CREDENTIAL_VERSION = 'llm-credential-v1';
 const TEST_PROJECT_NUMBER = '582852715831';
@@ -331,6 +331,44 @@ test('production requires exact V1-only postgres plus private GCS identity while
   });
   assert.equal(localAzure.mediaDriver, 'azure-blob');
   assert.equal(localAzure.mediaAuthMode, 'managed-identity');
+});
+
+test('production rejects coherent foreign project, instance, or database PostgreSQL tuples', async (t) => {
+  const cases = [
+    ['project', '//sqladmin.googleapis.com/projects/foreign-project/instances/hkbuddy-v1-pg/databases/hkbuddy_v1'],
+    ['instance', '//sqladmin.googleapis.com/projects/motion-expert-hk-ltd-webpage/instances/foreign-pg/databases/hkbuddy_v1'],
+    ['database', '//sqladmin.googleapis.com/projects/motion-expert-hk-ltd-webpage/instances/hkbuddy-v1-pg/databases/foreign_db'],
+  ];
+  for (const [name, foreignPostgresResourceId] of cases) {
+    await t.test(name, () => {
+      const foreignDatabaseUrl = `postgresql://foreign-app:private@test.internal:5432/foreign_${name}?sslmode=require`;
+      const foreignDependency = finalizeReleaseEvidenceRecord({
+        schemaVersion: 1,
+        commitSha: TEST_RELEASE_COMMIT,
+        legacyInventoryDigest: inventory.artifactSha256,
+        postgresResourceId: foreignPostgresResourceId,
+        postgresIdentitySha256: postgresIdentitySha256(foreignDatabaseUrl),
+        gcsResourceId: TEST_GCS_RESOURCE_ID,
+        gcsIdentitySha256: gcsIdentitySha256({ projectId: TEST_GCS_PROJECT, bucket: TEST_GCS_BUCKET }),
+        schema: 'v1_accept_12345678123441238123123456789abc',
+        gcsPrefix: 'v1-accept/12345678-1234-4123-8123-123456789abc/',
+        checks: dependency.checks,
+        schemaAbsent: true,
+        gcsPrefixObjectCount: 0,
+        result: true,
+        occurredAt: new Date().toISOString(),
+      });
+      const foreignDependencyFile = join(evidenceDirectory, `dependency-foreign-postgres-${name}.json`);
+      writeFileSync(foreignDependencyFile, JSON.stringify(foreignDependency));
+
+      assert.throws(() => loadConfig(productionEnvironment({
+        V1_DATABASE_URL: foreignDatabaseUrl,
+        V1_POSTGRES_RESOURCE_ID: foreignPostgresResourceId,
+        V1_DEPENDENCY_ACCEPTANCE_EVIDENCE_FILE: foreignDependencyFile,
+        V1_DEPENDENCY_ACCEPTANCE_EVIDENCE_VERSION: foreignDependency.artifactSha256,
+      })), /PostgreSQL|POSTGRES_RESOURCE_ID|exact/i);
+    });
+  }
 });
 
 test('config gives V1 provider selectors precedence over legacy selectors', () => {

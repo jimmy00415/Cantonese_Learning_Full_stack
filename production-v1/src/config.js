@@ -27,6 +27,7 @@ const AZURE_SPEECH_REGION = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const GOOGLE_PROJECT_ID = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
 const STABLE_CLOUD_RUN_HOST = new RegExp(`^${GCP_IDENTITY.service}-${GCP_IDENTITY.projectNumber}\\.${GCP_IDENTITY.region}\\.run\\.app$`);
 const RUNTIME_SERVICE_ACCOUNT = GCP_IDENTITY.serviceAccounts.runtime;
+const POSTGRES_RESOURCE_ID = `//sqladmin.googleapis.com/projects/${GCP_IDENTITY.projectId}/instances/${GCP_IDENTITY.cloudSqlInstance}/databases/${GCP_IDENTITY.database}`;
 const GCS_RESOURCE_ID = `//storage.googleapis.com/projects/_/buckets/${GCP_IDENTITY.bucket}`;
 const GOOGLE_SECRET_ENV_NAMES = Object.freeze([
   'V1_GOOGLE_API_KEY', 'GOOGLE_API_KEY', 'GEMINI_API_KEY',
@@ -322,7 +323,9 @@ function assertProductionReady(config) {
   }
   if (config.storeDriver !== 'postgres') throw new Error('V1_STORE_DRIVER=postgres is required in production');
   if (!config.databaseUrl) throw new Error('V1_DATABASE_URL is required in production');
-  if (!validResourceId(config.postgresResourceId)) throw new Error('V1_POSTGRES_RESOURCE_ID is required in production');
+  if (config.postgresResourceId !== POSTGRES_RESOURCE_ID) {
+    throw new Error('V1_POSTGRES_RESOURCE_ID must identify the exact Production V1 PostgreSQL database');
+  }
   if (config.mediaDriver !== 'gcs') throw new Error('V1_MEDIA_DRIVER=gcs is required in production');
   if (config.gcsProjectId !== GCP_IDENTITY.projectId) {
     throw new Error('V1_GOOGLE_CLOUD_PROJECT must identify the exact V1 Google project in production');

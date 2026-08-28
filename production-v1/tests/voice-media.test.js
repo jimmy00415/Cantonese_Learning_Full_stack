@@ -1079,7 +1079,7 @@ test('voice release evidence is artifact/config/commit bound and expires dynamic
   const databaseUrl = 'postgres://v1.example.test/v1';
   const gcsProjectId = 'motion-expert-hk-ltd-webpage';
   const gcsBucket = 'hkbuddy-v1-582852715831-media';
-  const postgresResourceId = '/subscriptions/new/resourceGroups/v1/providers/Microsoft.DBforPostgreSQL/flexibleServers/v1';
+  const postgresResourceId = '//sqladmin.googleapis.com/projects/motion-expert-hk-ltd-webpage/instances/hkbuddy-v1-pg/databases/hkbuddy_v1';
   const gcsResourceId = '//storage.googleapis.com/projects/_/buckets/hkbuddy-v1-582852715831-media';
   const postgresIdentity = postgresIdentitySha256(databaseUrl);
   const gcsIdentity = gcsIdentitySha256({ projectId: gcsProjectId, bucket: gcsBucket });

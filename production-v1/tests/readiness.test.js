@@ -24,7 +24,7 @@ import { runProductionReadiness } from '../scripts/production-readiness.js';
 
 const NOW = new Date('2026-08-25T12:00:00.000Z');
 const COMMIT = '1'.repeat(40);
-const POSTGRES_RESOURCE_ID = '/subscriptions/new/resourceGroups/v1/providers/Microsoft.DBforPostgreSQL/flexibleServers/v1-db';
+const POSTGRES_RESOURCE_ID = '//sqladmin.googleapis.com/projects/motion-expert-hk-ltd-webpage/instances/hkbuddy-v1-pg/databases/hkbuddy_v1';
 const BLOB_RESOURCE_ID = '/subscriptions/new/resourceGroups/v1/providers/Microsoft.Storage/storageAccounts/v1storage';
 const POSTGRES_IDENTITY = '37e3ef0cd42741f428370ea8381fd9150406e460513d0bb3deeb61ac08ec8d18';
 const BLOB_IDENTITY = 'fc85e13a0ac799694d2cfbead9dec319c5bc5130b6a991de6e0e193a20bbd454';
