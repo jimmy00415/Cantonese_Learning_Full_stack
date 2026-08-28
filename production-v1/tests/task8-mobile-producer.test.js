@@ -522,6 +522,111 @@ test('trusted native playing without the correlated CDP player event cannot sati
   assert.ok(observedCdpEvents > 0, 'the test must suppress browser-owned CDP Media observations');
 });
 
+test('a non-kLoad CDP event carrying the exact owned URL cannot satisfy later kPlay', async (t) => {
+  const origin = await startLocalProduct(t);
+  let rewrittenLoads = 0;
+  let retainedPlays = 0;
+  await assert.rejects(() => runPinnedPlaywrightFlow({
+    candidateOrigin: origin,
+    authorization: 'Bearer local-non-kload-source-contract',
+    fixturePath: FIXTURE_FILE,
+    challengeSeed: Buffer.alloc(32, 0x86),
+    testHooks: {
+      rewriteCdpMediaEvents(event) {
+        if (event.name === 'kLoad' && event.sourceUrl !== null) {
+          rewrittenLoads += 1;
+          return [{ ...event, name: 'kProgress' }];
+        }
+        if (event.name === 'kPlay') retainedPlays += 1;
+        return [event];
+      },
+    },
+    context: {
+      viewport: { width: 390, height: 844 }, deviceScaleFactor: 1,
+      isMobile: true, hasTouch: true, serviceWorkers: 'block', acceptDownloads: false,
+    },
+  }), /Controlled mobile evidence is invalid/);
+  assert.ok(rewrittenLoads > 0, 'the test must replace a real browser-owned kLoad');
+  assert.ok(retainedPlays > 0, 'the test must retain the later browser-owned kPlay');
+});
+
+test('suppressing the exact owned kLoad cannot satisfy the witness with later kPlay', async (t) => {
+  const origin = await startLocalProduct(t);
+  let suppressedSourceUrl = null;
+  let suppressedLoads = 0;
+  let retainedPlays = 0;
+  await assert.rejects(() => runPinnedPlaywrightFlow({
+    candidateOrigin: origin,
+    authorization: 'Bearer local-missing-kload-contract',
+    fixturePath: FIXTURE_FILE,
+    challengeSeed: Buffer.alloc(32, 0x87),
+    testHooks: {
+      rewriteCdpMediaEvents(event) {
+        if (event.name === 'kLoad' && event.sourceUrl !== null) {
+          suppressedSourceUrl = event.sourceUrl;
+          suppressedLoads += 1;
+          return [];
+        }
+        if (event.name === 'kPlay') {
+          retainedPlays += 1;
+          return [
+            { name: 'kProgress', pipelineState: null, sourceUrl: suppressedSourceUrl },
+            event,
+          ];
+        }
+        return [event];
+      },
+    },
+    context: {
+      viewport: { width: 390, height: 844 }, deviceScaleFactor: 1,
+      isMobile: true, hasTouch: true, serviceWorkers: 'block', acceptDownloads: false,
+    },
+  }), /Controlled mobile evidence is invalid/);
+  assert.ok(suppressedLoads > 0, 'the test must suppress a real browser-owned kLoad');
+  assert.ok(retainedPlays > 0, 'the test must retain the later browser-owned kPlay');
+});
+
+test('a reused player cannot combine an older owned kLoad with a later lifecycle kPlay', async (t) => {
+  for (const nextSourceUrl of ['foreign', null]) {
+    await t.test(nextSourceUrl ?? 'missing', async () => {
+      const origin = await startLocalProduct(t);
+      let advancedLifecycles = 0;
+      let retainedPlays = 0;
+      await assert.rejects(() => runPinnedPlaywrightFlow({
+        candidateOrigin: origin,
+        authorization: 'Bearer local-mixed-kload-lifecycle-contract',
+        fixturePath: FIXTURE_FILE,
+        challengeSeed: Buffer.alloc(32, nextSourceUrl === null ? 0x89 : 0x88),
+        testHooks: {
+          rewriteCdpMediaEvents(event) {
+            if (event.name === 'kLoad' && event.sourceUrl !== null) {
+              advancedLifecycles += 1;
+              return [
+                event,
+                {
+                  name: 'kLoad',
+                  pipelineState: null,
+                  sourceUrl: nextSourceUrl === null
+                    ? null
+                    : `${origin}/api/v1/media/foreign-lifecycle`,
+                },
+              ];
+            }
+            if (event.name === 'kPlay') retainedPlays += 1;
+            return [event];
+          },
+        },
+        context: {
+          viewport: { width: 390, height: 844 }, deviceScaleFactor: 1,
+          isMobile: true, hasTouch: true, serviceWorkers: 'block', acceptDownloads: false,
+        },
+      }), /Controlled mobile evidence is invalid/);
+      assert.ok(advancedLifecycles > 0, 'the test must advance a real browser-owned player lifecycle');
+      assert.ok(retainedPlays > 0, 'the test must retain the later browser-owned kPlay');
+    });
+  }
+});
+
 test('context fence blocks popup-first, WebSocket, and arbitrary EventSource traffic before a sentinel sees it', async (t) => {
   let sentinelRequests = 0;
   let sentinelUpgrades = 0;

@@ -440,7 +440,7 @@ export async function runPinnedPlaywrightFlow({
   const mediaPlayer = (playerId) => {
     if (typeof playerId !== 'string' || playerId.length < 1 || playerId.length > 256) return null;
     if (!mediaPlayers.has(playerId)) {
-      mediaPlayers.set(playerId, { properties: new Map(), sourceUrls: new Set(), playback: [] });
+      mediaPlayers.set(playerId, { properties: new Map(), lifecycleId: 0, currentLoad: null });
     }
     return mediaPlayers.get(playerId);
   };
@@ -467,15 +467,14 @@ export async function runPinnedPlaywrightFlow({
       let frameOwned = false;
       try { frameOwned = new URL(player.properties.get('kFrameUrl')).origin === trustedOrigin; } catch { /* not owned */ }
       if (!frameOwned) continue;
-      const sourceOwned = [...player.sourceUrls].some((value) => {
+      const sourceOwned = (() => {
         try {
-          const url = new URL(value);
+          const url = new URL(player.currentLoad?.sourceUrl);
           return url.origin === trustedOrigin && url.pathname === ownedMediaPath && !url.search && !url.hash;
         } catch { return false; }
-      });
-      if (sourceOwned && player.playback.some(({ afterExplicitPlay, name }) => (
-        afterExplicitPlay === true && name === 'kPlay'
-      ))) return true;
+      })();
+      if (sourceOwned && player.currentLoad?.loadAfterExplicitPlay === true
+        && player.currentLoad.playAfterExplicitPlay === true) return true;
     }
     return false;
   };
@@ -708,24 +707,60 @@ export async function runPinnedPlaywrightFlow({
       for (const event of events ?? []) {
         const parsed = parseMediaEvent(event?.value);
         if (!parsed) continue;
-        if (typeof testHooks?.acceptCdpMediaEvent === 'function') {
-          let accepted = false;
-          try { accepted = testHooks.acceptCdpMediaEvent(Object.freeze({ ...parsed })) === true; } catch {
+        let observations = [parsed];
+        if (typeof testHooks?.rewriteCdpMediaEvents === 'function') {
+          try {
+            observations = testHooks.rewriteCdpMediaEvents(Object.freeze({ ...parsed }));
+          } catch {
             failures.push('media-event-test-hook');
             continue;
           }
-          if (!accepted) continue;
+          if (!Array.isArray(observations) || observations.length > 4
+            || observations.some((observation) => !exactKeys(observation, [
+              'name', 'pipelineState', 'sourceUrl',
+            ]) || (observation.name !== null
+              && (typeof observation.name !== 'string' || observation.name.length > 128))
+              || (observation.pipelineState !== null
+                && (typeof observation.pipelineState !== 'string'
+                  || observation.pipelineState.length > 128))
+              || (observation.sourceUrl !== null
+                && (typeof observation.sourceUrl !== 'string'
+                  || observation.sourceUrl.length > 2_048)))) {
+            failures.push('media-event-test-hook');
+            continue;
+          }
         }
-        if (parsed.sourceUrl !== null) player.sourceUrls.add(parsed.sourceUrl);
-        if (isMediaPlaybackEvent(parsed)) {
-          const observation = {
-            name: parsed.name,
-            pipelineState: parsed.pipelineState,
-            afterExplicitPlay: explicitPlayStarted,
-          };
-          player.playback.push(observation);
-          mediaPlayback.push({ playerId, ...observation });
-          if (!explicitPlayStarted) failures.push('preplay-media');
+        for (const candidate of observations) {
+          const observed = Object.freeze({ ...candidate });
+          if (typeof testHooks?.acceptCdpMediaEvent === 'function') {
+            let accepted = false;
+            try { accepted = testHooks.acceptCdpMediaEvent(observed) === true; } catch {
+              failures.push('media-event-test-hook');
+              continue;
+            }
+            if (!accepted) continue;
+          }
+          if (observed.name === 'kLoad') {
+            player.lifecycleId += 1;
+            player.currentLoad = {
+              lifecycleId: player.lifecycleId,
+              sourceUrl: observed.sourceUrl,
+              loadAfterExplicitPlay: explicitPlayStarted,
+              playAfterExplicitPlay: false,
+            };
+          }
+          if (isMediaPlaybackEvent(observed)) {
+            const observation = {
+              name: observed.name,
+              pipelineState: observed.pipelineState,
+              afterExplicitPlay: explicitPlayStarted,
+            };
+            mediaPlayback.push({ playerId, ...observation });
+            if (observed.name === 'kPlay' && player.currentLoad !== null) {
+              player.currentLoad.playAfterExplicitPlay = explicitPlayStarted;
+            }
+            if (!explicitPlayStarted) failures.push('preplay-media');
+          }
         }
       }
     });
@@ -992,6 +1027,7 @@ export async function runPinnedPlaywrightFlow({
       } catch { return false; }
     });
     const playbackObserved = trustedNativePlayback && mediaPlayerHasOwnedPlayback(ownedMediaPath);
+    if (!playbackObserved) fail();
     assistantAudioReady = assistantAudioReady && playbackObserved;
 
     const unsupportedPriorIds = new Set(await page.locator('.message-row--assistant[data-message-id]').evaluateAll(
