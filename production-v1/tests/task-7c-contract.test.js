@@ -116,6 +116,23 @@ function canonicalMp3() {
   return canonicalMp3Fixture();
 }
 
+function strictVoiceEnvironment(overrides = {}) {
+  return {
+    V1_RELEASE_COMMIT_SHA: COMMIT,
+    V1_RELEASE_MANIFEST_FILE: '/app/release-manifest.json',
+    V1_RUNTIME_SERVICE_ACCOUNT: 'hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com',
+    V1_GOOGLE_CLOUD_PROJECT: 'motion-expert-hk-ltd-webpage',
+    V1_ASR_PROVIDER: 'google-stt-v2', V1_GOOGLE_STT_LOCATION: 'asia-southeast1',
+    V1_GOOGLE_STT_MODEL: 'chirp_2', V1_GOOGLE_STT_RECOGNIZER: '_',
+    V1_TTS_PROVIDER: 'google-tts', V1_GOOGLE_TTS_LOCATION: 'asia-southeast1',
+    V1_GOOGLE_TTS_VOICE_EN: 'en-US-Chirp3-HD-Achernar',
+    V1_GOOGLE_TTS_VOICE_YUE: 'yue-HK-Chirp3-HD-Achernar',
+    V1_GOOGLE_TTS_VOICE_CMN: 'cmn-CN-Chirp3-HD-Achernar',
+    V1_GOOGLE_CREDENTIAL_VERSION: 'runtime-sa-rotation-v1',
+    ...overrides,
+  };
+}
+
 test('Task 7C freezes the exact percentile SLOs and multilingual workload', () => {
   assert.equal(nearestRankP50([1, 2, 3, 4]), 2);
   assert.equal(nearestRankP50([]), null);
@@ -146,24 +163,27 @@ test('Task 7C freezes the exact percentile SLOs and multilingual workload', () =
 });
 
 test('preboot voice smoke configuration has no dependency or prior-evidence circularity', () => {
-  const config = loadVoiceSmokeConfiguration({
-    V1_RELEASE_COMMIT_SHA: COMMIT,
-    V1_RELEASE_MANIFEST_FILE: '/app/release-manifest.json',
-    V1_RUNTIME_SERVICE_ACCOUNT: 'hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com',
-    V1_GOOGLE_CLOUD_PROJECT: 'motion-expert-hk-ltd-webpage',
-    V1_ASR_PROVIDER: 'google-stt-v2', V1_GOOGLE_STT_LOCATION: 'asia-southeast1',
-    V1_GOOGLE_STT_MODEL: 'chirp_2', V1_GOOGLE_STT_RECOGNIZER: '_',
-    V1_TTS_PROVIDER: 'google-tts', V1_GOOGLE_TTS_LOCATION: 'asia-southeast1',
-    V1_GOOGLE_TTS_VOICE_EN: 'en-US-Chirp3-HD-Achernar',
-    V1_GOOGLE_TTS_VOICE_YUE: 'yue-HK-Chirp3-HD-Achernar',
-    V1_GOOGLE_TTS_VOICE_CMN: 'cmn-CN-Chirp3-HD-Achernar',
-    V1_GOOGLE_CREDENTIAL_VERSION: 'runtime-sa-rotation-v1',
-  });
+  const config = loadVoiceSmokeConfiguration(strictVoiceEnvironment());
   assert.equal(config.releaseCommitSha, COMMIT);
   assert.equal(config.asr.provider, 'google-stt-v2');
   assert.equal(config.tts.provider, 'google-tts');
   assert.equal(Object.hasOwn(config, 'databaseUrl'), false);
   assert.equal(Object.hasOwn(config, 'speechEvidence'), false);
+});
+
+test('strict Google voice smoke rejects every legacy provider API-key alias', () => {
+  for (const name of [
+    'V1_HKBU_API_KEY', 'HKBU_API_KEY',
+    'V1_AZURE_OPENAI_KEY', 'AZURE_OPENAI_KEY',
+    'V1_MINIMAX_API_KEY', 'MINIMAX_API_KEY',
+    'V1_AZURE_SPEECH_KEY', 'AZURE_SPEECH_KEY',
+  ]) {
+    assert.throws(
+      () => loadVoiceSmokeConfiguration(strictVoiceEnvironment({ [name]: 'must-not-be-accepted' })),
+      /ADC|API.key|provider|secret/i,
+      name,
+    );
+  }
 });
 
 test('real requester serializes immutable reply tuple and exact grounding IDs', async () => {

@@ -415,6 +415,7 @@ export function loadVoiceSmokeConfiguration(environment = process.env, { now = (
   if (env.V1_RUNTIME_SERVICE_ACCOUNT !== RUNTIME_SERVICE_ACCOUNT) {
     throw new Error('V1_RUNTIME_SERVICE_ACCOUNT must be the exact runtime service account');
   }
+  assertProductionProviderApiKeyFree(env);
   const asrProvider = asProvider(env.V1_ASR_PROVIDER);
   const ttsProvider = asProvider(env.V1_TTS_PROVIDER);
   if (asrProvider !== 'google-stt-v2' || ttsProvider !== 'google-tts') {
