@@ -133,6 +133,7 @@ function exactCloudSqlInstance() {
     state: 'RUNNABLE',
     ipAddresses: [{ type: 'PRIVATE', ipAddress: '10.25.0.3' }],
     settings: {
+      edition: 'ENTERPRISE',
       availabilityType: 'REGIONAL',
       tier: 'db-custom-1-3840',
       dataDiskType: 'PD_SSD',
@@ -479,7 +480,7 @@ test('the executable contract fixes the isolated GCP topology and least-privileg
   });
   assert.deepEqual(contract.resources.cloudSql, {
     instance: GCP_IDENTITY.cloudSqlInstance, database: GCP_IDENTITY.database, databaseVersion: 'POSTGRES_16',
-    availabilityType: 'REGIONAL', tier: 'db-custom-1-3840', diskType: 'PD_SSD',
+    edition: 'ENTERPRISE', availabilityType: 'REGIONAL', tier: 'db-custom-1-3840', diskType: 'PD_SSD',
     diskSizeGb: 20, storageAutoIncrease: true, privateIpOnly: true,
     sslMode: 'ENCRYPTED_ONLY', backupEnabled: true, backupStartTime: '18:00',
     pointInTimeRecovery: true, transactionLogRetentionDays: 7,
@@ -593,6 +594,7 @@ test('contract validation rejects identity drift, public access, broad workload 
     ['extra top-level surface', (value) => { value.unreviewed = true; }],
     ['public SQL', (value) => { value.resources.cloudSql.privateIpOnly = false; }],
     ['unencrypted SQL', (value) => { value.resources.cloudSql.sslMode = 'ALLOW_UNENCRYPTED_AND_ENCRYPTED'; }],
+    ['Cloud SQL edition drift', (value) => { value.resources.cloudSql.edition = 'ENTERPRISE_PLUS'; }],
     ['latest secret', (value) => { value.resources.cloudRun.secretVersionPolicy = 'latest'; }],
     ['missing readback', (value) => { value.safety.completePostCreateReadback = false; }],
     ['budget currency drift', (value) => { value.resources.budget.currency = 'USD'; }],
@@ -2675,7 +2677,7 @@ test('Cloud SQL creation uses the supported v1 REST insert with the named PSA ra
     body: {
       name: GCP_IDENTITY.cloudSqlInstance, region: 'asia-east2', databaseVersion: 'POSTGRES_16',
       settings: {
-        tier: 'db-custom-1-3840', availabilityType: 'REGIONAL',
+        edition: 'ENTERPRISE', tier: 'db-custom-1-3840', availabilityType: 'REGIONAL',
         dataDiskType: 'PD_SSD', dataDiskSizeGb: '20', storageAutoResize: true,
         ipConfiguration: {
           ipv4Enabled: false,
@@ -2692,6 +2694,44 @@ test('Cloud SQL creation uses the supported v1 REST insert with the named PSA ra
       },
     },
   }]);
+});
+
+test('Cloud SQL exact readback requires the Enterprise edition selected by the resource contract', async () => {
+  const plane = new GcpControlPlane({
+    contract: await contractFixture(), notificationChannel: CHANNEL,
+    gcloud: async () => { throw new Error('gcloud must not run'); },
+    request: async () => { throw new Error('REST must not run'); },
+  });
+  const exact = { ...exactCloudSqlInstance(), privateIp: '10.25.0.3' };
+  assert.equal(plane.compare('cloud-sql-instance', exact), true);
+
+  const missing = structuredClone(exact);
+  delete missing.settings.edition;
+  assert.equal(plane.compare('cloud-sql-instance', missing), false);
+
+  const plus = structuredClone(exact);
+  plus.settings.edition = 'ENTERPRISE_PLUS';
+  assert.equal(plane.compare('cloud-sql-instance', plus), false);
+});
+
+test('Cloud SQL v1 creation polls the canonical v1 operation endpoint', async () => {
+  const requests = [];
+  const plane = new GcpControlPlane({
+    contract: await contractFixture(), notificationChannel: CHANNEL,
+    gcloud: async () => { throw new Error('Cloud SQL create must not use gcloud argv'); },
+    request: async (input) => {
+      requests.push(input);
+      if (input.method === 'POST') return { name: 'operation-1', status: 'PENDING' };
+      return { name: 'operation-1', status: 'DONE' };
+    },
+  });
+
+  await plane.create('cloud-sql-instance');
+  assert.equal(requests[1]?.method, 'GET');
+  assert.equal(
+    requests[1]?.url,
+    `https://sqladmin.googleapis.com/v1/projects/${PROJECT}/operations/operation-1`,
+  );
 });
 
 test('global bucket ownership is target-project exact and a foreign collision cannot trigger storage or IAM mutation', async () => {

@@ -272,7 +272,7 @@ export function assertResourceContract(contract) {
   });
   requireExact(resources?.cloudSql, {
     instance: GCP_IDENTITY.cloudSqlInstance, database: GCP_IDENTITY.database, databaseVersion: 'POSTGRES_16',
-    availabilityType: 'REGIONAL', tier: 'db-custom-1-3840', diskType: 'PD_SSD',
+    edition: 'ENTERPRISE', availabilityType: 'REGIONAL', tier: 'db-custom-1-3840', diskType: 'PD_SSD',
     diskSizeGb: 20, storageAutoIncrease: true, privateIpOnly: true,
     sslMode: 'ENCRYPTED_ONLY', backupEnabled: true, backupStartTime: '18:00',
     pointInTimeRecovery: true, transactionLogRetentionDays: 7,
@@ -2815,7 +2815,7 @@ export class GcpControlPlane {
         body: {
           name: GCP_IDENTITY.cloudSqlInstance, region: 'asia-east2', databaseVersion: 'POSTGRES_16',
           settings: {
-            tier: 'db-custom-1-3840', availabilityType: 'REGIONAL',
+            edition: 'ENTERPRISE', tier: 'db-custom-1-3840', availabilityType: 'REGIONAL',
             dataDiskType: 'PD_SSD', dataDiskSizeGb: '20', storageAutoResize: true,
             ipConfiguration: {
               ipv4Enabled: false,
@@ -2998,7 +2998,8 @@ export class GcpControlPlane {
       && value.ipAddresses.every(({ type }) => type === 'PRIVATE');
     return value.name === GCP_IDENTITY.cloudSqlInstance && value.project === PROJECT
       && value.region === 'asia-east2' && value.databaseVersion === 'POSTGRES_16'
-      && value.state === 'RUNNABLE' && settings.availabilityType === 'REGIONAL'
+      && value.state === 'RUNNABLE' && settings.edition === 'ENTERPRISE'
+      && settings.availabilityType === 'REGIONAL'
       && settings.tier === 'db-custom-1-3840' && settings.dataDiskType === 'PD_SSD'
       && Number(settings.dataDiskSizeGb) === 20 && settings.storageAutoResize === true
       && ip.ipv4Enabled === false
@@ -3133,6 +3134,7 @@ export class GcpControlPlane {
 
   async #waitForSqlOperation(operation, apiVersion = 'v1beta4') {
     if (!['v1', 'v1beta4'].includes(apiVersion)) throw commandError('SQL_OPERATION_AMBIGUOUS');
+    const apiPath = apiVersion === 'v1' ? 'v1' : 'sql/v1beta4';
     const name = operation?.name;
     if (!name) throw commandError('SQL_OPERATION_AMBIGUOUS');
     for (let attempt = 0; attempt < 600; attempt += 1) {
@@ -3140,7 +3142,7 @@ export class GcpControlPlane {
         ? operation
         : await this.#rest({
           method: 'GET',
-          url: `https://sqladmin.googleapis.com/sql/${apiVersion}/projects/${PROJECT}/operations/${name}`,
+          url: `https://sqladmin.googleapis.com/${apiPath}/projects/${PROJECT}/operations/${name}`,
         });
       if (current?.status === 'DONE') {
         if (current.error?.errors?.length) throw commandError('SQL_OPERATION_FAILED');

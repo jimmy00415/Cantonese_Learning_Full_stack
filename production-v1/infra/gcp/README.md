@@ -429,10 +429,12 @@ Cloud SQL is created through the supported SQL Admin v1 `instances.insert`
 request because the installed GA Cloud SDK cannot bind the named PSA allocation
 on its create command. The request sets
 `settings.ipConfiguration.allocatedIpRange=hkbuddy-v1-google-services`,
-private IP only, `ENCRYPTED_ONLY`, HA, backup/PITR/WAL retention, retained and
-final backups, and deletion protection in one reviewed body. Its long-running
-operation must finish successfully before the complete instance readback is
-accepted.
+the explicit `ENTERPRISE` edition required by the `db-custom-1-3840` machine
+type on PostgreSQL 16, private IP only, `ENCRYPTED_ONLY`, HA,
+backup/PITR/WAL retention, retained and final backups, and deletion protection
+in one reviewed body. Its long-running v1 operation is polled through the
+canonical `/v1/projects/.../operations/...` endpoint and must finish
+successfully before the complete instance readback is accepted.
 
 Artifact Registry is created and read back as an exact writable
 `STANDARD_REPOSITORY`; a remote or virtual Docker repository with the same name

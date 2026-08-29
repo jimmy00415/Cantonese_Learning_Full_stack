@@ -118,6 +118,7 @@
       "instance": "hkbuddy-v1-pg",
       "database": "hkbuddy_v1",
       "databaseVersion": "POSTGRES_16",
+      "edition": "ENTERPRISE",
       "availabilityType": "REGIONAL",
       "tier": "db-custom-1-3840",
       "diskType": "PD_SSD",
