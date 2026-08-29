@@ -881,24 +881,28 @@ test('gcloud 553 observed managed-resource absences require the exact describe a
       name: `service account ${account}`,
       argv: ['iam', 'service-accounts', 'describe', account, `--project=${PROJECT}`, '--format=json'],
       stderr: `ERROR: (gcloud.iam.service-accounts.describe) NOT_FOUND: Unknown service account. ${authTail}`,
+      resourceIndex: 3,
       wrongResource: 'foreign@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com',
     })),
     {
       name: 'custom role',
       argv: ['iam', 'roles', 'describe', role, `--project=${PROJECT}`, '--format=json'],
       stderr: `ERROR: (gcloud.iam.roles.describe) NOT_FOUND: The role named projects/${PROJECT}/roles/${role} was not found. ${authTail}.`,
+      resourceIndex: 3,
       wrongResource: 'hkbuddyV1ForeignRole',
     },
     {
       name: 'Cloud SQL instance',
       argv: ['sql', 'instances', 'describe', GCP_IDENTITY.cloudSqlInstance, `--project=${PROJECT}`, '--format=json'],
       stderr: `ERROR: (gcloud.sql.instances.describe) HTTPError 404: The Cloud SQL instance does not exist. ${authTail}.`,
+      resourceIndex: 3,
       wrongResource: 'hkbuddy-v1-foreign-pg',
     },
     ...Object.values(GCP_IDENTITY.secrets).map((secret) => ({
       name: `secret ${secret}`,
       argv: ['secrets', 'describe', secret, `--project=${PROJECT}`, '--format=json'],
       stderr: `ERROR: (gcloud.secrets.describe) NOT_FOUND: Secret [projects/${PROJECT_NUMBER}/secrets/${secret}] not found. ${authTail}.`,
+      resourceIndex: 2,
       wrongResource: 'hkbuddy-v1-foreign-secret',
     })),
   ];
@@ -918,7 +922,7 @@ test('gcloud 553 observed managed-resource absences require the exact describe a
         (error) => error.code === 'NOT_FOUND',
       );
       for (const argv of [
-        fixture.argv.with(3, fixture.wrongResource),
+        fixture.argv.with(fixture.resourceIndex, fixture.wrongResource),
         fixture.argv.with(fixture.argv.length - 2, '--project=foreign-project'),
         fixture.argv.with(fixture.argv.length - 1, '--format=yaml'),
         [...fixture.argv, '--location=us-central1'],
