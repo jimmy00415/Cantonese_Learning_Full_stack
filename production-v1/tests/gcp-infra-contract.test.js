@@ -124,6 +124,40 @@ function enabledServiceRows(names) {
   }));
 }
 
+function exactCloudSqlInstance() {
+  return {
+    name: GCP_IDENTITY.cloudSqlInstance,
+    project: PROJECT,
+    region: GCP_IDENTITY.region,
+    databaseVersion: 'POSTGRES_16',
+    state: 'RUNNABLE',
+    ipAddresses: [{ type: 'PRIVATE', ipAddress: '10.25.0.3' }],
+    settings: {
+      availabilityType: 'REGIONAL',
+      tier: 'db-custom-1-3840',
+      dataDiskType: 'PD_SSD',
+      dataDiskSizeGb: '20',
+      storageAutoResize: true,
+      ipConfiguration: {
+        ipv4Enabled: false,
+        privateNetwork: `projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`,
+        allocatedIpRange: GCP_IDENTITY.psaRange,
+        sslMode: 'ENCRYPTED_ONLY',
+      },
+      backupConfiguration: {
+        enabled: true,
+        startTime: '18:00',
+        pointInTimeRecoveryEnabled: true,
+        transactionLogRetentionDays: 7,
+        backupRetentionSettings: { retentionUnit: 'COUNT', retainedBackups: 7 },
+      },
+      deletionProtectionEnabled: true,
+      retainBackupsOnDelete: true,
+      finalBackupConfig: { enabled: true, retentionDays: 30 },
+    },
+  };
+}
+
 function assetAuditControlPlane({
   contract, assets, enabledApis = ['iam.googleapis.com', 'serviceusage.googleapis.com'],
   gcloudRows = {}, restRows = {}, organizationResponse, billingAccountResponse,
@@ -184,6 +218,65 @@ function assetAuditControlPlane({
     },
   });
   return { plane, gcloudCalls, restCalls };
+}
+
+function dependencyAuditControlPlane({
+  contract,
+  enabledApis,
+  cloudSqlState = 'absent',
+  secretStates = {},
+  databaseForbidden = false,
+}) {
+  const fixture = assetAuditControlPlane({
+    contract,
+    assets: [],
+    enabledApis,
+    gcloudRows: {
+      'sql instances list': [],
+      [`secrets list --project=${PROJECT}`]: [],
+      'compute networks list': [],
+      'compute networks subnets': [],
+      'compute routes list': [],
+      'compute addresses list': [],
+      'services vpc-peerings list': [],
+    },
+    restRows: {
+      '/versions': { versions: [] },
+      '/users': { items: [] },
+    },
+  });
+  const baseGcloud = fixture.plane.gcloud;
+  fixture.plane.gcloud = async (args, options) => {
+    if (args[0] === 'compute' && args[1] === 'networks' && args[2] === 'subnets'
+      && args[3] === 'describe') {
+      fixture.gcloudCalls.push(args);
+      throw notFound();
+    }
+    if (args[0] === 'sql' && args[1] === 'instances' && args[2] === 'describe') {
+      fixture.gcloudCalls.push(args);
+      if (cloudSqlState === 'present') return exactCloudSqlInstance();
+      throw notFound();
+    }
+    if (args[0] === 'sql' && args[1] === 'databases' && args[2] === 'describe'
+      && databaseForbidden) {
+      fixture.gcloudCalls.push(args);
+      throw Object.assign(new Error('database forbidden'), { code: 'FORBIDDEN' });
+    }
+    if (args[0] === 'secrets' && args[1] === 'describe') {
+      fixture.gcloudCalls.push(args);
+      const secretId = args[2];
+      if (secretStates[secretId] === 'present') {
+        return {
+          name: `projects/${PROJECT}/secrets/${secretId}`,
+          replication: { automatic: {} },
+          labels: { application: 'hong-kong-buddy', environment: 'production-v1' },
+        };
+      }
+      throw notFound();
+    }
+    return baseGcloud(args, options);
+  };
+  return fixture;
 }
 
 test('central identity fixes the shared billed project resource island without legacy cloud identities', async () => {
@@ -758,6 +851,123 @@ test('gcloud classifies canonical absence only when describe argv and resource i
   }
 });
 
+test('current Artifact Registry generic 404 is absence only for the exact repository describe argv', async () => {
+  const stderr = 'ERROR: (gcloud.artifacts.repositories.describe) NOT_FOUND: Requested entity was not found. This command is authenticated as admin@motionexp.com which is the active account specified by the [core/account] property.\n';
+  const exactArgv = [
+    'artifacts', 'repositories', 'describe', GCP_IDENTITY.repository,
+    '--location=asia-east2', `--project=${PROJECT}`, '--format=json',
+  ];
+  const executor = createGcloudExecutor({
+    executable: 'python.exe', prefixArgs: ['C:/gcloud/lib/gcloud.py'],
+    execFile: async () => { const error = new Error('gcloud failed'); error.stderr = stderr; throw error; },
+  });
+
+  await assert.rejects(() => executor(exactArgv), (error) => error.code === 'NOT_FOUND');
+  for (const argv of [
+    exactArgv.with(3, 'hkbuddy-v1-foreign'),
+    exactArgv.with(4, '--location=us-central1'),
+    exactArgv.with(5, '--project=foreign-project'),
+    exactArgv.with(6, '--format=yaml'),
+  ]) {
+    await assert.rejects(() => executor(argv), (error) => error.code === 'TRANSPORT_AMBIGUOUS');
+  }
+});
+
+test('gcloud 553 observed managed-resource absences require the exact describe argv and stderr', async (t) => {
+  const authTail = 'This command is authenticated as admin@motionexp.com which is the active account specified by the [core/account] property';
+  const role = ACCEPTANCE_BUCKET_METADATA_ROLE.id;
+  const cases = [
+    ...Object.values(GCP_IDENTITY.serviceAccounts).map((account) => ({
+      name: `service account ${account}`,
+      argv: ['iam', 'service-accounts', 'describe', account, `--project=${PROJECT}`, '--format=json'],
+      stderr: `ERROR: (gcloud.iam.service-accounts.describe) NOT_FOUND: Unknown service account. ${authTail}`,
+      wrongResource: 'foreign@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com',
+    })),
+    {
+      name: 'custom role',
+      argv: ['iam', 'roles', 'describe', role, `--project=${PROJECT}`, '--format=json'],
+      stderr: `ERROR: (gcloud.iam.roles.describe) NOT_FOUND: The role named projects/${PROJECT}/roles/${role} was not found. ${authTail}.`,
+      wrongResource: 'hkbuddyV1ForeignRole',
+    },
+    {
+      name: 'Cloud SQL instance',
+      argv: ['sql', 'instances', 'describe', GCP_IDENTITY.cloudSqlInstance, `--project=${PROJECT}`, '--format=json'],
+      stderr: `ERROR: (gcloud.sql.instances.describe) HTTPError 404: The Cloud SQL instance does not exist. ${authTail}.`,
+      wrongResource: 'hkbuddy-v1-foreign-pg',
+    },
+    ...Object.values(GCP_IDENTITY.secrets).map((secret) => ({
+      name: `secret ${secret}`,
+      argv: ['secrets', 'describe', secret, `--project=${PROJECT}`, '--format=json'],
+      stderr: `ERROR: (gcloud.secrets.describe) NOT_FOUND: Secret [projects/${PROJECT_NUMBER}/secrets/${secret}] not found. ${authTail}.`,
+      wrongResource: 'hkbuddy-v1-foreign-secret',
+    })),
+  ];
+  const executorFor = (stderr) => createGcloudExecutor({
+    executable: 'python.exe', prefixArgs: ['C:/gcloud/lib/gcloud.py'],
+    execFile: async () => {
+      const error = new Error('gcloud failed');
+      error.stderr = `${stderr}\n`;
+      throw error;
+    },
+  });
+
+  for (const fixture of cases) {
+    await t.test(fixture.name, async () => {
+      await assert.rejects(
+        () => executorFor(fixture.stderr)(fixture.argv),
+        (error) => error.code === 'NOT_FOUND',
+      );
+      for (const argv of [
+        fixture.argv.with(3, fixture.wrongResource),
+        fixture.argv.with(fixture.argv.length - 2, '--project=foreign-project'),
+        fixture.argv.with(fixture.argv.length - 1, '--format=yaml'),
+        [...fixture.argv, '--location=us-central1'],
+      ]) {
+        await assert.rejects(
+          () => executorFor(fixture.stderr)(argv),
+          (error) => error.code === 'TRANSPORT_AMBIGUOUS',
+        );
+      }
+      await assert.rejects(
+        () => executorFor(fixture.stderr.replace('admin@motionexp.com', 'foreign@example.com'))(fixture.argv),
+        (error) => error.code === 'TRANSPORT_AMBIGUOUS',
+      );
+      await assert.rejects(
+        () => executorFor(fixture.stderr.slice(0, fixture.stderr.indexOf(' This command is authenticated as')))(fixture.argv),
+        (error) => error.code === 'TRANSPORT_AMBIGUOUS',
+      );
+    });
+  }
+
+  const secret = GCP_IDENTITY.secrets.session;
+  const secretArgv = ['secrets', 'describe', secret, `--project=${PROJECT}`, '--format=json'];
+  const secretStderr = `ERROR: (gcloud.secrets.describe) NOT_FOUND: Secret [projects/${PROJECT_NUMBER}/secrets/${secret}] not found. ${authTail}.`;
+  await assert.rejects(
+    () => executorFor(secretStderr.replace(PROJECT_NUMBER, '999999999999'))(secretArgv),
+    (error) => error.code === 'TRANSPORT_AMBIGUOUS',
+  );
+});
+
+test('gcloud 553 database authorization failure remains forbidden rather than absence', async () => {
+  const stderr = 'ERROR: (gcloud.sql.databases.describe) HTTPError 403: The client is not authorized to make this request. This command is authenticated as admin@motionexp.com which is the active account specified by the [core/account] property.\n';
+  const executor = createGcloudExecutor({
+    executable: 'python.exe', prefixArgs: ['C:/gcloud/lib/gcloud.py'],
+    execFile: async () => {
+      const error = new Error('gcloud failed');
+      error.stderr = stderr;
+      throw error;
+    },
+  });
+
+  await assert.rejects(
+    () => executor([
+      'sql', 'databases', 'describe', GCP_IDENTITY.database,
+      `--instance=${GCP_IDENTITY.cloudSqlInstance}`, `--project=${PROJECT}`, '--format=json',
+    ]),
+    (error) => error.code === 'FORBIDDEN',
+  );
+});
+
 test('real control-plane create-or-readback families receive canonical absence and perform zero mutation', async (t) => {
   const contract = await contractFixture();
   const fixtures = [
@@ -971,6 +1181,19 @@ function authenticatedRequestFixture(fetchImpl) {
     now: () => 1_000,
   });
 }
+
+test('authenticated REST bills every Google API request to the exact target quota project', async () => {
+  const target = 'https://billingbudgets.googleapis.com/v1/billingAccounts/example/budgets';
+  const fixture = authenticatedResponse(target);
+  let capturedHeaders;
+  const request = authenticatedRequestFixture(async (_url, options) => {
+    capturedHeaders = options.headers;
+    return fixture.response;
+  });
+
+  assert.deepEqual(await request({ method: 'GET', url: target }), { ok: true });
+  assert.equal(capturedHeaders['x-goog-user-project'], 'motion-expert-hk-ltd-webpage');
+});
 
 test('authenticated REST rejects redirected or drifted final URLs before consuming response bytes', async (t) => {
   const target = 'https://example.googleapis.com/v1/write';
@@ -1970,6 +2193,94 @@ test('pre-mutation audit rejects an older API snapshot even when the IAM bracket
   assert.equal(serviceRead, 3);
   assert.equal(fixture.gcloudCalls.some((args) => args.includes('enable')
     || args.includes('create') || args.includes('add-iam-policy-binding')), false);
+});
+
+test('pre-mutation audit skips database and users only when the SQL parent is proven absent', async (t) => {
+  const contract = await contractFixture();
+
+  await t.test('absent SQL instance skips every strict SQL descendant and performs zero mutation', async () => {
+    const fixture = dependencyAuditControlPlane({
+      contract,
+      enabledApis: ['iam.googleapis.com', 'serviceusage.googleapis.com', 'sqladmin.googleapis.com'],
+      cloudSqlState: 'absent',
+    });
+
+    assert.equal(await fixture.plane.auditPreMutationState(), true);
+    assert.equal(fixture.gcloudCalls.some((args) => (
+      args[0] === 'sql' && args[1] === 'databases' && args[2] === 'describe'
+    )), false);
+    assert.equal(fixture.restCalls.some(({ url }) => url.includes('/users')), false);
+    assert.equal(fixture.gcloudCalls.some((args) => args.includes('create') || args.includes('enable')), false);
+    assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+  });
+
+  await t.test('present SQL instance still reads the database and its 403 fails closed', async () => {
+    const fixture = dependencyAuditControlPlane({
+      contract,
+      enabledApis: ['iam.googleapis.com', 'serviceusage.googleapis.com', 'sqladmin.googleapis.com'],
+      cloudSqlState: 'present',
+      databaseForbidden: true,
+    });
+
+    await assert.rejects(
+      () => fixture.plane.auditPreMutationState(),
+      (error) => error.code === 'RESOURCE_STATE_UNKNOWN',
+    );
+    assert.equal(fixture.gcloudCalls.filter((args) => (
+      args[0] === 'sql' && args[1] === 'databases' && args[2] === 'describe'
+    )).length, 1);
+    assert.equal(fixture.gcloudCalls.some((args) => args.includes('create') || args.includes('enable')), false);
+  });
+});
+
+test('pre-mutation audit reads a secret version only when its exact container is present', async (t) => {
+  const contract = await contractFixture();
+  const target = GCP_IDENTITY.secrets.session;
+
+  await t.test('absent container skips its strict version descendant', async () => {
+    const fixture = dependencyAuditControlPlane({
+      contract,
+      enabledApis: ['iam.googleapis.com', 'serviceusage.googleapis.com', 'secretmanager.googleapis.com'],
+    });
+
+    assert.equal(await fixture.plane.auditPreMutationState(), true);
+    assert.equal(fixture.restCalls.some(({ url }) => url.includes(`/secrets/${target}/versions`)), false);
+  });
+
+  await t.test('present container still reads its version', async () => {
+    const fixture = dependencyAuditControlPlane({
+      contract,
+      enabledApis: ['iam.googleapis.com', 'serviceusage.googleapis.com', 'secretmanager.googleapis.com'],
+      secretStates: { [target]: 'present' },
+    });
+
+    assert.equal(await fixture.plane.auditPreMutationState(), true);
+    assert.equal(fixture.restCalls.filter(({ url }) => url.includes(`/secrets/${target}/versions`)).length, 1);
+  });
+});
+
+test('pre-mutation audit skips VPC descendants but still reads the independent PSA range', async () => {
+  const contract = await contractFixture();
+  const fixture = dependencyAuditControlPlane({
+    contract,
+    enabledApis: [
+      'iam.googleapis.com', 'serviceusage.googleapis.com',
+      'compute.googleapis.com', 'servicenetworking.googleapis.com',
+    ],
+  });
+
+  assert.equal(await fixture.plane.auditPreMutationState(), true);
+  assert.equal(fixture.gcloudCalls.some((args) => (
+    args[0] === 'compute' && args[1] === 'networks' && args[2] === 'subnets'
+      && args[3] === 'describe'
+  )), false);
+  assert.equal(fixture.gcloudCalls.some((args) => (
+    args[0] === 'services' && args[1] === 'vpc-peerings' && args[2] === 'list'
+  )), false);
+  assert.equal(fixture.gcloudCalls.filter((args) => (
+    args[0] === 'compute' && args[1] === 'addresses' && args[2] === 'describe'
+  )).length, 1);
+  assert.equal(fixture.gcloudCalls.some((args) => args.includes('create') || args.includes('enable')), false);
 });
 
 test('final readback rejects dependency agents after their owning APIs become disabled', async () => {

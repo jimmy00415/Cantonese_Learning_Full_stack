@@ -464,12 +464,24 @@ function canonicalDescribeAbsence(argv, stderr) {
       ['artifacts', 'repositories', 'describe', GCP_IDENTITY.repository, '--location=asia-east2', projectFlag, formatFlag],
       `ERROR: (gcloud.artifacts.repositories.describe) NOT_FOUND: Repository [projects/${PROJECT}/locations/asia-east2/repositories/${GCP_IDENTITY.repository}] was not found.`,
     ],
-    ...Object.values(GCP_IDENTITY.serviceAccounts).map((account) => [[
-      'iam', 'service-accounts', 'describe', account, projectFlag, formatFlag,
-    ], `ERROR: (gcloud.iam.service-accounts.describe) NOT_FOUND: Service account [${account}] was not found in project [${PROJECT}].`]),
+    [
+      ['artifacts', 'repositories', 'describe', GCP_IDENTITY.repository, '--location=asia-east2', projectFlag, formatFlag],
+      `ERROR: (gcloud.artifacts.repositories.describe) NOT_FOUND: Requested entity was not found. This command is authenticated as ${REQUIRED_OPERATOR_ACCOUNT} which is the active account specified by the [core/account] property.`,
+    ],
+    ...Object.values(GCP_IDENTITY.serviceAccounts).flatMap((account) => {
+      const argv = ['iam', 'service-accounts', 'describe', account, projectFlag, formatFlag];
+      return [
+        [argv, `ERROR: (gcloud.iam.service-accounts.describe) NOT_FOUND: Service account [${account}] was not found in project [${PROJECT}].`],
+        [argv, `ERROR: (gcloud.iam.service-accounts.describe) NOT_FOUND: Unknown service account. This command is authenticated as ${REQUIRED_OPERATOR_ACCOUNT} which is the active account specified by the [core/account] property`],
+      ];
+    }),
     [
       ['iam', 'roles', 'describe', role, projectFlag, formatFlag],
       `ERROR: (gcloud.iam.roles.describe) NOT_FOUND: Role [projects/${PROJECT}/roles/${role}] was not found.`,
+    ],
+    [
+      ['iam', 'roles', 'describe', role, projectFlag, formatFlag],
+      `ERROR: (gcloud.iam.roles.describe) NOT_FOUND: The role named projects/${PROJECT}/roles/${role} was not found. This command is authenticated as ${REQUIRED_OPERATOR_ACCOUNT} which is the active account specified by the [core/account] property.`,
     ],
     [
       ['compute', 'networks', 'describe', GCP_IDENTITY.network, projectFlag, formatFlag],
@@ -488,6 +500,10 @@ function canonicalDescribeAbsence(argv, stderr) {
       `ERROR: (gcloud.sql.instances.describe) HTTPError 404: The resource [projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}] was not found.`,
     ],
     [
+      ['sql', 'instances', 'describe', GCP_IDENTITY.cloudSqlInstance, projectFlag, formatFlag],
+      `ERROR: (gcloud.sql.instances.describe) HTTPError 404: The Cloud SQL instance does not exist. This command is authenticated as ${REQUIRED_OPERATOR_ACCOUNT} which is the active account specified by the [core/account] property.`,
+    ],
+    [
       ['sql', 'databases', 'describe', GCP_IDENTITY.database, `--instance=${GCP_IDENTITY.cloudSqlInstance}`, projectFlag, formatFlag],
       `ERROR: (gcloud.sql.databases.describe) HTTPError 404: Database [projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}/databases/${GCP_IDENTITY.database}] was not found.`,
     ],
@@ -498,9 +514,13 @@ function canonicalDescribeAbsence(argv, stderr) {
         [argv, `ERROR: (gcloud.storage.buckets.describe) gs://${bucket} not found: 404.`],
       ];
     }),
-    ...Object.values(GCP_IDENTITY.secrets).map((secret) => [[
-      'secrets', 'describe', secret, projectFlag, formatFlag,
-    ], `ERROR: (gcloud.secrets.describe) NOT_FOUND: Secret [projects/${PROJECT}/secrets/${secret}] not found.`]),
+    ...Object.values(GCP_IDENTITY.secrets).flatMap((secret) => {
+      const argv = ['secrets', 'describe', secret, projectFlag, formatFlag];
+      return [
+        [argv, `ERROR: (gcloud.secrets.describe) NOT_FOUND: Secret [projects/${PROJECT}/secrets/${secret}] not found.`],
+        [argv, `ERROR: (gcloud.secrets.describe) NOT_FOUND: Secret [projects/${PROJECT_NUMBER}/secrets/${secret}] not found. This command is authenticated as ${REQUIRED_OPERATOR_ACCOUNT} which is the active account specified by the [core/account] property.`],
+      ];
+    }),
     ...Object.values(GCP_IDENTITY.jobs).map((job) => [[
       'run', 'jobs', 'describe', job, projectFlag, `--region=${GCP_IDENTITY.region}`, formatFlag,
     ], `ERROR: (gcloud.run.jobs.describe) Cannot find job [${job}].`]),
@@ -783,6 +803,7 @@ export function createGcloudAuthenticatedRequest({
         headers: {
           authorization: `Bearer ${token}`,
           accept: 'application/json',
+          'x-goog-user-project': PROJECT,
           ...(body === undefined ? {} : { 'content-type': 'application/json' }),
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -1820,6 +1841,15 @@ const STATIC_EXPECTED_STEPS = [
 
 export const EXPECTED_PROVISION_STEPS = Object.freeze(STATIC_EXPECTED_STEPS);
 
+function preMutationParent(id) {
+  if (id === 'subnet' || id === 'psa-connection') return 'vpc';
+  if (id === 'database' || id.startsWith('db-user:')) return 'cloud-sql-instance';
+  if (id.startsWith('secret-version:')) {
+    return `secret-container:${id.slice('secret-version:'.length)}`;
+  }
+  return null;
+}
+
 function parseArguments(argv) {
   if (!Array.isArray(argv) || argv.some((value) => typeof value !== 'string')) return { valid: false };
   let confirmed = false;
@@ -2248,19 +2278,29 @@ export class GcpControlPlane {
       notificationChannel: canonicalMonitoringChannelName(notificationChannel),
       secretVersions: {},
     };
+    const auditStatuses = new Map();
     for (const id of STATIC_EXPECTED_STEPS) {
       if (['project', 'billing', 'apis'].includes(id) || id.startsWith('iam:')) continue;
       if (id === 'notification-channel' && !notificationChannel) continue;
       const api = apiForProvisionStep(id);
       if (api && !enabledApis.has(api)) continue;
+      const parent = preMutationParent(id);
+      if (parent) {
+        const parentStatus = auditStatuses.get(parent);
+        if (parentStatus === 'absent') continue;
+        if (parentStatus !== 'present') throw commandError('RESOURCE_STATE_UNKNOWN');
+      }
       const current = await this.read(id, context);
       if (id === 'notification-channel' && current?.status !== 'present') {
         throw commandError('ALERT_CHANNEL_REQUIRED');
       }
-      if (current?.status === 'unknown') throw commandError('RESOURCE_STATE_UNKNOWN');
+      if (!['present', 'absent'].includes(current?.status)) {
+        throw commandError('RESOURCE_STATE_UNKNOWN');
+      }
       if (current?.status === 'present' && !this.compare(id, current.value, context)) {
         throw commandError('RESOURCE_COLLISION');
       }
+      auditStatuses.set(id, current.status);
     }
     return true;
   }
