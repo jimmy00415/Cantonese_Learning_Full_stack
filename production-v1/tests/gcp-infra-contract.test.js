@@ -4348,6 +4348,202 @@ test('real Compute inventory validates malformed rows and includes regional addr
   }
 });
 
+test('live default-IPv4 PSA readback and exact managed CIDRs remain preflight-idempotent', async () => {
+  const contract = await contractFixture();
+  const network = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`;
+  const region = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/regions/asia-east2`;
+  const livePsa = {
+    address: '10.25.0.0',
+    addressType: 'INTERNAL',
+    kind: 'compute#address',
+    name: GCP_IDENTITY.psaRange,
+    network,
+    networkTier: 'PREMIUM',
+    prefixLength: 16,
+    purpose: 'VPC_PEERING',
+    selfLink: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/addresses/${GCP_IDENTITY.psaRange}`,
+    status: 'RESERVED',
+  };
+  const readPlane = new GcpControlPlane({
+    contract,
+    notificationChannel: CHANNEL,
+    gcloud: async (args) => {
+      if (args[0] === 'compute' && args[1] === 'addresses' && args[2] === 'describe') return livePsa;
+      throw new Error(`unexpected gcloud ${args.join(' ')}`);
+    },
+    request: async () => { throw new Error('REST must not run'); },
+  });
+
+  const readback = await readPlane.read('psa-range');
+  assert.equal(readback.value.ipVersion, 'IPV4');
+  assert.equal(readPlane.compare('psa-range', readback.value), true);
+  assert.equal(readPlane.compare('psa-range', { ...livePsa, ipVersion: 'IPV6' }), false);
+  assert.equal(readPlane.compare('psa-range', { ...livePsa, address: '2001:db8::' }), false);
+  assert.equal(readPlane.compare('psa-range', { ...livePsa, address: '10.25.000.0' }), false);
+
+  const liveSubnet = {
+    allowSubnetCidrRoutesOverlap: false,
+    gatewayAddress: '10.24.0.1',
+    ipCidrRange: '10.24.0.0/26',
+    kind: 'compute#subnetwork',
+    name: GCP_IDENTITY.subnet,
+    network,
+    privateIpGoogleAccess: true,
+    privateIpv6GoogleAccess: 'DISABLE_GOOGLE_ACCESS',
+    purpose: 'PRIVATE',
+    region,
+    selfLink: `${region}/subnetworks/${GCP_IDENTITY.subnet}`,
+    stackType: 'IPV4_ONLY',
+  };
+  assert.equal(readPlane.compare('subnet', liveSubnet), true);
+  assert.equal(readPlane.compare('subnet', { ...liveSubnet, purpose: 'REGIONAL_MANAGED_PROXY' }), false);
+  assert.equal(readPlane.compare('subnet', { ...liveSubnet, stackType: 'IPV4_IPV6' }), false);
+  assert.equal(readPlane.compare('subnet', {
+    ...liveSubnet, secondaryIpRanges: [{ rangeName: 'foreign', ipCidrRange: '10.25.0.0/24' }],
+  }), false);
+  for (const [field, value] of [
+    ['reservedInternalRange', 'https://networkconnectivity.googleapis.com/v1/projects/foreign/locations/global/internalRanges/foreign'],
+    ['resolveSubnetMask', 'ALL_IP_RANGES'],
+    ['ipv6CidrRange', '2001:db8::/64'],
+    ['ipv6GceEndpoint', 'VM_AND_FR'],
+    ['ipCollection', `${region}/publicDelegatedPrefixes/foreign`],
+    ['systemReservedInternalIpv6Ranges', ['fd20::/64']],
+    ['systemReservedExternalIpv6Ranges', ['2001:db8::/64']],
+  ]) assert.equal(readPlane.compare('subnet', { ...liveSubnet, [field]: value }), false);
+
+  const exactInventory = {
+    'compute networks list': [{
+      name: GCP_IDENTITY.network, selfLink: network, autoCreateSubnetworks: false,
+    }],
+    'compute networks subnets': [liveSubnet],
+    'compute routes list': [{
+      name: 'default-route-r-41fc9f2f5f7a6a3d',
+      description: 'Default local route to the subnetwork 10.24.0.0/26.',
+      destRange: '10.24.0.0/26',
+      kind: 'compute#route',
+      network,
+      nextHopNetwork: network,
+      priority: 0,
+      selfLink: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/routes/default-route-r-41fc9f2f5f7a6a3d`,
+    }],
+    'compute addresses list': [livePsa],
+  };
+  const accepted = assetAuditControlPlane({
+    contract,
+    assets: [],
+    enabledApis: ['iam.googleapis.com', 'serviceusage.googleapis.com', 'compute.googleapis.com'],
+    gcloudRows: exactInventory,
+  });
+  assert.equal(await accepted.plane.auditPreMutationState(), true);
+  assert.equal(accepted.gcloudCalls.some((args) => args.includes('create') || args.includes('enable')), false);
+  assert.equal(accepted.restCalls.some(({ method }) => method !== 'GET'), false);
+
+  const missingManagedRoute = assetAuditControlPlane({
+    contract,
+    assets: [],
+    enabledApis: ['iam.googleapis.com', 'serviceusage.googleapis.com', 'compute.googleapis.com'],
+    gcloudRows: { ...exactInventory, 'compute routes list': [] },
+  });
+  await assert.rejects(
+    () => missingManagedRoute.plane.auditPreMutationState(),
+    (error) => error.code === 'CIDR_OVERLAP',
+  );
+
+  for (const routeDrift of [
+    { routeType: 'STATIC' },
+    { tags: ['foreign'] },
+  ]) {
+    const driftedManagedRoute = assetAuditControlPlane({
+      contract,
+      assets: [],
+      enabledApis: ['iam.googleapis.com', 'serviceusage.googleapis.com', 'compute.googleapis.com'],
+      gcloudRows: {
+        ...exactInventory,
+        'compute routes list': [{ ...exactInventory['compute routes list'][0], ...routeDrift }],
+      },
+    });
+    await assert.rejects(
+      () => driftedManagedRoute.plane.auditPreMutationState(),
+      (error) => error.code === 'CIDR_OVERLAP',
+    );
+  }
+
+  const explicitSubnetRouteType = assetAuditControlPlane({
+    contract,
+    assets: [],
+    enabledApis: ['iam.googleapis.com', 'serviceusage.googleapis.com', 'compute.googleapis.com'],
+    gcloudRows: {
+      ...exactInventory,
+      'compute routes list': [{ ...exactInventory['compute routes list'][0], routeType: 'SUBNET' }],
+    },
+  });
+  assert.equal(await explicitSubnetRouteType.plane.auditPreMutationState(), true);
+
+  const duplicateManagedRoute = assetAuditControlPlane({
+    contract,
+    assets: [],
+    enabledApis: ['iam.googleapis.com', 'serviceusage.googleapis.com', 'compute.googleapis.com'],
+    gcloudRows: {
+      ...exactInventory,
+      'compute routes list': [
+        ...exactInventory['compute routes list'],
+        {
+          ...exactInventory['compute routes list'][0],
+          name: 'default-route-r-aaaaaaaaaaaaaaaa',
+          selfLink: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/routes/default-route-r-aaaaaaaaaaaaaaaa`,
+        },
+      ],
+    },
+  });
+  await assert.rejects(
+    () => duplicateManagedRoute.plane.auditPreMutationState(),
+    (error) => error.code === 'CIDR_OVERLAP',
+  );
+
+  const foreignRouteOverlap = assetAuditControlPlane({
+    contract,
+    assets: [],
+    enabledApis: ['iam.googleapis.com', 'serviceusage.googleapis.com', 'compute.googleapis.com'],
+    gcloudRows: {
+      ...exactInventory,
+      'compute routes list': [
+        ...exactInventory['compute routes list'],
+        {
+          name: 'foreign-overlap-route', network,
+          destRange: '10.25.0.0/24',
+          nextHopVpnTunnel: `${region}/vpnTunnels/foreign-overlap`,
+        },
+      ],
+    },
+  });
+  await assert.rejects(
+    () => foreignRouteOverlap.plane.auditPreMutationState(),
+    (error) => error.code === 'CIDR_OVERLAP',
+  );
+
+  const foreignOverlap = assetAuditControlPlane({
+    contract,
+    assets: [],
+    enabledApis: ['iam.googleapis.com', 'serviceusage.googleapis.com', 'compute.googleapis.com'],
+    gcloudRows: {
+      ...exactInventory,
+      'compute networks subnets': [
+        ...exactInventory['compute networks subnets'],
+        {
+          name: 'foreign-overlap', network, region,
+          selfLink: `${region}/subnetworks/foreign-overlap`, ipCidrRange: '10.24.0.0/27',
+        },
+      ],
+    },
+  });
+  await assert.rejects(
+    () => foreignOverlap.plane.auditPreMutationState(),
+    (error) => error.code === 'CIDR_OVERLAP',
+  );
+  assert.equal(foreignOverlap.gcloudCalls.some((args) => args.includes('create') || args.includes('enable')), false);
+  assert.equal(foreignOverlap.restCalls.some(({ method }) => method !== 'GET'), false);
+});
+
 test('every internal RESERVED address family is canonical and participates in project-wide overlap checks', async (t) => {
   const contract = await contractFixture();
   const network = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/default`;

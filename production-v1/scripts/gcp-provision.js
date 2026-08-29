@@ -1284,6 +1284,16 @@ function plainComputeRow(value) {
     && Object.values(value).every((member) => member !== null);
 }
 
+function normalizeGcloudComputeAddress(value) {
+  if (!plainComputeRow(value) || Object.hasOwn(value, 'ipVersion')
+    || !canonicalIpv4(value.address)) return value;
+  return { ...value, ipVersion: 'IPV4' };
+}
+
+function normalizeGcloudComputeAddresses(values) {
+  return requireObjectList(values).map(normalizeGcloudComputeAddress);
+}
+
 function exactAddressScope(item, regional) {
   const hasRegion = Object.hasOwn(item, 'region');
   if (regional) {
@@ -1513,6 +1523,49 @@ function assertCidrNoOverlap({ desired, network, subnets, routes, addresses }) {
   }
 }
 
+function exactManagedSubnet(value) {
+  const network = `${COMPUTE_NETWORK_PREFIX}${GCP_IDENTITY.network}`;
+  const region = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/regions/asia-east2`;
+  return plainComputeRow(value)
+    && value.kind === 'compute#subnetwork'
+    && value.name === GCP_IDENTITY.subnet
+    && value.selfLink === `${region}/subnetworks/${GCP_IDENTITY.subnet}`
+    && value.network === network && value.region === region
+    && value.ipCidrRange === '10.24.0.0/26' && value.gatewayAddress === '10.24.0.1'
+    && value.privateIpGoogleAccess === true
+    && value.privateIpv6GoogleAccess === 'DISABLE_GOOGLE_ACCESS'
+    && value.allowSubnetCidrRoutesOverlap === false
+    && value.purpose === 'PRIVATE' && value.stackType === 'IPV4_ONLY'
+    && !Object.hasOwn(value, 'secondaryIpRanges')
+    && !Object.hasOwn(value, 'role')
+    && !Object.hasOwn(value, 'ipv6AccessType')
+    && !Object.hasOwn(value, 'internalIpv6Prefix')
+    && !Object.hasOwn(value, 'externalIpv6Prefix')
+    && !Object.hasOwn(value, 'reservedInternalRange')
+    && !Object.hasOwn(value, 'resolveSubnetMask')
+    && !Object.hasOwn(value, 'ipv6CidrRange')
+    && !Object.hasOwn(value, 'ipv6GceEndpoint')
+    && !Object.hasOwn(value, 'ipCollection')
+    && !Object.hasOwn(value, 'systemReservedInternalIpv6Ranges')
+    && !Object.hasOwn(value, 'systemReservedExternalIpv6Ranges');
+}
+
+function exactManagedSubnetLocalRoute(value) {
+  const network = `${COMPUTE_NETWORK_PREFIX}${GCP_IDENTITY.network}`;
+  return plainComputeRow(value)
+    && /^default-route(?:-r)?-[a-f0-9]{16}$/.test(value.name ?? '')
+    && value.selfLink === `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/routes/${value.name}`
+    && value.kind === 'compute#route'
+    && value.description === 'Default local route to the subnetwork 10.24.0.0/26.'
+    && value.destRange === '10.24.0.0/26'
+    && value.network === network && value.nextHopNetwork === network
+    && value.priority === 0
+    && (!Object.hasOwn(value, 'routeType') || value.routeType === 'SUBNET')
+    && !Object.hasOwn(value, 'tags')
+    && !Object.hasOwn(value, 'routeStatus')
+    && !Object.hasOwn(value, 'asPaths');
+}
+
 export function assertCidrAvailable({
   desired, network, networks, subnets, routes, addresses, kind = 'subnet',
 }) {
@@ -1535,9 +1588,30 @@ function assertProjectWideCidrAvailability({ networks, subnets, routes, addresse
     routes: requireObjectList(routes), addresses: requireObjectList(addresses),
   };
   const allNetworks = validateComputeInventory(inventory);
+  const managedNetwork = `${COMPUTE_NETWORK_PREFIX}${GCP_IDENTITY.network}`;
+  const exactSubnets = inventory.subnets.filter(exactManagedSubnet);
+  const exactSubnetRoutes = inventory.routes.filter(exactManagedSubnetLocalRoute);
+  const exactSubnetPair = exactSubnets.length === 1 && exactSubnetRoutes.length === 1;
+  const exactSubnetRoute = exactSubnetPair ? exactSubnetRoutes[0] : null;
+  const unmanagedInventory = {
+    ...inventory,
+    subnets: exactSubnetPair
+      ? inventory.subnets.filter((item) => !exactManagedSubnet(item))
+      : inventory.subnets,
+    routes: inventory.routes.filter((item) => item !== exactSubnetRoute),
+    addresses: inventory.addresses.filter((item) => !(
+      item.name === GCP_IDENTITY.psaRange
+      && item.selfLink === `${COMPUTE_GLOBAL_ADDRESS_PREFIX}${GCP_IDENTITY.psaRange}`
+      && item.address === '10.25.0.0' && item.prefixLength === 16
+      && item.addressType === 'INTERNAL' && item.ipVersion === 'IPV4'
+      && item.networkTier === 'PREMIUM' && item.status === 'RESERVED'
+      && item.purpose === 'VPC_PEERING' && !Object.hasOwn(item, 'region')
+      && item.network === managedNetwork
+    )),
+  };
   for (const network of allNetworks) {
-    assertCidrNoOverlap({ desired: '10.24.0.0/26', network, ...inventory });
-    assertCidrNoOverlap({ desired: '10.25.0.0/16', network, ...inventory });
+    assertCidrNoOverlap({ desired: '10.24.0.0/26', network, ...unmanagedInventory });
+    assertCidrNoOverlap({ desired: '10.25.0.0/16', network, ...unmanagedInventory });
   }
 }
 
@@ -2299,7 +2373,9 @@ export class GcpControlPlane {
         this.#gcloud(['compute', 'addresses', 'list', `--project=${PROJECT}`, '--format=json']),
       ]);
       const networkInventory = requireObjectList(networks);
-      assertProjectWideCidrAvailability({ networks, subnets, routes, addresses });
+      assertProjectWideCidrAvailability({
+        networks, subnets, routes, addresses: normalizeGcloudComputeAddresses(addresses),
+      });
       if (enabledApis.has('servicenetworking.googleapis.com')) {
         const peeringLists = await Promise.all(networkInventory.map(async ({ name }) => (
           requireServiceNetworkingConnections(await this.#gcloud([
@@ -2611,10 +2687,11 @@ export class GcpControlPlane {
       ]) };
     }
     if (id === 'psa-range') {
-      return { status: 'present', value: await this.#gcloud([
+      const value = await this.#gcloud([
         'compute', 'addresses', 'describe', GCP_IDENTITY.psaRange, '--global',
         `--project=${PROJECT}`, '--format=json',
-      ]) };
+      ]);
+      return { status: 'present', value: normalizeGcloudComputeAddress(value) };
     }
     if (id === 'psa-connection') {
       const values = await this.#gcloud([
@@ -2858,12 +2935,7 @@ export class GcpControlPlane {
     if (id === 'vpc') return value.name === GCP_IDENTITY.network
       && value.selfLink === `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`
       && value.autoCreateSubnetworks === false && String(value.routingConfig?.routingMode ?? '').toUpperCase() === 'REGIONAL';
-    if (id === 'subnet') return value.name === GCP_IDENTITY.subnet
-      && value.selfLink === `https://www.googleapis.com/compute/v1/projects/${PROJECT}/regions/asia-east2/subnetworks/${GCP_IDENTITY.subnet}`
-      && value.region === `https://www.googleapis.com/compute/v1/projects/${PROJECT}/regions/asia-east2`
-      && value.ipCidrRange === '10.24.0.0/26'
-      && value.privateIpGoogleAccess === true
-      && value.network === `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`;
+    if (id === 'subnet') return exactManagedSubnet(value);
     if (id === 'psa-range') {
       const network = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`;
       validateComputeAddressInventory({
@@ -3337,7 +3409,7 @@ export class GcpControlPlane {
       kind,
       network: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`,
       networks: requireObjectList(networks), subnets: requireObjectList(subnets), routes: requireObjectList(routes),
-      addresses: requireObjectList(addresses),
+      addresses: normalizeGcloudComputeAddresses(addresses),
     });
   }
 
