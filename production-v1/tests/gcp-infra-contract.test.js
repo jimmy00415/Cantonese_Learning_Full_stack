@@ -1688,7 +1688,10 @@ test('Monitoring REST readbacks bind generated IDs to canonical project-ID paren
   const exactBudget = {
     name: `billingAccounts/${GCP_IDENTITY.billingAccountId}/budgets/123456789`,
     displayName: 'Hong Kong Buddy Production V1 monthly guard',
-    budgetFilter: { projects: [ASSET_PROJECT], calendarPeriod: 'MONTH' },
+    budgetFilter: {
+      projects: [ASSET_PROJECT], calendarPeriod: 'MONTH',
+      creditTypesTreatment: 'INCLUDE_ALL_CREDITS',
+    },
     amount: { specifiedAmount: { currencyCode: 'HKD', units: '2300' } },
     thresholdRules: [
       { thresholdPercent: 0.5, spendBasis: 'CURRENT_SPEND' },
@@ -2766,7 +2769,10 @@ test('budget readback normalizes an omitted default-false notification field', a
   const budget = {
     name: `billingAccounts/${GCP_IDENTITY.billingAccountId}/budgets/123`,
     displayName: 'Hong Kong Buddy Production V1 monthly guard',
-    budgetFilter: { projects: ['projects/123456789012'], calendarPeriod: 'MONTH' },
+    budgetFilter: {
+      projects: ['projects/123456789012'], calendarPeriod: 'MONTH',
+      creditTypesTreatment: 'INCLUDE_ALL_CREDITS',
+    },
     amount: { specifiedAmount: { currencyCode: 'HKD', units: '2300' } },
     thresholdRules: [
       { thresholdPercent: 0.5, spendBasis: 'CURRENT_SPEND' },
@@ -2795,6 +2801,201 @@ test('budget readback normalizes an omitted default-false notification field', a
   await plane.read('project');
   const readback = await plane.read('budget');
   assert.deepEqual(readback, { status: 'present', value: { exact: true } });
+});
+
+test('budget readback accepts the observed INCLUDE_ALL_CREDITS filter exactly', async () => {
+  const budget = {
+    name: `billingAccounts/${GCP_IDENTITY.billingAccountId}/budgets/123456789`,
+    displayName: 'Hong Kong Buddy Production V1 monthly guard',
+    budgetFilter: {
+      projects: [`projects/${PROJECT_NUMBER}`],
+      calendarPeriod: 'MONTH',
+      creditTypesTreatment: 'INCLUDE_ALL_CREDITS',
+    },
+    amount: { specifiedAmount: { currencyCode: 'HKD', units: '2300' } },
+    thresholdRules: [
+      { thresholdPercent: 0.5, spendBasis: 'CURRENT_SPEND' },
+      { thresholdPercent: 0.8, spendBasis: 'CURRENT_SPEND' },
+      { thresholdPercent: 1, spendBasis: 'CURRENT_SPEND' },
+      { thresholdPercent: 1, spendBasis: 'FORECASTED_SPEND' },
+    ],
+    notificationsRule: { monitoringNotificationChannels: [CHANNEL] },
+  };
+  const plane = new GcpControlPlane({
+    contract: await contractFixture(), notificationChannel: CHANNEL,
+    gcloud: async (args) => {
+      if (args[0] === 'projects') return { projectId: PROJECT, projectNumber: PROJECT_NUMBER };
+      throw new Error('unexpected gcloud operation');
+    },
+    request: async () => ({ budgets: [budget] }),
+  });
+  await plane.read('project');
+
+  assert.deepEqual(await plane.read('budget'), { status: 'present', value: { exact: true } });
+});
+
+test('budget lifecycle adopts the observed filter, creates once, and rejects credit drift', async (t) => {
+  const contract = await contractFixture();
+  const exactBudget = {
+    name: `billingAccounts/${GCP_IDENTITY.billingAccountId}/budgets/123456789`,
+    displayName: 'Hong Kong Buddy Production V1 monthly guard',
+    budgetFilter: {
+      projects: [`projects/${PROJECT_NUMBER}`],
+      calendarPeriod: 'MONTH',
+      creditTypesTreatment: 'INCLUDE_ALL_CREDITS',
+    },
+    amount: { specifiedAmount: { currencyCode: 'HKD', units: '2300' } },
+    thresholdRules: [
+      { thresholdPercent: 0.5, spendBasis: 'CURRENT_SPEND' },
+      { thresholdPercent: 0.8, spendBasis: 'CURRENT_SPEND' },
+      { thresholdPercent: 1, spendBasis: 'CURRENT_SPEND' },
+      { thresholdPercent: 1, spendBasis: 'FORECASTED_SPEND' },
+    ],
+    notificationsRule: { monitoringNotificationChannels: [CHANNEL] },
+  };
+  const planeFor = (request) => new GcpControlPlane({
+    contract, notificationChannel: CHANNEL,
+    gcloud: async (args) => {
+      if (args[0] === 'projects') return { projectId: PROJECT, projectNumber: PROJECT_NUMBER };
+      throw new Error(`unexpected gcloud ${args.join(' ')}`);
+    },
+    request,
+  });
+
+  await t.test('existing exact budget is adopted with no POST', async () => {
+    const requests = [];
+    const plane = planeFor(async (input) => {
+      requests.push(input);
+      if (input.method === 'GET') return { budgets: [exactBudget] };
+      throw new Error('POST must not run');
+    });
+    await plane.read('project');
+    assert.deepEqual(await ensureExactResource({
+      id: 'budget', mutate: true,
+      read: () => plane.read('budget'),
+      create: () => plane.create('budget', { notificationChannel: CHANNEL }),
+      compare: (value) => plane.compare('budget', value),
+    }), { id: 'budget', status: 'unchanged' });
+    assert.deepEqual(requests.map(({ method }) => method), ['GET']);
+  });
+
+  await t.test('preflight inventory accepts the observed managed budget', async () => {
+    const fixture = assetAuditControlPlane({
+      contract, assets: [],
+      enabledApis: [
+        'iam.googleapis.com', 'serviceusage.googleapis.com', 'billingbudgets.googleapis.com',
+      ],
+      restRows: { '/budgets': { budgets: [exactBudget] } },
+    });
+    assert.equal(await fixture.plane.auditPreMutationState(), true);
+    assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+    assert.equal(fixture.gcloudCalls.some((args) => args.includes('create') || args.includes('enable')), false);
+  });
+
+  await t.test('first create sends the canonical filter and rerun never duplicates POST', async () => {
+    const requests = [];
+    let created = false;
+    const plane = planeFor(async (input) => {
+      requests.push(input);
+      if (input.method === 'GET') return { budgets: created ? [exactBudget] : [] };
+      if (input.method === 'POST') { created = true; return exactBudget; }
+      throw new Error(`unexpected REST method ${input.method}`);
+    });
+    await plane.read('project');
+    const operation = {
+      id: 'budget', mutate: true,
+      read: () => plane.read('budget'),
+      create: () => plane.create('budget', { notificationChannel: CHANNEL }),
+      compare: (value) => plane.compare('budget', value),
+    };
+    assert.deepEqual(await ensureExactResource(operation), { id: 'budget', status: 'created' });
+    assert.deepEqual(await ensureExactResource(operation), { id: 'budget', status: 'unchanged' });
+    const posts = requests.filter(({ method }) => method === 'POST');
+    assert.deepEqual(posts, [{
+      method: 'POST',
+      url: `https://billingbudgets.googleapis.com/v1/billingAccounts/${GCP_IDENTITY.billingAccountId}/budgets`,
+      body: {
+        displayName: 'Hong Kong Buddy Production V1 monthly guard',
+        budgetFilter: {
+          projects: [`projects/${PROJECT_NUMBER}`],
+          calendarPeriod: 'MONTH',
+          creditTypesTreatment: 'INCLUDE_ALL_CREDITS',
+        },
+        amount: { specifiedAmount: { currencyCode: 'HKD', units: '2300' } },
+        thresholdRules: [
+          { thresholdPercent: 0.5, spendBasis: 'CURRENT_SPEND' },
+          { thresholdPercent: 0.8, spendBasis: 'CURRENT_SPEND' },
+          { thresholdPercent: 1, spendBasis: 'CURRENT_SPEND' },
+          { thresholdPercent: 1, spendBasis: 'FORECASTED_SPEND' },
+        ],
+        notificationsRule: {
+          monitoringNotificationChannels: [CHANNEL], disableDefaultIamRecipients: false,
+        },
+      },
+    }]);
+  });
+
+  for (const [name, creditTypesTreatment] of [
+    ['missing', undefined],
+    ['wrong', 'EXCLUDE_SPECIFIED_CREDITS'],
+    ['malformed', 1],
+  ]) {
+    await t.test(`${name} credit type is drift before POST`, async () => {
+      const budget = structuredClone(exactBudget);
+      if (creditTypesTreatment === undefined) delete budget.budgetFilter.creditTypesTreatment;
+      else budget.budgetFilter.creditTypesTreatment = creditTypesTreatment;
+      const requests = [];
+      const plane = planeFor(async (input) => {
+        requests.push(input);
+        if (input.method === 'GET') return { budgets: [budget] };
+        throw new Error('POST must not run');
+      });
+      await plane.read('project');
+      await assert.rejects(
+        () => ensureExactResource({
+          id: 'budget', mutate: true,
+          read: () => plane.read('budget'),
+          create: () => plane.create('budget', { notificationChannel: CHANNEL }),
+          compare: (value) => plane.compare('budget', value),
+        }),
+        (error) => error.code === 'RESOURCE_DRIFT',
+      );
+      assert.equal(requests.some(({ method }) => method === 'POST'), false);
+
+      const fixture = assetAuditControlPlane({
+        contract, assets: [],
+        enabledApis: [
+          'iam.googleapis.com', 'serviceusage.googleapis.com', 'billingbudgets.googleapis.com',
+        ],
+        restRows: { '/budgets': { budgets: [budget] } },
+      });
+      await assert.rejects(
+        () => fixture.plane.auditPreMutationState(),
+        (error) => error.code === 'RESOURCE_COLLISION',
+      );
+      assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+    });
+  }
+
+  await t.test('duplicate exact budgets are drift and never POST', async () => {
+    const requests = [];
+    const plane = planeFor(async (input) => {
+      requests.push(input);
+      if (input.method === 'GET') return { budgets: [exactBudget, { ...exactBudget }] };
+      throw new Error('POST must not run');
+    });
+    await plane.read('project');
+    await assert.rejects(
+      () => ensureExactResource({
+        id: 'budget', mutate: true,
+        read: () => plane.read('budget'),
+        create: () => plane.create('budget', { notificationChannel: CHANNEL }),
+        compare: (value) => plane.compare('budget', value),
+      }),
+      (error) => error.code === 'RESOURCE_DRIFT',
+    );
+    assert.equal(requests.some(({ method }) => method === 'POST'), false);
+  });
 });
 
 test('budget authority never infers a project number from project name fields', async () => {

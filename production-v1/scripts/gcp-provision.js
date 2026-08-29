@@ -1687,7 +1687,10 @@ function assertBudgetInventory(budgets, projectNumber) {
     }
     if (hasManagedName(budget.displayName)
       && (budget.displayName !== 'Hong Kong Buddy Production V1 monthly guard'
-        || !exact(budget.budgetFilter, { projects: [`projects/${projectNumber}`], calendarPeriod: 'MONTH' }))) {
+        || !exact(budget.budgetFilter, {
+          projects: [`projects/${projectNumber}`], calendarPeriod: 'MONTH',
+          creditTypesTreatment: 'INCLUDE_ALL_CREDITS',
+        }))) {
       throw commandError('RESOURCE_COLLISION');
     }
   }
@@ -3279,7 +3282,10 @@ export class GcpControlPlane {
     if (!canonicalChannel) throw commandError('MONITORING_CHANNEL_INVALID');
     return {
       displayName: 'Hong Kong Buddy Production V1 monthly guard',
-      budgetFilter: { projects: [`projects/${this.#projectNumber()}`], calendarPeriod: 'MONTH' },
+      budgetFilter: {
+        projects: [`projects/${this.#projectNumber()}`], calendarPeriod: 'MONTH',
+        creditTypesTreatment: 'INCLUDE_ALL_CREDITS',
+      },
       amount: { specifiedAmount: { currencyCode: 'HKD', units: '2300' } },
       thresholdRules: [
         { thresholdPercent: 0.5, spendBasis: 'CURRENT_SPEND' },
