@@ -1607,6 +1607,38 @@ test('log alert policies use official event contracts and validate each filter r
     assert.deepEqual(requests.map(({ url }) => url), ['https://logging.googleapis.com/v2/entries:list']);
   });
 
+  await t.test('metric descriptor lookup preserves the canonical metric path before policy creation', async () => {
+    for (const policy of contract.resources.monitoring.policies.filter(({ metricType }) => metricType)) {
+      const requests = [];
+      const plane = new GcpControlPlane({
+        contract, notificationChannel: CHANNEL,
+        gcloud: async () => { throw new Error('gcloud must not run'); },
+        request: async (input) => {
+          requests.push(input);
+          if (input.url === `https://monitoring.googleapis.com/v3/projects/${PROJECT}/metricDescriptors/${policy.metricType}`) {
+            return { type: policy.metricType };
+          }
+          if (input.url === `https://monitoring.googleapis.com/v3/projects/${PROJECT}/alertPolicies`) {
+            return { name: `projects/${PROJECT}/alertPolicies/1` };
+          }
+          throw new Error('unexpected request');
+        },
+      });
+
+      await plane.create(`monitoring-policy:${policy.id}`, { notificationChannel: CHANNEL });
+      assert.deepEqual(requests.map(({ method, url }) => ({ method, url })), [
+        {
+          method: 'GET',
+          url: `https://monitoring.googleapis.com/v3/projects/${PROJECT}/metricDescriptors/${policy.metricType}`,
+        },
+        {
+          method: 'POST',
+          url: `https://monitoring.googleapis.com/v3/projects/${PROJECT}/alertPolicies`,
+        },
+      ]);
+    }
+  });
+
   await t.test('metric descriptor identity mismatch stops before Monitoring mutation', async () => {
     const requests = [];
     const plane = new GcpControlPlane({

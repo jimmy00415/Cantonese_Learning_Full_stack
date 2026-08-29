@@ -3232,9 +3232,10 @@ export class GcpControlPlane {
     if (policy.metricType) {
       let descriptor;
       try {
+        const metricDescriptorPath = policy.metricType.split('/').map(encodeURIComponent).join('/');
         descriptor = await this.#rest({
           method: 'GET',
-          url: `https://monitoring.googleapis.com/v3/projects/${PROJECT}/metricDescriptors/${encodeURIComponent(policy.metricType)}`,
+          url: `https://monitoring.googleapis.com/v3/projects/${PROJECT}/metricDescriptors/${metricDescriptorPath}`,
         });
       } catch {
         throw commandError('MONITORING_METRIC_DESCRIPTOR_UNVERIFIED');
