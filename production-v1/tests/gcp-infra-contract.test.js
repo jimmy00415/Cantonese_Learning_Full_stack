@@ -3884,6 +3884,33 @@ test('Cloud Asset retrieval is exhaustive and exactly 1000 valid rows cannot imp
   assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
 });
 
+test('Cloud Asset accepts the live Artifact Registry resource display name exactly', async () => {
+  const contract = await contractFixture();
+  const repositoryPath = `projects/${PROJECT}/locations/asia-east2/repositories/${GCP_IDENTITY.repository}`;
+  const repository = cloudAsset({
+    name: `//artifactregistry.googleapis.com/${repositoryPath}`,
+    assetType: 'artifactregistry.googleapis.com/Repository',
+    displayName: repositoryPath,
+    description: 'Hong Kong Buddy production containers',
+  });
+  const accepted = assetAuditControlPlane({ contract, assets: [repository] });
+
+  assert.equal(await accepted.plane.auditPreMutationState(), true);
+  assert.equal(accepted.gcloudCalls.some((args) => args.includes('create') || args.includes('enable')), false);
+  assert.equal(accepted.restCalls.some(({ method }) => method !== 'GET'), false);
+
+  const foreignDisplayName = assetAuditControlPlane({
+    contract,
+    assets: [{ ...repository, displayName: repositoryPath.replace(`projects/${PROJECT}/`, 'projects/foreign/') }],
+  });
+  await assert.rejects(
+    () => foreignDisplayName.plane.auditPreMutationState(),
+    (error) => error.code === 'RESOURCE_COLLISION',
+  );
+  assert.equal(foreignDisplayName.gcloudCalls.some((args) => args.includes('create') || args.includes('enable')), false);
+  assert.equal(foreignDisplayName.restCalls.some(({ method }) => method !== 'GET'), false);
+});
+
 test('Cloud Asset managed identities require exact type name numeric project field canonical parent and metadata shapes', async (t) => {
   const contract = await contractFixture();
   const exactService = cloudAsset();

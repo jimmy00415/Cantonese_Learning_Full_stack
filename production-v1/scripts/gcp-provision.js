@@ -1718,6 +1718,8 @@ function exactAsset({ asset, assetType, name, location, parent = ASSET_PROJECT_P
 }
 
 function exactTopLevelManagedAsset(asset) {
+  const repositoryPath = `projects/${PROJECT}/locations/asia-east2/repositories/${GCP_IDENTITY.repository}`;
+  const repositoryDisplayNames = new Set([GCP_IDENTITY.repository, repositoryPath]);
   const serviceAccountDisplays = {
     'hkbuddy-v1-runtime': 'Hong Kong Buddy Cloud Run runtime',
     'hkbuddy-v1-build': 'Hong Kong Buddy Cloud Build',
@@ -1733,7 +1735,7 @@ function exactTopLevelManagedAsset(asset) {
   for (const service of [GCP_IDENTITY.service, GCP_IDENTITY.candidateService]) {
     if (exactAsset({ asset, assetType: 'run.googleapis.com/Service', name: `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/services/${service}`, location: 'asia-east2' })) return asset.displayName === undefined || asset.displayName === service;
   }
-  if (exactAsset({ asset, assetType: 'artifactregistry.googleapis.com/Repository', name: `//artifactregistry.googleapis.com/projects/${PROJECT}/locations/asia-east2/repositories/${GCP_IDENTITY.repository}`, location: 'asia-east2' })) return asset.displayName === undefined || asset.displayName === GCP_IDENTITY.repository;
+  if (exactAsset({ asset, assetType: 'artifactregistry.googleapis.com/Repository', name: `//artifactregistry.googleapis.com/${repositoryPath}`, location: 'asia-east2' })) return asset.displayName === undefined || repositoryDisplayNames.has(asset.displayName);
   if (exactAsset({ asset, assetType: 'storage.googleapis.com/Bucket', name: `//storage.googleapis.com/${GCP_IDENTITY.bucket}`, location: 'asia-east2' })) return true;
   if (exactAsset({ asset, assetType: 'storage.googleapis.com/Bucket', name: `//storage.googleapis.com/${GCP_IDENTITY.buildSourceBucket}`, location: 'asia-east2' })) return true;
   if (exactAsset({ asset, assetType: 'sqladmin.googleapis.com/Instance', name: `//sqladmin.googleapis.com/projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}`, location: 'asia-east2' })) return true;
