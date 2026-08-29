@@ -1075,6 +1075,59 @@ test('authenticated HTTPS control-plane identity is resolved without exposing it
   assert.equal(JSON.stringify(seen.filter(([kind]) => kind !== 'token-info')).includes('sensitive-access-token'), false);
 });
 
+test('Google Auth REST rejects every 404 provenance and enforces the exact quota project', async (t) => {
+  await t.test('quota project overrides client state and ignores caller authentication headers', async () => {
+    const captured = [];
+    const client = {
+      quotaProjectId: 'foreign-project',
+      request: async (input) => { captured.push(input); return { data: { ok: true } }; },
+    };
+    const request = createAuthenticatedRequest({ auth: { getClient: async () => client } });
+
+    assert.deepEqual(await request({
+      method: 'GET', url: 'https://example.googleapis.com/v1/read',
+      headers: {
+        authorization: 'Bearer caller-supplied-secret',
+        'x-goog-user-project': 'foreign-project',
+      },
+      authorization: 'Bearer alternate-caller-secret',
+    }), { ok: true });
+    assert.equal(client.quotaProjectId, 'motion-expert-hk-ltd-webpage');
+    assert.deepEqual(captured, [{
+      method: 'GET', url: 'https://example.googleapis.com/v1/read', data: undefined,
+      timeout: 120_000,
+      headers: { 'x-goog-user-project': 'motion-expert-hk-ltd-webpage' },
+    }]);
+    assert.equal(JSON.stringify(captured).includes('caller-supplied-secret'), false);
+    assert.equal(JSON.stringify(captured).includes('alternate-caller-secret'), false);
+    assert.equal(JSON.stringify(captured).includes('foreign-project'), false);
+  });
+
+  for (const [name, dependencyError] of [
+    ['bare NOT_FOUND', Object.assign(new Error('sensitive-bearer-token'), { code: 'NOT_FOUND' })],
+    ['HTTP status 404', Object.assign(new Error('private-request-secret'), { response: { status: 404 } })],
+  ]) {
+    await t.test(name, async () => {
+      const request = createAuthenticatedRequest({
+        auth: {
+          getClient: async () => ({
+            quotaProjectId: 'foreign-project',
+            request: async () => { throw dependencyError; },
+          }),
+        },
+      });
+      await assert.rejects(
+        () => request({ method: 'GET', url: 'https://example.googleapis.com/v1/read' }),
+        (error) => error.code === 'TRANSPORT_AMBIGUOUS'
+          && !String(error).includes('sensitive-bearer-token')
+          && !String(error).includes('private-request-secret')
+          && !JSON.stringify(error).includes('sensitive-bearer-token')
+          && !JSON.stringify(error).includes('private-request-secret'),
+      );
+    });
+  }
+});
+
 test('default-style HTTPS authentication reuses the exact gcloud account without putting bearer data in argv', async () => {
   const execCalls = [];
   const fetchCalls = [];
@@ -1197,6 +1250,27 @@ test('authenticated REST bills every Google API request to the exact target quot
 
   assert.deepEqual(await request({ method: 'GET', url: target }), { ok: true });
   assert.equal(capturedHeaders['x-goog-user-project'], 'motion-expert-hk-ltd-webpage');
+});
+
+test('direct-fetch authenticated REST treats a bounded Google 404 as ambiguous', async () => {
+  const target = 'https://example.googleapis.com/v1/read';
+  const privateDetail = 'private-response-detail';
+  const bytes = Buffer.from(JSON.stringify({
+    error: { code: 404, message: privateDetail, status: 'NOT_FOUND' },
+  }));
+  const fixture = authenticatedResponse(target, {
+    status: 404, chunks: [bytes], contentLength: bytes.length,
+  });
+  const request = authenticatedRequestFixture(async () => fixture.response);
+
+  await assert.rejects(
+    () => request({ method: 'GET', url: target }),
+    (error) => error.code === 'TRANSPORT_AMBIGUOUS'
+      && !String(error).includes('sensitive-bearer-token')
+      && !String(error).includes(privateDetail)
+      && !JSON.stringify(error).includes('sensitive-bearer-token')
+      && !JSON.stringify(error).includes(privateDetail),
+  );
 });
 
 test('authenticated REST rejects redirected or drifted final URLs before consuming response bytes', async (t) => {
@@ -2851,6 +2925,81 @@ test('malformed successful list responses are ambiguous and can never trigger du
         (error) => error.code === 'PAGINATION_AMBIGUOUS',
       );
       assert.equal(requests.every(({ method }) => method === 'GET'), true);
+    });
+  }
+});
+
+test('REST NOT_FOUND injection cannot prove absence for any REST-backed resource', async (t) => {
+  const contract = await contractFixture();
+  for (const id of [
+    'notification-channel',
+    'monitoring-policy:sql-backup-failure',
+    'budget',
+    `secret-version:${GCP_IDENTITY.secrets.session}`,
+    'db-user:hkbuddy_app',
+  ]) {
+    await t.test(id, async () => {
+      const restCalls = [];
+      const gcloudCalls = [];
+      const plane = new GcpControlPlane({
+        contract, notificationChannel: CHANNEL,
+        gcloud: async (args) => { gcloudCalls.push(args); throw new Error('gcloud must not run'); },
+        request: async (input) => {
+          restCalls.push(input);
+          throw Object.assign(new Error('private-request-secret'), { code: 'NOT_FOUND' });
+        },
+      });
+
+      await assert.rejects(
+        () => plane.read(id, { notificationChannel: CHANNEL }),
+        (error) => error.code === 'TRANSPORT_AMBIGUOUS'
+          && !String(error).includes('private-request-secret')
+          && !JSON.stringify(error).includes('private-request-secret'),
+      );
+      assert.equal(restCalls.length, 1);
+      assert.equal(restCalls.every(({ method }) => method === 'GET'), true);
+      assert.deepEqual(gcloudCalls, []);
+    });
+  }
+});
+
+test('canonical gcloud describe absence remains authoritative for control-plane reads', async () => {
+  const executor = createGcloudExecutor({
+    executable: 'python.exe', prefixArgs: ['C:/gcloud/lib/gcloud.py'],
+    execFile: async () => {
+      const error = new Error('gcloud failed');
+      error.stderr = `ERROR: (gcloud.artifacts.repositories.describe) NOT_FOUND: Repository [projects/${PROJECT}/locations/asia-east2/repositories/${GCP_IDENTITY.repository}] was not found.\n`;
+      throw error;
+    },
+  });
+  const plane = new GcpControlPlane({
+    contract: await contractFixture(), notificationChannel: CHANNEL,
+    gcloud: executor,
+    request: async () => { throw new Error('REST must not run'); },
+  });
+
+  assert.deepEqual(await plane.read('artifact-registry'), { status: 'absent' });
+});
+
+test('successful omitted REST collections remain authoritative absence evidence', async (t) => {
+  const contract = await contractFixture();
+  for (const id of [
+    'monitoring-policy:sql-backup-failure',
+    'budget',
+    `secret-version:${GCP_IDENTITY.secrets.session}`,
+    'db-user:hkbuddy_app',
+  ]) {
+    await t.test(id, async () => {
+      const restCalls = [];
+      const plane = new GcpControlPlane({
+        contract, notificationChannel: CHANNEL,
+        gcloud: async () => { throw new Error('gcloud must not run'); },
+        request: async (input) => { restCalls.push(input); return {}; },
+      });
+
+      assert.deepEqual(await plane.read(id), { status: 'absent' });
+      assert.equal(restCalls.length, 1);
+      assert.equal(restCalls.every(({ method }) => method === 'GET'), true);
     });
   }
 });

@@ -556,6 +556,12 @@ function classifyTransportError(error, argv = null) {
   return 'TRANSPORT_AMBIGUOUS';
 }
 
+function classifyRestTransportError(error) {
+  const status = Number(error?.response?.status ?? error?.status ?? error?.statusCode);
+  if (error?.code === 'NOT_FOUND' || status === 404) return 'TRANSPORT_AMBIGUOUS';
+  return classifyTransportError(error);
+}
+
 function secretBearingArgument(value) {
   return /--password(?:=|$)|-----BEGIN [A-Z ]*PRIVATE KEY-----|["']?private_key["']?\s*[:=]/i.test(value)
     || /postgres(?:ql)?:\/\/[^/@:]+:[^/@]+@/i.test(value);
@@ -827,7 +833,7 @@ export function createGcloudAuthenticatedRequest({
     const text = await readBoundedAuthenticatedResponse(response);
     if (!response.ok) {
       const error = commandError(response.status === 403 ? 'FORBIDDEN'
-        : response.status === 404 ? 'NOT_FOUND'
+        : response.status === 404 ? 'TRANSPORT_AMBIGUOUS'
           : response.status === 409 ? 'ALREADY_EXISTS' : 'TRANSPORT_AMBIGUOUS');
       throw error;
     }
@@ -907,10 +913,14 @@ export function createAuthenticatedRequest({ auth = new GoogleAuth({
     }
     try {
       const client = await getClient();
-      const response = await client.request({ method, url, data: body, timeout: 120_000 });
+      client.quotaProjectId = PROJECT;
+      const response = await client.request({
+        method, url, data: body, timeout: 120_000,
+        headers: { 'x-goog-user-project': PROJECT },
+      });
       return response.data;
     } catch (cause) {
-      throw commandError(classifyTransportError(cause));
+      throw commandError(classifyRestTransportError(cause));
     }
   };
   Object.defineProperty(request, 'getPrincipal', {
@@ -2335,7 +2345,12 @@ export class GcpControlPlane {
   }
 
   async #rest(input) {
-    return this.request(input);
+    try {
+      return await this.request(input);
+    } catch (error) {
+      if (error?.code === 'NOT_FOUND') throw commandError('TRANSPORT_AMBIGUOUS');
+      throw error;
+    }
   }
 
   async #listAll({ url, itemKey }) {
