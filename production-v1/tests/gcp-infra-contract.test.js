@@ -3059,35 +3059,200 @@ test('every non-paginated list readback rejects malformed shapes before any crea
   }
 });
 
-test('PSA connection readback selects only the exact service network and range and rejects duplicates', async () => {
-  const targetNetwork = `projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`;
+test('PSA connection readback accepts only the installed gcloud identity and fails closed on drift', async (t) => {
+  const contract = await contractFixture();
+  const targetNetwork = `projects/${PROJECT_NUMBER}/global/networks/${GCP_IDENTITY.network}`;
   const exactConnection = {
-    service: 'servicenetworking.googleapis.com', network: targetNetwork,
+    service: 'services/servicenetworking.googleapis.com', network: targetNetwork,
+    peering: 'servicenetworking-googleapis-com',
     reservedPeeringRanges: [GCP_IDENTITY.psaRange],
   };
-  for (const [listing, expected] of [
-    [[
-      { service: 'other.googleapis.com', network: targetNetwork, reservedPeeringRanges: ['foreign'] },
-      exactConnection,
-    ], { status: 'present', value: exactConnection }],
-    [[{ service: 'other.googleapis.com', network: targetNetwork, reservedPeeringRanges: ['foreign'] }], { status: 'absent' }],
-  ]) {
-    const plane = new GcpControlPlane({
-      contract: await contractFixture(), notificationChannel: NUMERIC_CHANNEL,
-      gcloud: async () => listing,
-      request: async () => { throw new Error('REST must not run'); },
-    });
-    assert.deepEqual(await plane.read('psa-connection'), expected);
-  }
-  const duplicatePlane = new GcpControlPlane({
-    contract: await contractFixture(), notificationChannel: NUMERIC_CHANNEL,
-    gcloud: async () => [exactConnection, { ...exactConnection }],
+  const planeFor = (listing) => new GcpControlPlane({
+    contract, notificationChannel: NUMERIC_CHANNEL,
+    gcloud: async () => listing,
     request: async () => { throw new Error('REST must not run'); },
   });
-  await assert.rejects(
-    () => duplicatePlane.read('psa-connection'),
-    (error) => error.code === 'LIST_RESPONSE_AMBIGUOUS',
-  );
+
+  await t.test('real gcloud 553/API representation is exact', async () => {
+    const plane = planeFor([exactConnection]);
+    const readback = await plane.read('psa-connection');
+    assert.deepEqual(readback, { status: 'present', value: exactConnection });
+    assert.equal(plane.compare('psa-connection', readback.value), true);
+  });
+
+  await t.test('an exact empty list is absence', async () => {
+    assert.deepEqual(await planeFor([]).read('psa-connection'), { status: 'absent' });
+  });
+
+  await t.test('first create reads empty, connects once, and accepts exact post-readback', async () => {
+    const calls = [];
+    let listing = [];
+    const plane = new GcpControlPlane({
+      contract, notificationChannel: NUMERIC_CHANNEL,
+      gcloud: async (args) => {
+        calls.push(args);
+        if (args[0] === 'services' && args[1] === 'vpc-peerings' && args[2] === 'list') {
+          return listing;
+        }
+        if (args[0] === 'services' && args[1] === 'vpc-peerings' && args[2] === 'connect') {
+          listing = [exactConnection];
+          return {};
+        }
+        throw new Error(`unexpected gcloud ${args.join(' ')}`);
+      },
+      request: async () => { throw new Error('REST must not run'); },
+    });
+    assert.deepEqual(await ensureExactResource({
+      id: 'psa-connection', mutate: true,
+      read: () => plane.read('psa-connection'),
+      create: () => plane.create('psa-connection'),
+      compare: (value) => plane.compare('psa-connection', value),
+    }), { id: 'psa-connection', status: 'created' });
+    assert.deepEqual(calls.filter((args) => args[2] === 'connect'), [[
+      'services', 'vpc-peerings', 'connect', `--network=${GCP_IDENTITY.network}`,
+      `--ranges=${GCP_IDENTITY.psaRange}`, '--service=servicenetworking.googleapis.com',
+      `--project=${PROJECT}`, '--format=json',
+    ]]);
+  });
+
+  await t.test('exact rerun reads once and never connects', async () => {
+    const calls = [];
+    const plane = new GcpControlPlane({
+      contract, notificationChannel: NUMERIC_CHANNEL,
+      gcloud: async (args) => { calls.push(args); return [exactConnection]; },
+      request: async () => { throw new Error('REST must not run'); },
+    });
+    assert.deepEqual(await ensureExactResource({
+      id: 'psa-connection', mutate: true,
+      read: () => plane.read('psa-connection'),
+      create: () => plane.create('psa-connection'),
+      compare: (value) => plane.compare('psa-connection', value),
+    }), { id: 'psa-connection', status: 'unchanged' });
+    assert.equal(calls.length, 1);
+    assert.equal(calls.some((args) => args[2] === 'connect'), false);
+  });
+
+  for (const [name, connection] of [
+    ['project-ID network', {
+      ...exactConnection,
+      network: `projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`,
+    }],
+    ['foreign project number', {
+      ...exactConnection,
+      network: `projects/999999999999/global/networks/${GCP_IDENTITY.network}`,
+    }],
+    ['foreign project ID', {
+      ...exactConnection,
+      network: `projects/foreign-project/global/networks/${GCP_IDENTITY.network}`,
+    }],
+    ['unprefixed service', { ...exactConnection, service: 'servicenetworking.googleapis.com' }],
+    ['malformed service', {
+      ...exactConnection,
+      service: 'services/servicenetworking.googleapis.com/connections/extra',
+    }],
+    ['missing peering', { ...exactConnection, peering: undefined }],
+    ['wrong peering', { ...exactConnection, peering: 'foreign-peering' }],
+    ['non-string peering', { ...exactConnection, peering: 1 }],
+  ]) {
+    await t.test(name, async () => {
+      await assert.rejects(
+        () => planeFor([connection]).read('psa-connection'),
+        (error) => error.code === 'LIST_RESPONSE_AMBIGUOUS',
+      );
+    });
+  }
+
+  await t.test('duplicate exact rows are ambiguous', async () => {
+    await assert.rejects(
+      () => planeFor([exactConnection, { ...exactConnection }]).read('psa-connection'),
+      (error) => error.code === 'LIST_RESPONSE_AMBIGUOUS',
+    );
+  });
+
+  await t.test('a wrong range is present drift and cannot authorize creation', async () => {
+    let creates = 0;
+    const plane = planeFor([{
+      ...exactConnection, reservedPeeringRanges: ['foreign-range'],
+    }]);
+    await assert.rejects(
+      () => ensureExactResource({
+        id: 'psa-connection', mutate: true,
+        read: () => plane.read('psa-connection'),
+        create: async () => { creates += 1; },
+        compare: (value) => plane.compare('psa-connection', value),
+      }),
+      (error) => error.code === 'RESOURCE_DRIFT',
+    );
+    assert.equal(creates, 0);
+  });
+
+  await t.test('a singular range field is never an exact API representation', async () => {
+    const plane = new GcpControlPlane({
+      contract, notificationChannel: NUMERIC_CHANNEL,
+      gcloud: async () => [{
+        service: exactConnection.service, network: exactConnection.network,
+        reservedPeeringRange: GCP_IDENTITY.psaRange,
+      }],
+      request: async () => { throw new Error('REST must not run'); },
+    });
+    await assert.rejects(
+      () => plane.read('psa-connection'),
+      (error) => error.code === 'LIST_RESPONSE_AMBIGUOUS',
+    );
+  });
+});
+
+test('pre-mutation PSA audit accepts only exact scoped installed-gcloud connection rows', async (t) => {
+  const contract = await contractFixture();
+  const network = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`;
+  const exactConnection = {
+    service: 'services/servicenetworking.googleapis.com',
+    network: `projects/${PROJECT_NUMBER}/global/networks/${GCP_IDENTITY.network}`,
+    peering: 'servicenetworking-googleapis-com',
+    reservedPeeringRanges: [GCP_IDENTITY.psaRange],
+  };
+  const fixtureFor = (connections) => assetAuditControlPlane({
+    contract, assets: [],
+    enabledApis: [
+      'iam.googleapis.com', 'serviceusage.googleapis.com',
+      'compute.googleapis.com', 'servicenetworking.googleapis.com',
+    ],
+    gcloudRows: {
+      'compute networks list': [{
+        name: GCP_IDENTITY.network, selfLink: network, autoCreateSubnetworks: false,
+      }],
+      'compute networks subnets': [],
+      'compute routes list': [],
+      'compute addresses list': [],
+      'services vpc-peerings list': connections,
+    },
+  });
+
+  await t.test('exact row', async () => {
+    const fixture = fixtureFor([exactConnection]);
+    assert.equal(await fixture.plane.auditPreMutationState(), true);
+    assert.equal(fixture.gcloudCalls.some((args) => args.includes('create') || args.includes('enable')), false);
+    assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+  });
+
+  for (const [name, connections] of [
+    ['malformed service', [{ ...exactConnection, service: 'servicenetworking.googleapis.com' }]],
+    ['foreign project number', [{
+      ...exactConnection,
+      network: `projects/999999999999/global/networks/${GCP_IDENTITY.network}`,
+    }]],
+    ['duplicate rows', [exactConnection, { ...exactConnection }]],
+  ]) {
+    await t.test(name, async () => {
+      const fixture = fixtureFor(connections);
+      await assert.rejects(
+        () => fixture.plane.auditPreMutationState(),
+        (error) => error.code === 'LIST_RESPONSE_AMBIGUOUS',
+      );
+      assert.equal(fixture.gcloudCalls.some((args) => args.includes('create') || args.includes('enable')), false);
+      assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+    });
+  }
 });
 
 function preflightGcloud({
@@ -3632,6 +3797,33 @@ test('Monitoring inventory rejects a managed channel for a different email addre
   );
 });
 
+test('Cloud Asset PSA connection identity requires the numeric project in name and parent', async () => {
+  const contract = await contractFixture();
+  const exactConnection = cloudAsset({
+    name: `//servicenetworking.googleapis.com/projects/${PROJECT_NUMBER}/global/networks/${GCP_IDENTITY.network}`,
+    assetType: 'servicenetworking.googleapis.com/Connection',
+    displayName: GCP_IDENTITY.network,
+    location: 'global',
+    parentFullResourceName: `//cloudresourcemanager.googleapis.com/projects/${PROJECT_NUMBER}`,
+    parentAssetType: 'cloudresourcemanager.googleapis.com/Project',
+  });
+  const accepted = assetAuditControlPlane({ contract, assets: [exactConnection] });
+  assert.equal(await accepted.plane.auditPreMutationState(), true);
+
+  const projectIdConnection = {
+    ...exactConnection,
+    name: `//servicenetworking.googleapis.com/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`,
+    parentFullResourceName: `//cloudresourcemanager.googleapis.com/projects/${PROJECT}`,
+  };
+  const rejected = assetAuditControlPlane({ contract, assets: [projectIdConnection] });
+  await assert.rejects(
+    () => rejected.plane.auditPreMutationState(),
+    (error) => error.code === 'RESOURCE_COLLISION',
+  );
+  assert.equal(rejected.gcloudCalls.some((args) => args.includes('create') || args.includes('enable')), false);
+  assert.equal(rejected.restCalls.some(({ method }) => method !== 'GET'), false);
+});
+
 test('every exact managed top-level Cloud Asset identity is rejected on every wrong asset type', async (t) => {
   const contract = await contractFixture();
   const identities = [
@@ -3643,7 +3835,12 @@ test('every exact managed top-level Cloud Asset identity is rejected on every wr
     ['network', `//compute.googleapis.com/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`, GCP_IDENTITY.network, 'global'],
     ['subnet', `//compute.googleapis.com/projects/${PROJECT}/regions/asia-east2/subnetworks/${GCP_IDENTITY.subnet}`, GCP_IDENTITY.subnet, 'asia-east2'],
     ['psa range', `//compute.googleapis.com/projects/${PROJECT}/global/addresses/${GCP_IDENTITY.psaRange}`, GCP_IDENTITY.psaRange, 'global'],
-    ['psa connection', `//servicenetworking.googleapis.com/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`, GCP_IDENTITY.network, 'global'],
+    [
+      'psa connection',
+      `//servicenetworking.googleapis.com/projects/${PROJECT_NUMBER}/global/networks/${GCP_IDENTITY.network}`,
+      GCP_IDENTITY.network, 'global',
+      `//cloudresourcemanager.googleapis.com/projects/${PROJECT_NUMBER}`,
+    ],
     ...Object.values(GCP_IDENTITY.serviceAccounts).map((email) => [
       `service account ${email}`, `//iam.googleapis.com/projects/${PROJECT}/serviceAccounts/${email}`,
       email.split('@')[0], 'global',
@@ -3658,12 +3855,13 @@ test('every exact managed top-level Cloud Asset identity is rejected on every wr
       `role ${id}`, `//iam.googleapis.com/projects/${PROJECT}/roles/${id}`, id, 'global',
     ]),
   ];
-  for (const [label, name, displayName, location] of identities) {
+  for (const [label, name, displayName, location, parentFullResourceName] of identities) {
     await t.test(label, async () => {
       const fixture = assetAuditControlPlane({
         contract,
         assets: [cloudAsset({
           name, displayName, location, assetType: 'pubsub.googleapis.com/Topic',
+          ...(parentFullResourceName === undefined ? {} : { parentFullResourceName }),
         })],
       });
       await assert.rejects(

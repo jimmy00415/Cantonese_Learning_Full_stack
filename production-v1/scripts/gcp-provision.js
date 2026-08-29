@@ -1177,6 +1177,27 @@ function sameNetwork(value, expected) {
   return candidate === normalized;
 }
 
+const SERVICE_NETWORKING_CONNECTION_SERVICE = 'services/servicenetworking.googleapis.com';
+const SERVICE_NETWORKING_PEERING = 'servicenetworking-googleapis-com';
+
+function serviceNetworkingNetworkName(network) {
+  return `projects/${PROJECT_NUMBER}/global/networks/${network}`;
+}
+
+function requireServiceNetworkingConnections(values, network) {
+  const listing = requireObjectList(values);
+  const expectedNetwork = serviceNetworkingNetworkName(network);
+  if (listing.length > 1
+    || listing.some((value) => value.service !== SERVICE_NETWORKING_CONNECTION_SERVICE
+    || value.network !== expectedNetwork
+    || value.peering !== SERVICE_NETWORKING_PEERING
+    || !Array.isArray(value.reservedPeeringRanges)
+    || value.reservedPeeringRanges.some((range) => typeof range !== 'string'))) {
+    throw commandError('LIST_RESPONSE_AMBIGUOUS');
+  }
+  return listing;
+}
+
 const COMPUTE_NAME = /^[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?$/;
 const COMPUTE_NETWORK_PREFIX = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/`;
 const COMPUTE_REGION = new RegExp(`^https://www\\.googleapis\\.com/compute/v1/projects/${PROJECT}/regions/[a-z]+(?:-[a-z]+)+[1-9]\\d*$`);
@@ -1716,7 +1737,11 @@ function exactTopLevelManagedAsset(asset) {
   if (exactAsset({ asset, assetType: 'compute.googleapis.com/Network', name: `//compute.googleapis.com/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`, location: 'global' })) return true;
   if (exactAsset({ asset, assetType: 'compute.googleapis.com/Subnetwork', name: `//compute.googleapis.com/projects/${PROJECT}/regions/asia-east2/subnetworks/${GCP_IDENTITY.subnet}`, location: 'asia-east2' })) return true;
   if (exactAsset({ asset, assetType: 'compute.googleapis.com/Address', name: `//compute.googleapis.com/projects/${PROJECT}/global/addresses/${GCP_IDENTITY.psaRange}`, location: 'global' })) return true;
-  if (exactAsset({ asset, assetType: 'servicenetworking.googleapis.com/Connection', name: `//servicenetworking.googleapis.com/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`, location: 'global' })) return true;
+  if (exactAsset({
+    asset, assetType: 'servicenetworking.googleapis.com/Connection',
+    name: `//servicenetworking.googleapis.com/projects/${PROJECT_NUMBER}/global/networks/${GCP_IDENTITY.network}`,
+    location: 'global', parent: `//cloudresourcemanager.googleapis.com/projects/${PROJECT_NUMBER}`,
+  })) return true;
   if (serviceAccounts.has(asset.name) && exactAsset({ asset, assetType: 'iam.googleapis.com/ServiceAccount', name: asset.name, location: 'global' })) return asset.displayName === undefined || asset.displayName === serviceAccounts.get(asset.name);
   if (secrets.has(asset.name) && exactAsset({ asset, assetType: 'secretmanager.googleapis.com/Secret', name: asset.name, location: 'global' })) return true;
   if (jobs.has(asset.name) && exactAsset({ asset, assetType: 'run.googleapis.com/Job', name: asset.name, location: 'asia-east2' })) return true;
@@ -2271,11 +2296,13 @@ export class GcpControlPlane {
       const networkInventory = requireObjectList(networks);
       assertProjectWideCidrAvailability({ networks, subnets, routes, addresses });
       if (enabledApis.has('servicenetworking.googleapis.com')) {
-        const peeringLists = await Promise.all(networkInventory.map(({ name }) => this.#gcloud([
-          'services', 'vpc-peerings', 'list', `--network=${name}`, '--service=servicenetworking.googleapis.com',
-          `--project=${PROJECT}`, '--format=json',
-        ])));
-        const targetNetwork = `projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`;
+        const peeringLists = await Promise.all(networkInventory.map(async ({ name }) => (
+          requireServiceNetworkingConnections(await this.#gcloud([
+            'services', 'vpc-peerings', 'list', `--network=${name}`, '--service=servicenetworking.googleapis.com',
+            `--project=${PROJECT}`, '--format=json',
+          ]), name)
+        )));
+        const targetNetwork = serviceNetworkingNetworkName(GCP_IDENTITY.network);
         if (peeringLists.flatMap(requireObjectList).some((peering) => (
           Array.isArray(peering?.reservedPeeringRanges)
           && peering.reservedPeeringRanges.includes(GCP_IDENTITY.psaRange)
@@ -2589,19 +2616,8 @@ export class GcpControlPlane {
         'services', 'vpc-peerings', 'list', `--network=${GCP_IDENTITY.network}`,
         '--service=servicenetworking.googleapis.com', `--project=${PROJECT}`, '--format=json',
       ]);
-      const listing = requireObjectList(values);
-      if (listing.some((value) => typeof value.service !== 'string'
-        || typeof value.network !== 'string'
-        || !Array.isArray(value.reservedPeeringRanges)
-        || value.reservedPeeringRanges.some((range) => typeof range !== 'string'))) {
-        throw commandError('LIST_RESPONSE_AMBIGUOUS');
-      }
-      const targetNetwork = `projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`;
-      const matches = listing.filter(({ service, network }) => (
-        service === 'servicenetworking.googleapis.com' && network === targetNetwork
-      ));
-      if (matches.length > 1) throw commandError('LIST_RESPONSE_AMBIGUOUS');
-      return matches.length === 1 ? { status: 'present', value: matches[0] } : { status: 'absent' };
+      const listing = requireServiceNetworkingConnections(values, GCP_IDENTITY.network);
+      return listing.length === 1 ? { status: 'present', value: listing[0] } : { status: 'absent' };
     }
     if (id === 'cloud-sql-instance') {
       const raw = await this.#gcloud([
@@ -2857,10 +2873,10 @@ export class GcpControlPlane {
         && value.network === network;
     }
     if (id === 'psa-connection') {
-      const ranges = value.reservedPeeringRanges ?? value.reservedPeeringRange ?? [];
-      return value.service === 'servicenetworking.googleapis.com'
-        && value.network === `projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`
-        && exact(ranges, [GCP_IDENTITY.psaRange]);
+      return value.service === SERVICE_NETWORKING_CONNECTION_SERVICE
+        && value.network === serviceNetworkingNetworkName(GCP_IDENTITY.network)
+        && value.peering === SERVICE_NETWORKING_PEERING
+        && exact(value.reservedPeeringRanges, [GCP_IDENTITY.psaRange]);
     }
     if (id === 'cloud-sql-instance') return this.#compareCloudSql(value);
     if (id === 'database') return value.name === GCP_IDENTITY.database && value.instance === GCP_IDENTITY.cloudSqlInstance
