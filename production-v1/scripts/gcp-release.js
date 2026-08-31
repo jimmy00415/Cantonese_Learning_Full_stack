@@ -26,8 +26,12 @@ import {
   writeAtomicCreateOnly,
 } from './release-state-store.js';
 import { GCP_IDENTITY } from '../src/gcp-identity.js';
+import { CANONICAL_WAV } from '../src/media/canonical-wav.js';
 import { finalizeReleaseEvidenceRecord } from '../src/services/release-evidence.js';
-import { finalizeEvidenceRecord } from '../src/services/voice-evidence.js';
+import {
+  finalizeEvidenceRecord,
+  validateIosVoiceEvidence,
+} from '../src/services/voice-evidence.js';
 import {
   LATENCY_ACCEPTANCE_CONTRACT,
   finalizeLatencyAcceptanceRecord,
@@ -1285,11 +1289,16 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
   operations.push(
     operation('inventory', 'inventory-publish:legacyInventory', [
       'secrets', 'versions', 'add', EVIDENCE_DEFINITIONS.legacyInventory.secret,
-      `--data-file=${legacyInventory.filePath}`, `--project=${PROJECT}`, '--format=json',
+      '--data-file=-', `--project=${PROJECT}`, '--format=json',
     ]),
     operation('inventory', 'inventory-readback:legacyInventory', [
       'secrets', 'versions', 'describe', legacyInventory.secretVersion,
       `--secret=${EVIDENCE_DEFINITIONS.legacyInventory.secret}`, `--project=${PROJECT}`, '--format=json',
+    ]),
+    operation('inventory', 'inventory-payload-readback:legacyInventory', [
+      'secrets', 'versions', 'access', legacyInventory.secretVersion,
+      `--secret=${EVIDENCE_DEFINITIONS.legacyInventory.secret}`, `--project=${PROJECT}`,
+      '--format=get(payload.data)',
     ]),
   );
   for (const [key, contract] of Object.entries(expectedJobs)) {
@@ -1326,11 +1335,16 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     if (key === 'legacyInventory') continue;
     operations.push(operation('evidence', `evidence-publish:${key}`, [
       'secrets', 'versions', 'add', definition.secret,
-      `--data-file=${evidence[key].filePath}`, `--project=${PROJECT}`, '--format=json',
+      '--data-file=-', `--project=${PROJECT}`, '--format=json',
     ]));
     operations.push(operation('evidence', `evidence-readback:${key}`, [
       'secrets', 'versions', 'describe', evidence[key].secretVersion,
       `--secret=${definition.secret}`, `--project=${PROJECT}`, '--format=json',
+    ]));
+    operations.push(operation('evidence', `evidence-payload-readback:${key}`, [
+      'secrets', 'versions', 'access', evidence[key].secretVersion,
+      `--secret=${definition.secret}`, `--project=${PROJECT}`,
+      '--format=get(payload.data)',
     ]));
   }
   for (const [key, output] of Object.entries(acceptanceOutputs)) {
@@ -2552,12 +2566,37 @@ export function validateEvidenceVersionReceipt(value, { secret, secretVersion } 
   return true;
 }
 
+export function validateEvidencePayloadReceipt(value, expected) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]+={0,2}$/.test(value)
+    || !expected || !DIGEST.test(String(expected.artifactSha256 ?? ''))
+    || !DIGEST.test(String(expected.objectSha256 ?? ''))) {
+    throw new Error('Evidence payload readback is invalid');
+  }
+  const unpadded = value.replace(/=+$/u, '');
+  let bytes;
+  try { bytes = Buffer.from(unpadded, 'base64url'); } catch {
+    throw new Error('Evidence payload readback is invalid');
+  }
+  if (bytes.length < 2 || bytes.length > 1024 * 1024
+    || bytes.toString('base64url') !== unpadded
+    || createHash('sha256').update(bytes).digest('hex') !== expected.objectSha256) {
+    throw new Error('Evidence payload readback is invalid');
+  }
+  return Object.freeze({
+    artifactSha256: expected.artifactSha256,
+    byteLength: bytes.length,
+    objectSha256: expected.objectSha256,
+  });
+}
+
 function semanticEvidenceFinalizer(kind) {
   return ['asrSmoke', 'ttsSmoke', 'iosVoiceAcceptance'].includes(kind)
     ? finalizeEvidenceRecord : finalizeReleaseEvidenceRecord;
 }
 
-export async function validateEvidenceArtifactFile(value, { releaseSha, kind = null } = {}) {
+export async function validateEvidenceArtifactFile(value, {
+  releaseSha, kind = null, iosVoiceMode = 'historical', iosVoiceNow,
+} = {}) {
   if (!exactKeys(value, ['artifactSha256', 'filePath', 'objectSha256'])
     || !isAbsoluteFile(value.filePath)
     || !DIGEST.test(String(value.artifactSha256 ?? ''))
@@ -2594,10 +2633,27 @@ export async function validateEvidenceArtifactFile(value, { releaseSha, kind = n
     || semanticDigest !== value.artifactSha256) {
     throw new Error('Evidence artifact file is invalid');
   }
+  if (kind === 'iosVoiceAcceptance') {
+    if (!['current', 'historical'].includes(iosVoiceMode)) {
+      throw new Error('Evidence artifact file is invalid');
+    }
+    if (iosVoiceMode === 'current') {
+      const currentTime = new Date(iosVoiceNow).getTime();
+      if (!Number.isFinite(currentTime) || !validateIosVoiceEvidence(record, {
+        expectedVersion: value.artifactSha256,
+        commitSha: releaseSha,
+        normalizerContractVersion: CANONICAL_WAV.contractVersion,
+        now: new Date(currentTime),
+      })) {
+        throw new Error('Evidence artifact file is invalid');
+      }
+    }
+  }
   return Object.freeze({
     artifactSha256: value.artifactSha256,
     objectSha256: value.objectSha256,
     byteLength: contents.length,
+    contentsBase64: contents.toString('base64'),
   });
 }
 
@@ -2663,15 +2719,157 @@ export async function inspectCollectedEvidenceArtifact(filePath, { releaseSha, k
   return Object.freeze({ filePath, artifactSha256, objectSha256, byteLength: contents.length });
 }
 
-async function validateEvidenceArtifactSet(evidence, { releaseSha } = {}) {
+async function validateEvidenceArtifactSet(evidence, {
+  releaseSha, iosVoiceMode = 'historical', iosVoiceNow,
+} = {}) {
+  if (!['current', 'historical'].includes(iosVoiceMode)
+    || (iosVoiceMode === 'current' && !Number.isFinite(new Date(iosVoiceNow).getTime()))) {
+    throw new Error('Evidence artifact set is invalid');
+  }
+  const validated = {};
   for (const [kind, value] of Object.entries(evidence)) {
-    await validateEvidenceArtifactFile({
+    validated[kind] = await validateEvidenceArtifactFile({
       filePath: value.filePath,
       artifactSha256: value.artifactSha256,
       objectSha256: value.objectSha256,
-    }, { releaseSha, kind });
+    }, { releaseSha, kind, iosVoiceMode, iosVoiceNow });
   }
-  return true;
+  return Object.freeze(validated);
+}
+
+function freezeEvidencePublicationPayloads(validation, evidence, selected) {
+  if (!validation || typeof validation !== 'object' || Array.isArray(validation)) {
+    throw new Error('Evidence publication payload is invalid');
+  }
+  const payloads = {};
+  for (const { id } of selected) {
+    if (!id.startsWith('inventory-publish:') && !id.startsWith('evidence-publish:')) continue;
+    const key = id.slice(id.indexOf(':') + 1);
+    const expected = evidence[key];
+    const member = validation[key];
+    if (!expected || !exactKeys(member, [
+      'artifactSha256', 'byteLength', 'contentsBase64', 'objectSha256',
+    ]) || member.artifactSha256 !== expected.artifactSha256
+      || member.objectSha256 !== expected.objectSha256
+      || !Number.isSafeInteger(member.byteLength) || member.byteLength < 2
+      || member.byteLength > 1024 * 1024 || typeof member.contentsBase64 !== 'string') {
+      throw new Error('Evidence publication payload is invalid');
+    }
+    const bytes = Buffer.from(member.contentsBase64, 'base64');
+    if (bytes.length !== member.byteLength
+      || bytes.toString('base64') !== member.contentsBase64
+      || createHash('sha256').update(bytes).digest('hex') !== expected.objectSha256) {
+      throw new Error('Evidence publication payload is invalid');
+    }
+    payloads[key] = member.contentsBase64;
+  }
+  return Object.freeze(payloads);
+}
+
+function evidencePublicationBytes(payloads, key, expected) {
+  const contentsBase64 = payloads?.[key];
+  if (typeof contentsBase64 !== 'string' || !expected) {
+    throw new Error('Evidence publication payload is invalid');
+  }
+  const bytes = Buffer.from(contentsBase64, 'base64');
+  if (bytes.length < 2 || bytes.length > 1024 * 1024
+    || bytes.toString('base64') !== contentsBase64
+    || createHash('sha256').update(bytes).digest('hex') !== expected.objectSha256) {
+    throw new Error('Evidence publication payload is invalid');
+  }
+  return bytes;
+}
+
+export function createReleaseGcloudExecutor({
+  environment = process.env,
+  ordinaryExecutor = createDefaultGcloudExecutor({ environment }),
+  execFileImpl = execFile,
+  resolveLaunch = resolveDefaultGcloudLaunch,
+} = {}) {
+  if (typeof ordinaryExecutor !== 'function' || typeof execFileImpl !== 'function'
+    || typeof resolveLaunch !== 'function') {
+    throw new Error('Release gcloud executor configuration is invalid');
+  }
+  return async (argv, options = {}) => {
+    const secrets = new Set(Object.values(EVIDENCE_DEFINITIONS).map(({ secret }) => secret));
+    if (Object.hasOwn(options, 'text')) {
+      if (!exactKeys(options, ['maxBuffer', 'text']) || options.text !== true
+        || options.maxBuffer !== 2 * 1024 * 1024
+        || !Array.isArray(argv) || argv.length !== 7
+        || argv[0] !== 'secrets' || argv[1] !== 'versions' || argv[2] !== 'access'
+        || !NUMERIC_VERSION.test(String(argv[3] ?? ''))
+        || typeof argv[4] !== 'string' || !argv[4].startsWith('--secret=')
+        || !secrets.has(argv[4].slice('--secret='.length))
+        || argv[5] !== `--project=${PROJECT}` || argv[6] !== '--format=get(payload.data)') {
+        throw new Error('Release gcloud text invocation is invalid');
+      }
+      const { executable, prefixArgs } = resolveLaunch(environment);
+      return new Promise((resolveExecution, rejectExecution) => {
+        try {
+          execFileImpl(executable, [...prefixArgs, ...argv, '--quiet'], {
+            encoding: 'utf8', maxBuffer: options.maxBuffer, windowsHide: true,
+            shell: false, timeout: 120_000,
+          }, (error, stdout) => {
+            const textValue = String(stdout ?? '').trim();
+            if (error || !textValue) {
+              rejectExecution(new Error('Release gcloud text invocation failed'));
+              return;
+            }
+            resolveExecution(textValue);
+          });
+        } catch {
+          rejectExecution(new Error('Release gcloud text invocation failed'));
+        }
+      });
+    }
+    if (!Object.hasOwn(options, 'stdin')) return ordinaryExecutor(argv, options);
+    const stdin = options.stdin;
+    if (!exactKeys(options, ['stdin']) || !Buffer.isBuffer(stdin)
+      || stdin.length < 2 || stdin.length > 1024 * 1024
+      || !Array.isArray(argv) || argv.length !== 7
+      || argv[0] !== 'secrets' || argv[1] !== 'versions' || argv[2] !== 'add'
+      || !secrets.has(argv[3]) || argv[4] !== '--data-file=-'
+      || argv[5] !== `--project=${PROJECT}` || argv[6] !== '--format=json') {
+      throw new Error('Release gcloud stdin invocation is invalid');
+    }
+    const { executable, prefixArgs } = resolveLaunch(environment);
+    return new Promise((resolveExecution, rejectExecution) => {
+      let settled = false;
+      const fail = () => {
+        if (settled) return;
+        settled = true;
+        rejectExecution(new Error('Release gcloud stdin invocation failed'));
+      };
+      const succeed = (value) => {
+        if (settled) return;
+        settled = true;
+        resolveExecution(value);
+      };
+      let child;
+      try {
+        child = execFileImpl(executable, [...prefixArgs, ...argv, '--quiet'], {
+          encoding: 'utf8', maxBuffer: 1024 * 1024, windowsHide: true,
+          shell: false, timeout: 120_000,
+        }, (error, stdout) => {
+          if (error) { fail(); return; }
+          const textValue = String(stdout ?? '').trim();
+          if (!textValue) { succeed(null); return; }
+          try { succeed(JSON.parse(textValue)); } catch { fail(); }
+        });
+      } catch { fail(); return; }
+      if (!child?.stdin || typeof child.stdin.end !== 'function'
+        || typeof child.stdin.once !== 'function') {
+        child?.kill?.();
+        fail();
+        return;
+      }
+      child.stdin.once('error', () => {
+        child?.kill?.();
+        fail();
+      });
+      child.stdin.end(Buffer.from(stdin));
+    });
+  };
 }
 
 function recentEvidenceTime(value, now, maximumAgeMs = 24 * 60 * 60_000) {
@@ -4124,8 +4322,10 @@ function plannedMutationAfterObservation(plan, operationId) {
     const key = operationId.slice(operationId.indexOf(':') + 1);
     const expected = plan.evidence[key];
     return Object.freeze({
+      artifactSha256: expected.artifactSha256,
       kind: 'secret-version',
       name: `projects/${PROJECT}/secrets/${expected.secret}/versions/${expected.secretVersion}`,
+      objectSha256: expected.objectSha256,
       state: 'ENABLED',
       version: expected.secretVersion,
     });
@@ -4269,9 +4469,19 @@ function canonicalMutationAfterObservation(plan, operationId, observed) {
     || operationId.startsWith('evidence-publish:')) {
     const key = operationId.slice(operationId.indexOf(':') + 1);
     const version = plan.evidence[key];
-    validateEvidenceVersionReceipt(observed, version);
+    validateEvidenceVersionReceipt(observed?.metadata, version);
+    const payload = observed?.payload;
+    if (!exactKeys(payload, ['artifactSha256', 'byteLength', 'objectSha256'])
+      || payload.artifactSha256 !== version.artifactSha256
+      || payload.objectSha256 !== version.objectSha256
+      || !Number.isSafeInteger(payload.byteLength) || payload.byteLength < 2
+      || payload.byteLength > 1024 * 1024) {
+      throw new Error('Secret payload after observation differs from plan');
+    }
     const actual = Object.freeze({
-      kind: 'secret-version', name: observed.name, state: observed.state,
+      artifactSha256: version.artifactSha256,
+      kind: 'secret-version', name: observed.metadata.name,
+      objectSha256: version.objectSha256, state: observed.metadata.state,
       version: version.secretVersion,
     });
     if (!exact(actual, expected)) throw new Error('Secret version after observation differs from plan');
@@ -4469,8 +4679,10 @@ function mutationSafeResult(plan, operationId, context) {
     const key = operationId.slice(operationId.indexOf(':') + 1);
     const expected = plan.evidence[key];
     return Object.freeze({
+      artifactSha256: expected.artifactSha256,
       kind: 'secret-version',
       name: `projects/${PROJECT}/secrets/${expected.secret}`,
+      objectSha256: expected.objectSha256,
       version: expected.secretVersion,
     });
   }
@@ -4579,9 +4791,13 @@ function validateExecutionSafeResult(safeResult, { job }) {
 }
 
 function validateSecretVersionSafeResult(safeResult, expected) {
-  if (!exactKeys(safeResult, ['kind', 'name', 'version'])
+  if (!exactKeys(safeResult, [
+    'artifactSha256', 'kind', 'name', 'objectSha256', 'version',
+  ])
     || safeResult.kind !== 'secret-version'
     || safeResult.name !== `projects/${PROJECT}/secrets/${expected.secret}`
+    || safeResult.artifactSha256 !== expected.artifactSha256
+    || safeResult.objectSha256 !== expected.objectSha256
     || safeResult.version !== expected.secretVersion) {
     throw new Error('Checkpointed Secret version identity is invalid');
   }
@@ -4607,12 +4823,20 @@ async function reconstructCheckpointedEvidenceVersion({
   const operationId = `${phase}-publish:${key}`;
   const expected = plan.evidence[key];
   const readback = plan.operations.find(({ id }) => id === `${phase}-readback:${key}`);
-  if (!expected || !readback) throw new Error('Checkpointed Secret version is unavailable');
+  const payloadReadback = plan.operations.find(
+    ({ id }) => id === `${phase}-payload-readback:${key}`,
+  );
+  if (!expected || !readback || !payloadReadback) {
+    throw new Error('Checkpointed Secret version is unavailable');
+  }
   validateSecretVersionSafeResult(
     checkpointSafeResult(records, attemptId, operationId), expected,
   );
   const receipt = await executor([...readback.argv]);
   validateEvidenceVersionReceipt(receipt, expected);
+  validateEvidencePayloadReceipt(await executor([...payloadReadback.argv], {
+    maxBuffer: 2 * 1024 * 1024, text: true,
+  }), expected);
   return expected.secretVersion;
 }
 
@@ -4662,10 +4886,10 @@ function journalCheckpointBoundary(operationId) {
     return operationId.replace(/-execute$/u, '-execution-readback');
   }
   if (operationId.startsWith('inventory-publish:')) {
-    return operationId.replace('inventory-publish:', 'inventory-readback:');
+    return operationId.replace('inventory-publish:', 'inventory-payload-readback:');
   }
   if (operationId.startsWith('evidence-publish:')) {
-    return operationId.replace('evidence-publish:', 'evidence-readback:');
+    return operationId.replace('evidence-publish:', 'evidence-payload-readback:');
   }
   if (operationId.startsWith('evidence-output-delete:')) {
     return operationId.replace('evidence-output-delete:', 'evidence-output-delete-readback:');
@@ -6890,7 +7114,7 @@ export async function runGcpRelease({
   let executor;
   try {
     executor = readinessExecutor ?? mobileExecutor ?? workloadPrivacyExecutor ?? execute ?? (selected.length > 0 || task8Attestations.workload !== undefined
-      ? createDefaultGcloudExecutor({ environment })
+      ? createReleaseGcloudExecutor({ environment })
       : async () => { throw new Error('No control-plane operation is planned'); });
   } catch {
     return publish(writeOutput, 1, {
@@ -6899,7 +7123,9 @@ export async function runGcpRelease({
     });
   }
   const completed = [];
+  let evidencePublicationPayloads = Object.freeze({});
   const evidenceSecretVersions = {};
+  const evidenceVersionReadbacks = new Map();
   const collectedEvidence = {};
   const collectedObjectReceipts = new Map();
   const candidateReadbacks = {};
@@ -7201,13 +7427,25 @@ export async function runGcpRelease({
       });
     } else if (selection.phase === 'inventory') {
       if (typeof verifyEvidence !== 'function') throw new Error('Evidence verifier is unavailable');
-      await verifyEvidence({ legacyInventory: plan.evidence.legacyInventory }, { releaseSha: plan.releaseSha });
+      const validation = await verifyEvidence({ legacyInventory: plan.evidence.legacyInventory }, {
+        releaseSha: plan.releaseSha, iosVoiceMode: 'historical',
+      });
+      evidencePublicationPayloads = freezeEvidencePublicationPayloads(
+        validation, plan.evidence, selected,
+      );
     } else if (selection.phase === 'evidence') {
       if (typeof verifyEvidence !== 'function') throw new Error('Evidence verifier is unavailable');
-      await verifyEvidence(plan.evidence, { releaseSha: plan.releaseSha });
+      const validation = await verifyEvidence(plan.evidence, {
+        releaseSha: plan.releaseSha, iosVoiceMode: 'current', iosVoiceNow: now(),
+      });
+      evidencePublicationPayloads = freezeEvidencePublicationPayloads(
+        validation, plan.evidence, selected,
+      );
     } else if (['candidate-cleanup', 'rollback'].includes(selection.phase)) {
       if (typeof verifyEvidence !== 'function') throw new Error('Evidence verifier is unavailable');
-      await verifyEvidence(plan.evidence, { releaseSha: plan.releaseSha });
+      await verifyEvidence(plan.evidence, {
+        releaseSha: plan.releaseSha, iosVoiceMode: 'historical',
+      });
     }
     for (const member of selected) {
       if (hasOpenJournalAttempt && !resumeBoundaryReached) {
@@ -7490,6 +7728,19 @@ export async function runGcpRelease({
               `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
             ]
             : member.argv));
+      const publicationKey = member.id.startsWith('inventory-publish:')
+        || member.id.startsWith('evidence-publish:')
+        ? member.id.slice(member.id.indexOf(':') + 1) : null;
+      const payloadReadbackKey = member.id.startsWith('inventory-payload-readback:')
+        || member.id.startsWith('evidence-payload-readback:')
+        ? member.id.slice(member.id.indexOf(':') + 1) : null;
+      const operationOptions = publicationKey !== null ? Object.freeze({
+        stdin: evidencePublicationBytes(
+          evidencePublicationPayloads, publicationKey, plan.evidence[publicationKey],
+        ),
+      }) : payloadReadbackKey !== null ? Object.freeze({
+        maxBuffer: 2 * 1024 * 1024, text: true,
+      }) : undefined;
       if (mutationAdapter !== null && !restartingMutation
         && selection.phase === 'promote' && finalPublicMutation) {
         const postIntentNow = now();
@@ -7505,11 +7756,11 @@ export async function runGcpRelease({
         try {
           if (!restartingMutation) {
             if (mutationAdapter === null) {
-              receipt = await executor(operationArgv);
+              receipt = await executor(operationArgv, operationOptions);
             } else {
               let execution;
               try {
-                execution = executor(operationArgv);
+                execution = executor(operationArgv, operationOptions);
               } finally {
                 mutationAttempted = true;
                 if (member.id === 'candidate-deploy') candidateDeployMutationAttempted = true;
@@ -7965,9 +8216,20 @@ export async function runGcpRelease({
         validateEvidenceVersionReceipt(receipt, expected);
         if (member.id.includes('-publish:')) {
           evidenceSecretVersions[key] = expected.secretVersion;
-        } else if (evidenceSecretVersions[key] !== expected.secretVersion) {
-          throw new Error('Evidence version readback is not publication-bound');
+        } else {
+          if (evidenceSecretVersions[key] !== expected.secretVersion) {
+            throw new Error('Evidence version readback is not publication-bound');
+          }
+          evidenceVersionReadbacks.set(key, receipt);
         }
+      }
+      if (/^(?:inventory|evidence)-payload-readback:/.test(member.id)) {
+        const key = member.id.slice(member.id.indexOf(':') + 1);
+        const expected = plan.evidence[key];
+        const metadata = evidenceVersionReadbacks.get(key);
+        if (!metadata) throw new Error('Evidence payload readback is not version-bound');
+        const payload = validateEvidencePayloadReceipt(receipt, expected);
+        receipt = Object.freeze({ metadata, payload });
       }
       if (pendingJournal !== null
         && journalCheckpointBoundary(pendingJournal.operationId) === member.id) {

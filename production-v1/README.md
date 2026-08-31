@@ -11,6 +11,120 @@ This directory is isolated from the legacy application. It has its own runtime,
 storage drivers, release evidence, reports, and deployment boundary. Do not point
 it at the legacy app, legacy PostgreSQL database, or legacy Blob container.
 
+## Cross-machine handoff — 2026-09-01
+
+This handoff separates code readiness from live GCP state. The branch to resume
+is `feat/production-v1-ai-senior`. Resolve and record its current commit with
+`git rev-parse HEAD` after pulling; release artifacts must use that clean,
+committed SHA and must not use an older local checkout.
+
+### Last confirmed live boundary
+
+- The selected host remains the shared GCP project
+  `motion-expert-hk-ltd-webpage` (`582852715831`) and the verified operations
+  email channel is
+  `projects/motion-expert-hk-ltd-webpage/notificationChannels/5363602469320935089`.
+- The V1 budget and alert policies, Artifact Registry repository, five service
+  accounts, acceptance metadata-reader custom role, VPC/subnet/PSA connection,
+  private HA PostgreSQL 16 instance and `hkbuddy_v1` database, both V1 buckets,
+  and all ten empty Secret containers were created and read back in earlier
+  guarded runs.
+- The latest confirmed provision attempt stopped with
+  `POST_CREATE_READBACK_FAILED` at `bucket-iam-baseline`. The media bucket had
+  accepted the IAM-policy write, after which the fixed operator lost effective
+  `storage.buckets.get`, `getIamPolicy`, and `setIamPolicy`; the build-source
+  bucket still had those three permissions through its generated convenience
+  bindings. No Secret version or `hkbuddy_app` / `hkbuddy_migrator` database
+  user was created.
+- The branch now contains a TDD-covered recovery: an exact three-permission
+  custom role plus one permanent project IAM binding whose condition is limited
+  to the two exact V1 bucket resource names. It runs before the full provision
+  audit, restores access without project-wide Storage Admin, then sanitizes both
+  local bucket policies. **That recovery code has not yet been executed live.**
+- No V1 Cloud Run Job, private candidate service, stable service, public V1 URL,
+  or production QR code exists. The legacy Azure app
+  `hkbuddy-pilot-0630` was not modified.
+- The original workstation's gcloud refresh token required reauthentication
+  before this handoff could take a final fresh inventory. Treat the bullets
+  above as the last confirmed snapshot and re-run the read-only preflight on the
+  new computer before accepting them as current.
+
+### Resume on the new computer
+
+From a fresh clone:
+
+```powershell
+git switch feat/production-v1-ai-senior
+git pull --ff-only
+cd production-v1
+npm ci
+$controlledBrowserRoot = 'D:\VS_PROJECT\Testing\HongKong_Buddy\.codex-task-5g-temp\playwright'
+$controlledTempRoot = 'D:\VS_PROJECT\Testing\HongKong_Buddy\.codex-task-5g-temp\temp'
+$controlledTmpRoot = 'D:\VS_PROJECT\Testing\HongKong_Buddy\.codex-task-5g-temp\tmp'
+New-Item -ItemType Directory -Force -Path $controlledBrowserRoot, $controlledTempRoot, $controlledTmpRoot | Out-Null
+$env:PLAYWRIGHT_BROWSERS_PATH = $controlledBrowserRoot
+$env:TEMP = $controlledTempRoot
+$env:TMP = $controlledTmpRoot
+node node_modules/playwright/cli.js install chromium
+npm run check
+npm test
+npm run security:dependencies
+git status --short
+```
+
+The test and security commands must finish successfully and `git status` must
+be empty before creating a frozen release archive. The full Task 8 browser
+evidence suite intentionally binds itself to the exact controlled `D:` browser
+cache and task-owned temporary roots above. A generic clone, or a computer
+without that `D:` path, cannot claim full `npm test` PASS. Do not weaken or skip
+that contract: focused GCP or release tests are useful diagnostics but are not a
+substitute for the full release gate. If the harness cannot be reproduced,
+record Task 8 as an outstanding external release gate.
+
+On Windows, create a separate Cloud SDK configuration and authenticate the
+fixed human operator again:
+
+```powershell
+$env:CLOUDSDK_CONFIG = Join-Path $env:LOCALAPPDATA 'gcloud-hkbuddy-production-v1'
+New-Item -ItemType Directory -Force -Path $env:CLOUDSDK_CONFIG | Out-Null
+gcloud auth login admin@motionexp.com
+gcloud config set account admin@motionexp.com
+gcloud config set project motion-expert-hk-ltd-webpage
+gcloud auth list --filter=status:ACTIVE
+gcloud config get-value project
+```
+
+Do not copy the old gcloud directory or reuse any pasted OAuth/verification
+code. Do not set impersonation, access-token-file, or credential-file overrides.
+Capture the read-only preflight first, but expect it may currently fail with
+`PREFLIGHT_INVENTORY_INVALID` when it reaches the known locked media-bucket IAM
+read. That expected failure is a snapshot, not permission to repair anything
+manually and not evidence that the rest of the inventory passed. Then use only
+the one exact confirmed resume command:
+
+```powershell
+npm run gcp:preflight -- --notification-channel=projects/motion-expert-hk-ltd-webpage/notificationChannels/5363602469320935089
+
+npm run gcp:provision -- --confirm-project=motion-expert-hk-ltd-webpage --notification-channel=projects/motion-expert-hk-ltd-webpage/notificationChannels/5363602469320935089
+```
+
+The confirmed command may first create the narrow operator bucket-IAM role and
+conditioned binding, then wait for Google IAM propagation. If it returns
+`OPERATOR_BUCKET_IAM_PROPAGATION_TIMEOUT`, preserve the resources, wait, and run
+the same command again; do not add `roles/storage.admin`, restore legacy
+convenience bindings, delete either bucket, or create credentials manually.
+For any other failure, record the JSON `code`, `mutationPerformed`, `completed`,
+and `resumeBoundary`, perform read-only inspection, and fix the proven cause
+before retrying.
+
+After `GCP_PROVISION_COMPLETE`, continue the guarded release phases documented
+in `infra/gcp/README.md`. The remaining external gates are still explicit:
+owner confirmation of the legacy-resource inventory, a real iPhone Safari voice
+evidence bundle, a 30-file multilingual canonical-WAV latency manifest, private
+candidate acceptance, and final stable promotion. Generate and deliver a QR
+only after the stable URL passes live text, voice, readiness, privacy, and mobile
+acceptance.
+
 ## Local product preview
 
 From `production-v1/`:

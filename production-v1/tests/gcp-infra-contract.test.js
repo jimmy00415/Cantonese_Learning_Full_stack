@@ -49,6 +49,29 @@ const ACCEPTANCE_BUCKET_METADATA_ROLE = Object.freeze({
   includedPermissions: ['storage.buckets.get'],
   stage: 'GA',
 });
+const BUCKET_IAM_OPERATOR_ROLE = Object.freeze({
+  id: 'hkbuddyV1BucketIamPolicyOperator',
+  name: `projects/${PROJECT}/roles/hkbuddyV1BucketIamPolicyOperator`,
+  title: 'HK Buddy V1 bucket IAM policy operator',
+  description: 'Manage IAM policies for the two Hong Kong Buddy V1 buckets',
+  includedPermissions: [
+    'storage.buckets.get',
+    'storage.buckets.getIamPolicy',
+    'storage.buckets.setIamPolicy',
+  ],
+  stage: 'GA',
+});
+const BUCKET_IAM_OPERATOR_CONDITION = Object.freeze({
+  title: 'HK Buddy V1 bucket IAM boundary',
+  description: 'Limit operator bucket IAM access to the two Hong Kong Buddy V1 buckets',
+  expression: `resource.service == "storage.googleapis.com" && resource.type == "storage.googleapis.com/Bucket" && (resource.name == "projects/_/buckets/${GCP_IDENTITY.bucket}" || resource.name == "projects/_/buckets/${GCP_IDENTITY.buildSourceBucket}")`,
+});
+const BUCKET_IAM_OPERATOR_BINDING = Object.freeze({
+  scope: 'project',
+  member: 'user:admin@motionexp.com',
+  role: BUCKET_IAM_OPERATOR_ROLE.name,
+  condition: BUCKET_IAM_OPERATOR_CONDITION,
+});
 
 const AUTOMATIC_PROJECT_BINDINGS = Object.freeze([
   { member: 'user:admin@motionexp.com', role: 'roles/owner', required: true },
@@ -112,6 +135,33 @@ function protectedProjectPolicy(contract) {
   };
 }
 
+function recoveredPreflightProjectPolicy() {
+  return {
+    version: 3,
+    etag: 'BwYAAAAAAAQ=',
+    bindings: [
+      { role: 'roles/owner', members: ['user:admin@motionexp.com'] },
+      { role: 'roles/compute.serviceAgent', members: [`serviceAccount:service-${PROJECT_NUMBER}@compute-system.iam.gserviceaccount.com`] },
+      { role: 'roles/editor', members: [`serviceAccount:${PROJECT_NUMBER}@cloudservices.gserviceaccount.com`] },
+      {
+        role: BUCKET_IAM_OPERATOR_BINDING.role,
+        members: [BUCKET_IAM_OPERATOR_BINDING.member],
+        condition: clone(BUCKET_IAM_OPERATOR_BINDING.condition),
+      },
+    ],
+  };
+}
+
+function preflightReadRequest(channelHandler = null) {
+  return async (input) => {
+    if (input.url === `https://cloudresourcemanager.googleapis.com/v1/projects/${PROJECT}:getIamPolicy`) {
+      return recoveredPreflightProjectPolicy();
+    }
+    if (channelHandler) return channelHandler(input);
+    throw new Error(`unexpected preflight REST read ${input.url}`);
+  };
+}
+
 function notFound() {
   return Object.assign(new Error('not found'), { code: 'NOT_FOUND' });
 }
@@ -163,6 +213,7 @@ function assetAuditControlPlane({
   contract, assets, enabledApis = ['iam.googleapis.com', 'serviceusage.googleapis.com'],
   gcloudRows = {}, restRows = {}, organizationResponse, billingAccountResponse,
   projectResponse, billingLinkResponse,
+  projectIamPolicy = operatorProjectPolicy(contract, { includeOperator: true }),
 }) {
   const gcloudCalls = [];
   const restCalls = [];
@@ -199,7 +250,7 @@ function assetAuditControlPlane({
         billingEnabled: true, billingAccountName: `billingAccounts/${GCP_IDENTITY.billingAccountId}`,
         ...billingLinkResponse,
       };
-      if (args[0] === 'projects' && args[1] === 'get-iam-policy') return protectedProjectPolicy(contract);
+      if (args[0] === 'projects' && args[1] === 'get-iam-policy') return clone(projectIamPolicy);
       if (args[0] === 'asset') {
         if (assets instanceof Error) throw assets;
         return assets;
@@ -211,10 +262,18 @@ function assetAuditControlPlane({
       throw notFound();
     },
     request: async (input) => {
-      restCalls.push(input);
       for (const [needle, value] of Object.entries(restRows)) {
-        if (input.url.includes(needle)) return typeof value === 'function' ? value(input) : value;
+        if (input.url.includes(needle)) {
+          restCalls.push(input);
+          return typeof value === 'function' ? value(input) : value;
+        }
       }
+      if (input.url === `https://cloudresourcemanager.googleapis.com/v1/projects/${PROJECT}:getIamPolicy`) {
+        // Generic inventory fixtures model the already-recovered baseline. The
+        // version-3 POST shape itself is asserted by operatorBindingPlane tests.
+        return clone(projectIamPolicy);
+      }
+      restCalls.push(input);
       throw notFound();
     },
   });
@@ -240,6 +299,7 @@ function dependencyAuditControlPlane({
       'compute routes list': [],
       'compute addresses list': [],
       'services vpc-peerings list': [],
+      'sql databases list': [],
     },
     restRows: {
       '/versions': { versions: [] },
@@ -258,7 +318,7 @@ function dependencyAuditControlPlane({
       if (cloudSqlState === 'present') return exactCloudSqlInstance();
       throw notFound();
     }
-    if (args[0] === 'sql' && args[1] === 'databases' && args[2] === 'describe'
+    if (args[0] === 'sql' && args[1] === 'databases' && args[2] === 'list'
       && databaseForbidden) {
       fixture.gcloudCalls.push(args);
       throw Object.assign(new Error('database forbidden'), { code: 'FORBIDDEN' });
@@ -268,7 +328,7 @@ function dependencyAuditControlPlane({
       const secretId = args[2];
       if (secretStates[secretId] === 'present') {
         return {
-          name: `projects/${PROJECT}/secrets/${secretId}`,
+          name: `projects/${PROJECT_NUMBER}/secrets/${secretId}`,
           replication: { automatic: {} },
           labels: { application: 'hong-kong-buddy', environment: 'production-v1' },
         };
@@ -451,7 +511,11 @@ test('the executable contract fixes the isolated GCP topology and least-privileg
     requiredVerificationStatus: 'VERIFIED',
   });
   assert.equal(contract.resources.budget.projectFilter, `projects/${PROJECT_NUMBER}`);
-  assert.deepEqual(contract.resources.customRoles, [ACCEPTANCE_BUCKET_METADATA_ROLE]);
+  assert.deepEqual(contract.resources.customRoles, [
+    ACCEPTANCE_BUCKET_METADATA_ROLE,
+    BUCKET_IAM_OPERATOR_ROLE,
+  ]);
+  assert.deepEqual(contract.iam.operatorBucketIamBinding, BUCKET_IAM_OPERATOR_BINDING);
   assert.equal(
     EXPECTED_PROVISION_STEPS.includes('custom-role:hkbuddyV1AcceptanceBucketMetadataReader'),
     true,
@@ -459,6 +523,21 @@ test('the executable contract fixes the isolated GCP topology and least-privileg
   assert.equal(
     EXPECTED_PROVISION_STEPS.indexOf('custom-role:hkbuddyV1AcceptanceBucketMetadataReader')
       < EXPECTED_PROVISION_STEPS.indexOf('vpc'),
+    true,
+  );
+  assert.equal(
+    EXPECTED_PROVISION_STEPS.indexOf('custom-role:hkbuddyV1BucketIamPolicyOperator')
+      < EXPECTED_PROVISION_STEPS.indexOf('operator-bucket-iam-binding'),
+    true,
+  );
+  assert.equal(
+    EXPECTED_PROVISION_STEPS.indexOf('build-source-bucket')
+      < EXPECTED_PROVISION_STEPS.indexOf('operator-bucket-iam-binding'),
+    true,
+  );
+  assert.equal(
+    EXPECTED_PROVISION_STEPS.indexOf('operator-bucket-iam-binding')
+      < EXPECTED_PROVISION_STEPS.indexOf('bucket-iam-baseline'),
     true,
   );
   assert.deepEqual(contract.apis, [
@@ -615,11 +694,12 @@ test('contract validation rejects identity drift, public access, broad workload 
   }
 });
 
-test('acceptance bucket metadata custom role is definition-exact and rejects permission or stage drift', async (t) => {
+test('custom roles are definition-exact and reject permission, stage, deletion, or inventory drift', async (t) => {
   const contract = await contractFixture();
   const exactRole = { ...ACCEPTANCE_BUCKET_METADATA_ROLE, deleted: false };
+  const operatorRole = { ...BUCKET_IAM_OPERATOR_ROLE, deleted: false };
   assert.doesNotThrow(() => assertExactCustomRoleDefinitions({
-    contract, roles: [exactRole],
+    contract, roles: [exactRole, operatorRole],
   }));
 
   for (const [name, mutate] of [
@@ -630,7 +710,7 @@ test('acceptance bucket metadata custom role is definition-exact and rejects per
   ]) {
     await t.test(name, () => {
       const role = clone(exactRole);
-      const roles = [role];
+      const roles = [role, clone(operatorRole)];
       mutate(role, roles);
       assert.throws(
         () => assertExactCustomRoleDefinitions({ contract, roles }),
@@ -659,7 +739,7 @@ test('gcloud execution is argv-only and rejects values that could disclose a sec
       'C:/gcloud/lib/gcloud.py', 'projects', 'describe', PROJECT,
       `--project=${PROJECT}`, '--format=json', '--quiet',
     ],
-    options: { encoding: 'utf8', maxBuffer: 1048576, windowsHide: true },
+    options: { encoding: 'utf8', maxBuffer: 1048576, windowsHide: true, timeout: 120_000 },
   }]);
   assert.equal(calls[0].args.filter((value) => value === '--quiet').length, 1);
   await executor(['projects', 'describe', PROJECT, `--project=${PROJECT}`, '--format=json', '--quiet']);
@@ -974,6 +1054,118 @@ test('gcloud 553 database authorization failure remains forbidden rather than ab
   );
 });
 
+test('Cloud SQL database discovery uses a successful scoped list instead of generic describe 404s', async (t) => {
+  const contract = await contractFixture();
+  const databaseRow = (name) => ({
+    charset: 'UTF8',
+    collation: 'en_US.UTF8',
+    etag: `${name}-etag`,
+    instance: GCP_IDENTITY.cloudSqlInstance,
+    kind: 'sql#database',
+    name,
+    project: PROJECT,
+    selfLink: `https://sqladmin.googleapis.com/sql/v1beta4/projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}/databases/${name}`,
+  });
+  const postgres = databaseRow('postgres');
+  const target = databaseRow(GCP_IDENTITY.database);
+  const listArgv = [
+    'sql', 'databases', 'list', `--instance=${GCP_IDENTITY.cloudSqlInstance}`,
+    `--project=${PROJECT}`, '--format=json',
+  ];
+
+  const planeFor = (listing) => {
+    const calls = [];
+    const plane = new GcpControlPlane({
+      contract,
+      notificationChannel: CHANNEL,
+      gcloud: async (args) => {
+        calls.push(args);
+        if (args[0] === 'sql' && args[1] === 'databases' && args[2] === 'list') return listing;
+        throw new Error(`unexpected gcloud ${args.join(' ')}`);
+      },
+      request: async () => { throw new Error('REST must not run'); },
+    });
+    return { plane, calls };
+  };
+
+  await t.test('the live built-in postgres row proves the managed database is absent', async () => {
+    const { plane, calls } = planeFor([postgres]);
+    assert.deepEqual(await plane.read('database'), { status: 'absent' });
+    assert.deepEqual(calls, [listArgv]);
+    assert.equal(calls.some((args) => args.includes('describe') || args.includes('create')), false);
+  });
+
+  await t.test('one exact managed row is present and remains contract-comparable', async () => {
+    const { plane, calls } = planeFor([postgres, target]);
+    const result = await plane.read('database');
+    assert.equal(result.status, 'present');
+    assert.deepEqual(result.value, target);
+    assert.equal(plane.compare('database', result.value), true);
+    assert.equal(plane.compare('database', {
+      ...result.value,
+      selfLink: `https://sqladmin.googleapis.com/sql/v1beta4/projects/${PROJECT}/instances/foreign/databases/${GCP_IDENTITY.database}`,
+    }), false);
+    assert.deepEqual(calls, [listArgv]);
+  });
+
+  for (const [name, listing] of [
+    ['empty list', []],
+    ['missing postgres witness', [target]],
+    ['non-array response', { items: [postgres] }],
+    ['non-object row', [postgres, null]],
+    ['missing name', [{ ...postgres, name: undefined }]],
+    ['wrong kind', [{ ...postgres, kind: 'sql#operation' }]],
+    ['foreign instance', [{ ...postgres, instance: 'foreign-instance' }]],
+    ['foreign project', [{ ...postgres, project: 'foreign-project' }]],
+    ['drifted postgres self link', [{
+      ...postgres,
+      selfLink: `https://sqladmin.googleapis.com/sql/v1beta4/projects/${PROJECT}/instances/foreign/databases/postgres`,
+    }]],
+    ['drifted managed self link', [postgres, {
+      ...target,
+      selfLink: `https://sqladmin.googleapis.com/sql/v1beta4/projects/${PROJECT}/instances/foreign/databases/${GCP_IDENTITY.database}`,
+    }]],
+    ['duplicate system name', [postgres, { ...postgres }]],
+    ['duplicate managed name', [postgres, target, { ...target }]],
+  ]) {
+    await t.test(name, async () => {
+      const { plane, calls } = planeFor(listing);
+      let creates = 0;
+      await assert.rejects(
+        () => ensureExactResource({
+          id: 'database', mutate: true,
+          read: () => plane.read('database'),
+          create: async () => { creates += 1; },
+          compare: (value) => plane.compare('database', value),
+        }),
+        (error) => error.code === 'LIST_RESPONSE_AMBIGUOUS',
+      );
+      assert.deepEqual(calls, [listArgv]);
+      assert.equal(creates, 0);
+      assert.equal(calls.some((args) => args.includes('create')), false);
+    });
+  }
+});
+
+test('the current generic database describe 404 remains ambiguous even for the managed argv', async () => {
+  const stderr = 'ERROR: (gcloud.sql.databases.describe) HTTPError 404: Not Found. This command is authenticated as admin@motionexp.com which is the active account specified by the [core/account] property\n';
+  const executor = createGcloudExecutor({
+    executable: 'python.exe', prefixArgs: ['C:/gcloud/lib/gcloud.py'],
+    execFile: async () => {
+      const error = new Error('gcloud failed');
+      error.stderr = stderr;
+      throw error;
+    },
+  });
+  await assert.rejects(
+    () => executor([
+      'sql', 'databases', 'describe', GCP_IDENTITY.database,
+      `--instance=${GCP_IDENTITY.cloudSqlInstance}`, `--project=${PROJECT}`, '--format=json',
+    ]),
+    (error) => error.code === 'TRANSPORT_AMBIGUOUS',
+  );
+});
+
 test('real control-plane create-or-readback families receive canonical absence and perform zero mutation', async (t) => {
   const contract = await contractFixture();
   const fixtures = [
@@ -984,7 +1176,6 @@ test('real control-plane create-or-readback families receive canonical absence a
     ['subnet', `ERROR: (gcloud.compute.networks.subnets.describe) Could not fetch resource:\n - The resource 'projects/${PROJECT}/regions/asia-east2/subnetworks/${GCP_IDENTITY.subnet}' was not found`],
     ['psa-range', `ERROR: (gcloud.compute.addresses.describe) Could not fetch resource:\n - The resource 'projects/${PROJECT}/global/addresses/${GCP_IDENTITY.psaRange}' was not found`],
     ['cloud-sql-instance', `ERROR: (gcloud.sql.instances.describe) HTTPError 404: The resource [projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}] was not found.`],
-    ['database', `ERROR: (gcloud.sql.databases.describe) HTTPError 404: Database [projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}/databases/${GCP_IDENTITY.database}] was not found.`],
     ['bucket', `ERROR: (gcloud.storage.buckets.describe) HTTPError 404: The specified bucket [gs://${GCP_IDENTITY.bucket}] does not exist.`],
     ['build-source-bucket', `ERROR: (gcloud.storage.buckets.describe) HTTPError 404: The specified bucket [gs://${GCP_IDENTITY.buildSourceBucket}] does not exist.`],
     [`secret-container:${GCP_IDENTITY.secrets.session}`, `ERROR: (gcloud.secrets.describe) NOT_FOUND: Secret [projects/${PROJECT}/secrets/${GCP_IDENTITY.secrets.session}] not found.`],
@@ -1050,7 +1241,7 @@ test('exhaustive inventory gets a bounded invocation-specific output capacity an
     (error) => error.code === 'TRANSPORT_AMBIGUOUS',
   );
   assert.deepEqual(calls, [{
-    encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, windowsHide: true,
+    encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, windowsHide: true, timeout: 120_000,
   }]);
   await assert.rejects(
     () => executor(['asset', 'search-all-resources', `--project=${PROJECT}`], { maxBuffer: 64 * 1024 * 1024 }),
@@ -1095,11 +1286,14 @@ test('Google Auth REST rejects every 404 provenance and enforces the exact quota
       authorization: 'Bearer alternate-caller-secret',
     }), { ok: true });
     assert.equal(client.quotaProjectId, 'motion-expert-hk-ltd-webpage');
-    assert.deepEqual(captured, [{
+    assert.equal(captured.length, 1);
+    const [{ signal, ...capturedRequest }] = captured;
+    assert.equal(signal instanceof AbortSignal, true);
+    assert.deepEqual(capturedRequest, {
       method: 'GET', url: 'https://example.googleapis.com/v1/read', data: undefined,
       timeout: 120_000,
       headers: { 'x-goog-user-project': 'motion-expert-hk-ltd-webpage' },
-    }]);
+    });
     assert.equal(JSON.stringify(captured).includes('caller-supplied-secret'), false);
     assert.equal(JSON.stringify(captured).includes('alternate-caller-secret'), false);
     assert.equal(JSON.stringify(captured).includes('foreign-project'), false);
@@ -1125,6 +1319,414 @@ test('Google Auth REST rejects every 404 provenance and enforces the exact quota
           && !String(error).includes('private-request-secret')
           && !JSON.stringify(error).includes('sensitive-bearer-token')
           && !JSON.stringify(error).includes('private-request-secret'),
+      );
+    });
+  }
+});
+
+test('Google Auth REST propagates the caller deadline signal to the SDK transport', async () => {
+  const captured = [];
+  const controller = new AbortController();
+  const timeoutController = new AbortController();
+  const timeoutCalls = [];
+  const request = createAuthenticatedRequest({
+    createTimeoutSignal: (milliseconds) => {
+      timeoutCalls.push(milliseconds);
+      return timeoutController.signal;
+    },
+    auth: {
+      getClient: async () => ({
+        request: async (input) => {
+          captured.push(input);
+          return { data: { ok: true } };
+        },
+      }),
+    },
+  });
+
+  assert.deepEqual(await request({
+    method: 'GET', url: 'https://example.googleapis.com/v1/read', signal: controller.signal,
+  }), { ok: true });
+  assert.equal(captured.length, 1);
+  assert.equal(captured[0].signal instanceof AbortSignal, true);
+  assert.notEqual(captured[0].signal, controller.signal);
+  assert.notEqual(captured[0].signal, timeoutController.signal);
+  assert.deepEqual(timeoutCalls, [120_000]);
+  controller.abort();
+  assert.equal(captured[0].signal.aborted, true);
+  await assert.rejects(
+    () => request({ method: 'GET', url: 'https://example.googleapis.com/v1/read', signal: {} }),
+    /Authenticated request is invalid/,
+  );
+});
+
+test('standalone Google Auth principal lookup bounds every SDK credential wait', async (t) => {
+  for (const hangingStage of ['getClient', 'getAccessToken', 'getTokenInfo']) {
+    await t.test(hangingStage, async () => {
+      const timeoutController = new AbortController();
+      const { signal } = timeoutController;
+      const originalAddEventListener = signal.addEventListener.bind(signal);
+      const originalRemoveEventListener = signal.removeEventListener.bind(signal);
+      let activeAbortListeners = 0;
+      let addedAbortListeners = 0;
+      signal.addEventListener = (type, listener, options) => {
+        if (type === 'abort') {
+          activeAbortListeners += 1;
+          addedAbortListeners += 1;
+        }
+        return originalAddEventListener(type, listener, options);
+      };
+      signal.removeEventListener = (type, listener, options) => {
+        if (type === 'abort') activeAbortListeners -= 1;
+        return originalRemoveEventListener(type, listener, options);
+      };
+
+      const timeoutCalls = [];
+      let stageStarted;
+      const stageStartedPromise = new Promise((resolve) => { stageStarted = resolve; });
+      const hang = () => {
+        stageStarted();
+        return new Promise(() => {});
+      };
+      const client = {
+        getAccessToken: () => hangingStage === 'getAccessToken'
+          ? hang() : Promise.resolve({ token: 'sensitive-sdk-principal-token' }),
+        getTokenInfo: () => hangingStage === 'getTokenInfo'
+          ? hang() : Promise.resolve({ email: 'admin@motionexp.com' }),
+      };
+      const request = createAuthenticatedRequest({
+        createTimeoutSignal: (milliseconds) => {
+          timeoutCalls.push(milliseconds);
+          return signal;
+        },
+        auth: {
+          getClient: () => hangingStage === 'getClient' ? hang() : Promise.resolve(client),
+        },
+      });
+
+      const pending = request.getPrincipal().then(
+        () => ({ code: 'unexpected-success', serialized: '' }),
+        (error) => ({ code: error.code, serialized: `${String(error)}${JSON.stringify(error)}` }),
+      );
+      await stageStartedPromise;
+      timeoutController.abort();
+      let watchdog;
+      const outcome = await Promise.race([
+        pending,
+        new Promise((resolve) => {
+          watchdog = setTimeout(() => resolve({ code: 'watchdog-expired', serialized: '' }), 100);
+        }),
+      ]);
+      clearTimeout(watchdog);
+
+      assert.equal(outcome.code, 'TRANSPORT_AMBIGUOUS');
+      assert.equal(outcome.serialized.includes('sensitive-sdk-principal-token'), false);
+      assert.deepEqual(timeoutCalls, [120_000]);
+      assert.equal(addedAbortListeners >= 1, true);
+      assert.equal(activeAbortListeners, 0);
+    });
+  }
+});
+
+test('Google Auth REST aborts initial and cached waits for a hanging SDK client', async () => {
+  let getClientCalls = 0;
+  let getClientStarted;
+  const getClientStartedPromise = new Promise((resolve) => { getClientStarted = resolve; });
+  const request = createAuthenticatedRequest({
+    auth: {
+      getClient: () => {
+        getClientCalls += 1;
+        getClientStarted();
+        return new Promise(() => {});
+      },
+    },
+  });
+
+  const runAbortAttempt = async () => {
+    const controller = new AbortController();
+    const { signal } = controller;
+    const originalAddEventListener = signal.addEventListener.bind(signal);
+    const originalRemoveEventListener = signal.removeEventListener.bind(signal);
+    let activeAbortListeners = 0;
+    let addedAbortListeners = 0;
+    signal.addEventListener = (type, listener, options) => {
+      if (type === 'abort') {
+        activeAbortListeners += 1;
+        addedAbortListeners += 1;
+      }
+      return originalAddEventListener(type, listener, options);
+    };
+    signal.removeEventListener = (type, listener, options) => {
+      if (type === 'abort') activeAbortListeners -= 1;
+      return originalRemoveEventListener(type, listener, options);
+    };
+
+    const pending = request({
+      method: 'GET', url: 'https://sqladmin.googleapis.com/v1/projects/example/operations', signal,
+    }).then(
+      () => ({ code: 'unexpected-success', serialized: '' }),
+      (error) => ({ code: error.code, serialized: `${String(error)}${JSON.stringify(error)}` }),
+    );
+    controller.abort();
+    let watchdog;
+    const outcome = await Promise.race([
+      pending,
+      new Promise((resolve) => {
+        watchdog = setTimeout(() => resolve({ code: 'watchdog-expired', serialized: '' }), 100);
+      }),
+    ]);
+    clearTimeout(watchdog);
+    return { outcome, activeAbortListeners, addedAbortListeners };
+  };
+
+  const initial = await runAbortAttempt();
+  await getClientStartedPromise;
+  const cached = await runAbortAttempt();
+  for (const attempt of [initial, cached]) {
+    assert.equal(attempt.outcome.code, 'TRANSPORT_AMBIGUOUS');
+    assert.equal(attempt.outcome.serialized.includes('credential'), false);
+    assert.equal(attempt.addedAbortListeners, 1);
+    assert.equal(attempt.activeAbortListeners, 0);
+  }
+  assert.equal(getClientCalls, 1);
+});
+
+test('Google Auth REST abort race bounds an SDK request that ignores its signal', async () => {
+  const callerController = new AbortController();
+  const timeoutController = new AbortController();
+  const { signal } = callerController;
+  const originalAddEventListener = signal.addEventListener.bind(signal);
+  const originalRemoveEventListener = signal.removeEventListener.bind(signal);
+  let activeAbortListeners = 0;
+  let addedAbortListeners = 0;
+  signal.addEventListener = (type, listener, options) => {
+    if (type === 'abort') {
+      activeAbortListeners += 1;
+      addedAbortListeners += 1;
+    }
+    return originalAddEventListener(type, listener, options);
+  };
+  signal.removeEventListener = (type, listener, options) => {
+    if (type === 'abort') activeAbortListeners -= 1;
+    return originalRemoveEventListener(type, listener, options);
+  };
+  let requestStarted;
+  const requestStartedPromise = new Promise((resolve) => { requestStarted = resolve; });
+  let capturedSignal;
+  const request = createAuthenticatedRequest({
+    createTimeoutSignal: () => timeoutController.signal,
+    auth: {
+      getClient: async () => ({
+        request: (input) => {
+          capturedSignal = input.signal;
+          requestStarted();
+          return new Promise(() => {});
+        },
+      }),
+    },
+  });
+
+  const pending = request({
+    method: 'POST', url: 'https://sqladmin.googleapis.com/v1/projects/example/operations',
+    body: { value: 'sensitive-sdk-body' }, signal,
+  }).then(
+    () => ({ code: 'unexpected-success', serialized: '' }),
+    (error) => ({ code: error.code, serialized: `${String(error)}${JSON.stringify(error)}` }),
+  );
+  await requestStartedPromise;
+  assert.equal(capturedSignal instanceof AbortSignal, true);
+  assert.notEqual(capturedSignal, signal);
+  assert.notEqual(capturedSignal, timeoutController.signal);
+  callerController.abort();
+  let watchdog;
+  const outcome = await Promise.race([
+    pending,
+    new Promise((resolve) => {
+      watchdog = setTimeout(() => resolve({ code: 'watchdog-expired', serialized: '' }), 100);
+    }),
+  ]);
+  clearTimeout(watchdog);
+
+  assert.equal(outcome.code, 'TRANSPORT_AMBIGUOUS');
+  assert.equal(outcome.serialized.includes('sensitive-sdk-body'), false);
+  assert.equal(addedAbortListeners, 2);
+  assert.equal(activeAbortListeners, 0);
+});
+
+test('standalone Google Auth principal lookup composes its caller and default deadlines', async () => {
+  const callerController = new AbortController();
+  const timeoutController = new AbortController();
+  const { signal } = callerController;
+  const originalAddEventListener = signal.addEventListener.bind(signal);
+  const originalRemoveEventListener = signal.removeEventListener.bind(signal);
+  let activeAbortListeners = 0;
+  let addedAbortListeners = 0;
+  signal.addEventListener = (type, listener, options) => {
+    if (type === 'abort') {
+      activeAbortListeners += 1;
+      addedAbortListeners += 1;
+    }
+    return originalAddEventListener(type, listener, options);
+  };
+  signal.removeEventListener = (type, listener, options) => {
+    if (type === 'abort') activeAbortListeners -= 1;
+    return originalRemoveEventListener(type, listener, options);
+  };
+  const timeoutCalls = [];
+  let tokenInfoStarted;
+  const tokenInfoStartedPromise = new Promise((resolve) => { tokenInfoStarted = resolve; });
+  const request = createAuthenticatedRequest({
+    createTimeoutSignal: (milliseconds) => {
+      timeoutCalls.push(milliseconds);
+      return timeoutController.signal;
+    },
+    auth: {
+      getClient: async () => ({
+        getAccessToken: async () => ({ token: 'sensitive-sdk-caller-token' }),
+        getTokenInfo: () => {
+          tokenInfoStarted();
+          return new Promise(() => {});
+        },
+      }),
+    },
+  });
+
+  const pending = request.getPrincipal(signal).then(
+    () => ({ code: 'unexpected-success', serialized: '' }),
+    (error) => ({ code: error.code, serialized: `${String(error)}${JSON.stringify(error)}` }),
+  );
+  await tokenInfoStartedPromise;
+  callerController.abort();
+  let watchdog;
+  const outcome = await Promise.race([
+    pending,
+    new Promise((resolve) => {
+      watchdog = setTimeout(() => resolve({ code: 'watchdog-expired', serialized: '' }), 100);
+    }),
+  ]);
+  clearTimeout(watchdog);
+
+  assert.equal(outcome.code, 'TRANSPORT_AMBIGUOUS');
+  assert.equal(outcome.serialized.includes('sensitive-sdk-caller-token'), false);
+  assert.deepEqual(timeoutCalls, [120_000]);
+  assert.equal(addedAbortListeners, 3);
+  assert.equal(activeAbortListeners, 0);
+});
+
+test('Google Auth Cloud SQL REST classifies structured 409 reasons exactly', async (t) => {
+  const target = `https://sqladmin.googleapis.com/v1/projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}/databases`;
+  for (const [reason, code] of [
+    ['operationInProgress', 'SQL_OPERATION_IN_PROGRESS'],
+    ['invalidState', 'SQL_INVALID_STATE'],
+    ['alreadyExists', 'ALREADY_EXISTS'],
+    ['unknownConflict', 'HTTP_CONFLICT_AMBIGUOUS'],
+  ]) {
+    await t.test(reason, async () => {
+      const request = createAuthenticatedRequest({
+        auth: {
+          getClient: async () => ({
+            request: async () => {
+              const error = new Error('redacted-conflict-secret');
+              error.response = {
+                status: 409,
+                data: {
+                  error: {
+                    code: 409,
+                    message: 'redacted-conflict-secret',
+                    errors: [{ domain: 'global', reason, message: 'redacted-conflict-secret' }],
+                  },
+                },
+              };
+              throw error;
+            },
+          }),
+        },
+      });
+      await assert.rejects(
+        () => request({ method: 'POST', url: target, body: { name: GCP_IDENTITY.database } }),
+        (error) => error.code === code
+          && !String(error).includes('redacted-conflict-secret')
+          && !JSON.stringify(error).includes('redacted-conflict-secret'),
+      );
+    });
+  }
+
+  await t.test('hostile response payload getter', async () => {
+    const request = createAuthenticatedRequest({
+      auth: {
+        getClient: async () => ({
+          request: async () => {
+            const error = new Error('outer-secret');
+            error.response = { status: 409 };
+            Object.defineProperty(error.response, 'data', {
+              get() { throw new Error('payload-getter-secret'); },
+            });
+            throw error;
+          },
+        }),
+      },
+    });
+    await assert.rejects(
+      () => request({ method: 'POST', url: target, body: { name: GCP_IDENTITY.database } }),
+      (error) => error.code === 'HTTP_CONFLICT_AMBIGUOUS'
+        && !String(error).includes('secret') && !JSON.stringify(error).includes('secret'),
+    );
+  });
+
+  await t.test('malformed 409 payload', async () => {
+    const request = createAuthenticatedRequest({
+      auth: {
+        getClient: async () => ({
+          request: async () => {
+            const error = new Error('redacted-conflict-secret');
+            error.response = { status: 409, data: '{not-json' };
+            throw error;
+          },
+        }),
+      },
+    });
+    await assert.rejects(
+      () => request({ method: 'POST', url: target, body: { name: GCP_IDENTITY.database } }),
+      (error) => error.code === 'HTTP_CONFLICT_AMBIGUOUS'
+        && !String(error).includes('redacted-conflict-secret')
+        && !JSON.stringify(error).includes('redacted-conflict-secret'),
+    );
+  });
+});
+
+test('Google Auth Storage IAM treats a structured ABORTED etag conflict as deterministic only for a managed bucket policy', async (t) => {
+  const managed = `https://storage.googleapis.com/storage/v1/b/${GCP_IDENTITY.bucket}/iam`;
+  const foreign = 'https://storage.googleapis.com/storage/v1/b/foreign-bucket/iam';
+  for (const [name, target, expected] of [
+    ['managed bucket policy', managed, 'IAM_POLICY_ETAG_MISMATCH'],
+    ['foreign bucket policy', foreign, 'HTTP_CONFLICT_AMBIGUOUS'],
+  ]) {
+    await t.test(name, async () => {
+      const request = createAuthenticatedRequest({
+        auth: {
+          getClient: async () => ({
+            request: async () => {
+              const error = new Error('redacted-concurrent-policy');
+              error.response = {
+                status: 409,
+                data: {
+                  error: {
+                    code: 409,
+                    message: 'redacted-concurrent-policy',
+                    status: 'ABORTED',
+                  },
+                },
+              };
+              throw error;
+            },
+          }),
+        },
+      });
+      await assert.rejects(
+        () => request({ method: 'PUT', url: target, body: { etag: 'CAE=', bindings: [] } }),
+        (error) => error.code === expected
+          && !String(error).includes('redacted-concurrent-policy')
+          && !JSON.stringify(error).includes('redacted-concurrent-policy'),
       );
     });
   }
@@ -1188,6 +1790,187 @@ test('default-style HTTPS authentication reuses the exact gcloud account without
   assert.equal(fetchCalls[0].options.redirect, 'error');
 });
 
+test('default-style HTTPS requests share one bounded signal across authentication and fetch', async () => {
+  const timeoutController = new AbortController();
+  const timeoutCalls = [];
+  const execSignals = [];
+  let fetchSignal;
+  const request = createGcloudAuthenticatedRequest({
+    executable: 'python.exe', prefixArgs: ['C:/gcloud/lib/gcloud.py'],
+    account: 'admin@motionexp.com', environment: {}, now: () => 1_000,
+    createTimeoutSignal: (milliseconds) => {
+      timeoutCalls.push(milliseconds);
+      return timeoutController.signal;
+    },
+    execFile: async (_executable, args, options) => {
+      execSignals.push(options.signal);
+      return args.includes('config')
+        ? { stdout: '{"core":{"account":"admin@motionexp.com"},"auth":{}}\n', stderr: '' }
+        : { stdout: 'sensitive-bearer-token\n', stderr: '' };
+    },
+    getTokenInfo: async () => ({ email: 'admin@motionexp.com' }),
+    fetchImpl: async (url, options) => {
+      fetchSignal = options.signal;
+      const body = Buffer.from('{"ok":true}');
+      return {
+        ok: true, status: 200, redirected: false, url,
+        headers: { get: (name) => name === 'content-length' ? String(body.length) : null },
+        body: new ReadableStream({
+          start(controller) { controller.enqueue(body); controller.close(); },
+        }),
+      };
+    },
+  });
+
+  assert.deepEqual(await request({
+    method: 'GET', url: 'https://sqladmin.googleapis.com/v1/projects/example/operations',
+  }), { ok: true });
+  assert.deepEqual(timeoutCalls, [120_000]);
+  assert.deepEqual(execSignals, [timeoutController.signal, timeoutController.signal]);
+  assert.equal(fetchSignal, timeoutController.signal);
+});
+
+test('standalone gcloud principal lookup has a default bounded token-inspection wait', async () => {
+  const timeoutController = new AbortController();
+  const timeoutCalls = [];
+  let tokenInfoStarted;
+  const tokenInfoStartedPromise = new Promise((resolve) => { tokenInfoStarted = resolve; });
+  const request = createGcloudAuthenticatedRequest({
+    executable: 'python.exe', prefixArgs: ['C:/gcloud/lib/gcloud.py'],
+    account: 'admin@motionexp.com', environment: {},
+    createTimeoutSignal: (milliseconds) => {
+      timeoutCalls.push(milliseconds);
+      return timeoutController.signal;
+    },
+    execFile: async (_executable, args) => args.includes('config')
+      ? { stdout: '{"core":{"account":"admin@motionexp.com"},"auth":{}}\n', stderr: '' }
+      : { stdout: 'sensitive-principal-bearer-token\n', stderr: '' },
+    getTokenInfo: async () => {
+      tokenInfoStarted();
+      return new Promise(() => {});
+    },
+    fetchImpl: async () => { throw new Error('fetch must not run'); },
+  });
+
+  const pending = request.getPrincipal().then(
+    () => ({ code: 'unexpected-success', serialized: '' }),
+    (error) => ({ code: error.code, serialized: `${String(error)}${JSON.stringify(error)}` }),
+  );
+  await tokenInfoStartedPromise;
+  timeoutController.abort();
+  let watchdog;
+  const outcome = await Promise.race([
+    pending,
+    new Promise((resolve) => {
+      watchdog = setTimeout(() => resolve({ code: 'watchdog-expired', serialized: '' }), 100);
+    }),
+  ]);
+  clearTimeout(watchdog);
+
+  assert.equal(outcome.code, 'TRANSPORT_AMBIGUOUS');
+  assert.equal(outcome.serialized.includes('sensitive-principal-bearer-token'), false);
+  assert.deepEqual(timeoutCalls, [120_000]);
+});
+
+test('cached standalone gcloud principal lookup still honors an aborted caller deadline', async () => {
+  let tokenInfoCalls = 0;
+  const request = createGcloudAuthenticatedRequest({
+    executable: 'python.exe', prefixArgs: ['C:/gcloud/lib/gcloud.py'],
+    account: 'admin@motionexp.com', environment: {}, now: () => 1_000,
+    execFile: async (_executable, args) => args.includes('config')
+      ? { stdout: '{"core":{"account":"admin@motionexp.com"},"auth":{}}\n', stderr: '' }
+      : { stdout: 'sensitive-cached-principal-token\n', stderr: '' },
+    getTokenInfo: async () => {
+      tokenInfoCalls += 1;
+      return { email: 'admin@motionexp.com' };
+    },
+    fetchImpl: async () => { throw new Error('fetch must not run'); },
+  });
+  assert.equal(await request.getPrincipal(), 'admin@motionexp.com');
+  const controller = new AbortController();
+  controller.abort();
+
+  await assert.rejects(
+    () => request.getPrincipal(controller.signal),
+    (error) => error.code === 'TRANSPORT_AMBIGUOUS'
+      && !String(error).includes('sensitive-cached-principal-token')
+      && !JSON.stringify(error).includes('sensitive-cached-principal-token'),
+  );
+  assert.equal(tokenInfoCalls, 1);
+});
+
+test('expired gcloud principal refresh aborts hanging token inspection and removes its listener', async () => {
+  let now = 0;
+  let tokenInfoCalls = 0;
+  let refreshStarted;
+  const refreshStartedPromise = new Promise((resolve) => { refreshStarted = resolve; });
+  let fetchCalls = 0;
+  let activeAbortListeners = 0;
+  let addedAbortListeners = 0;
+  let refreshSignal = null;
+  const request = createGcloudAuthenticatedRequest({
+    executable: 'python.exe', prefixArgs: ['C:/gcloud/lib/gcloud.py'],
+    account: 'admin@motionexp.com', environment: {}, now: () => now,
+    execFile: async (_executable, args, options) => {
+      if (now === 240_001 && refreshSignal === null) {
+        refreshSignal = options.signal;
+        const originalAddEventListener = refreshSignal.addEventListener.bind(refreshSignal);
+        const originalRemoveEventListener = refreshSignal.removeEventListener.bind(refreshSignal);
+        refreshSignal.addEventListener = (type, listener, listenerOptions) => {
+          if (type === 'abort') {
+            activeAbortListeners += 1;
+            addedAbortListeners += 1;
+          }
+          return originalAddEventListener(type, listener, listenerOptions);
+        };
+        refreshSignal.removeEventListener = (type, listener, listenerOptions) => {
+          if (type === 'abort') activeAbortListeners -= 1;
+          return originalRemoveEventListener(type, listener, listenerOptions);
+        };
+      }
+      return args.includes('config')
+        ? { stdout: '{"core":{"account":"admin@motionexp.com"},"auth":{}}\n', stderr: '' }
+        : { stdout: 'sensitive-refresh-bearer-token\n', stderr: '' };
+    },
+    getTokenInfo: async () => {
+      tokenInfoCalls += 1;
+      if (tokenInfoCalls === 1) return { email: 'admin@motionexp.com' };
+      refreshStarted();
+      return new Promise(() => {});
+    },
+    fetchImpl: async () => { fetchCalls += 1; throw new Error('fetch must not run'); },
+  });
+  assert.equal(await request.getPrincipal(), 'admin@motionexp.com');
+  now = 240_001;
+
+  const controller = new AbortController();
+  const { signal } = controller;
+
+  const pending = request({
+    method: 'GET', url: 'https://sqladmin.googleapis.com/v1/projects/example/operations', signal,
+  }).then(
+    () => ({ code: 'unexpected-success', serialized: '' }),
+    (error) => ({ code: error.code, serialized: `${String(error)}${JSON.stringify(error)}` }),
+  );
+  await refreshStartedPromise;
+  controller.abort();
+  let watchdog;
+  const outcome = await Promise.race([
+    pending,
+    new Promise((resolve) => {
+      watchdog = setTimeout(() => resolve({ code: 'watchdog-expired', serialized: '' }), 100);
+    }),
+  ]);
+  clearTimeout(watchdog);
+
+  assert.equal(outcome.code, 'TRANSPORT_AMBIGUOUS');
+  assert.equal(outcome.serialized.includes('sensitive-refresh-bearer-token'), false);
+  assert.equal(tokenInfoCalls, 2);
+  assert.equal(fetchCalls, 0);
+  assert.equal(addedAbortListeners, 1);
+  assert.equal(activeAbortListeners, 0);
+});
+
 function authenticatedResponse(url, {
   chunks = [Buffer.from('{"ok":true}')],
   contentLength,
@@ -1240,6 +2023,120 @@ function authenticatedRequestFixture(fetchImpl) {
     now: () => 1_000,
   });
 }
+
+test('authenticated Cloud SQL REST classifies structured 409 reasons without treating every conflict as existence', async (t) => {
+  const target = `https://sqladmin.googleapis.com/v1/projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}/databases`;
+  for (const [reason, code] of [
+    ['operationInProgress', 'SQL_OPERATION_IN_PROGRESS'],
+    ['invalidState', 'SQL_INVALID_STATE'],
+    ['alreadyExists', 'ALREADY_EXISTS'],
+    ['unknownConflict', 'HTTP_CONFLICT_AMBIGUOUS'],
+  ]) {
+    await t.test(reason, async () => {
+      const payload = Buffer.from(JSON.stringify({
+        error: {
+          code: 409,
+          message: 'redacted conflict',
+          errors: [{ domain: 'global', reason, message: 'redacted conflict' }],
+        },
+      }));
+      const fixture = authenticatedResponse(target, { chunks: [payload], status: 409 });
+      const request = authenticatedRequestFixture(async () => fixture.response);
+      await assert.rejects(
+        () => request({ method: 'POST', url: target, body: { name: GCP_IDENTITY.database } }),
+        (error) => error.code === code && !String(error).includes('redacted conflict'),
+      );
+    });
+  }
+
+  await t.test('malformed 409 payload', async () => {
+    const payload = Buffer.from('{not-json');
+    const fixture = authenticatedResponse(target, {
+      chunks: [payload], status: 409, contentLength: payload.length,
+    });
+    const request = authenticatedRequestFixture(async () => fixture.response);
+    await assert.rejects(
+      () => request({ method: 'POST', url: target, body: { name: GCP_IDENTITY.database } }),
+      (error) => error.code === 'HTTP_CONFLICT_AMBIGUOUS',
+    );
+  });
+
+  for (const [name, fixture] of [
+    ['truncated 409 payload', authenticatedResponse(target, {
+      chunks: [Buffer.from('{"error":')], status: 409, contentLength: 10,
+    })],
+    ['invalid UTF-8 409 payload', authenticatedResponse(target, {
+      chunks: [Buffer.from([0xc3, 0x28])], status: 409, contentLength: 2,
+    })],
+  ]) {
+    await t.test(name, async () => {
+      const request = authenticatedRequestFixture(async () => fixture.response);
+      await assert.rejects(
+        () => request({ method: 'POST', url: target, body: { name: GCP_IDENTITY.database } }),
+        (error) => error.code === 'HTTP_CONFLICT_AMBIGUOUS',
+      );
+    });
+  }
+
+  await t.test('hanging 409 payload aborted by the caller', async () => {
+    let responseStarted;
+    const responseStartedPromise = new Promise((resolve) => { responseStarted = resolve; });
+    const request = authenticatedRequestFixture(async (url, options) => {
+      const body = new ReadableStream({
+        start(controller) {
+          options.signal.addEventListener('abort', () => controller.error(new Error('aborted-secret')), {
+            once: true,
+          });
+          responseStarted();
+        },
+      });
+      return {
+        ok: false, status: 409, redirected: false, url,
+        headers: { get: () => null }, body,
+      };
+    });
+    const controller = new AbortController();
+    const pending = request({
+      method: 'POST', url: target, body: { name: GCP_IDENTITY.database }, signal: controller.signal,
+    }).then(
+      () => ({ code: 'unexpected-success', serialized: '' }),
+      (error) => ({ code: error.code, serialized: `${String(error)}${JSON.stringify(error)}` }),
+    );
+    await responseStartedPromise;
+    controller.abort();
+    let watchdog;
+    const outcome = await Promise.race([
+      pending,
+      new Promise((resolve) => {
+        watchdog = setTimeout(() => resolve({ code: 'watchdog-expired', serialized: '' }), 100);
+      }),
+    ]);
+    clearTimeout(watchdog);
+    assert.equal(outcome.code, 'HTTP_CONFLICT_AMBIGUOUS');
+    assert.equal(outcome.serialized.includes('secret'), false);
+  });
+});
+
+test('authenticated Storage IAM direct REST preserves deterministic managed-bucket etag conflicts', async () => {
+  const target = `https://storage.googleapis.com/storage/v1/b/${GCP_IDENTITY.buildSourceBucket}/iam`;
+  const payload = Buffer.from(JSON.stringify({
+    error: {
+      code: 409,
+      message: 'redacted-concurrent-policy',
+      status: 'ABORTED',
+    },
+  }));
+  const fixture = authenticatedResponse(target, {
+    chunks: [payload], status: 409, contentLength: payload.length,
+  });
+  const request = authenticatedRequestFixture(async () => fixture.response);
+  await assert.rejects(
+    () => request({ method: 'PUT', url: target, body: { etag: 'CAE=', bindings: [] } }),
+    (error) => error.code === 'IAM_POLICY_ETAG_MISMATCH'
+      && !String(error).includes('redacted-concurrent-policy')
+      && !JSON.stringify(error).includes('redacted-concurrent-policy'),
+  );
+});
 
 test('authenticated REST bills every Google API request to the exact target quota project', async () => {
   const target = 'https://billingbudgets.googleapis.com/v1/billingAccounts/example/budgets';
@@ -1833,7 +2730,7 @@ test('ensureExactResource is dry-run safe, reads after create, and fails closed 
     ['403 is unknown', async () => ({ status: 'unknown', code: 'FORBIDDEN' }), async () => undefined, 'RESOURCE_STATE_UNKNOWN'],
     ['present drift', async () => ({ status: 'present', value: { name: 'other' } }), async () => undefined, 'RESOURCE_DRIFT'],
     ['collision', async () => ({ status: 'absent' }), async () => { const error = new Error('collision'); error.code = 'ALREADY_EXISTS'; throw error; }, 'RESOURCE_COLLISION'],
-    ['ambiguous missing', (() => { let reads = 0; return async () => (++reads === 1 ? { status: 'absent' } : { status: 'absent' }); })(), async () => { throw new Error('transport lost'); }, 'CREATE_RESULT_AMBIGUOUS'],
+    ['ambiguous missing', (() => { let reads = 0; return async () => (++reads === 1 ? { status: 'absent' } : { status: 'absent' }); })(), async () => { throw Object.assign(new Error('transport lost'), { code: 'TRANSPORT_AMBIGUOUS' }); }, 'CREATE_RESULT_AMBIGUOUS'],
   ];
   for (const [name, read, create, code] of failures) {
     await t.test(name, async () => {
@@ -1851,10 +2748,59 @@ test('ensureExactResource is dry-run safe, reads after create, and fails closed 
       read: async () => (++reads === 1
         ? { status: 'absent' }
         : { status: 'present', value: { exact: true } }),
-      create: async () => { throw new Error('response lost'); },
+      create: async () => { throw Object.assign(new Error('response lost'), { code: 'TRANSPORT_AMBIGUOUS' }); },
       compare: (value) => value.exact === true,
     });
     assert.deepEqual(result, { id: 'resource', status: 'created-readback-recovered' });
+  });
+
+  await t.test('unknown HTTP conflict is never adopted through a concurrent exact readback', async () => {
+    const target = `https://sqladmin.googleapis.com/v1/projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}/databases`;
+    const payload = Buffer.from(JSON.stringify({
+      error: {
+        code: 409,
+        message: 'redacted conflict',
+        errors: [{ domain: 'global', reason: 'unknownConflict', message: 'redacted conflict' }],
+      },
+    }));
+    const fixture = authenticatedResponse(target, {
+      chunks: [payload], status: 409, contentLength: payload.length,
+    });
+    const request = authenticatedRequestFixture(async () => fixture.response);
+    let reads = 0;
+
+    await assert.rejects(
+      () => ensureExactResource({
+        id: 'database', mutate: true,
+        read: async () => (++reads === 1
+          ? { status: 'absent' }
+          : { status: 'present', value: { exact: true } }),
+        create: () => request({
+          method: 'POST', url: target, body: { name: GCP_IDENTITY.database },
+        }),
+        compare: (value) => value.exact === true,
+      }),
+      (error) => error.code === 'HTTP_CONFLICT_AMBIGUOUS',
+    );
+    assert.equal(reads, 1);
+  });
+
+  await t.test('deterministic create failure is never hidden by a later exact readback', async () => {
+    let reads = 0;
+    await assert.rejects(
+      () => ensureExactResource({
+        id: 'resource', mutate: true,
+        read: async () => (++reads === 1
+          ? { status: 'absent' }
+          : { status: 'present', value: { exact: true } }),
+        create: async () => {
+          throw Object.assign(new Error('terminal SQL operation failed'), { code: 'SQL_OPERATION_FAILED' });
+        },
+        compare: (value) => value.exact === true,
+      }),
+      (error) => error.code === 'SQL_OPERATION_FAILED',
+    );
+    assert.equal(reads, 1);
   });
 });
 
@@ -1934,6 +2880,11 @@ function exactManagedIamPolicies(contract) {
   for (const binding of contract.project.protectedBindings) {
     policies.project.bindings.push({ role: binding.role, members: [binding.member] });
   }
+  policies.project.bindings.push({
+    role: contract.iam.operatorBucketIamBinding.role,
+    members: [contract.iam.operatorBucketIamBinding.member],
+    condition: clone(contract.iam.operatorBucketIamBinding.condition),
+  });
   for (const binding of contract.iam.automaticProjectBindings) {
     policies.project.bindings.push({
       role: binding.role,
@@ -2039,6 +2990,54 @@ test('managed IAM final readback is an exact per-scope allowlist and forbids wor
     );
   });
 
+  for (const [name, mutate] of [
+    ['missing resource service guard', (binding) => {
+      binding.condition.expression = binding.condition.expression.replace(
+        'resource.service == "storage.googleapis.com" && ', '',
+      );
+    }],
+    ['wider bucket prefix', (binding) => {
+      binding.condition.expression = 'resource.name.startsWith("projects/_/buckets/hkbuddy-v1-")';
+    }],
+    ['equivalent alternate expression', (binding) => {
+      binding.condition.expression = `resource.service == "storage.googleapis.com" && resource.type == "storage.googleapis.com/Bucket" && resource.name in ["projects/_/buckets/${GCP_IDENTITY.bucket}", "projects/_/buckets/${GCP_IDENTITY.buildSourceBucket}"]`;
+    }],
+    ['title drift', (binding) => { binding.condition.title = 'Equivalent title'; }],
+    ['description drift', (binding) => { binding.condition.description = 'Equivalent description'; }],
+    ['extra member', (binding) => { binding.members.push('user:foreign@example.test'); }],
+    ['unconditional grant', (binding) => { delete binding.condition; }],
+  ]) {
+    await t.test(`operator bucket IAM condition rejects ${name}`, () => {
+      const policies = clone(exactPolicies);
+      const binding = policies.project.bindings.find(({ role }) => (
+        role === BUCKET_IAM_OPERATOR_ROLE.name
+      ));
+      mutate(binding);
+      assert.throws(
+        () => assertExactManagedIamPolicies({
+          contract, projectNumber: PROJECT_NUMBER, policiesByScope: policies,
+          enabledApis: allEnabledApis,
+        }),
+        (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
+      );
+    });
+  }
+
+  await t.test('operator bucket IAM condition rejects a duplicate grant', () => {
+    const policies = clone(exactPolicies);
+    const binding = policies.project.bindings.find(({ role }) => (
+      role === BUCKET_IAM_OPERATOR_ROLE.name
+    ));
+    policies.project.bindings.push(clone(binding));
+    assert.throws(
+      () => assertExactManagedIamPolicies({
+        contract, projectNumber: PROJECT_NUMBER, policiesByScope: policies,
+        enabledApis: allEnabledApis,
+      }),
+      (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
+    );
+  });
+
   await t.test('all immutable shared-project baseline bindings are exact and allowed', () => {
     for (const { member, role } of contract.project.protectedBindings) {
       const policies = clone(exactPolicies);
@@ -2126,7 +3125,12 @@ test('pre-sensitive IAM subset audits reject foreign project owners and secret a
           gcloudCalls.push(args);
           if (args[0] === 'services' && args[1] === 'list') return enabledServiceRows([]);
           if (args[0] === 'iam' && args[1] === 'roles' && args[2] === 'list') {
-            return contract.resources.customRoles.map((role) => ({ ...role, deleted: false }));
+            return contract.resources.customRoles.map(liveCustomRoleListRow);
+          }
+          if (args[0] === 'iam' && args[1] === 'roles' && args[2] === 'describe') {
+            const role = contract.resources.customRoles.find(({ id }) => id === args[3]);
+            if (!role) throw new Error('unexpected custom role describe');
+            return { ...role, deleted: false };
           }
           let scope;
           if (args[0] === 'projects') scope = 'project';
@@ -2322,7 +3326,7 @@ test('pre-mutation audit skips database and users only when the SQL parent is pr
 
     assert.equal(await fixture.plane.auditPreMutationState(), true);
     assert.equal(fixture.gcloudCalls.some((args) => (
-      args[0] === 'sql' && args[1] === 'databases' && args[2] === 'describe'
+      args[0] === 'sql' && args[1] === 'databases' && args[2] === 'list'
     )), false);
     assert.equal(fixture.restCalls.some(({ url }) => url.includes('/users')), false);
     assert.equal(fixture.gcloudCalls.some((args) => args.includes('create') || args.includes('enable')), false);
@@ -2342,7 +3346,7 @@ test('pre-mutation audit skips database and users only when the SQL parent is pr
       (error) => error.code === 'RESOURCE_STATE_UNKNOWN',
     );
     assert.equal(fixture.gcloudCalls.filter((args) => (
-      args[0] === 'sql' && args[1] === 'databases' && args[2] === 'describe'
+      args[0] === 'sql' && args[1] === 'databases' && args[2] === 'list'
     )).length, 1);
     assert.equal(fixture.gcloudCalls.some((args) => args.includes('create') || args.includes('enable')), false);
   });
@@ -2372,6 +3376,62 @@ test('pre-mutation audit reads a secret version only when its exact container is
     assert.equal(await fixture.plane.auditPreMutationState(), true);
     assert.equal(fixture.restCalls.filter(({ url }) => url.includes(`/secrets/${target}/versions`)).length, 1);
   });
+});
+
+test('pre-mutation secret inventory accepts the live numeric project resource name without mutation', async () => {
+  const contract = await contractFixture();
+  const target = GCP_IDENTITY.secrets.dbAppUrl;
+  const fixture = assetAuditControlPlane({
+    contract,
+    assets: [],
+    enabledApis: ['iam.googleapis.com', 'serviceusage.googleapis.com', 'secretmanager.googleapis.com'],
+    gcloudRows: {
+      [`secrets list --project=${PROJECT}`]: [{
+        name: `projects/${PROJECT_NUMBER}/secrets/${target}`,
+        replication: { automatic: {} },
+        labels: { application: 'hong-kong-buddy', environment: 'production-v1' },
+      }],
+    },
+  });
+
+  assert.equal(await fixture.plane.auditPreMutationState(), true);
+  assert.equal(fixture.gcloudCalls.some((args) => (
+    args.includes('create') || args.includes('enable') || args.includes('add-iam-policy-binding')
+  )), false);
+  assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+});
+
+test('pre-mutation secret inventory rejects noncanonical parents and duplicate rows before mutation', async (t) => {
+  const contract = await contractFixture();
+  const target = GCP_IDENTITY.secrets.dbAppUrl;
+  const exactSecret = {
+    name: `projects/${PROJECT_NUMBER}/secrets/${target}`,
+    replication: { automatic: {} },
+    labels: { application: 'hong-kong-buddy', environment: 'production-v1' },
+  };
+  for (const [name, secrets] of [
+    ['project ID parent', [{ ...exactSecret, name: `projects/${PROJECT}/secrets/${target}` }]],
+    ['foreign numeric parent', [{ ...exactSecret, name: `projects/999999999999/secrets/${target}` }]],
+    ['malformed descendant', [{ ...exactSecret, name: `${exactSecret.name}/versions/1` }]],
+    ['duplicate exact row', [exactSecret, { ...exactSecret }]],
+  ]) {
+    await t.test(name, async () => {
+      const fixture = assetAuditControlPlane({
+        contract,
+        assets: [],
+        enabledApis: ['iam.googleapis.com', 'serviceusage.googleapis.com', 'secretmanager.googleapis.com'],
+        gcloudRows: { [`secrets list --project=${PROJECT}`]: secrets },
+      });
+      await assert.rejects(
+        () => fixture.plane.auditPreMutationState(),
+        (error) => error.code === 'LIST_RESPONSE_AMBIGUOUS',
+      );
+      assert.equal(fixture.gcloudCalls.some((args) => (
+        args.includes('create') || args.includes('enable') || args.includes('add-iam-policy-binding')
+      )), false);
+      assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+    });
+  }
 });
 
 test('pre-mutation audit skips VPC descendants but still reads the independent PSA range', async () => {
@@ -2425,7 +3485,12 @@ test('final readback rejects dependency agents after their owning APIs become di
         return enabledServiceRows(enabledApis);
       }
       if (args[0] === 'iam' && args[1] === 'roles' && args[2] === 'list') {
-        return contract.resources.customRoles.map((role) => ({ ...role, deleted: false }));
+        return contract.resources.customRoles.map(liveCustomRoleListRow);
+      }
+      if (args[0] === 'iam' && args[1] === 'roles' && args[2] === 'describe') {
+        const role = contract.resources.customRoles.find(({ id }) => id === args[3]);
+        if (!role) throw new Error('unexpected custom role describe');
+        return { ...role, deleted: false };
       }
       if (args.includes('get-iam-policy')) return policyFor(args);
       throw new Error('unexpected gcloud operation');
@@ -2478,7 +3543,12 @@ test('final readback ends with a stable API-bracketed exact IAM decision', async
           ].includes(name)));
       }
       if (args[0] === 'iam' && args[1] === 'roles' && args[2] === 'list') {
-        return contract.resources.customRoles.map((role) => ({ ...role, deleted: false }));
+        return contract.resources.customRoles.map(liveCustomRoleListRow);
+      }
+      if (args[0] === 'iam' && args[1] === 'roles' && args[2] === 'describe') {
+        const role = contract.resources.customRoles.find(({ id }) => id === args[3]);
+        if (!role) throw new Error('unexpected custom role describe');
+        return { ...role, deleted: false };
       }
       if (args.includes('get-iam-policy')) return policyFor(args);
       throw new Error('unexpected gcloud operation');
@@ -2504,36 +3574,143 @@ test('final readback ends with a stable API-bracketed exact IAM decision', async
   );
 });
 
-test('pre-sensitive managed IAM audit reads the exact custom role definition before secrets', async () => {
-  const contract = await contractFixture();
+function liveCustomRoleListRow(role = ACCEPTANCE_BUCKET_METADATA_ROLE) {
+  return {
+    name: role.name,
+    title: role.title,
+    description: role.description,
+    stage: role.stage,
+    etag: 'BwYF9example',
+  };
+}
+
+function customRoleAuditFixture({
+  contract,
+  listedRoles = contract.resources.customRoles.map(liveCustomRoleListRow),
+  describedRole = { ...ACCEPTANCE_BUCKET_METADATA_ROLE, deleted: false },
+  describeError = null,
+}) {
   const gcloudCalls = [];
-  let customRole = { ...ACCEPTANCE_BUCKET_METADATA_ROLE, deleted: false };
   const plane = new GcpControlPlane({
     contract, notificationChannel: CHANNEL,
     gcloud: async (args) => {
       gcloudCalls.push(args);
       if (args[0] === 'services' && args[1] === 'list') return enabledServiceRows([]);
-      if (args[0] === 'iam' && args[1] === 'roles' && args[2] === 'list') return [customRole];
+      if (args[0] === 'iam' && args[1] === 'roles' && args[2] === 'list') return clone(listedRoles);
+      if (args[0] === 'iam' && args[1] === 'roles' && args[2] === 'describe') {
+        if (describeError) throw describeError;
+        if (args[3] === ACCEPTANCE_BUCKET_METADATA_ROLE.id) return clone(describedRole);
+        const role = contract.resources.customRoles.find(({ id }) => id === args[3]);
+        if (!role) throw new Error(`unexpected custom role describe ${args[3]}`);
+        return { ...clone(role), deleted: false };
+      }
       if (args.includes('get-iam-policy')) return { bindings: [] };
-      throw new Error('unexpected gcloud operation');
+      throw new Error(`unexpected gcloud operation ${args.join(' ')}`);
     },
     request: async () => { throw new Error('REST must not run'); },
   });
   plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
+  return { plane, gcloudCalls };
+}
 
-  await plane.auditManagedIamPolicies({ projectOnly: false });
-  assert.equal(gcloudCalls.some((args) => (
+function assertNoSensitiveGcloudMutation(calls) {
+  assert.equal(calls.some((args) => args.some((arg) => [
+    'create', 'update', 'delete', 'undelete', 'enable',
+    'add-iam-policy-binding', 'remove-iam-policy-binding', 'set-iam-policy',
+  ].includes(arg))), false);
+}
+
+test('pre-sensitive managed IAM audit accepts the live list projection and describes the exact role on every run', async () => {
+  const contract = await contractFixture();
+  const fixture = customRoleAuditFixture({ contract });
+
+  await fixture.plane.auditManagedIamPolicies({ projectOnly: false });
+  await fixture.plane.auditManagedIamPolicies({ projectOnly: false });
+
+  const listCalls = fixture.gcloudCalls.filter((args) => (
     args[0] === 'iam' && args[1] === 'roles' && args[2] === 'list'
-      && args.includes(`--project=${PROJECT}`) && args.includes('--format=json')
-  )), true);
+  ));
+  const describeCalls = fixture.gcloudCalls.filter((args) => (
+    args[0] === 'iam' && args[1] === 'roles' && args[2] === 'describe'
+  ));
+  assert.deepEqual(listCalls, Array(2).fill([
+    'iam', 'roles', 'list', '--show-deleted', `--project=${PROJECT}`, '--format=json',
+  ]));
+  assert.deepEqual(describeCalls, Array(2).fill(null).flatMap(() => ([
+    [
+      'iam', 'roles', 'describe', ACCEPTANCE_BUCKET_METADATA_ROLE.id,
+      `--project=${PROJECT}`, '--format=json',
+    ],
+    [
+      'iam', 'roles', 'describe', BUCKET_IAM_OPERATOR_ROLE.id,
+      `--project=${PROJECT}`, '--format=json',
+    ],
+  ])));
+  assertNoSensitiveGcloudMutation(fixture.gcloudCalls);
+});
 
-  customRole = {
-    ...customRole, includedPermissions: ['storage.buckets.get', 'storage.buckets.list'],
-  };
-  await assert.rejects(
-    () => plane.auditManagedIamPolicies({ projectOnly: false }),
-    (error) => error.code === 'CUSTOM_ROLE_ALLOWLIST_MISMATCH',
-  );
+test('pre-sensitive managed IAM audit rejects non-exact role inventories before describe or mutation', async (t) => {
+  const contract = await contractFixture();
+  const exact = liveCustomRoleListRow();
+  const operator = liveCustomRoleListRow(BUCKET_IAM_OPERATOR_ROLE);
+  const invalidInventories = [
+    ['missing expected role', [operator]],
+    ['duplicate expected role', [exact, { ...exact }, operator]],
+    ['extra project role', [exact, operator, { ...exact, name: `projects/${PROJECT}/roles/unexpected` }]],
+    ['foreign-project role', [{ ...exact, name: 'projects/foreign-project/roles/hkbuddyV1AcceptanceBucketMetadataReader' }, operator]],
+    ['hidden deleted extra role', [exact, operator, {
+      ...exact, name: `projects/${PROJECT}/roles/deletedUnexpected`, deleted: true,
+    }]],
+    ['deleted expected role', [{ ...exact, deleted: true }, operator]],
+    ['ambiguous expected deleted state', [{ ...exact, deleted: 'false' }, operator]],
+  ];
+
+  for (const [name, listedRoles] of invalidInventories) {
+    await t.test(name, async () => {
+      const fixture = customRoleAuditFixture({ contract, listedRoles });
+      await assert.rejects(
+        () => fixture.plane.auditManagedIamPolicies({ projectOnly: false }),
+        (error) => error.code === 'CUSTOM_ROLE_ALLOWLIST_MISMATCH',
+      );
+      assert.equal(fixture.gcloudCalls.some((args) => (
+        args[0] === 'iam' && args[1] === 'roles' && args[2] === 'describe'
+      )), false);
+      assertNoSensitiveGcloudMutation(fixture.gcloudCalls);
+    });
+  }
+});
+
+test('pre-sensitive managed IAM audit fails closed on described definition drift or unreadable state', async (t) => {
+  const contract = await contractFixture();
+  const cases = [
+    ['permission drift', {
+      describedRole: {
+        ...ACCEPTANCE_BUCKET_METADATA_ROLE,
+        includedPermissions: ['storage.buckets.get', 'storage.buckets.list'],
+        deleted: false,
+      },
+      code: 'CUSTOM_ROLE_ALLOWLIST_MISMATCH',
+    }],
+    ['forbidden describe', {
+      describeError: Object.assign(new Error('forbidden'), { code: 'FORBIDDEN' }),
+      code: 'FORBIDDEN',
+    }],
+    ['ambiguous describe', {
+      describeError: Object.assign(new Error('ambiguous'), { code: 'TRANSPORT_AMBIGUOUS' }),
+      code: 'TRANSPORT_AMBIGUOUS',
+    }],
+  ];
+
+  for (const [name, { describedRole, describeError, code }] of cases) {
+    await t.test(name, async () => {
+      const fixture = customRoleAuditFixture({ contract, describedRole, describeError });
+      await assert.rejects(
+        () => fixture.plane.auditManagedIamPolicies({ projectOnly: false }),
+        (error) => error.code === code,
+      );
+      assertNoSensitiveGcloudMutation(fixture.gcloudCalls);
+    });
+  }
 });
 
 function exactBucket({
@@ -2557,6 +3734,802 @@ function exactBuildSourceBucket(overrides = {}) {
     lifecycleDeleteAfterDays: 1,
     ...overrides,
   });
+}
+
+function storagePolicy({ bucket, bindings = [], etag = 'CAE=', includeBindings = true } = {}) {
+  return {
+    version: 1,
+    kind: 'storage#policy',
+    resourceId: `projects/_/buckets/${bucket}`,
+    ...(includeBindings ? { bindings } : {}),
+    etag,
+  };
+}
+
+const DEFAULT_UNIFORM_BUCKET_TUPLES = Object.freeze([
+  { role: 'roles/storage.legacyBucketOwner', member: `projectEditor:${PROJECT}` },
+  { role: 'roles/storage.legacyBucketOwner', member: `projectOwner:${PROJECT}` },
+  { role: 'roles/storage.legacyBucketReader', member: `projectViewer:${PROJECT}` },
+  { role: 'roles/storage.legacyObjectOwner', member: `projectEditor:${PROJECT}` },
+  { role: 'roles/storage.legacyObjectOwner', member: `projectOwner:${PROJECT}` },
+  { role: 'roles/storage.legacyObjectReader', member: `projectViewer:${PROJECT}` },
+]);
+
+const EXPECTED_MEDIA_BUCKET_BINDINGS = Object.freeze([
+  {
+    role: `projects/${PROJECT}/roles/hkbuddyV1AcceptanceBucketMetadataReader`,
+    members: [`serviceAccount:${GCP_IDENTITY.serviceAccounts.acceptance}`],
+  },
+  {
+    role: 'roles/storage.objectUser',
+    members: [
+      `serviceAccount:${GCP_IDENTITY.serviceAccounts.acceptance}`,
+      `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`,
+    ],
+  },
+]);
+
+const EXPECTED_BUILD_SOURCE_BUCKET_BINDINGS = Object.freeze([
+  {
+    role: 'roles/storage.objectViewer',
+    members: [`serviceAccount:${GCP_IDENTITY.serviceAccounts.build}`],
+  },
+]);
+
+function groupBucketIamTuples(tuples) {
+  const byRole = new Map();
+  for (const { role, member } of tuples) {
+    const members = byRole.get(role) ?? [];
+    members.push(member);
+    byRole.set(role, members);
+  }
+  return [...byRole.entries()]
+    .map(([role, members]) => ({ role, members: [...members].sort() }))
+    .sort((left, right) => left.role.localeCompare(right.role));
+}
+
+function defaultUniformBucketBindings() {
+  return groupBucketIamTuples(DEFAULT_UNIFORM_BUCKET_TUPLES);
+}
+
+function operatorProjectPolicy(contract, {
+  includeOperator = false, etag = 'BwYAAAAAAAQ=', extraBindings = [],
+} = {}) {
+  return {
+    version: includeOperator ? 3 : 1,
+    etag,
+    bindings: [
+      ...contract.project.protectedBindings.map(({ role, member }) => ({
+        role, members: [member],
+      })),
+      ...(includeOperator ? [{
+        role: contract.iam.operatorBucketIamBinding.role,
+        members: [contract.iam.operatorBucketIamBinding.member],
+        condition: clone(contract.iam.operatorBucketIamBinding.condition),
+      }] : []),
+      ...extraBindings,
+    ],
+  };
+}
+
+function operatorBindingPlane({
+  contract, policies, setResponse, permissionResponses = {}, bucketPolicies = {},
+  now = Date.now, sleep = async () => undefined,
+}) {
+  const gcloudCalls = [];
+  const restCalls = [];
+  const policyQueue = [...policies];
+  const permissionQueues = Object.fromEntries(Object.entries(permissionResponses).map(
+    ([bucket, responses]) => [bucket, [...responses]],
+  ));
+  let currentPolicy = policyQueue.at(-1);
+  const plane = new GcpControlPlane({
+    contract, now, sleep,
+    gcloud: async (args) => {
+      gcloudCalls.push(args);
+      if (args[0] === 'services' && args[1] === 'list') {
+        return enabledServiceRows(['cloudresourcemanager.googleapis.com', 'iam.googleapis.com', 'storage.googleapis.com']);
+      }
+      throw new Error(`unexpected gcloud ${args.join(' ')}`);
+    },
+    request: async (input) => {
+      restCalls.push(clone(input));
+      if (input.url === `https://cloudresourcemanager.googleapis.com/v1/projects/${PROJECT}:getIamPolicy`) {
+        currentPolicy = policyQueue.length > 0 ? policyQueue.shift() : currentPolicy;
+        return clone(currentPolicy);
+      }
+      if (input.url === `https://cloudresourcemanager.googleapis.com/v1/projects/${PROJECT}:setIamPolicy`) {
+        currentPolicy = setResponse instanceof Error ? currentPolicy : clone(setResponse);
+        if (setResponse instanceof Error) throw setResponse;
+        return clone(setResponse);
+      }
+      for (const bucket of [GCP_IDENTITY.bucket, GCP_IDENTITY.buildSourceBucket]) {
+        const encoded = encodeURIComponent(bucket);
+        if (input.url.startsWith(`https://storage.googleapis.com/storage/v1/b/${encoded}/iam/testPermissions?`)) {
+          const queue = permissionQueues[bucket] ?? [];
+          if (queue.length === 0) throw new Error(`missing permission response for ${bucket}`);
+          const response = queue.shift();
+          if (response instanceof Error) throw response;
+          return clone(response);
+        }
+        if (input.url === `https://storage.googleapis.com/storage/v1/b/${encoded}/iam?optionsRequestedPolicyVersion=3`) {
+          const response = bucketPolicies[bucket];
+          if (response instanceof Error) throw response;
+          return clone(response);
+        }
+      }
+      throw new Error(`unexpected request ${input.method} ${input.url}`);
+    },
+  });
+  plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
+  return { plane, gcloudCalls, restCalls };
+}
+
+test('operator bucket IAM project binding uses a version-3 etag transaction and exact condition', async () => {
+  const contract = await contractFixture();
+  const observed = operatorProjectPolicy(contract, { etag: 'BwYAAAAAAAQ=' });
+  const final = operatorProjectPolicy(contract, {
+    includeOperator: true, etag: 'BwYAAAAAAAg=',
+  });
+  const fixture = operatorBindingPlane({
+    contract, policies: [observed, final], setResponse: final,
+  });
+
+  assert.deepEqual(await fixture.plane.read('operator-bucket-iam-binding'), { status: 'absent' });
+  await fixture.plane.create('operator-bucket-iam-binding');
+  const setCall = fixture.restCalls.find(({ url }) => url.endsWith(':setIamPolicy'));
+  assert.deepEqual(setCall, {
+    method: 'POST',
+    url: `https://cloudresourcemanager.googleapis.com/v1/projects/${PROJECT}:setIamPolicy`,
+    body: {
+      policy: {
+        ...observed,
+        version: 3,
+        bindings: [
+          ...observed.bindings,
+          {
+            role: BUCKET_IAM_OPERATOR_BINDING.role,
+            members: [BUCKET_IAM_OPERATOR_BINDING.member],
+            condition: clone(BUCKET_IAM_OPERATOR_BINDING.condition),
+          },
+        ],
+      },
+      updateMask: 'bindings,etag,version',
+    },
+  });
+  assert.deepEqual(await fixture.plane.read('operator-bucket-iam-binding'), {
+    status: 'present', value: { exact: true },
+  });
+  assert.equal(fixture.plane.compare('operator-bucket-iam-binding', { exact: true }), true);
+  assert.equal(fixture.restCalls.filter(({ url }) => url.endsWith(':setIamPolicy')).length, 1);
+  assert.deepEqual(
+    fixture.restCalls.filter(({ url }) => url.endsWith(':getIamPolicy')).map(({ body }) => body),
+    [
+      { options: { requestedPolicyVersion: 3 } },
+      { options: { requestedPolicyVersion: 3 } },
+    ],
+  );
+});
+
+test('operator bucket IAM project binding fails closed on condition drift or etag conflict', async (t) => {
+  const contract = await contractFixture();
+  const final = operatorProjectPolicy(contract, { includeOperator: true });
+  for (const [name, mutate] of [
+    ['alternate equivalent expression', (policy) => {
+      policy.bindings.at(-1).condition.expression = `resource.service == "storage.googleapis.com" && resource.type == "storage.googleapis.com/Bucket" && resource.name in ["projects/_/buckets/${GCP_IDENTITY.bucket}", "projects/_/buckets/${GCP_IDENTITY.buildSourceBucket}"]`;
+    }],
+    ['extra member', (policy) => { policy.bindings.at(-1).members.push('user:foreign@example.test'); }],
+    ['unconditional binding', (policy) => { delete policy.bindings.at(-1).condition; }],
+    ['duplicate binding', (policy) => { policy.bindings.push(clone(policy.bindings.at(-1))); }],
+  ]) {
+    await t.test(name, async () => {
+      const drifted = clone(final);
+      mutate(drifted);
+      const fixture = operatorBindingPlane({
+        contract, policies: [drifted], setResponse: drifted,
+      });
+      await assert.rejects(
+        () => fixture.plane.read('operator-bucket-iam-binding'),
+        (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
+      );
+      assert.equal(fixture.restCalls.some(({ url }) => url.endsWith(':setIamPolicy')), false);
+    });
+  }
+
+  await t.test('etag conflict is never blind-retried', async () => {
+    const observed = operatorProjectPolicy(contract);
+    const etagConflict = Object.assign(new Error('etag changed'), {
+      code: 'IAM_POLICY_ETAG_MISMATCH',
+    });
+    const fixture = operatorBindingPlane({
+      contract, policies: [observed], setResponse: etagConflict,
+    });
+    assert.deepEqual(await fixture.plane.read('operator-bucket-iam-binding'), { status: 'absent' });
+    await assert.rejects(
+      () => fixture.plane.create('operator-bucket-iam-binding'),
+      (error) => error.code === 'IAM_POLICY_ETAG_MISMATCH',
+    );
+    assert.equal(fixture.restCalls.filter(({ url }) => url.endsWith(':setIamPolicy')).length, 1);
+  });
+});
+
+test('operator bucket IAM propagation polls exact permissions plus readable local policies with a deadline', async (t) => {
+  const contract = await contractFixture();
+  const permissions = [
+    'storage.buckets.get', 'storage.buckets.getIamPolicy', 'storage.buckets.setIamPolicy',
+  ];
+  const permissionResponse = { kind: 'storage#testIamPermissionsResponse', permissions };
+  let clock = 0;
+  const fixture = operatorBindingPlane({
+    contract,
+    policies: [operatorProjectPolicy(contract, { includeOperator: true })],
+    setResponse: operatorProjectPolicy(contract, { includeOperator: true }),
+    permissionResponses: {
+      [GCP_IDENTITY.bucket]: [
+        { kind: 'storage#testIamPermissionsResponse', permissions: [] },
+        permissionResponse,
+      ],
+      [GCP_IDENTITY.buildSourceBucket]: [permissionResponse, permissionResponse],
+    },
+    bucketPolicies: {
+      [GCP_IDENTITY.bucket]: storagePolicy({ bucket: GCP_IDENTITY.bucket, bindings: [] }),
+      [GCP_IDENTITY.buildSourceBucket]: storagePolicy({
+        bucket: GCP_IDENTITY.buildSourceBucket,
+        bindings: defaultUniformBucketBindings(), etag: 'CAI=',
+      }),
+    },
+    now: () => clock,
+    sleep: async (milliseconds) => { clock += milliseconds; },
+  });
+
+  await fixture.plane.waitForOperatorBucketIamAccess({
+    buckets: [GCP_IDENTITY.bucket, GCP_IDENTITY.buildSourceBucket],
+  });
+  assert.equal(clock > 0, true);
+  assert.equal(fixture.restCalls.filter(({ url }) => url.includes('/iam/testPermissions?')).length, 3);
+  assert.equal(fixture.restCalls.filter(({ url }) => url.includes('optionsRequestedPolicyVersion=3')).length, 2);
+
+  await t.test('partial or extra permissions are never treated as propagation', async () => {
+    const invalid = operatorBindingPlane({
+      contract,
+      policies: [operatorProjectPolicy(contract, { includeOperator: true })],
+      setResponse: operatorProjectPolicy(contract, { includeOperator: true }),
+      permissionResponses: {
+        [GCP_IDENTITY.bucket]: [{
+          kind: 'storage#testIamPermissionsResponse',
+          permissions: ['storage.buckets.get', 'storage.buckets.getIamPolicy'],
+        }],
+      },
+      now: () => 120_000,
+      sleep: async () => undefined,
+    });
+    await assert.rejects(
+      () => invalid.plane.waitForOperatorBucketIamAccess({ buckets: [GCP_IDENTITY.bucket] }),
+      (error) => error.code === 'OPERATOR_BUCKET_IAM_PERMISSION_INVALID',
+    );
+  });
+});
+
+test('lost project IAM set response recovers only from exact readback and supports crash resume', async () => {
+  const contract = await contractFixture();
+  const observed = operatorProjectPolicy(contract, { etag: 'BwYAAAAAAAQ=' });
+  const final = operatorProjectPolicy(contract, {
+    includeOperator: true, etag: 'BwYAAAAAAAg=',
+  });
+  const responseLost = Object.assign(new Error('response lost'), { code: 'TRANSPORT_AMBIGUOUS' });
+  const fixture = operatorBindingPlane({
+    contract, policies: [observed, final], setResponse: responseLost,
+  });
+  let setApplied = false;
+  const baseRequest = fixture.plane.request;
+  fixture.plane.request = async (input) => {
+    if (input.url.endsWith(':setIamPolicy')) {
+      fixture.restCalls.push(clone(input));
+      setApplied = true;
+      throw responseLost;
+    }
+    if (input.url.endsWith(':getIamPolicy') && setApplied) return clone(final);
+    return baseRequest(input);
+  };
+  const result = await ensureExactResource({
+    id: 'operator-bucket-iam-binding', mutate: true,
+    read: () => fixture.plane.read('operator-bucket-iam-binding'),
+    create: () => fixture.plane.create('operator-bucket-iam-binding'),
+    compare: (value) => fixture.plane.compare('operator-bucket-iam-binding', value),
+  });
+  assert.deepEqual(result, {
+    id: 'operator-bucket-iam-binding', status: 'created-readback-recovered',
+  });
+
+  const resumed = operatorBindingPlane({
+    contract, policies: [final], setResponse: final,
+  });
+  const resumedResult = await ensureExactResource({
+    id: 'operator-bucket-iam-binding', mutate: true,
+    read: () => resumed.plane.read('operator-bucket-iam-binding'),
+    create: () => resumed.plane.create('operator-bucket-iam-binding'),
+    compare: (value) => resumed.plane.compare('operator-bucket-iam-binding', value),
+  });
+  assert.deepEqual(resumedResult, {
+    id: 'operator-bucket-iam-binding', status: 'unchanged',
+  });
+  assert.equal(resumed.restCalls.some(({ url }) => url.endsWith(':setIamPolicy')), false);
+});
+
+function operatorRecoveryAuditFixture({
+  contract, mediaPermissions = [], buildPermissions = [
+    'storage.buckets.get', 'storage.buckets.getIamPolicy', 'storage.buckets.setIamPolicy',
+  ],
+}) {
+  const assets = [GCP_IDENTITY.bucket, GCP_IDENTITY.buildSourceBucket].map((bucket) => cloudAsset({
+    name: `//storage.googleapis.com/${bucket}`,
+    assetType: 'storage.googleapis.com/Bucket',
+    displayName: bucket, location: 'asia-east2',
+  }));
+  const fixture = assetAuditControlPlane({
+    contract, assets,
+    projectIamPolicy: operatorProjectPolicy(contract),
+    enabledApis: ['cloudresourcemanager.googleapis.com', 'iam.googleapis.com', 'storage.googleapis.com'],
+    gcloudRows: {
+      'storage buckets list': [
+        { name: GCP_IDENTITY.bucket }, { name: GCP_IDENTITY.buildSourceBucket },
+      ],
+    },
+    restRows: {
+      ':getIamPolicy': operatorProjectPolicy(contract),
+      [`/${GCP_IDENTITY.bucket}/iam/testPermissions`]: {
+        kind: 'storage#testIamPermissionsResponse', permissions: mediaPermissions,
+      },
+      [`/${GCP_IDENTITY.buildSourceBucket}/iam/testPermissions`]: {
+        kind: 'storage#testIamPermissionsResponse', permissions: buildPermissions,
+      },
+      [`/${GCP_IDENTITY.buildSourceBucket}/iam?optionsRequestedPolicyVersion=3`]: storagePolicy({
+        bucket: GCP_IDENTITY.buildSourceBucket,
+        bindings: defaultUniformBucketBindings(), etag: 'CAI=',
+      }),
+    },
+  });
+  const baseGcloud = fixture.plane.gcloud;
+  fixture.plane.gcloud = async (args, options) => {
+    if (args[0] === 'iam' && args[1] === 'roles' && args[2] === 'describe'
+      && args[3] === BUCKET_IAM_OPERATOR_ROLE.id) {
+      fixture.gcloudCalls.push(args);
+      throw Object.assign(new Error(
+        `ERROR: (gcloud.iam.roles.describe) NOT_FOUND: Role [projects/${PROJECT}/roles/${BUCKET_IAM_OPERATOR_ROLE.id}] was not found.`,
+      ), {
+        code: 'NOT_FOUND',
+        stderr: `ERROR: (gcloud.iam.roles.describe) NOT_FOUND: Role [projects/${PROJECT}/roles/${BUCKET_IAM_OPERATOR_ROLE.id}] was not found.`,
+      });
+    }
+    return baseGcloud(args, options);
+  };
+  return fixture;
+}
+
+test('operator recovery audit accepts only the exact locked-media and default-build bootstrap state', async (t) => {
+  const contract = await contractFixture();
+  const exact = operatorRecoveryAuditFixture({ contract });
+  assert.deepEqual(await exact.plane.auditOperatorBucketIamRecovery(), {
+    existingBuckets: [GCP_IDENTITY.bucket, GCP_IDENTITY.buildSourceBucket],
+  });
+  assert.equal(exact.restCalls.some(({ method }) => method !== 'GET' && method !== 'POST'), false);
+  assert.equal(exact.restCalls.some(({ url }) => url.endsWith(':setIamPolicy')), false);
+  assert.equal(exact.gcloudCalls.some((args) => (
+    args.includes('create') || args.includes('add-iam-policy-binding') || args.includes('set-iam-policy')
+  )), false);
+
+  await t.test('partial permission state is ambiguous and stops before recovery mutation', async () => {
+    const partial = operatorRecoveryAuditFixture({
+      contract,
+      mediaPermissions: ['storage.buckets.get', 'storage.buckets.getIamPolicy'],
+    });
+    await assert.rejects(
+      () => partial.plane.auditOperatorBucketIamRecovery(),
+      (error) => error.code === 'OPERATOR_BUCKET_IAM_PERMISSION_INVALID',
+    );
+    assert.equal(partial.restCalls.some(({ url }) => url.endsWith(':setIamPolicy')), false);
+  });
+});
+
+function configuredBucketBindings(contract, bucket) {
+  const byRole = new Map();
+  for (const binding of contract.iam.bindings.filter(({ scope }) => scope === `bucket:${bucket}`)) {
+    const members = byRole.get(binding.role) ?? [];
+    members.push(binding.member.replace('__PROJECT_NUMBER__', PROJECT_NUMBER));
+    byRole.set(binding.role, members);
+  }
+  return [...byRole.entries()]
+    .map(([role, members]) => ({ role, members: [...members].sort() }))
+    .sort((left, right) => left.role.localeCompare(right.role));
+}
+
+test('bucket IAM baseline preserves every configured bucket binding and sends the full policy with the observed dynamic etag', async (t) => {
+  const contract = await contractFixture();
+  assert.deepEqual(
+    EXPECTED_PROVISION_STEPS.filter((id) => id.includes('bucket-iam-baseline')),
+    ['bucket-iam-baseline', 'build-source-bucket-iam-baseline'],
+  );
+  assert.equal(
+    EXPECTED_PROVISION_STEPS.indexOf('build-source-bucket')
+      < EXPECTED_PROVISION_STEPS.indexOf('bucket-iam-baseline'),
+    true,
+  );
+  assert.equal(
+    EXPECTED_PROVISION_STEPS.indexOf('build-source-bucket-iam-baseline')
+      < EXPECTED_PROVISION_STEPS.findIndex((id) => id.startsWith('secret-container:')),
+    true,
+  );
+
+  const cases = [
+    {
+      id: 'bucket-iam-baseline',
+      bucket: GCP_IDENTITY.bucket,
+      observedEtag: 'AQIDBAUG',
+      responseEtag: 'BwgJCgsM',
+      configured: EXPECTED_MEDIA_BUCKET_BINDINGS,
+    },
+    {
+      id: 'build-source-bucket-iam-baseline',
+      bucket: GCP_IDENTITY.buildSourceBucket,
+      observedEtag: 'DQ4PEBES',
+      responseEtag: 'ExQVFhcY',
+      configured: EXPECTED_BUILD_SOURCE_BUCKET_BINDINGS,
+    },
+  ];
+
+  for (const {
+    id, bucket, observedEtag, responseEtag, configured,
+  } of cases) {
+    await t.test(`${id} preserves ${configured.length} configured role groups`, async () => {
+      assert.notEqual(observedEtag, 'CAE=');
+      assert.deepEqual(configuredBucketBindings(contract, bucket), configured);
+      const initial = storagePolicy({
+        bucket,
+        bindings: [...defaultUniformBucketBindings(), ...clone(configured)],
+        etag: observedEtag,
+      });
+      const finalPolicy = storagePolicy({
+        bucket, bindings: clone(configured), etag: responseEtag,
+      });
+      const calls = [];
+      let gets = 0;
+      const plane = new GcpControlPlane({
+        contract, notificationChannel: CHANNEL,
+        gcloud: async () => { throw new Error('gcloud must not run'); },
+        request: async (input) => {
+          calls.push(clone(input));
+          if (input.method === 'GET') return gets++ === 0 ? clone(initial) : clone(finalPolicy);
+          if (input.method === 'PUT') return clone(finalPolicy);
+          throw new Error('unexpected request');
+        },
+      });
+      plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
+
+      const result = await ensureExactResource({
+        id, mutate: true,
+        read: () => plane.read(id),
+        create: () => plane.create(id),
+        compare: (value) => plane.compare(id, value),
+      });
+
+      assert.deepEqual(result, { id, status: 'created' });
+      assert.deepEqual(calls, [
+        {
+          method: 'GET',
+          url: `https://storage.googleapis.com/storage/v1/b/${bucket}/iam?optionsRequestedPolicyVersion=3`,
+        },
+        {
+          method: 'PUT',
+          url: `https://storage.googleapis.com/storage/v1/b/${bucket}/iam`,
+          body: {
+            version: 1,
+            kind: 'storage#policy',
+            resourceId: `projects/_/buckets/${bucket}`,
+            bindings: clone(configured),
+            etag: observedEtag,
+          },
+        },
+        {
+          method: 'GET',
+          url: `https://storage.googleapis.com/storage/v1/b/${bucket}/iam?optionsRequestedPolicyVersion=3`,
+        },
+      ]);
+    });
+  }
+});
+
+test('bucket IAM baseline removes every non-empty proper subset of the six official default tuples', async (t) => {
+  const contract = await contractFixture();
+  const id = 'bucket-iam-baseline';
+  const bucket = GCP_IDENTITY.bucket;
+  const observedEtag = 'ESIzRFVm';
+  const responseEtag = 'd4iZqrvM';
+  const fullMask = (1 << DEFAULT_UNIFORM_BUCKET_TUPLES.length) - 1;
+
+  assert.equal(DEFAULT_UNIFORM_BUCKET_TUPLES.length, 6);
+  assert.deepEqual(
+    configuredBucketBindings(contract, bucket),
+    EXPECTED_MEDIA_BUCKET_BINDINGS,
+  );
+
+  for (let mask = 1; mask < fullMask; mask += 1) {
+    await t.test(`default tuple mask ${mask.toString(2).padStart(6, '0')}`, async () => {
+      const partialDefaults = groupBucketIamTuples(
+        DEFAULT_UNIFORM_BUCKET_TUPLES.filter((ignored, index) => (mask & (1 << index)) !== 0),
+      );
+      const initial = storagePolicy({
+        bucket,
+        bindings: [...partialDefaults, ...clone(EXPECTED_MEDIA_BUCKET_BINDINGS)],
+        etag: observedEtag,
+      });
+      const finalPolicy = storagePolicy({
+        bucket,
+        bindings: clone(EXPECTED_MEDIA_BUCKET_BINDINGS),
+        etag: responseEtag,
+      });
+      const calls = [];
+      let gets = 0;
+      const plane = new GcpControlPlane({
+        contract, notificationChannel: CHANNEL,
+        gcloud: async () => { throw new Error('gcloud must not run'); },
+        request: async (input) => {
+          calls.push(clone(input));
+          if (input.method === 'GET') return clone(gets++ === 0 ? initial : finalPolicy);
+          if (input.method === 'PUT') return clone(finalPolicy);
+          throw new Error('unexpected request');
+        },
+      });
+      plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
+
+      assert.deepEqual(await ensureExactResource({
+        id, mutate: true,
+        read: () => plane.read(id),
+        create: () => plane.create(id),
+        compare: (value) => plane.compare(id, value),
+      }), { id, status: 'created' });
+      assert.deepEqual(calls, [
+        {
+          method: 'GET',
+          url: `https://storage.googleapis.com/storage/v1/b/${bucket}/iam?optionsRequestedPolicyVersion=3`,
+        },
+        {
+          method: 'PUT',
+          url: `https://storage.googleapis.com/storage/v1/b/${bucket}/iam`,
+          body: {
+            version: 1,
+            kind: 'storage#policy',
+            resourceId: `projects/_/buckets/${bucket}`,
+            bindings: clone(EXPECTED_MEDIA_BUCKET_BINDINGS),
+            etag: observedEtag,
+          },
+        },
+        {
+          method: 'GET',
+          url: `https://storage.googleapis.com/storage/v1/b/${bucket}/iam?optionsRequestedPolicyVersion=3`,
+        },
+      ], `partial default mask ${mask} must produce one exact authoritative PUT`);
+    });
+  }
+});
+
+test('bucket IAM baseline is idempotent for empty or configured-only policies', async (t) => {
+  const contract = await contractFixture();
+  for (const [name, id, bucket, policy] of [
+    [
+      'empty response with omitted bindings',
+      'bucket-iam-baseline', GCP_IDENTITY.bucket,
+      storagePolicy({ bucket: GCP_IDENTITY.bucket, includeBindings: false }),
+    ],
+    [
+      'complete configured policy',
+      'build-source-bucket-iam-baseline', GCP_IDENTITY.buildSourceBucket,
+      storagePolicy({
+        bucket: GCP_IDENTITY.buildSourceBucket,
+        bindings: configuredBucketBindings(contract, GCP_IDENTITY.buildSourceBucket),
+      }),
+    ],
+    [
+      'complete media policy with both configured role groups',
+      'bucket-iam-baseline', GCP_IDENTITY.bucket,
+      storagePolicy({
+        bucket: GCP_IDENTITY.bucket,
+        bindings: clone(EXPECTED_MEDIA_BUCKET_BINDINGS),
+        etag: '3q2+7w==',
+      }),
+    ],
+  ]) {
+    await t.test(name, async () => {
+      const calls = [];
+      const plane = new GcpControlPlane({
+        contract, notificationChannel: CHANNEL,
+        gcloud: async () => { throw new Error('gcloud must not run'); },
+        request: async (input) => { calls.push(clone(input)); return clone(policy); },
+      });
+      plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
+      const result = await ensureExactResource({
+        id, mutate: true,
+        read: () => plane.read(id),
+        create: () => plane.create(id),
+        compare: (value) => plane.compare(id, value),
+      });
+      assert.deepEqual(result, { id, status: 'unchanged' });
+      assert.deepEqual(calls.map(({ method }) => method), ['GET']);
+    });
+  }
+});
+
+test('bucket IAM baseline rejects unknown conditional duplicate foreign or malformed policy before PUT', async (t) => {
+  const contract = await contractFixture();
+  const bucket = GCP_IDENTITY.bucket;
+  const defaults = defaultUniformBucketBindings();
+  const configured = configuredBucketBindings(contract, bucket);
+  const cases = [
+    ['unknown role', [...defaults, { role: 'roles/storage.admin', members: [configured[0].members[0]] }]],
+    ['foreign member', defaults.map((binding, index) => index === 0
+      ? { ...binding, members: [...binding.members, 'projectOwner:999999999999'] } : binding)],
+    ['conditional', defaults.map((binding, index) => index === 0
+      ? { ...binding, condition: { title: 'temporary', expression: 'true' } } : binding)],
+    ['duplicate role', [...defaults, clone(defaults[0])]],
+    ['duplicate member', defaults.map((binding, index) => index === 0
+      ? { ...binding, members: [...binding.members, binding.members[0]] } : binding)],
+    ...DEFAULT_UNIFORM_BUCKET_TUPLES.map(({ role, member }) => [
+      `project-number convenience alias ${role} ${member.split(':')[0]}`,
+      groupBucketIamTuples([{
+        role,
+        member: `${member.split(':')[0]}:${PROJECT_NUMBER}`,
+      }]),
+    ]),
+  ];
+  for (const [name, bindings] of cases) {
+    await t.test(name, async () => {
+      const calls = [];
+      const plane = new GcpControlPlane({
+        contract, notificationChannel: CHANNEL,
+        gcloud: async () => { throw new Error('gcloud must not run'); },
+        request: async (input) => {
+          calls.push(clone(input));
+          return storagePolicy({ bucket, bindings });
+        },
+      });
+      plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
+      await assert.rejects(
+        () => plane.read('bucket-iam-baseline'),
+        (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
+      );
+      assert.deepEqual(calls.map(({ method }) => method), ['GET']);
+    });
+  }
+
+  for (const [name, policy] of [
+    ['missing etag', { ...storagePolicy({ bucket, bindings: defaults }), etag: undefined }],
+    ['noncanonical etag', storagePolicy({ bucket, bindings: defaults, etag: 'not base64!' })],
+    ['wrong kind', { ...storagePolicy({ bucket, bindings: defaults }), kind: 'storage#bucket' }],
+    ['foreign resource', { ...storagePolicy({ bucket, bindings: defaults }), resourceId: 'projects/_/buckets/foreign' }],
+    ['condition-capable version', { ...storagePolicy({ bucket, bindings: defaults }), version: 3 }],
+  ]) {
+    await t.test(name, async () => {
+      let puts = 0;
+      const plane = new GcpControlPlane({
+        contract, notificationChannel: CHANNEL,
+        gcloud: async () => { throw new Error('gcloud must not run'); },
+        request: async (input) => {
+          if (input.method === 'PUT') puts += 1;
+          return clone(policy);
+        },
+      });
+      plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
+      await assert.rejects(
+        () => plane.read('bucket-iam-baseline'),
+        (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
+      );
+      assert.equal(puts, 0);
+    });
+  }
+});
+
+test('a failed bucket IAM reread invalidates every older cached write snapshot', async () => {
+  const contract = await contractFixture();
+  const bucket = GCP_IDENTITY.bucket;
+  const valid = storagePolicy({ bucket, bindings: defaultUniformBucketBindings() });
+  const invalid = {
+    ...storagePolicy({ bucket, bindings: defaultUniformBucketBindings() }),
+    bindings: [{ role: 'roles/storage.admin', members: ['user:foreign@example.test'] }],
+  };
+  let reads = 0;
+  let puts = 0;
+  const plane = new GcpControlPlane({
+    contract, notificationChannel: CHANNEL,
+    gcloud: async () => { throw new Error('gcloud must not run'); },
+    request: async (input) => {
+      if (input.method === 'PUT') {
+        puts += 1;
+        return storagePolicy({ bucket, bindings: [], etag: 'CAI=' });
+      }
+      return clone(reads++ === 0 ? valid : invalid);
+    },
+  });
+  plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
+
+  assert.deepEqual(await plane.read('bucket-iam-baseline'), { status: 'absent' });
+  await assert.rejects(
+    () => plane.read('bucket-iam-baseline'),
+    (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
+  );
+  await assert.rejects(
+    () => plane.create('bucket-iam-baseline'),
+    (error) => error.code === 'BUCKET_IAM_BASELINE_STATE_INVALID',
+  );
+  assert.equal(puts, 0);
+});
+
+test('bucket IAM baseline recovers only a lost response with exact readback and rejects etag drift or bad post-readback', async (t) => {
+  const contract = await contractFixture();
+  const bucket = GCP_IDENTITY.bucket;
+  const initial = storagePolicy({ bucket, bindings: defaultUniformBucketBindings() });
+  const finalPolicy = storagePolicy({ bucket, bindings: [], etag: 'CAI=' });
+  const execute = async ({ putError, postPolicy }) => {
+    let gets = 0;
+    const calls = [];
+    const plane = new GcpControlPlane({
+      contract, notificationChannel: CHANNEL,
+      gcloud: async () => { throw new Error('gcloud must not run'); },
+      request: async (input) => {
+        calls.push(clone(input));
+        if (input.method === 'GET') return clone(gets++ === 0 ? initial : postPolicy);
+        if (putError) throw putError;
+        return clone(finalPolicy);
+      },
+    });
+    plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
+    const operation = () => ensureExactResource({
+      id: 'bucket-iam-baseline', mutate: true,
+      read: () => plane.read('bucket-iam-baseline'),
+      create: () => plane.create('bucket-iam-baseline'),
+      compare: (value) => plane.compare('bucket-iam-baseline', value),
+    });
+    return { operation, calls };
+  };
+
+  await t.test('lost response recovers after one exact authoritative readback', async () => {
+    const fixture = await execute({
+      putError: Object.assign(new Error('response lost'), { code: 'TRANSPORT_AMBIGUOUS' }),
+      postPolicy: finalPolicy,
+    });
+    assert.deepEqual(await fixture.operation(), {
+      id: 'bucket-iam-baseline', status: 'created-readback-recovered',
+    });
+    assert.deepEqual(fixture.calls.map(({ method }) => method), ['GET', 'PUT', 'GET']);
+  });
+
+  await t.test('etag conflict is deterministic and never adopted through readback', async () => {
+    const fixture = await execute({
+      putError: Object.assign(new Error('concurrent policy write'), { code: 'IAM_POLICY_ETAG_MISMATCH' }),
+      postPolicy: finalPolicy,
+    });
+    await assert.rejects(fixture.operation, (error) => error.code === 'IAM_POLICY_ETAG_MISMATCH');
+    assert.deepEqual(fixture.calls.map(({ method }) => method), ['GET', 'PUT']);
+  });
+
+  await t.test('successful PUT still requires a separate exact policy readback', async () => {
+    const fixture = await execute({ putError: null, postPolicy: initial });
+    await assert.rejects(fixture.operation, (error) => error.code === 'POST_CREATE_READBACK_FAILED');
+    assert.deepEqual(fixture.calls.map(({ method }) => method), ['GET', 'PUT', 'GET']);
+  });
+
+  await t.test('lost response with a non-exact readback remains ambiguous', async () => {
+    const fixture = await execute({
+      putError: Object.assign(new Error('response lost'), { code: 'TRANSPORT_AMBIGUOUS' }),
+      postPolicy: initial,
+    });
+    await assert.rejects(fixture.operation, (error) => error.code === 'CREATE_RESULT_AMBIGUOUS');
+    assert.deepEqual(fixture.calls.map(({ method }) => method), ['GET', 'PUT', 'GET']);
+  });
+});
+
+function gcloudBucketMetadata(value) {
+  const metadata = clone(value);
+  delete metadata.projectNumber;
+  return metadata;
 }
 
 test('readback compares project display name and labels, repository description, and unconditional bucket lifecycle exactly', async () => {
@@ -2610,19 +4583,23 @@ test('Artifact Registry creation and readback require an exact writable standard
   ]]);
 });
 
-test('secret container readback rejects expiry, rotation, topics, CMEK, and label drift', async () => {
+test('secret container readback binds the cached numeric project and rejects identity or policy drift', async () => {
   const plane = new GcpControlPlane({
     contract: await contractFixture(), notificationChannel: CHANNEL,
     gcloud: async () => { throw new Error('gcloud must not run'); },
     request: async () => { throw new Error('REST must not run'); },
   });
+  plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
   const secret = {
-    name: `projects/${PROJECT}/secrets/${GCP_IDENTITY.secrets.session}`,
+    name: `projects/${PROJECT_NUMBER}/secrets/${GCP_IDENTITY.secrets.session}`,
     replication: { automatic: {} },
     labels: { application: 'hong-kong-buddy', environment: 'production-v1' },
   };
   assert.equal(plane.compare(`secret-container:${GCP_IDENTITY.secrets.session}`, secret), true);
   for (const drifted of [
+    { ...secret, name: `projects/${PROJECT}/secrets/${GCP_IDENTITY.secrets.session}` },
+    { ...secret, name: `projects/999999999999/secrets/${GCP_IDENTITY.secrets.session}` },
+    { ...secret, name: `${secret.name}/foreign` },
     { ...secret, expireTime: '2026-09-01T00:00:00Z' },
     { ...secret, ttl: '86400s' },
     { ...secret, rotation: { nextRotationTime: '2026-09-01T00:00:00Z', rotationPeriod: '86400s' } },
@@ -2632,6 +4609,74 @@ test('secret container readback rejects expiry, rotation, topics, CMEK, and labe
   ]) {
     assert.equal(plane.compare(`secret-container:${GCP_IDENTITY.secrets.session}`, drifted), false);
   }
+
+  const unbound = new GcpControlPlane({
+    contract: await contractFixture(), notificationChannel: CHANNEL,
+    gcloud: async () => { throw new Error('gcloud must not run'); },
+    request: async () => { throw new Error('REST must not run'); },
+  });
+  assert.equal(unbound.compare(`secret-container:${GCP_IDENTITY.secrets.session}`, secret), false);
+
+  const poisoned = new GcpControlPlane({
+    contract: await contractFixture(), notificationChannel: CHANNEL,
+    gcloud: async () => { throw new Error('gcloud must not run'); },
+    request: async () => { throw new Error('REST must not run'); },
+  });
+  poisoned.cache.set('project', { projectNumber: '999999999999' });
+  assert.equal(poisoned.compare(`secret-container:${GCP_IDENTITY.secrets.session}`, {
+    ...secret, name: `projects/999999999999/secrets/${GCP_IDENTITY.secrets.session}`,
+  }), false);
+});
+
+test('secret container create readback and rerun accept the live numeric identity with one POST total', async () => {
+  const contract = await contractFixture();
+  const secretId = GCP_IDENTITY.secrets.dbAppUrl;
+  const resourceId = `secret-container:${secretId}`;
+  const liveSecret = {
+    name: `projects/${PROJECT_NUMBER}/secrets/${secretId}`,
+    replication: { automatic: {} },
+    labels: { application: 'hong-kong-buddy', environment: 'production-v1' },
+  };
+  const gcloudCalls = [];
+  const requests = [];
+  let created = false;
+  const plane = new GcpControlPlane({
+    contract, notificationChannel: CHANNEL,
+    gcloud: async (args) => {
+      gcloudCalls.push(args);
+      if (args[0] === 'secrets' && args[1] === 'describe') {
+        if (!created) throw notFound();
+        return liveSecret;
+      }
+      throw new Error(`unexpected gcloud ${args.join(' ')}`);
+    },
+    request: async (input) => {
+      requests.push(input);
+      if (input.method !== 'POST') throw new Error(`unexpected REST method ${input.method}`);
+      created = true;
+      return liveSecret;
+    },
+  });
+  plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
+  const operation = {
+    id: resourceId,
+    mutate: true,
+    read: () => plane.read(resourceId),
+    create: () => plane.create(resourceId),
+    compare: (value) => plane.compare(resourceId, value),
+  };
+
+  assert.deepEqual(await ensureExactResource(operation), { id: resourceId, status: 'created' });
+  assert.deepEqual(await ensureExactResource(operation), { id: resourceId, status: 'unchanged' });
+  assert.deepEqual(requests, [{
+    method: 'POST',
+    url: `https://secretmanager.googleapis.com/v1/projects/${PROJECT}/secrets?secretId=${secretId}`,
+    body: {
+      replication: { automatic: {} },
+      labels: { application: 'hong-kong-buddy', environment: 'production-v1' },
+    },
+  }]);
+  assert.equal(gcloudCalls.filter((args) => args[0] === 'secrets' && args[1] === 'describe').length, 3);
 });
 
 test('existing generated secret values must be canonical base64url encodings of exactly 32 bytes', async () => {
@@ -2668,7 +4713,10 @@ test('Cloud SQL creation uses the supported v1 REST insert with the named PSA ra
     gcloud: async () => { throw new Error('Cloud SQL create must not use gcloud argv'); },
     request: async (input) => {
       requests.push(input);
-      return { name: 'operation-1', status: 'DONE' };
+      return {
+        kind: 'sql#operation', name: 'operation-1', operationType: 'CREATE', status: 'DONE',
+        targetId: GCP_IDENTITY.cloudSqlInstance, targetProject: PROJECT,
+      };
     },
   });
   await plane.create('cloud-sql-instance');
@@ -2712,17 +4760,77 @@ test('Cloud SQL exact readback requires the Enterprise edition selected by the r
   const plus = structuredClone(exact);
   plus.settings.edition = 'ENTERPRISE_PLUS';
   assert.equal(plane.compare('cloud-sql-instance', plus), false);
+
+  for (const ipAddresses of [
+    [
+      { type: 'PRIVATE', ipAddress: '10.25.0.3' },
+      { type: 'PRIVATE', ipAddress: '10.25.0.3' },
+    ],
+    [
+      { type: 'PRIVATE', ipAddress: '10.25.0.3' },
+      { type: 'PRIVATE', ipAddress: '10.25.0.4' },
+    ],
+  ]) {
+    assert.equal(plane.compare('cloud-sql-instance', { ...exact, ipAddresses }), false);
+  }
+});
+
+test('final readback never accepts duplicate or split Cloud SQL private-IP identities', async (t) => {
+  const secretVersions = {
+    [GCP_IDENTITY.secrets.dbAppUrl]: '1',
+    [GCP_IDENTITY.secrets.dbMigratorUrl]: '1',
+    [GCP_IDENTITY.secrets.session]: '1',
+    [GCP_IDENTITY.secrets.bootstrap]: '1',
+  };
+  for (const [name, ipAddresses] of [
+    ['duplicate', [
+      { type: 'PRIVATE', ipAddress: '10.25.0.3' },
+      { type: 'PRIVATE', ipAddress: '10.25.0.3' },
+    ]],
+    ['split', [
+      { type: 'PRIVATE', ipAddress: '10.25.0.3' },
+      { type: 'PRIVATE', ipAddress: '10.25.0.4' },
+    ]],
+  ]) {
+    await t.test(name, async () => {
+      const plane = new GcpControlPlane({
+        contract: await contractFixture(), notificationChannel: CHANNEL,
+        gcloud: async () => { throw new Error('gcloud must not run'); },
+        request: async () => { throw new Error('REST must not run'); },
+      });
+      const compare = plane.compare.bind(plane);
+      plane.auditUserManagedServiceAccountKeys = async () => undefined;
+      plane.read = async (id) => ({
+        status: 'present',
+        value: id === 'cloud-sql-instance'
+          ? { ...exactCloudSqlInstance(), privateIp: '10.25.0.3', ipAddresses }
+          : {},
+      });
+      plane.compare = (id, value, context) => (
+        id === 'cloud-sql-instance' ? compare(id, value, context) : true
+      );
+
+      await assert.rejects(
+        () => plane.finalReadback({ notificationChannel: CHANNEL, secretVersions }),
+        (error) => error.code === 'FINAL_READBACK_FAILED',
+      );
+    });
+  }
 });
 
 test('Cloud SQL v1 creation polls the canonical v1 operation endpoint', async () => {
   const requests = [];
+  const operation = (status) => ({
+    kind: 'sql#operation', name: 'operation-1', operationType: 'CREATE', status,
+    targetId: GCP_IDENTITY.cloudSqlInstance, targetProject: PROJECT,
+  });
   const plane = new GcpControlPlane({
     contract: await contractFixture(), notificationChannel: CHANNEL,
     gcloud: async () => { throw new Error('Cloud SQL create must not use gcloud argv'); },
     request: async (input) => {
       requests.push(input);
-      if (input.method === 'POST') return { name: 'operation-1', status: 'PENDING' };
-      return { name: 'operation-1', status: 'DONE' };
+      if (input.method === 'POST') return operation('PENDING');
+      return operation('DONE');
     },
   });
 
@@ -2734,35 +4842,607 @@ test('Cloud SQL v1 creation polls the canonical v1 operation endpoint', async ()
   );
 });
 
-test('global bucket ownership is target-project exact and a foreign collision cannot trigger storage or IAM mutation', async () => {
+test('Cloud SQL mutation operation identity and terminal errors fail closed', async (t) => {
+  const contract = await contractFixture();
+  const exactOperation = {
+    kind: 'sql#operation', name: 'operation-1', operationType: 'CREATE', status: 'DONE',
+    targetId: GCP_IDENTITY.cloudSqlInstance, targetProject: PROJECT,
+  };
+  for (const [name, operation, code] of [
+    ['wrong kind', { ...exactOperation, kind: 'sql#database' }, 'SQL_OPERATION_AMBIGUOUS'],
+    ['wrong type', { ...exactOperation, operationType: 'UPDATE' }, 'SQL_OPERATION_AMBIGUOUS'],
+    ['wrong target', { ...exactOperation, targetId: 'foreign-instance' }, 'SQL_OPERATION_AMBIGUOUS'],
+    ['wrong project', { ...exactOperation, targetProject: 'foreign-project' }, 'SQL_OPERATION_AMBIGUOUS'],
+    ['unknown status', { ...exactOperation, status: 'UNKNOWN' }, 'SQL_OPERATION_AMBIGUOUS'],
+    ['terminal error', {
+      ...exactOperation,
+      error: { kind: 'sql#operationErrors', errors: [{ code: 'FAILED', message: 'failed' }] },
+    }, 'SQL_OPERATION_FAILED'],
+    ['empty terminal error wrapper', {
+      ...exactOperation, error: { kind: 'sql#operationErrors', errors: [] },
+    }, 'SQL_OPERATION_AMBIGUOUS'],
+  ]) {
+    await t.test(name, async () => {
+      const plane = new GcpControlPlane({
+        contract, notificationChannel: CHANNEL,
+        gcloud: async () => { throw new Error('gcloud must not run'); },
+        request: async () => operation,
+      });
+      await assert.rejects(
+        () => plane.create('cloud-sql-instance'),
+        (error) => error.code === code,
+      );
+    });
+  }
+});
+
+test('Cloud SQL operation deadlines include an in-flight poll response', async () => {
+  let now = 0;
+  const timeoutMs = 30 * 60 * 1_000;
+  const operation = (status) => ({
+    kind: 'sql#operation', name: 'slow-operation', operationType: 'CREATE', status,
+    targetId: GCP_IDENTITY.cloudSqlInstance, targetProject: PROJECT,
+  });
+  const plane = new GcpControlPlane({
+    contract: await contractFixture(), notificationChannel: CHANNEL,
+    now: () => now,
+    sleep: async (milliseconds) => { now += milliseconds; },
+    gcloud: async () => { throw new Error('gcloud must not run'); },
+    request: async (input) => {
+      if (input.method === 'POST') return operation('PENDING');
+      now = timeoutMs + 1;
+      return operation('DONE');
+    },
+  });
+
+  await assert.rejects(
+    () => plane.create('cloud-sql-instance'),
+    (error) => error.code === 'SQL_OPERATION_TIMEOUT',
+  );
+});
+
+test('Cloud SQL operation deadline aborts a poll that never resolves by itself', async () => {
+  const timeoutMs = 30 * 60 * 1_000;
+  let nowCalls = 0;
+  let expired = false;
+  const clock = () => {
+    nowCalls += 1;
+    if (nowCalls === 1) return 0;
+    return expired ? timeoutMs : timeoutMs - 1;
+  };
+  const operation = {
+    kind: 'sql#operation', name: 'hanging-operation', operationType: 'CREATE', status: 'PENDING',
+    targetId: GCP_IDENTITY.cloudSqlInstance, targetProject: PROJECT,
+  };
+  const plane = new GcpControlPlane({
+    contract: await contractFixture(), notificationChannel: CHANNEL,
+    now: clock,
+    sleep: async () => { expired = true; },
+    gcloud: async () => { throw new Error('gcloud must not run'); },
+    request: async (input) => {
+      if (input.method === 'POST') {
+        return operation;
+      }
+      assert.equal(input.signal instanceof AbortSignal, true);
+      return new Promise((_resolve, reject) => {
+        input.signal.addEventListener('abort', () => {
+          expired = true;
+          reject(Object.assign(new Error('aborted'), { code: 'TRANSPORT_AMBIGUOUS' }));
+        }, { once: true });
+      });
+    },
+  });
+
+  await assert.rejects(
+    () => plane.create('cloud-sql-instance'),
+    (error) => error.code === 'SQL_OPERATION_TIMEOUT',
+  );
+});
+
+test('database insert waits for a quiet exact Cloud SQL instance and polls its v1 operation', async () => {
+  const requests = [];
   const gcloudCalls = [];
+  const sleeps = [];
+  let now = 0;
+  let operationLists = 0;
+  const sql = { ...exactCloudSqlInstance(), ipAddresses: [{ type: 'PRIVATE', ipAddress: '10.25.0.2' }] };
+  const operation = (name, operationType, status) => ({
+    kind: 'sql#operation', name, operationType, status,
+    targetId: GCP_IDENTITY.cloudSqlInstance, targetProject: PROJECT,
+  });
+  const plane = new GcpControlPlane({
+    contract: await contractFixture(), notificationChannel: CHANNEL,
+    now: () => now,
+    sleep: async (milliseconds) => { sleeps.push(milliseconds); now += milliseconds; },
+    gcloud: async (args) => {
+      gcloudCalls.push(args);
+      if (args[0] === 'sql' && args[1] === 'instances' && args[2] === 'describe') return sql;
+      throw new Error(`unexpected gcloud ${args.join(' ')}`);
+    },
+    request: async (input) => {
+      requests.push(input);
+      if (input.method === 'GET' && input.url.includes('/operations?')) {
+        operationLists += 1;
+        return operationLists === 1
+          ? { kind: 'sql#operationsList', items: [operation('backup-op', 'BACKUP_VOLUME', 'RUNNING')] }
+          : { kind: 'sql#operationsList', items: [operation('backup-op', 'BACKUP_VOLUME', 'DONE')] };
+      }
+      if (input.method === 'POST' && input.url.endsWith('/databases')) {
+        return operation('database-op', 'CREATE_DATABASE', 'PENDING');
+      }
+      if (input.method === 'GET' && input.url.endsWith('/operations/database-op')) {
+        return operation('database-op', 'CREATE_DATABASE', 'DONE');
+      }
+      throw new Error(`unexpected REST ${input.method} ${input.url}`);
+    },
+  });
+
+  await plane.create('database');
+  const databasePost = requests.find(({ method, url }) => method === 'POST' && url.endsWith('/databases'));
+  assert.deepEqual({
+    method: databasePost.method,
+    url: databasePost.url,
+    body: databasePost.body,
+  }, {
+    method: 'POST',
+    url: `https://sqladmin.googleapis.com/v1/projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}/databases`,
+    body: { project: PROJECT, instance: GCP_IDENTITY.cloudSqlInstance, name: GCP_IDENTITY.database },
+  });
+  assert.equal(operationLists, 2);
+  assert.equal(gcloudCalls.filter((args) => args[2] === 'instances' || args[2] === 'describe').length >= 3, true);
+  assert.equal(sleeps.length >= 1, true);
+  assert.equal(
+    requests.at(-1).url,
+    `https://sqladmin.googleapis.com/v1/projects/${PROJECT}/operations/database-op`,
+  );
+});
+
+test('database insert re-proves readiness after official transient Cloud SQL 409 states', async (t) => {
+  const contract = await contractFixture();
+  for (const transientCode of ['SQL_OPERATION_IN_PROGRESS', 'SQL_INVALID_STATE']) {
+    await t.test(transientCode, async () => {
+      const requests = [];
+      let posts = 0;
+      let now = 0;
+      const operation = {
+        kind: 'sql#operation', name: 'database-operation', operationType: 'CREATE_DATABASE',
+        status: 'DONE', targetId: GCP_IDENTITY.cloudSqlInstance, targetProject: PROJECT,
+      };
+      const plane = new GcpControlPlane({
+        contract, notificationChannel: CHANNEL,
+        now: () => now,
+        sleep: async (milliseconds) => { now += milliseconds; },
+        gcloud: async (args) => {
+          if (args[0] === 'sql' && args[1] === 'instances' && args[2] === 'describe') {
+            return exactCloudSqlInstance();
+          }
+          throw new Error(`unexpected gcloud ${args.join(' ')}`);
+        },
+        request: async (input) => {
+          requests.push(input);
+          if (input.method === 'GET' && input.url.includes('/operations?')) {
+            return { kind: 'sql#operationsList' };
+          }
+          if (input.method === 'POST' && input.url.endsWith('/databases')) {
+            posts += 1;
+            if (posts === 1) throw Object.assign(new Error('transient conflict'), { code: transientCode });
+            return operation;
+          }
+          throw new Error(`unexpected REST ${input.method} ${input.url}`);
+        },
+      });
+
+      assert.deepEqual(await plane.create('database'), operation);
+      assert.equal(posts, 2);
+      assert.equal(requests.filter(({ url }) => url.includes('/operations?')).length, 2);
+    });
+  }
+});
+
+test('database insert reads every operations page and never posts while a later page is active', async () => {
+  const requests = [];
+  let now = 0;
+  const sql = exactCloudSqlInstance();
+  const operation = (name, status) => ({
+    kind: 'sql#operation', name, operationType: 'BACKUP_VOLUME', status,
+    targetId: GCP_IDENTITY.cloudSqlInstance, targetProject: PROJECT,
+  });
+  const plane = new GcpControlPlane({
+    contract: await contractFixture(), notificationChannel: CHANNEL,
+    now: () => now,
+    sleep: async () => { now += 600_001; },
+    gcloud: async (args) => {
+      if (args[0] === 'sql' && args[1] === 'instances' && args[2] === 'describe') return sql;
+      throw new Error(`unexpected gcloud ${args.join(' ')}`);
+    },
+    request: async (input) => {
+      requests.push(input);
+      if (input.method !== 'GET') throw new Error('database POST must remain blocked');
+      const pageToken = new URL(input.url).searchParams.get('pageToken');
+      return pageToken === null
+        ? { kind: 'sql#operationsList', items: [operation('done-op', 'DONE')], nextPageToken: 'page-2' }
+        : { kind: 'sql#operationsList', items: [operation('active-op', 'RUNNING')] };
+    },
+  });
+
+  await assert.rejects(
+    () => plane.create('database'),
+    (error) => error.code === 'SQL_INSTANCE_NOT_QUIET',
+  );
+  assert.equal(requests.some(({ method }) => method === 'POST'), false);
+  assert.equal(requests.some(({ url }) => new URL(url).searchParams.get('pageToken') === 'page-2'), true);
+});
+
+test('database quiet gate rejects a non-Operation row before database mutation', async () => {
   const requests = [];
   const plane = new GcpControlPlane({
     contract: await contractFixture(), notificationChannel: CHANNEL,
     gcloud: async (args) => {
-      gcloudCalls.push(args);
-       if (args[0] === 'projects' && args[1] === 'describe') {
-        return {
-          projectId: PROJECT, projectNumber: PROJECT_NUMBER, lifecycleState: 'ACTIVE',
-          parent: { type: 'organization', id: GCP_IDENTITY.organizationId }, name: 'Motion Expert HK LTD Webpage',
-          labels: {},
-         };
-       }
-       if (args[0] === 'storage' && args[1] === 'buckets' && args[2] === 'describe') {
-         return exactBucket({ projectNumber: '999999999999' });
-       }
-       throw new Error('unexpected gcloud operation');
+      if (args[0] === 'sql' && args[1] === 'instances' && args[2] === 'describe') {
+        return exactCloudSqlInstance();
+      }
+      throw new Error(`unexpected gcloud ${args.join(' ')}`);
     },
     request: async (input) => {
       requests.push(input);
-      if (input.method === 'GET') return exactBucket({ projectNumber: '999999999999' });
-      throw new Error('mutation must not run');
+      if (input.method === 'GET' && input.url.includes('/operations?')) {
+        return {
+          kind: 'sql#operationsList',
+          items: [{
+            kind: 'sql#database', name: 'forged-operation', operationType: 'BACKUP_VOLUME',
+            status: 'DONE', targetId: GCP_IDENTITY.cloudSqlInstance, targetProject: PROJECT,
+          }],
+        };
+      }
+      throw new Error('database mutation must remain blocked');
     },
   });
-  assert.equal((await plane.read('project')).status, 'present');
-  await assert.rejects(() => plane.read('bucket'), (error) => error.code === 'BUCKET_ID_COLLISION');
-  assert.equal(requests.length, 0);
-  assert.equal(gcloudCalls.some((args) => args.includes('add-iam-policy-binding')), false);
+
+  await assert.rejects(
+    () => plane.create('database'),
+    (error) => error.code === 'SQL_OPERATION_AMBIGUOUS',
+  );
+  assert.equal(requests.some(({ method }) => method === 'POST'), false);
+});
+
+test('database quiet deadline includes in-flight instance and paginated operation reads', async (t) => {
+  const contract = await contractFixture();
+  const timeoutMs = 10 * 60 * 1_000;
+  for (const slowStage of ['instance', 'operations']) {
+    await t.test(slowStage, async () => {
+      let now = 0;
+      const requests = [];
+      const plane = new GcpControlPlane({
+        contract, notificationChannel: CHANNEL,
+        now: () => now,
+        sleep: async (milliseconds) => { now += milliseconds; },
+        gcloud: async (args) => {
+          if (args[0] === 'sql' && args[1] === 'instances' && args[2] === 'describe') {
+            if (slowStage === 'instance') now = timeoutMs + 1;
+            return exactCloudSqlInstance();
+          }
+          throw new Error(`unexpected gcloud ${args.join(' ')}`);
+        },
+        request: async (input) => {
+          requests.push(input);
+          if (input.method === 'GET' && input.url.includes('/operations?')) {
+            if (slowStage === 'operations') now = timeoutMs + 1;
+            return { kind: 'sql#operationsList' };
+          }
+          throw new Error('database mutation must remain blocked');
+        },
+      });
+
+      await assert.rejects(
+        () => plane.create('database'),
+        (error) => error.code === 'SQL_INSTANCE_NOT_QUIET',
+      );
+      assert.equal(requests.some(({ method }) => method === 'POST'), false);
+      if (slowStage === 'instance') assert.equal(requests.length, 0);
+    });
+  }
+});
+
+test('database quiet deadline aborts hanging gcloud and REST reads', async (t) => {
+  const contract = await contractFixture();
+  const timeoutMs = 10 * 60 * 1_000;
+  for (const slowStage of ['instance', 'operations']) {
+    await t.test(slowStage, async () => {
+      let nowCalls = 0;
+      let now = 0;
+      const clock = () => {
+        nowCalls += 1;
+        if (nowCalls === 1) return 0;
+        if (now < timeoutMs - 1) now = timeoutMs - 1;
+        return now;
+      };
+      const hang = (signal) => new Promise((_resolve, reject) => {
+        assert.equal(signal instanceof AbortSignal, true);
+        signal.addEventListener('abort', () => {
+          now = timeoutMs;
+          reject(Object.assign(new Error('aborted'), { code: 'TRANSPORT_AMBIGUOUS' }));
+        }, { once: true });
+      });
+      const plane = new GcpControlPlane({
+        contract, notificationChannel: CHANNEL,
+        now: clock,
+        sleep: async (milliseconds) => { now += milliseconds; },
+        gcloud: async (args, options) => {
+          if (args[0] === 'sql' && args[1] === 'instances' && args[2] === 'describe') {
+            return slowStage === 'instance' ? hang(options?.signal) : exactCloudSqlInstance();
+          }
+          throw new Error(`unexpected gcloud ${args.join(' ')}`);
+        },
+        request: async (input) => {
+          if (input.method === 'GET' && input.url.includes('/operations?')) {
+            return slowStage === 'operations' ? hang(input.signal) : { kind: 'sql#operationsList' };
+          }
+          throw new Error('database mutation must remain blocked');
+        },
+      });
+
+      await assert.rejects(
+        () => plane.create('database'),
+        (error) => error.code === 'SQL_INSTANCE_NOT_QUIET',
+      );
+    });
+  }
+});
+
+test('database quiet deadline rejects a successful insert response that arrives after the deadline', async () => {
+  const timeoutMs = 10 * 60 * 1_000;
+  let now = 0;
+  const operation = {
+    kind: 'sql#operation', name: 'late-database-operation', operationType: 'CREATE_DATABASE',
+    status: 'DONE', targetId: GCP_IDENTITY.cloudSqlInstance, targetProject: PROJECT,
+  };
+  const plane = new GcpControlPlane({
+    contract: await contractFixture(), notificationChannel: CHANNEL,
+    now: () => now,
+    sleep: async (milliseconds) => { now += milliseconds; },
+    gcloud: async (args) => {
+      if (args[0] === 'sql' && args[1] === 'instances' && args[2] === 'describe') {
+        return exactCloudSqlInstance();
+      }
+      throw new Error(`unexpected gcloud ${args.join(' ')}`);
+    },
+    request: async (input) => {
+      if (input.method === 'GET' && input.url.includes('/operations?')) {
+        return { kind: 'sql#operationsList' };
+      }
+      if (input.method === 'POST' && input.url.endsWith('/databases')) {
+        now = timeoutMs + 1;
+        return operation;
+      }
+      throw new Error(`unexpected REST ${input.method} ${input.url}`);
+    },
+  });
+
+  await assert.rejects(
+    () => plane.create('database'),
+    (error) => error.code === 'SQL_INSTANCE_NOT_QUIET',
+  );
+});
+
+test('database quiet deadline aborts an insert request that never resolves by itself', async () => {
+  const timeoutMs = 10 * 60 * 1_000;
+  let now = 0;
+  let instanceReads = 0;
+  let databasePostSeen = false;
+  const plane = new GcpControlPlane({
+    contract: await contractFixture(), notificationChannel: CHANNEL,
+    now: () => now,
+    sleep: async (milliseconds) => { now += milliseconds; },
+    gcloud: async (args) => {
+      if (args[0] === 'sql' && args[1] === 'instances' && args[2] === 'describe') {
+        instanceReads += 1;
+        if (instanceReads === 2) now = timeoutMs - 1;
+        return exactCloudSqlInstance();
+      }
+      throw new Error(`unexpected gcloud ${args.join(' ')}`);
+    },
+    request: async (input) => {
+      if (input.method === 'GET' && input.url.includes('/operations?')) {
+        return { kind: 'sql#operationsList' };
+      }
+      if (input.method === 'POST' && input.url.endsWith('/databases')) {
+        databasePostSeen = true;
+        return new Promise((_resolve, reject) => {
+          input.signal?.addEventListener('abort', () => {
+            now = timeoutMs;
+            reject(Object.assign(new Error('aborted'), { code: 'TRANSPORT_AMBIGUOUS' }));
+          }, { once: true });
+        });
+      }
+      throw new Error(`unexpected REST ${input.method} ${input.url}`);
+    },
+  });
+
+  let watchdog;
+  const outcome = await Promise.race([
+    plane.create('database').then(
+      () => 'unexpected-success',
+      (error) => error.code,
+    ),
+    new Promise((resolve) => { watchdog = setTimeout(() => resolve('watchdog-expired'), 100); }),
+  ]);
+  clearTimeout(watchdog);
+  assert.equal(databasePostSeen, true);
+  assert.equal(outcome, 'SQL_INSTANCE_NOT_QUIET');
+});
+
+test('Cloud SQL operation pagination treats page tokens and operation names as bounded opaque strings', async () => {
+  const requests = [];
+  const operationName = 'opaque operation/name';
+  const pageToken = 'opaque token:%/+';
+  let operationPages = 0;
+  const operation = (name, operationType, status) => ({
+    kind: 'sql#operation', name, operationType, status,
+    targetId: GCP_IDENTITY.cloudSqlInstance, targetProject: PROJECT,
+  });
+  const plane = new GcpControlPlane({
+    contract: await contractFixture(), notificationChannel: CHANNEL,
+    gcloud: async (args) => {
+      if (args[0] === 'sql' && args[1] === 'instances' && args[2] === 'describe') {
+        return exactCloudSqlInstance();
+      }
+      throw new Error(`unexpected gcloud ${args.join(' ')}`);
+    },
+    request: async (input) => {
+      requests.push(input);
+      if (input.method === 'GET' && input.url.includes('/operations?')) {
+        operationPages += 1;
+        return operationPages === 1
+          ? { kind: 'sql#operationsList', nextPageToken: pageToken }
+          : { kind: 'sql#operationsList', nextPageToken: '' };
+      }
+      if (input.method === 'POST' && input.url.endsWith('/databases')) {
+        return operation(operationName, 'CREATE_DATABASE', 'PENDING');
+      }
+      if (input.method === 'GET' && input.url.includes('/operations/')) {
+        return operation(operationName, 'CREATE_DATABASE', 'DONE');
+      }
+      throw new Error(`unexpected REST ${input.method} ${input.url}`);
+    },
+  });
+
+  await plane.create('database');
+  assert.equal(operationPages, 2);
+  assert.equal(
+    new URL(requests.find(({ url }) => url.includes('pageToken='))?.url).searchParams.get('pageToken'),
+    pageToken,
+  );
+  assert.equal(
+    requests.at(-1).url.endsWith(`/operations/${encodeURIComponent(operationName)}`),
+    true,
+  );
+});
+
+test('database user creation requires an exact CREATE_USER operation identity', async (t) => {
+  const contract = await contractFixture();
+  const password = Buffer.alloc(32, 7).toString('base64url');
+  const context = {
+    sensitive: {
+      databaseUrl: `postgresql://hkbuddy_app:${password}@10.25.0.3:5432/hkbuddy_v1?sslmode=require`,
+    },
+  };
+  const exactOperation = {
+    kind: 'sql#operation', name: 'create-user-operation', operationType: 'CREATE_USER',
+    status: 'DONE', targetId: GCP_IDENTITY.cloudSqlInstance, targetProject: PROJECT,
+  };
+  const accepted = new GcpControlPlane({
+    contract, notificationChannel: CHANNEL,
+    gcloud: async () => { throw new Error('gcloud must not run'); },
+    request: async () => exactOperation,
+  });
+  assert.deepEqual(await accepted.create('db-user:hkbuddy_app', context), exactOperation);
+
+  for (const [name, operation] of [
+    ['wrong kind', { ...exactOperation, kind: 'sql#database' }],
+    ['wrong type', { ...exactOperation, operationType: 'UPDATE_USER' }],
+    ['wrong target', { ...exactOperation, targetId: 'foreign-instance' }],
+    ['wrong project', { ...exactOperation, targetProject: 'foreign-project' }],
+  ]) {
+    await t.test(name, async () => {
+      const requests = [];
+      const plane = new GcpControlPlane({
+        contract, notificationChannel: CHANNEL,
+        gcloud: async () => { throw new Error('gcloud must not run'); },
+        request: async (input) => { requests.push(input); return operation; },
+      });
+      await assert.rejects(
+        () => plane.create('db-user:hkbuddy_app', context),
+        (error) => error.code === 'SQL_OPERATION_AMBIGUOUS',
+      );
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0].method, 'POST');
+    });
+  }
+});
+
+test('live gcloud bucket metadata binds to exact Storage JSON project ownership for both bucket classes', async (t) => {
+  for (const [id, bucket, restValue] of [
+    ['bucket', GCP_IDENTITY.bucket, exactBucket()],
+    ['build-source-bucket', GCP_IDENTITY.buildSourceBucket, exactBuildSourceBucket()],
+  ]) {
+    await t.test(id, async () => {
+      const gcloudCalls = [];
+      const requests = [];
+      const plane = new GcpControlPlane({
+        contract: await contractFixture(), notificationChannel: CHANNEL,
+        gcloud: async (args) => {
+          gcloudCalls.push(args);
+          return gcloudBucketMetadata(restValue);
+        },
+        request: async (input) => {
+          requests.push(input);
+          return restValue;
+        },
+      });
+      plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
+
+      assert.deepEqual(await plane.read(id), { status: 'present', value: restValue });
+      assert.equal(plane.compare(id, restValue), true);
+      assert.deepEqual(gcloudCalls, [[
+        'storage', 'buckets', 'describe', `gs://${bucket}`, `--project=${PROJECT}`, '--format=json',
+      ]]);
+      assert.deepEqual(requests, [{
+        method: 'GET',
+        url: `https://storage.googleapis.com/storage/v1/b/${bucket}?projection=full`,
+      }]);
+    });
+  }
+});
+
+test('Storage JSON bucket ownership read fails closed for foreign missing malformed forbidden and ambiguous results', async (t) => {
+  const failures = [
+    ['foreign owner', (exactValue) => ({ ...exactValue, projectNumber: '999999999999' }), 'reject', 'BUCKET_ID_COLLISION'],
+    ['missing owner', (exactValue) => {
+      const value = clone(exactValue);
+      delete value.projectNumber;
+      return value;
+    }, 'reject', 'BUCKET_ID_COLLISION'],
+    ['malformed identity', () => ({ projectNumber: PROJECT_NUMBER }), 'reject', 'BUCKET_ID_COLLISION'],
+    ['forbidden', () => { throw Object.assign(new Error('forbidden'), { code: 'FORBIDDEN' }); }, 'unknown', 'FORBIDDEN'],
+    ['ambiguous', () => { throw Object.assign(new Error('ambiguous'), { code: 'TRANSPORT_AMBIGUOUS' }); }, 'reject', 'TRANSPORT_AMBIGUOUS'],
+    ['missing after existence proof', () => { throw Object.assign(new Error('not found'), { code: 'NOT_FOUND' }); }, 'reject', 'TRANSPORT_AMBIGUOUS'],
+  ];
+  for (const [id, bucket, exactValue] of [
+    ['bucket', GCP_IDENTITY.bucket, exactBucket()],
+    ['build-source-bucket', GCP_IDENTITY.buildSourceBucket, exactBuildSourceBucket()],
+  ]) {
+    for (const [failure, response, outcome, code] of failures) {
+      await t.test(`${id}: ${failure}`, async () => {
+        const gcloudCalls = [];
+        const requests = [];
+        const plane = new GcpControlPlane({
+          contract: await contractFixture(), notificationChannel: CHANNEL,
+          gcloud: async (args) => {
+            gcloudCalls.push(args);
+            return gcloudBucketMetadata(exactValue);
+          },
+          request: async (input) => {
+            requests.push(input);
+            return response(exactValue);
+          },
+        });
+        plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
+
+        if (outcome === 'unknown') {
+          assert.deepEqual(await plane.read(id), { status: 'unknown', code });
+        } else {
+          await assert.rejects(() => plane.read(id), (error) => error.code === code);
+        }
+        assert.equal(gcloudCalls.length, 1);
+        assert.deepEqual(requests, [{
+          method: 'GET',
+          url: `https://storage.googleapis.com/storage/v1/b/${bucket}?projection=full`,
+        }]);
+        assert.equal(gcloudCalls.some((args) => args.includes('add-iam-policy-binding')), false);
+        assert.equal(requests.some(({ method }) => method !== 'GET'), false);
+      });
+    }
+  }
 });
 
 test('bucket insert request contains only writable exact controls and readback includes target projectNumber', async () => {
@@ -2842,7 +5522,7 @@ test('budget readback normalizes an omitted default-false notification field', a
     name: `billingAccounts/${GCP_IDENTITY.billingAccountId}/budgets/123`,
     displayName: 'Hong Kong Buddy Production V1 monthly guard',
     budgetFilter: {
-      projects: ['projects/123456789012'], calendarPeriod: 'MONTH',
+      projects: [`projects/${PROJECT_NUMBER}`], calendarPeriod: 'MONTH',
       creditTypesTreatment: 'INCLUDE_ALL_CREDITS',
     },
     amount: { specifiedAmount: { currencyCode: 'HKD', units: '2300' } },
@@ -2858,7 +5538,7 @@ test('budget readback normalizes an omitted default-false notification field', a
     contract: await contractFixture(), notificationChannel: CHANNEL,
     gcloud: async (args) => {
       if (args[0] === 'projects') return {
-        projectId: PROJECT, projectNumber: '123456789012', lifecycleState: 'ACTIVE',
+        projectId: PROJECT, projectNumber: PROJECT_NUMBER, lifecycleState: 'ACTIVE',
         parent: { type: 'organization', id: '797368190621' },
         labels: { application: 'hong-kong-buddy', environment: 'production-v1' },
       };
@@ -3123,14 +5803,15 @@ test('paginated secret-version, alert-policy, and budget readbacks cannot hide d
         requests.push(input);
         if (input.url.includes(':access')) throw new Error('ambiguous versions must stop before access');
         if (input.url.includes('pageToken=second')) return {
-          versions: [{ name: `projects/${PROJECT}/secrets/${GCP_IDENTITY.secrets.session}/versions/2`, state: 'ENABLED' }],
+          versions: [{ name: `projects/${PROJECT_NUMBER}/secrets/${GCP_IDENTITY.secrets.session}/versions/2`, state: 'ENABLED' }],
         };
         return {
-          versions: [{ name: `projects/${PROJECT}/secrets/${GCP_IDENTITY.secrets.session}/versions/1`, state: 'ENABLED' }],
+          versions: [{ name: `projects/${PROJECT_NUMBER}/secrets/${GCP_IDENTITY.secrets.session}/versions/1`, state: 'ENABLED' }],
           nextPageToken: 'second',
         };
       },
     });
+    plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
     assert.deepEqual(await plane.read(`secret-version:${GCP_IDENTITY.secrets.session}`), {
       status: 'present', value: { exact: false },
     });
@@ -3184,6 +5865,73 @@ test('paginated secret-version, alert-policy, and budget readbacks cannot hide d
   });
 });
 
+test('secret-version list and access responses bind the exact cached numeric parent', async (t) => {
+  const contract = await contractFixture();
+  const secretId = GCP_IDENTITY.secrets.session;
+  const versionName = `projects/${PROJECT_NUMBER}/secrets/${secretId}/versions/1`;
+  const secretValue = Buffer.alloc(32, 0x41).toString('base64url');
+  const readWith = async (options = {}) => {
+    const listedName = options.listedName ?? versionName;
+    const accessName = Object.hasOwn(options, 'accessName') ? options.accessName : versionName;
+    const duplicate = options.duplicate ?? false;
+    const requests = [];
+    const plane = new GcpControlPlane({
+      contract, notificationChannel: CHANNEL,
+      gcloud: async () => { throw new Error('gcloud must not run'); },
+      request: async (input) => {
+        requests.push(input);
+        if (input.url.includes(':access')) {
+          return { name: accessName, payload: { data: Buffer.from(secretValue).toString('base64') } };
+        }
+        const row = { name: listedName, state: 'ENABLED' };
+        return { versions: duplicate ? [row, { ...row }] : [row] };
+      },
+    });
+    plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
+    return {
+      requests,
+      result: () => plane.read(`secret-version:${secretId}`),
+    };
+  };
+
+  await t.test('live numeric list and access names pass', async () => {
+    const fixture = await readWith();
+    assert.deepEqual(await fixture.result(), {
+      status: 'present', value: { version: '1', secretValue, exact: true },
+    });
+    assert.equal(fixture.requests.length, 2);
+    assert.equal(fixture.requests.every(({ method }) => method === 'GET'), true);
+  });
+
+  for (const [name, options] of [
+    ['project ID list parent', { listedName: `projects/${PROJECT}/secrets/${secretId}/versions/1` }],
+    ['foreign numeric list parent', { listedName: `projects/999999999999/secrets/${secretId}/versions/1` }],
+    ['wrong secret list parent', { listedName: `projects/${PROJECT_NUMBER}/secrets/foreign/versions/1` }],
+    ['malformed list descendant', { listedName: `${versionName}/extra` }],
+    ['duplicate exact list row', { duplicate: true }],
+  ]) {
+    await t.test(name, async () => {
+      const fixture = await readWith(options);
+      await assert.rejects(fixture.result, (error) => error.code === 'LIST_RESPONSE_AMBIGUOUS');
+      assert.equal(fixture.requests.some(({ method }) => method !== 'GET'), false);
+    });
+  }
+
+  for (const [name, accessName] of [
+    ['project ID access parent', `projects/${PROJECT}/secrets/${secretId}/versions/1`],
+    ['foreign numeric access parent', `projects/999999999999/secrets/${secretId}/versions/1`],
+    ['wrong secret access parent', `projects/${PROJECT_NUMBER}/secrets/foreign/versions/1`],
+    ['malformed access descendant', `${versionName}/extra`],
+    ['missing access name', undefined],
+  ]) {
+    await t.test(name, async () => {
+      const fixture = await readWith({ accessName });
+      await assert.rejects(fixture.result, (error) => error.code === 'SECRET_VERSION_INVALID');
+      assert.equal(fixture.requests.some(({ method }) => method !== 'GET'), false);
+    });
+  }
+});
+
 test('malformed successful list responses are ambiguous and can never trigger duplicate creation', async (t) => {
   for (const body of [null, 'not-an-object', []]) {
     await t.test(JSON.stringify(body), async () => {
@@ -3193,6 +5941,7 @@ test('malformed successful list responses are ambiguous and can never trigger du
         gcloud: async () => { throw new Error('gcloud must not run'); },
         request: async (input) => { requests.push(input); return body; },
       });
+      plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
       await assert.rejects(
         () => plane.read(`secret-version:${GCP_IDENTITY.secrets.session}`),
         (error) => error.code === 'PAGINATION_AMBIGUOUS',
@@ -3222,6 +5971,7 @@ test('REST NOT_FOUND injection cannot prove absence for any REST-backed resource
           throw Object.assign(new Error('private-request-secret'), { code: 'NOT_FOUND' });
         },
       });
+      plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
 
       await assert.rejects(
         () => plane.read(id, { notificationChannel: CHANNEL }),
@@ -3269,6 +6019,7 @@ test('successful omitted REST collections remain authoritative absence evidence'
         gcloud: async () => { throw new Error('gcloud must not run'); },
         request: async (input) => { restCalls.push(input); return {}; },
       });
+      plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
 
       assert.deepEqual(await plane.read(id), { status: 'absent' });
       assert.equal(restCalls.length, 1);
@@ -3568,13 +6319,9 @@ function preflightGcloud({
       name: 'default', autoCreateSubnetworks: true,
     };
     if (args[0] === 'projects') {
-      if (args[1] === 'get-iam-policy') return {
-        bindings: [
-          { role: 'roles/owner', members: ['user:admin@motionexp.com'] },
-          { role: 'roles/compute.serviceAgent', members: [`serviceAccount:service-${PROJECT_NUMBER}@compute-system.iam.gserviceaccount.com`] },
-          { role: 'roles/editor', members: [`serviceAccount:${PROJECT_NUMBER}@cloudservices.gserviceaccount.com`] },
-        ],
-      };
+      if (args[1] === 'get-iam-policy') {
+        return recoveredPreflightProjectPolicy();
+      }
       if (projectPresent) return {
         projectId: PROJECT, projectNumber: PROJECT_NUMBER,
         parent: { type: 'organization', id: GCP_IDENTITY.organizationId },
@@ -3598,6 +6345,7 @@ test('preflight is read-only, project-explicit, and requires the existing shared
   const result = await runGcpPreflight({
     contract: await contractFixture(),
     gcloud: fixture.gcloud,
+    request: preflightReadRequest(),
     getRestPrincipal: async () => 'admin@motionexp.com',
     writeOutput: (line) => output.push(line),
   });
@@ -3760,7 +6508,7 @@ test('real control plane rejects each missing protected baseline binding before 
   }
 });
 
-test('real control plane completes the no-channel discovery stage with only API enablement', async () => {
+test('real control plane completes narrow IAM recovery before no-channel API discovery', async () => {
   const contract = await contractFixture();
   const calls = [];
   const enabledBefore = ['iam.googleapis.com', 'serviceusage.googleapis.com'];
@@ -3772,6 +6520,8 @@ test('real control plane completes the no-channel discovery stage with only API 
     'speech.googleapis.com', 'texttospeech.googleapis.com', 'monitoring.googleapis.com', 'logging.googleapis.com',
   ];
   let apisEnabled = false;
+  let operatorRoleCreated = false;
+  let operatorBindingCreated = false;
   const notFound = () => Object.assign(new Error('not found'), { code: 'NOT_FOUND' });
   const plane = new GcpControlPlane({
     contract, notificationChannel: null,
@@ -3791,18 +6541,38 @@ test('real control plane completes the no-channel discovery stage with only API 
       if (args[0] === 'billing' && args[1] === 'projects') return {
         billingEnabled: true, billingAccountName: `billingAccounts/${GCP_IDENTITY.billingAccountId}`,
       };
-      if (args[0] === 'projects' && args[1] === 'get-iam-policy') return {
-        bindings: contract.project.protectedBindings.map(({ role, member }) => ({ role, members: [member] })),
-      };
+      if (args[0] === 'projects' && args[1] === 'get-iam-policy') {
+        return operatorProjectPolicy(contract, { includeOperator: operatorBindingCreated });
+      }
       if (args[0] === 'asset' && args[1] === 'search-all-resources') return [];
       if (args[0] === 'iam' && args.includes('list')) return [];
+      if (args[0] === 'iam' && args[1] === 'roles' && args[2] === 'describe') {
+        if (!operatorRoleCreated || args[3] !== BUCKET_IAM_OPERATOR_ROLE.id) throw notFound();
+        return { ...BUCKET_IAM_OPERATOR_ROLE, deleted: false };
+      }
+      if (args[0] === 'iam' && args[1] === 'roles' && args[2] === 'create') {
+        assert.equal(args[3], BUCKET_IAM_OPERATOR_ROLE.id);
+        operatorRoleCreated = true;
+        return { ...BUCKET_IAM_OPERATOR_ROLE, deleted: false };
+      }
       if (args[0] === 'services' && args[1] === 'list') {
         return enabledServiceRows(apisEnabled ? allApis : enabledBefore);
       }
       if (args[0] === 'services' && args[1] === 'enable') { apisEnabled = true; return {}; }
       throw notFound();
     },
-    request: async () => { throw new Error('REST must not run before channel'); },
+    request: async (input) => {
+      if (input.url.endsWith(':getIamPolicy')) {
+        return operatorProjectPolicy(contract, { includeOperator: operatorBindingCreated });
+      }
+      if (input.url.endsWith(':setIamPolicy')) {
+        operatorBindingCreated = true;
+        return operatorProjectPolicy(contract, {
+          includeOperator: true, etag: 'BwYAAAAAAAg=',
+        });
+      }
+      throw new Error('unexpected REST before channel');
+    },
   });
   const result = await runGcpProvision({
     argv: [`--confirm-project=${PROJECT}`], contract, controlPlane: plane, writeOutput: () => undefined,
@@ -3817,7 +6587,11 @@ test('real control plane completes the no-channel discovery stage with only API 
   ]);
   assert.equal(calls.some((args) => args.includes(`--project=${GCP_IDENTITY.assetInventoryConsumerProjectId}`)), false);
   assert.deepEqual(calls.filter((args) => args.includes('enable')).map((args) => args.slice(0, 2)), [['services', 'enable']]);
-  assert.equal(calls.some((args) => args.includes('create') || args.includes('add-iam-policy-binding')), false);
+  assert.deepEqual(
+    calls.filter((args) => args.includes('create')).map((args) => args.slice(0, 4)),
+    [['iam', 'roles', 'create', BUCKET_IAM_OPERATOR_ROLE.id]],
+  );
+  assert.equal(calls.some((args) => args.includes('add-iam-policy-binding')), false);
 });
 
 test('real Cloud Asset audit fails closed before host mutation for disabled-service inventory ambiguity and foreign aliases', async (t) => {
@@ -3853,7 +6627,7 @@ test('real Cloud Asset audit fails closed before host mutation for disabled-serv
       ['Cloud Run service', 'run.googleapis.com/Service', `//run.googleapis.com/${targetProject}/locations/asia-east2/services/hkbuddy-v1-foreign`],
       ['VPC', 'compute.googleapis.com/Network', `//compute.googleapis.com/${targetProject}/global/networks/hkbuddy-v1-foreign`],
       ['Artifact Registry repository', 'artifactregistry.googleapis.com/Repository', `//artifactregistry.googleapis.com/${targetProject}/locations/asia-east2/repositories/hkbuddy-v1-foreign`],
-      ['Cloud SQL instance', 'sqladmin.googleapis.com/Instance', `//sqladmin.googleapis.com/${targetProject}/instances/hkbuddy-v1-foreign`],
+      ['Cloud SQL instance', 'sqladmin.googleapis.com/Instance', `//cloudsql.googleapis.com/${targetProject}/instances/hkbuddy-v1-foreign`],
       ['bucket', 'storage.googleapis.com/Bucket', '//storage.googleapis.com/hkbuddy-v1-foreign'],
       ['secret', 'secretmanager.googleapis.com/Secret', `//secretmanager.googleapis.com/${targetProject}/secrets/hkbuddy-v1-foreign`],
       ['custom role', 'iam.googleapis.com/Role', `//iam.googleapis.com/${targetProject}/roles/hkbuddyV1Foreign`],
@@ -3949,6 +6723,64 @@ test('Cloud Asset accepts the live Artifact Registry resource display name exact
   );
   assert.equal(foreignDisplayName.gcloudCalls.some((args) => args.includes('create') || args.includes('enable')), false);
   assert.equal(foreignDisplayName.restCalls.some(({ method }) => method !== 'GET'), false);
+});
+
+test('Cloud Asset accepts the live numeric Secret resource and display names exactly', async () => {
+  const contract = await contractFixture();
+  const secretId = GCP_IDENTITY.secrets.dbAppUrl;
+  const secretPath = `projects/${PROJECT_NUMBER}/secrets/${secretId}`;
+  const fixture = assetAuditControlPlane({
+    contract,
+    assets: [cloudAsset({
+      name: `//secretmanager.googleapis.com/${secretPath}`,
+      assetType: 'secretmanager.googleapis.com/Secret',
+      displayName: secretPath,
+      location: 'global',
+    })],
+  });
+
+  assert.equal(await fixture.plane.auditPreMutationState(), true);
+  assert.equal(fixture.gcloudCalls.some((args) => args.includes('create') || args.includes('enable')), false);
+  assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+});
+
+test('Cloud Asset rejects Secret project aliases malformed identities displays and duplicate rows', async (t) => {
+  const contract = await contractFixture();
+  const secretId = GCP_IDENTITY.secrets.dbAppUrl;
+  const secretPath = `projects/${PROJECT_NUMBER}/secrets/${secretId}`;
+  const exactSecret = cloudAsset({
+    name: `//secretmanager.googleapis.com/${secretPath}`,
+    assetType: 'secretmanager.googleapis.com/Secret',
+    displayName: secretPath,
+    location: 'global',
+  });
+  for (const [name, assets, code] of [
+    ['project ID resource name', [{
+      ...exactSecret, name: `//secretmanager.googleapis.com/projects/${PROJECT}/secrets/${secretId}`,
+    }], 'RESOURCE_COLLISION'],
+    ['foreign numeric resource name', [{
+      ...exactSecret, name: `//secretmanager.googleapis.com/projects/999999999999/secrets/${secretId}`,
+    }], 'RESOURCE_COLLISION'],
+    ['project ID display name', [{
+      ...exactSecret, displayName: `projects/${PROJECT}/secrets/${secretId}`,
+    }], 'RESOURCE_COLLISION'],
+    ['foreign numeric display name', [{
+      ...exactSecret, displayName: `projects/999999999999/secrets/${secretId}`,
+    }], 'RESOURCE_COLLISION'],
+    ['malformed resource descendant', [{ ...exactSecret, name: `${exactSecret.name}/versions/1` }], 'RESOURCE_COLLISION'],
+    ['missing display name', [{ ...exactSecret, displayName: undefined }], 'CLOUD_ASSET_INVENTORY_AMBIGUOUS'],
+    ['duplicate exact row', [exactSecret, { ...exactSecret }], 'CLOUD_ASSET_INVENTORY_AMBIGUOUS'],
+  ]) {
+    await t.test(name, async () => {
+      const fixture = assetAuditControlPlane({ contract, assets });
+      await assert.rejects(
+        () => fixture.plane.auditPreMutationState(),
+        (error) => error.code === code,
+      );
+      assert.equal(fixture.gcloudCalls.some((args) => args.includes('create') || args.includes('enable')), false);
+      assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+    });
+  }
 });
 
 test('Cloud Asset managed identities require exact type name numeric project field canonical parent and metadata shapes', async (t) => {
@@ -4124,6 +6956,90 @@ test('Cloud Asset PSA connection identity requires the numeric project in name a
   assert.equal(rejected.restCalls.some(({ method }) => method !== 'GET'), false);
 });
 
+test('Cloud Asset accepts the exact live Cloud SQL name and only canonical BackupRun descendants', async (t) => {
+  const contract = await contractFixture();
+  const instanceName = `//cloudsql.googleapis.com/projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}`;
+  const instance = cloudAsset({
+    name: instanceName,
+    assetType: 'sqladmin.googleapis.com/Instance',
+    displayName: GCP_IDENTITY.cloudSqlInstance,
+    location: 'asia-east2',
+    state: 'RUNNABLE',
+  });
+  const backupRun = {
+    name: `${instanceName}/backupRuns/1787973381153`,
+    assetType: 'sqladmin.googleapis.com/BackupRun',
+    project: ASSET_PROJECT,
+    location: 'asia-east1',
+    parentFullResourceName: instanceName,
+    parentAssetType: 'sqladmin.googleapis.com/Instance',
+    state: 'RUNNING',
+  };
+  const projectBackup = {
+    name: `//cloudsql.googleapis.com/projects/${PROJECT}/backups/18378fa3-1e80-4ae9-8b7a-bc87f6e45095`,
+    assetType: 'sqladmin.googleapis.com/Backup',
+    project: ASSET_PROJECT,
+    location: 'asia-east1',
+    parentFullResourceName: ASSET_PROJECT_PARENT,
+    parentAssetType: ASSET_PROJECT_TYPE,
+    state: 'ENQUEUED',
+  };
+  const accepted = assetAuditControlPlane({ contract, assets: [instance, backupRun, projectBackup] });
+  assert.equal(await accepted.plane.auditPreMutationState(), true);
+  for (const [location, state] of [
+    ['asia', 'SUCCESSFUL'],
+    ['europe-west12', 'FAILED'],
+  ]) {
+    const lifecycle = assetAuditControlPlane({
+      contract, assets: [instance, { ...backupRun, location, state }],
+    });
+    assert.equal(await lifecycle.plane.auditPreMutationState(), true);
+  }
+
+  const invalid = [
+    ['legacy instance authority', {
+      ...instance,
+      name: `//sqladmin.googleapis.com/projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}`,
+    }],
+    ['instance foreign display name', { ...instance, displayName: `${GCP_IDENTITY.cloudSqlInstance}-foreign` }],
+    ['backup wrong type', { ...backupRun, assetType: 'sqladmin.googleapis.com/Backup' }],
+    ['backup foreign project in name', { ...backupRun, name: backupRun.name.replace(`/projects/${PROJECT}/`, '/projects/foreign/') }],
+    ['backup foreign parent', { ...backupRun, parentFullResourceName: `${instanceName}-foreign` }],
+    ['backup wrong parent type', { ...backupRun, parentAssetType: 'cloudresourcemanager.googleapis.com/Project' }],
+    ['backup zero id', { ...backupRun, name: `${instanceName}/backupRuns/0` }],
+    ['backup negative id', { ...backupRun, name: `${instanceName}/backupRuns/-1` }],
+    ['backup nonnumeric id', { ...backupRun, name: `${instanceName}/backupRuns/not-a-number` }],
+    ['backup noncanonical id', { ...backupRun, name: `${instanceName}/backupRuns/01787973381153` }],
+    ['backup id outside signed int64', { ...backupRun, name: `${instanceName}/backupRuns/9223372036854775808` }],
+    ['backup noncanonical location', { ...backupRun, location: 'somewhere' }],
+    ['backup unknown lifecycle state', { ...backupRun, state: 'READY' }],
+    ['foreign child under exact instance', {
+      ...backupRun,
+      name: `${instanceName}/foreignChildren/1787973381153`,
+      assetType: 'foreign.googleapis.com/Child',
+    }],
+  ];
+  for (const [name, asset] of invalid) {
+    await t.test(name, async () => {
+      const fixture = assetAuditControlPlane({ contract, assets: [asset] });
+      await assert.rejects(
+        () => fixture.plane.auditPreMutationState(),
+        (error) => error.code === 'RESOURCE_COLLISION',
+      );
+      assert.equal(fixture.gcloudCalls.some((args) => args.includes('enable') || args.includes('create')), false);
+      assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+    });
+  }
+
+  const wrongNumericProject = assetAuditControlPlane({
+    contract, assets: [{ ...backupRun, project: 'projects/999999999999' }],
+  });
+  await assert.rejects(
+    () => wrongNumericProject.plane.auditPreMutationState(),
+    (error) => error.code === 'CLOUD_ASSET_INVENTORY_WRONG_PROJECT',
+  );
+});
+
 test('every exact managed top-level Cloud Asset identity is rejected on every wrong asset type', async (t) => {
   const contract = await contractFixture();
   const identities = [
@@ -4131,7 +7047,7 @@ test('every exact managed top-level Cloud Asset identity is rejected on every wr
     ['repository', `//artifactregistry.googleapis.com/projects/${PROJECT}/locations/asia-east2/repositories/${GCP_IDENTITY.repository}`, GCP_IDENTITY.repository, 'asia-east2'],
     ['bucket', `//storage.googleapis.com/${GCP_IDENTITY.bucket}`, GCP_IDENTITY.bucket, 'asia-east2'],
     ['build source bucket', `//storage.googleapis.com/${GCP_IDENTITY.buildSourceBucket}`, GCP_IDENTITY.buildSourceBucket, 'asia-east2'],
-    ['sql', `//sqladmin.googleapis.com/projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}`, GCP_IDENTITY.cloudSqlInstance, 'asia-east2'],
+    ['sql', `//cloudsql.googleapis.com/projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}`, GCP_IDENTITY.cloudSqlInstance, 'asia-east2'],
     ['network', `//compute.googleapis.com/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`, GCP_IDENTITY.network, 'global'],
     ['subnet', `//compute.googleapis.com/projects/${PROJECT}/regions/asia-east2/subnetworks/${GCP_IDENTITY.subnet}`, GCP_IDENTITY.subnet, 'asia-east2'],
     ['psa range', `//compute.googleapis.com/projects/${PROJECT}/global/addresses/${GCP_IDENTITY.psaRange}`, GCP_IDENTITY.psaRange, 'global'],
@@ -4584,6 +7500,425 @@ test('live default-IPv4 PSA readback and exact managed CIDRs remain preflight-id
   assert.equal(foreignOverlap.restCalls.some(({ method }) => method !== 'GET'), false);
 });
 
+test('post-Cloud-SQL PSA route is exempt only by exact address, connection, instance, and route provenance', async (t) => {
+  const contract = await contractFixture();
+  const network = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`;
+  const region = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/regions/asia-east2`;
+  const exactConnection = {
+    service: 'services/servicenetworking.googleapis.com',
+    network: `projects/${PROJECT_NUMBER}/global/networks/${GCP_IDENTITY.network}`,
+    peering: 'servicenetworking-googleapis-com',
+    reservedPeeringRanges: [GCP_IDENTITY.psaRange],
+  };
+  const exactSql = {
+    ...exactCloudSqlInstance(),
+    ipAddresses: [{ type: 'PRIVATE', ipAddress: '10.25.0.2' }],
+  };
+  const postgres = {
+    kind: 'sql#database', name: 'postgres', instance: GCP_IDENTITY.cloudSqlInstance, project: PROJECT,
+    selfLink: `https://sqladmin.googleapis.com/sql/v1beta4/projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}/databases/postgres`,
+  };
+  const livePsa = {
+    address: '10.25.0.0', addressType: 'INTERNAL', ipVersion: 'IPV4', kind: 'compute#address',
+    name: GCP_IDENTITY.psaRange, network, networkTier: 'PREMIUM', prefixLength: 16,
+    purpose: 'VPC_PEERING',
+    selfLink: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/addresses/${GCP_IDENTITY.psaRange}`,
+    status: 'RESERVED',
+  };
+  const liveSubnet = {
+    allowSubnetCidrRoutesOverlap: false, gatewayAddress: '10.24.0.1', ipCidrRange: '10.24.0.0/26',
+    kind: 'compute#subnetwork', name: GCP_IDENTITY.subnet, network,
+    privateIpGoogleAccess: true, privateIpv6GoogleAccess: 'DISABLE_GOOGLE_ACCESS',
+    purpose: 'PRIVATE', region, selfLink: `${region}/subnetworks/${GCP_IDENTITY.subnet}`, stackType: 'IPV4_ONLY',
+  };
+  const localRoute = {
+    name: 'default-route-r-41fc9f2f5f7a6a3d',
+    description: 'Default local route to the subnetwork 10.24.0.0/26.',
+    destRange: '10.24.0.0/26', kind: 'compute#route', network, nextHopNetwork: network, priority: 0,
+    selfLink: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/routes/default-route-r-41fc9f2f5f7a6a3d`,
+  };
+  const peeringRoute = {
+    creationTimestamp: '2026-08-28T20:12:14.625-07:00',
+    description: 'Auto generated route via peering [servicenetworking-googleapis-com].',
+    destRange: '10.25.0.0/24', id: '2991965253249528033', kind: 'compute#route',
+    name: 'peering-route-887ca332c8354df3', network,
+    nextHopPeering: 'servicenetworking-googleapis-com', priority: 0,
+    selfLink: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/routes/peering-route-887ca332c8354df3`,
+  };
+  const inventory = {
+    'compute networks list': [{ name: GCP_IDENTITY.network, selfLink: network, autoCreateSubnetworks: false }],
+    'compute networks subnets': [liveSubnet],
+    'compute routes list': [localRoute, peeringRoute],
+    'compute addresses list': [livePsa],
+    'services vpc-peerings list': [exactConnection],
+    'sql instances list': [{ name: GCP_IDENTITY.cloudSqlInstance, project: PROJECT }],
+    'sql instances describe': exactSql,
+    'sql databases list': [postgres],
+  };
+  const enabledApis = [
+    'iam.googleapis.com', 'serviceusage.googleapis.com', 'compute.googleapis.com',
+    'servicenetworking.googleapis.com', 'sqladmin.googleapis.com',
+  ];
+  const fixtureFor = (gcloudRows = inventory) => assetAuditControlPlane({
+    contract, assets: [], enabledApis, gcloudRows, restRows: { '/users': { items: [] } },
+  });
+
+  await t.test('the exact live four-party proof is preflight-idempotent', async () => {
+    const fixture = fixtureFor();
+    assert.equal(await fixture.plane.auditPreMutationState(), true);
+    assert.equal(fixture.gcloudCalls.some((args) => args.includes('create') || args.includes('enable')), false);
+    assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+  });
+
+  for (const [name, rows] of [
+    ['missing imported route', { ...inventory, 'compute routes list': [localRoute] }],
+    ['duplicate imported route', {
+      ...inventory,
+      'compute routes list': [localRoute, peeringRoute, {
+        ...peeringRoute,
+        name: 'peering-route-aaaaaaaaaaaaaaaa',
+        selfLink: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/routes/peering-route-aaaaaaaaaaaaaaaa`,
+      }],
+    }],
+    ['missing connection', { ...inventory, 'services vpc-peerings list': [] }],
+    ['absent Cloud SQL instance', {
+      ...inventory, 'sql instances list': [], 'sql instances describe': undefined,
+    }],
+    ['route outside the private IP /24', {
+      ...inventory,
+      'compute routes list': [localRoute, { ...peeringRoute, destRange: '10.25.1.0/24' }],
+    }],
+    ['Cloud SQL private IP outside the route', {
+      ...inventory,
+      'sql instances describe': { ...exactSql, ipAddresses: [{ type: 'PRIVATE', ipAddress: '10.25.1.2' }] },
+    }],
+    ['multiple Cloud SQL private IPs', {
+      ...inventory,
+      'sql instances describe': {
+        ...exactSql,
+        ipAddresses: [
+          { type: 'PRIVATE', ipAddress: '10.25.0.2' },
+          { type: 'PRIVATE', ipAddress: '10.25.0.3' },
+        ],
+      },
+    }],
+    ...[
+      ['wrong kind', { kind: 'compute#forwardingRule' }],
+      ['wrong self link', { selfLink: `${network}/routes/foreign` }],
+      ['wrong description', { description: 'Imported route' }],
+      ['wrong network', { network: `${network}-foreign` }],
+      ['wrong peering', { nextHopPeering: 'foreign-peering' }],
+      ['wrong priority', { priority: 1000 }],
+      ['static route type', { routeType: 'STATIC' }],
+      ['tagged route', { tags: ['foreign'] }],
+      ['route status selector', { routeStatus: 'ACTIVE' }],
+      ['AS path selector', { asPaths: [{ pathSegmentType: 'AS_SEQUENCE', asLists: [64512] }] }],
+    ].map(([name, drift]) => [name, {
+      ...inventory,
+      'compute routes list': [localRoute, { ...peeringRoute, ...drift }],
+    }]),
+  ]) {
+    await t.test(name, async () => {
+      const fixture = fixtureFor(rows);
+      if (Object.hasOwn(rows, 'sql instances describe') && rows['sql instances describe'] === undefined) {
+        delete rows['sql instances describe'];
+      }
+      await assert.rejects(
+        () => fixture.plane.auditPreMutationState(),
+        (error) => ['CIDR_OVERLAP', 'CIDR_AUDIT_INVALID', 'RESOURCE_COLLISION'].includes(error.code),
+      );
+      assert.equal(fixture.gcloudCalls.some((args) => args.includes('create') || args.includes('enable')), false);
+      assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+    });
+  }
+
+  await t.test('a second Cloud SQL read changing the private IP fails closed', async () => {
+    const fixture = fixtureFor();
+    const baseGcloud = fixture.plane.gcloud;
+    let describeReads = 0;
+    fixture.plane.gcloud = async (args, options) => {
+      if (args[0] === 'sql' && args[1] === 'instances' && args[2] === 'describe') {
+        fixture.gcloudCalls.push(args);
+        describeReads += 1;
+        return describeReads === 1 ? exactSql : {
+          ...exactSql, ipAddresses: [{ type: 'PRIVATE', ipAddress: '10.25.0.3' }],
+        };
+      }
+      return baseGcloud(args, options);
+    };
+    await assert.rejects(
+      () => fixture.plane.auditPreMutationState(),
+      (error) => error.code === 'RESOURCE_STATE_UNKNOWN',
+    );
+    assert.equal(describeReads, 2);
+  });
+
+  await t.test('a second Cloud SQL read adding a duplicate private IP fails closed', async () => {
+    const fixture = fixtureFor();
+    const baseGcloud = fixture.plane.gcloud;
+    let describeReads = 0;
+    fixture.plane.gcloud = async (args, options) => {
+      if (args[0] === 'sql' && args[1] === 'instances' && args[2] === 'describe') {
+        fixture.gcloudCalls.push(args);
+        describeReads += 1;
+        return describeReads === 1 ? exactSql : {
+          ...exactSql,
+          ipAddresses: [
+            { type: 'PRIVATE', ipAddress: '10.25.0.2' },
+            { type: 'PRIVATE', ipAddress: '10.25.0.2' },
+          ],
+        };
+      }
+      return baseGcloud(args, options);
+    };
+    await assert.rejects(
+      () => fixture.plane.auditPreMutationState(),
+      (error) => error.code === 'RESOURCE_STATE_UNKNOWN',
+    );
+    assert.equal(describeReads, 2);
+  });
+
+  await t.test('a second route inventory adding an overlap fails closed when Cloud SQL and the managed route were absent', async () => {
+    const noSqlInventory = {
+      ...inventory,
+      'compute routes list': [localRoute],
+      'sql instances list': [],
+    };
+    delete noSqlInventory['sql instances describe'];
+    const fixture = fixtureFor(noSqlInventory);
+    const baseGcloud = fixture.plane.gcloud;
+    let routeReads = 0;
+    fixture.plane.gcloud = async (args, options) => {
+      if (args[0] === 'compute' && args[1] === 'routes' && args[2] === 'list') {
+        fixture.gcloudCalls.push(args);
+        routeReads += 1;
+        return routeReads === 1 ? [localRoute] : [localRoute, {
+          name: 'foreign-overlap-route', network, destRange: '10.25.8.0/24',
+          nextHopVpnTunnel: `${region}/vpnTunnels/foreign-overlap`,
+        }];
+      }
+      return baseGcloud(args, options);
+    };
+    await assert.rejects(
+      () => fixture.plane.auditPreMutationState(),
+      (error) => error.code === 'RESOURCE_STATE_UNKNOWN',
+    );
+    assert.equal(routeReads, 2);
+    assert.equal(fixture.gcloudCalls.some((args) => args.includes('create') || args.includes('enable')), false);
+    assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+  });
+
+  for (const [name, commandKey, secondInventory] of [
+    ['subnet overlap', 'compute networks subnets', [liveSubnet, {
+      ...liveSubnet,
+      gatewayAddress: '10.25.4.1', ipCidrRange: '10.25.4.0/24', name: 'foreign-subnet',
+      selfLink: `${region}/subnetworks/foreign-subnet`,
+    }]],
+    ['address overlap', 'compute addresses list', [livePsa, {
+      ...livePsa,
+      name: 'foreign-psa',
+      selfLink: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/addresses/foreign-psa`,
+    }]],
+  ]) {
+    await t.test(`a second full CIDR audit rejects a new ${name}`, async () => {
+      const fixture = fixtureFor();
+      const baseGcloud = fixture.plane.gcloud;
+      let inventoryReads = 0;
+      fixture.plane.gcloud = async (args, options) => {
+        const inventoryList = commandKey === 'compute networks subnets'
+          ? args.slice(0, 4).join(' ') === 'compute networks subnets list'
+          : args.slice(0, 3).join(' ') === commandKey;
+        if (inventoryList) {
+          fixture.gcloudCalls.push(args);
+          inventoryReads += 1;
+          return inventoryReads <= 2 ? inventory[commandKey] : secondInventory;
+        }
+        return baseGcloud(args, options);
+      };
+      await assert.rejects(
+        () => fixture.plane.auditPreMutationState(),
+        (error) => error.code === 'RESOURCE_STATE_UNKNOWN',
+      );
+      assert.equal(inventoryReads, 3);
+      assert.equal(fixture.gcloudCalls.some((args) => args.includes('create') || args.includes('enable')), false);
+      assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+    });
+  }
+
+  await t.test('a second full CIDR audit rejects a foreign peering claiming the managed range', async () => {
+    const foreignNetworkName = 'foreign-vpc';
+    const foreignNetwork = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/${foreignNetworkName}`;
+    const fixture = fixtureFor({
+      ...inventory,
+      'compute networks list': [
+        ...inventory['compute networks list'],
+        { name: foreignNetworkName, selfLink: foreignNetwork, autoCreateSubnetworks: false },
+      ],
+    });
+    const baseGcloud = fixture.plane.gcloud;
+    let foreignPeeringReads = 0;
+    fixture.plane.gcloud = async (args, options) => {
+      if (args[0] === 'services' && args[1] === 'vpc-peerings' && args[2] === 'list') {
+        fixture.gcloudCalls.push(args);
+        if (args.includes(`--network=${GCP_IDENTITY.network}`)) return [exactConnection];
+        if (args.includes(`--network=${foreignNetworkName}`)) {
+          foreignPeeringReads += 1;
+          return foreignPeeringReads === 1 ? [] : [{
+            service: 'services/servicenetworking.googleapis.com',
+            network: `projects/${PROJECT_NUMBER}/global/networks/${foreignNetworkName}`,
+            peering: 'servicenetworking-googleapis-com',
+            reservedPeeringRanges: [GCP_IDENTITY.psaRange],
+          }];
+        }
+      }
+      return baseGcloud(args, options);
+    };
+    await assert.rejects(
+      () => fixture.plane.auditPreMutationState(),
+      (error) => error.code === 'RESOURCE_STATE_UNKNOWN',
+    );
+    assert.equal(foreignPeeringReads, 2);
+    assert.equal(fixture.gcloudCalls.some((args) => args.includes('create') || args.includes('enable')), false);
+    assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+  });
+
+  for (const [name, secondRoutes] of [
+    ['missing imported route', [localRoute]],
+    ['changed imported route identity', [localRoute, {
+      ...peeringRoute,
+      creationTimestamp: '2026-08-28T20:13:14.625-07:00',
+      id: '2991965253249528034',
+      name: 'peering-route-aaaaaaaaaaaaaaaa',
+      selfLink: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/routes/peering-route-aaaaaaaaaaaaaaaa`,
+    }]],
+    ['duplicate imported route', [localRoute, peeringRoute, {
+      ...peeringRoute,
+      id: '2991965253249528034',
+      name: 'peering-route-aaaaaaaaaaaaaaaa',
+      selfLink: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/routes/peering-route-aaaaaaaaaaaaaaaa`,
+    }]],
+  ]) {
+    await t.test(`a second route read with a ${name} fails closed`, async () => {
+      const fixture = fixtureFor();
+      const baseGcloud = fixture.plane.gcloud;
+      let routeReads = 0;
+      fixture.plane.gcloud = async (args, options) => {
+        if (args[0] === 'compute' && args[1] === 'routes' && args[2] === 'list') {
+          fixture.gcloudCalls.push(args);
+          routeReads += 1;
+          return routeReads === 1 ? inventory['compute routes list'] : secondRoutes;
+        }
+        return baseGcloud(args, options);
+      };
+      await assert.rejects(
+        () => fixture.plane.auditPreMutationState(),
+        (error) => error.code === 'RESOURCE_STATE_UNKNOWN',
+      );
+      assert.equal(routeReads, 2);
+      assert.equal(fixture.gcloudCalls.some((args) => args.includes('create') || args.includes('enable')), false);
+      assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+    });
+  }
+
+  const exactPolicies = exactManagedIamPolicies(contract);
+  const finalSecretVersions = {
+    [GCP_IDENTITY.secrets.dbAppUrl]: '1',
+    [GCP_IDENTITY.secrets.dbMigratorUrl]: '1',
+    [GCP_IDENTITY.secrets.session]: '1',
+    [GCP_IDENTITY.secrets.bootstrap]: '1',
+  };
+  const finalReadbackFixtureFor = (routes) => {
+    const gcloudCalls = [];
+    const policyFor = (args) => {
+      if (args[0] === 'projects') return exactPolicies.project;
+      if (args[0] === 'storage') return exactPolicies[`bucket:${args[3].slice('gs://'.length)}`];
+      if (args[0] === 'artifacts') return exactPolicies[`repository:${args[3]}`];
+      if (args[0] === 'secrets') return exactPolicies[`secret:${args[2]}`];
+      if (args[0] === 'iam' && args[1] === 'service-accounts') {
+        const account = contract.resources.serviceAccounts.find(({ email }) => email === args[3]);
+        return exactPolicies[`service-account:${account?.id}`];
+      }
+      throw new Error(`unexpected IAM policy operation ${args.join(' ')}`);
+    };
+    const plane = new GcpControlPlane({
+      contract, notificationChannel: CHANNEL,
+      gcloud: async (args) => {
+        gcloudCalls.push(args);
+        if (args[0] === 'services' && args[1] === 'list') {
+          return enabledServiceRows(AUTOMATIC_BINDING_APIS);
+        }
+        if (args[0] === 'compute' && args[1] === 'networks' && args[2] === 'list') {
+          return inventory['compute networks list'];
+        }
+        if (args[0] === 'compute' && args[1] === 'networks' && args[2] === 'subnets') {
+          return inventory['compute networks subnets'];
+        }
+        if (args[0] === 'compute' && args[1] === 'routes' && args[2] === 'list') return routes;
+        if (args[0] === 'compute' && args[1] === 'addresses' && args[2] === 'list') {
+          return inventory['compute addresses list'];
+        }
+        if (args[0] === 'services' && args[1] === 'vpc-peerings' && args[2] === 'list') {
+          return inventory['services vpc-peerings list'];
+        }
+        if (args[0] === 'iam' && args[1] === 'roles' && args[2] === 'list') {
+          return contract.resources.customRoles.map(liveCustomRoleListRow);
+        }
+        if (args[0] === 'iam' && args[1] === 'roles' && args[2] === 'describe') {
+          const role = contract.resources.customRoles.find(({ id }) => id === args[3]);
+          if (!role) throw new Error('unexpected custom role describe');
+          return { ...role, deleted: false };
+        }
+        if (args.includes('get-iam-policy')) return policyFor(args);
+        throw new Error(`unexpected gcloud ${args.join(' ')}`);
+      },
+      request: async () => { throw new Error('REST must not run'); },
+    });
+    const compare = plane.compare.bind(plane);
+    const liveSql = { ...exactSql, privateIp: '10.25.0.2' };
+    plane.cache.set('project', { projectNumber: PROJECT_NUMBER });
+    plane.auditUserManagedServiceAccountKeys = async () => undefined;
+    plane.read = async (id) => ({
+      status: 'present', value: id === 'cloud-sql-instance' ? liveSql : {},
+    });
+    plane.compare = (id, value, context) => (
+      id === 'cloud-sql-instance' ? compare(id, value, context) : true
+    );
+    return { plane, gcloudCalls };
+  };
+
+  await t.test('final readback accepts one exact live four-party route proof', async () => {
+    const fixture = finalReadbackFixtureFor([localRoute, peeringRoute]);
+    await fixture.plane.finalReadback({
+      notificationChannel: CHANNEL, secretVersions: finalSecretVersions,
+    });
+    assert.equal(fixture.gcloudCalls.some((args) => args.includes('create') || args.includes('enable')), false);
+  });
+
+  for (const [name, routes] of [
+    ['missing', [localRoute]],
+    ['duplicate', [localRoute, peeringRoute, {
+      ...peeringRoute,
+      id: '2991965253249528034',
+      name: 'peering-route-bbbbbbbbbbbbbbbb',
+      selfLink: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/routes/peering-route-bbbbbbbbbbbbbbbb`,
+    }]],
+    ['foreign', [localRoute, { ...peeringRoute, nextHopPeering: 'foreign-peering' }]],
+  ]) {
+    await t.test(`final readback rejects a ${name} post-create PSA route before COMPLETE`, async () => {
+      const fixture = finalReadbackFixtureFor(routes);
+      await assert.rejects(
+        () => fixture.plane.finalReadback({
+          notificationChannel: CHANNEL, secretVersions: finalSecretVersions,
+        }),
+        (error) => error.code === 'FINAL_READBACK_FAILED',
+      );
+      assert.equal(fixture.gcloudCalls.some((args) => (
+        args.includes('create') || args.includes('enable') || args.includes('add-iam-policy-binding')
+      )), false);
+    });
+  }
+});
+
 test('every internal RESERVED address family is canonical and participates in project-wide overlap checks', async (t) => {
   const contract = await contractFixture();
   const network = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/default`;
@@ -4787,7 +8122,7 @@ test('preflight verifies an enabled target-project Monitoring channel and fails 
       contract: await contractFixture(),
       gcloud: fixture.gcloud,
       getRestPrincipal: async () => 'admin@motionexp.com',
-      request: async (input) => {
+      request: preflightReadRequest(async (input) => {
         requests.push(input);
         return {
           name: CHANNEL, displayName: 'HK Buddy V1 operations',
@@ -4795,7 +8130,7 @@ test('preflight verifies an enabled target-project Monitoring channel and fails 
           labels: { email_address: 'admin@motionexp.com' },
           type: 'email', enabled: true, verificationStatus: 'VERIFIED',
         };
-      },
+      }),
       writeOutput: () => undefined,
     });
     assert.equal(result.exitCode, 0);
@@ -4811,7 +8146,7 @@ test('preflight verifies an enabled target-project Monitoring channel and fails 
       contract: await contractFixture(),
       gcloud: fixture.gcloud,
       getRestPrincipal: async () => 'admin@motionexp.com',
-      request: async (input) => {
+      request: preflightReadRequest(async (input) => {
         requests.push(input);
         return {
           name: PROJECT_ID_CHANNEL,
@@ -4822,7 +8157,7 @@ test('preflight verifies an enabled target-project Monitoring channel and fails 
           labels: { email_address: 'admin@motionexp.com' },
           type: 'email', enabled: true, verificationStatus: 'VERIFIED',
         };
-      },
+      }),
       writeOutput: () => undefined,
     });
     assert.equal(result.exitCode, 0);
@@ -4839,7 +8174,7 @@ test('preflight verifies an enabled target-project Monitoring channel and fails 
       contract: await contractFixture(),
       gcloud: fixture.gcloud,
       getRestPrincipal: async () => 'admin@motionexp.com',
-      request: async () => ({
+      request: preflightReadRequest(async () => ({
         name: CHANNEL,
         displayName: 'HK Buddy V1 operations',
         userLabels: {
@@ -4847,7 +8182,7 @@ test('preflight verifies an enabled target-project Monitoring channel and fails 
         },
         labels: { email_address: 'attacker@example.test' },
         type: 'email', enabled: true, verificationStatus: 'VERIFIED',
-      }),
+      })),
       writeOutput: () => undefined,
     });
     assert.equal(result.exitCode, 1);
@@ -4861,11 +8196,11 @@ test('preflight verifies an enabled target-project Monitoring channel and fails 
       contract: await contractFixture(),
       gcloud: fixture.gcloud,
       getRestPrincipal: async () => 'admin@motionexp.com',
-      request: async () => ({
+      request: preflightReadRequest(async () => ({
         name: CHANNEL, displayName: 'HK Buddy V1 operations',
         userLabels: { application: 'hong_kong_buddy', environment: 'production_v1', hkbuddy_contract: 'operations' },
         type: 'email', enabled: true, verificationStatus: 'UNVERIFIED',
-      }),
+      })),
       writeOutput: () => undefined,
     });
     assert.equal(result.exitCode, 1);
@@ -4877,11 +8212,11 @@ test('preflight verifies an enabled target-project Monitoring channel and fails 
     const result = await runGcpPreflight({
       argv: [`--notification-channel=${CHANNEL}`], contract: await contractFixture(),
       gcloud: fixture.gcloud, getRestPrincipal: async () => 'admin@motionexp.com',
-      request: async () => ({
+      request: preflightReadRequest(async () => ({
         name: CHANNEL, displayName: 'HK Buddy V1 operations',
         userLabels: { application: 'hong_kong_buddy', environment: 'production_v1', hkbuddy_contract: 'operations' },
         type: 'sms', enabled: true, verificationStatus: 'VERIFIED',
-      }),
+      })),
       writeOutput: () => undefined,
     });
     assert.equal(result.exitCode, 1);
@@ -4959,7 +8294,7 @@ test('confirmed provisioning requires the existing shared baseline while other 4
     });
     assert.equal(result.exitCode, 1);
     assert.equal(result.publicReport.code, 'SHARED_PROJECT_BASELINE_INVALID');
-    assert.equal(result.publicReport.resumeBoundary, 'billing');
+    assert.equal(result.publicReport.resumeBoundary, 'operator-bucket-iam-recovery-audit');
     assert.equal(plane.calls.some(([kind, id]) => kind === 'create' && id === 'billing'), false);
   });
 });
@@ -4968,7 +8303,8 @@ class MemoryControlPlane {
   constructor({
     existing = [], unverifiedChannel = false, userManagedKey = false,
     finalReadbackFailure = null, iamSubsetFailure = null,
-    preMutationFailure = null,
+    preMutationFailure = null, operatorRecoveryFailure = null,
+    operatorPropagationFailure = null,
   } = {}) {
     this.resources = new Map([...new Set(['project', 'billing', ...existing])].map((id) => {
       const value = { id, exact: true };
@@ -4983,7 +8319,38 @@ class MemoryControlPlane {
     this.finalReadbackFailure = finalReadbackFailure;
     this.iamSubsetFailure = iamSubsetFailure;
     this.preMutationFailure = preMutationFailure;
+    this.operatorRecoveryFailure = operatorRecoveryFailure;
+    this.operatorPropagationFailure = operatorPropagationFailure;
     this.secrets = [];
+  }
+
+  async auditOperatorBucketIamRecovery() {
+    this.calls.push(['audit', 'operator-bucket-iam-recovery']);
+    if (this.operatorRecoveryFailure) {
+      const error = new Error(this.operatorRecoveryFailure);
+      error.code = this.operatorRecoveryFailure;
+      throw error;
+    }
+    const project = await this.read('project');
+    const billing = await this.read('billing');
+    if (project?.status !== 'present' || !this.compare('project', project.value)
+      || billing?.status !== 'present' || !this.compare('billing', billing.value)) {
+      const error = new Error('shared project baseline invalid');
+      error.code = 'SHARED_PROJECT_BASELINE_INVALID';
+      throw error;
+    }
+    return {
+      existingBuckets: [GCP_IDENTITY.bucket, GCP_IDENTITY.buildSourceBucket],
+    };
+  }
+
+  async waitForOperatorBucketIamAccess({ buckets }) {
+    this.calls.push(['wait', 'operator-bucket-iam-propagation', [...buckets]]);
+    if (this.operatorPropagationFailure) {
+      const error = new Error(this.operatorPropagationFailure);
+      error.code = this.operatorPropagationFailure;
+      throw error;
+    }
   }
 
   async read(id) {
@@ -5134,14 +8501,26 @@ test('confirmed provisioning creates every fixed step, performs post-create read
   assert.equal(JSON.stringify(result).includes('latest'), false);
 
   const created = plane.calls.filter(([kind]) => kind === 'create').map(([, id]) => id);
-  assert.deepEqual(created, EXPECTED_PROVISION_STEPS.filter((id) => (
-    !['project', 'billing', 'notification-channel'].includes(id)
-  )));
+  const recoverySteps = [
+    'custom-role:hkbuddyV1BucketIamPolicyOperator', 'operator-bucket-iam-binding',
+  ];
+  assert.deepEqual(created, [
+    ...recoverySteps,
+    ...EXPECTED_PROVISION_STEPS.filter((id) => (
+      !['project', 'billing', 'notification-channel', ...recoverySteps].includes(id)
+    )),
+  ]);
   for (const id of created) {
     const sequence = plane.calls.filter(([kind, candidate]) => (
       ['read', 'create'].includes(kind) && candidate === id
     )).map(([kind]) => kind);
-    assert.deepEqual(sequence, ['read', 'create', 'read'], id);
+    assert.deepEqual(
+      sequence,
+      recoverySteps.includes(id)
+        ? ['read', 'create', 'read', 'read']
+        : ['read', 'create', 'read'],
+      id,
+    );
   }
   assert.equal(plane.calls.some(([kind, id]) => kind === 'create' && id === 'notification-channel'), false);
 
@@ -5155,6 +8534,131 @@ test('confirmed provisioning creates every fixed step, performs post-create read
   assert.equal(plane.calls.some(([kind]) => kind === 'final-readback'), true);
 });
 
+test('confirmed provisioning repairs operator bucket IAM before the full audit and every ordinary mutation', async () => {
+  const plane = new MemoryControlPlane();
+  const result = await runGcpProvision({
+    argv: [`--confirm-project=${PROJECT}`, `--notification-channel=${CHANNEL}`],
+    contract: await contractFixture(), controlPlane: plane,
+    writeOutput: () => undefined,
+  });
+
+  assert.equal(result.exitCode, 0);
+  const operatorRole = 'custom-role:hkbuddyV1BucketIamPolicyOperator';
+  const operatorBinding = 'operator-bucket-iam-binding';
+  const recoveryAuditIndex = plane.calls.findIndex(([kind, id]) => (
+    kind === 'audit' && id === 'operator-bucket-iam-recovery'
+  ));
+  const roleCreateIndex = plane.calls.findIndex(([kind, id]) => (
+    kind === 'create' && id === operatorRole
+  ));
+  const bindingCreateIndex = plane.calls.findIndex(([kind, id]) => (
+    kind === 'create' && id === operatorBinding
+  ));
+  const propagationIndex = plane.calls.findIndex(([kind]) => kind === 'wait');
+  const fullAuditIndex = plane.calls.findIndex(([kind, id]) => (
+    kind === 'audit' && id === 'pre-mutation-state'
+  ));
+  const firstOtherCreateIndex = plane.calls.findIndex(([kind, id]) => (
+    kind === 'create' && ![operatorRole, operatorBinding].includes(id)
+  ));
+  assert.equal(recoveryAuditIndex < roleCreateIndex, true);
+  assert.equal(roleCreateIndex < bindingCreateIndex, true);
+  assert.equal(bindingCreateIndex < propagationIndex, true);
+  assert.equal(propagationIndex < fullAuditIndex, true);
+  assert.equal(fullAuditIndex < firstOtherCreateIndex, true);
+  assert.equal(plane.calls.filter(([kind, id]) => (
+    kind === 'create' && [operatorRole, operatorBinding].includes(id)
+  )).length, 2);
+  assert.equal(plane.calls.some(([kind, id]) => kind === 'create' && (
+    id.startsWith('secret-version:') || id.startsWith('db-user:')
+  )), true);
+});
+
+test('operator IAM recovery failures are resumable and precede secrets, database users, and bucket baselines', async (t) => {
+  await t.test('strict recovery audit failure is non-mutating', async () => {
+    const plane = new MemoryControlPlane({ operatorRecoveryFailure: 'IAM_ALLOWLIST_MISMATCH' });
+    const result = await runGcpProvision({
+      argv: [`--confirm-project=${PROJECT}`, `--notification-channel=${CHANNEL}`],
+      contract: await contractFixture(), controlPlane: plane,
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.publicReport.resumeBoundary, 'operator-bucket-iam-recovery-audit');
+    assert.equal(result.publicReport.mutationPerformed, false);
+    assert.equal(plane.calls.some(([kind]) => kind === 'create'), false);
+    assert.equal(plane.calls.some(([kind, id]) => kind === 'audit' && id === 'pre-mutation-state'), false);
+  });
+
+  await t.test('propagation timeout preserves the durable binding and stops before the full audit', async () => {
+    const plane = new MemoryControlPlane({
+      operatorPropagationFailure: 'OPERATOR_BUCKET_IAM_PROPAGATION_TIMEOUT',
+    });
+    const result = await runGcpProvision({
+      argv: [`--confirm-project=${PROJECT}`, `--notification-channel=${CHANNEL}`],
+      contract: await contractFixture(), controlPlane: plane,
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.publicReport.resumeBoundary, 'operator-bucket-iam-propagation');
+    assert.equal(result.publicReport.mutationPerformed, true);
+    assert.equal(plane.resources.has('operator-bucket-iam-binding'), true);
+    assert.equal(plane.calls.some(([kind, id]) => kind === 'audit' && id === 'pre-mutation-state'), false);
+    assert.equal(plane.calls.some(([kind, id]) => kind === 'create' && (
+      id.includes('bucket-iam-baseline') || id.startsWith('secret-version:') || id.startsWith('db-user:')
+    )), false);
+  });
+
+  await t.test('crash resume adopts the exact role and binding without another IAM write', async () => {
+    const existing = [
+      'custom-role:hkbuddyV1BucketIamPolicyOperator',
+      'operator-bucket-iam-binding',
+    ];
+    const plane = new MemoryControlPlane({ existing });
+    const result = await runGcpProvision({
+      argv: [`--confirm-project=${PROJECT}`, `--notification-channel=${CHANNEL}`],
+      contract: await contractFixture(), controlPlane: plane,
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 0);
+    assert.equal(plane.calls.some(([kind, id]) => (
+      kind === 'create' && existing.includes(id)
+    )), false);
+    assert.equal(plane.calls.some(([kind]) => kind === 'wait'), true);
+  });
+});
+
+test('both bucket IAM baselines must be sanitized before any secret version or database-user write', async () => {
+  const plane = new MemoryControlPlane();
+  const baseCreate = plane.create.bind(plane);
+  plane.create = async (id, context) => {
+    if (id === 'build-source-bucket-iam-baseline') {
+      plane.calls.push(['create', id]);
+      throw Object.assign(new Error('baseline policy is not safe'), {
+        code: 'IAM_ALLOWLIST_MISMATCH',
+      });
+    }
+    return baseCreate(id, context);
+  };
+
+  const result = await runGcpProvision({
+    argv: [`--confirm-project=${PROJECT}`, `--notification-channel=${CHANNEL}`],
+    contract: await contractFixture(), controlPlane: plane,
+    writeOutput: () => undefined,
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.publicReport.code, 'IAM_ALLOWLIST_MISMATCH');
+  assert.equal(result.publicReport.resumeBoundary, 'build-source-bucket-iam-baseline');
+  assert.equal(plane.calls.some(([kind, id]) => kind === 'create' && (
+    id.startsWith('secret-version:') || id.startsWith('db-user:')
+  )), false);
+  assert.deepEqual(
+    plane.calls.filter(([kind, id]) => kind === 'create' && id.includes('bucket-iam-baseline'))
+      .map(([, id]) => id),
+    ['bucket-iam-baseline', 'build-source-bucket-iam-baseline'],
+  );
+});
+
 test('exhaustive pre-mutation audit rejects managed collisions and network overlap before every write', async (t) => {
   for (const code of ['RESOURCE_COLLISION', 'CIDR_OVERLAP', 'IAM_ALLOWLIST_MISMATCH']) {
     await t.test(code, async () => {
@@ -5165,9 +8669,14 @@ test('exhaustive pre-mutation audit rejects managed collisions and network overl
       });
       assert.equal(result.exitCode, 1);
       assert.equal(result.publicReport.code, code);
-      assert.equal(result.publicReport.mutationPerformed, false);
-      assert.deepEqual(plane.calls.filter(([kind]) => kind === 'create'), []);
-      assert.deepEqual(plane.calls.filter(([kind]) => kind === 'audit'), [['audit', 'pre-mutation-state']]);
+      assert.equal(result.publicReport.mutationPerformed, true);
+      assert.deepEqual(
+        plane.calls.filter(([kind]) => kind === 'create').map(([, id]) => id),
+        ['custom-role:hkbuddyV1BucketIamPolicyOperator', 'operator-bucket-iam-binding'],
+      );
+      assert.deepEqual(plane.calls.filter(([kind]) => kind === 'audit'), [
+        ['audit', 'operator-bucket-iam-recovery'], ['audit', 'pre-mutation-state'],
+      ]);
     });
   }
 });
@@ -5191,7 +8700,11 @@ test('service-account key and mandatory final-readback gates prevent a false pro
       assert.equal(result.publicReport.code, expectedCode);
       assert.deepEqual(
         plane.calls.filter(([kind]) => kind === 'create').map(([, id]) => id),
-        ['apis'],
+        [
+          'custom-role:hkbuddyV1BucketIamPolicyOperator',
+          'operator-bucket-iam-binding',
+          'apis',
+        ],
       );
       assert.equal(plane.calls.some(([kind, id]) => kind === 'create' && (
         ['vpc', 'subnet', 'psa-range', 'psa-connection', 'cloud-sql-instance', 'database', 'bucket'].includes(id)

@@ -103,6 +103,18 @@
           "storage.buckets.get"
         ],
         "stage": "GA"
+      },
+      {
+        "id": "hkbuddyV1BucketIamPolicyOperator",
+        "name": "projects/motion-expert-hk-ltd-webpage/roles/hkbuddyV1BucketIamPolicyOperator",
+        "title": "HK Buddy V1 bucket IAM policy operator",
+        "description": "Manage IAM policies for the two Hong Kong Buddy V1 buckets",
+        "includedPermissions": [
+          "storage.buckets.get",
+          "storage.buckets.getIamPolicy",
+          "storage.buckets.setIamPolicy"
+        ],
+        "stage": "GA"
       }
     ],
     "network": {
@@ -497,6 +509,16 @@
         "required": false
       }
     ],
+    "operatorBucketIamBinding": {
+      "scope": "project",
+      "member": "user:admin@motionexp.com",
+      "role": "projects/motion-expert-hk-ltd-webpage/roles/hkbuddyV1BucketIamPolicyOperator",
+      "condition": {
+        "title": "HK Buddy V1 bucket IAM boundary",
+        "description": "Limit operator bucket IAM access to the two Hong Kong Buddy V1 buckets",
+        "expression": "resource.service == \"storage.googleapis.com\" && resource.type == \"storage.googleapis.com/Bucket\" && (resource.name == \"projects/_/buckets/hkbuddy-v1-582852715831-media\" || resource.name == \"projects/_/buckets/hkbuddy-v1-582852715831-build-source\")"
+      }
+    },
     "bindings": [
       {
         "scope": "project",

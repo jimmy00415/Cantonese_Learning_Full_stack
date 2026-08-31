@@ -1,4 +1,51 @@
-# Cantonese Conversation Tutor (Prototype)
+# Cantonese Conversation Tutor / Hong Kong Buddy
+
+> **Production V1 handoff:** active production work is isolated in
+> [`production-v1/`](production-v1/) on branch
+> `feat/production-v1-ai-senior`. It is not the legacy prototype described
+> below. As of the 2026-09-01 handoff, the V1 infrastructure is only partially
+> provisioned and no stable Production V1 URL or QR code has been released.
+
+## Continue Production V1 on another computer
+
+```powershell
+git clone https://github.com/jimmy00415/Cantonese_Learning_Full_stack.git
+cd Cantonese_Learning_Full_stack
+git switch feat/production-v1-ai-senior
+cd production-v1
+npm ci
+$controlledBrowserRoot = 'D:\VS_PROJECT\Testing\HongKong_Buddy\.codex-task-5g-temp\playwright'
+$controlledTempRoot = 'D:\VS_PROJECT\Testing\HongKong_Buddy\.codex-task-5g-temp\temp'
+$controlledTmpRoot = 'D:\VS_PROJECT\Testing\HongKong_Buddy\.codex-task-5g-temp\tmp'
+New-Item -ItemType Directory -Force -Path $controlledBrowserRoot, $controlledTempRoot, $controlledTmpRoot | Out-Null
+$env:PLAYWRIGHT_BROWSERS_PATH = $controlledBrowserRoot
+$env:TEMP = $controlledTempRoot
+$env:TMP = $controlledTmpRoot
+node node_modules/playwright/cli.js install chromium
+npm run check
+npm test
+npm run security:dependencies
+```
+
+The full Task 8 browser evidence suite deliberately asserts that exact
+controlled `D:` browser cache and task-owned temporary root. A generic clone,
+or a computer without that `D:` path, cannot claim full `npm test` PASS. Do not
+weaken or skip the evidence contract to make the suite green; treat inability
+to reproduce that harness as an outstanding external release gate, not a
+product regression.
+
+Then follow the dated handoff and guarded GCP resume procedure in
+[`production-v1/README.md`](production-v1/README.md) and
+[`production-v1/infra/gcp/README.md`](production-v1/infra/gcp/README.md).
+Authenticate again on the new computer; no OAuth code, API key, access token,
+database password, or Secret Manager payload is stored in this repository.
+
+Do not point Production V1 at the legacy Azure app, legacy storage, or any
+unrelated resource in the shared GCP project. Do not treat a local preview,
+contract test, candidate service, or planned Cloud Run hostname as a live
+production release.
+
+## Legacy prototype
 
 A desktop-first web app prototype implementing the PRD. It wires a simple React-free frontend to a Node/Express backend with mocked ASR/LLM/TTS so you can exercise the flow without real cloud keys. Replace the mock hooks with actual providers when ready.
 

@@ -108,7 +108,37 @@ const REQUIRED_CUSTOM_ROLES = Object.freeze([
     includedPermissions: ['storage.buckets.get'],
     stage: 'GA',
   },
+  {
+    id: 'hkbuddyV1BucketIamPolicyOperator',
+    name: `projects/${PROJECT}/roles/hkbuddyV1BucketIamPolicyOperator`,
+    title: 'HK Buddy V1 bucket IAM policy operator',
+    description: 'Manage IAM policies for the two Hong Kong Buddy V1 buckets',
+    includedPermissions: [
+      'storage.buckets.get',
+      'storage.buckets.getIamPolicy',
+      'storage.buckets.setIamPolicy',
+    ],
+    stage: 'GA',
+  },
 ]);
+const REQUIRED_OPERATOR_BUCKET_IAM_BINDING = Object.freeze({
+  scope: 'project',
+  member: `user:${REQUIRED_OPERATOR_ACCOUNT}`,
+  role: `projects/${PROJECT}/roles/hkbuddyV1BucketIamPolicyOperator`,
+  condition: {
+    title: 'HK Buddy V1 bucket IAM boundary',
+    description: 'Limit operator bucket IAM access to the two Hong Kong Buddy V1 buckets',
+    expression: `resource.service == "storage.googleapis.com" && resource.type == "storage.googleapis.com/Bucket" && (resource.name == "projects/_/buckets/${GCP_IDENTITY.bucket}" || resource.name == "projects/_/buckets/${GCP_IDENTITY.buildSourceBucket}")`,
+  },
+});
+const OPERATOR_BUCKET_IAM_STEP = 'operator-bucket-iam-binding';
+const OPERATOR_BUCKET_IAM_ROLE_ID = 'hkbuddyV1BucketIamPolicyOperator';
+const OPERATOR_BUCKET_IAM_PERMISSIONS = Object.freeze([
+  'storage.buckets.get',
+  'storage.buckets.getIamPolicy',
+  'storage.buckets.setIamPolicy',
+]);
+const OPERATOR_BUCKET_IAM_PROPAGATION_TIMEOUT_MS = 120_000;
 const REQUIRED_IAM_BINDINGS = Object.freeze([
   { scope: 'project', member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`, role: 'roles/aiplatform.user' },
   { scope: 'project', member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`, role: 'roles/speech.client' },
@@ -354,6 +384,7 @@ export function assertResourceContract(contract) {
   requireExact(contract.iam, {
     forbiddenWorkloadRoles: REQUIRED_FORBIDDEN_WORKLOAD_ROLES,
     automaticProjectBindings: REQUIRED_AUTOMATIC_PROJECT_BINDINGS,
+    operatorBucketIamBinding: REQUIRED_OPERATOR_BUCKET_IAM_BINDING,
     bindings: REQUIRED_IAM_BINDINGS,
   });
   const runtime = `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`;
@@ -417,6 +448,34 @@ function requireObjectList(value) {
     throw commandError('LIST_RESPONSE_AMBIGUOUS');
   }
   return value;
+}
+
+function cloudSqlDatabaseSelfLink(name) {
+  return `https://sqladmin.googleapis.com/sql/v1beta4/projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}/databases/${name}`;
+}
+
+function requireCloudSqlDatabases(value) {
+  const listing = requireObjectList(value);
+  const names = new Set();
+  let postgresWitnesses = 0;
+  if (listing.some((item) => {
+    const managedIdentity = item?.name === 'postgres' || item?.name === GCP_IDENTITY.database;
+    const valid = plainComputeRow(item)
+      && item.kind === 'sql#database'
+      && typeof item.name === 'string' && item.name.length > 0
+      && item.instance === GCP_IDENTITY.cloudSqlInstance
+      && item.project === PROJECT
+      && (!managedIdentity || item.selfLink === cloudSqlDatabaseSelfLink(item.name))
+      && !names.has(item.name);
+    if (valid) {
+      names.add(item.name);
+      if (item.name === 'postgres') {
+        postgresWitnesses += 1;
+      }
+    }
+    return !valid;
+  }) || postgresWitnesses !== 1) throw commandError('LIST_RESPONSE_AMBIGUOUS');
+  return listing;
 }
 
 function canonicalServiceApiName(value) {
@@ -556,10 +615,84 @@ function classifyTransportError(error, argv = null) {
   return 'TRANSPORT_AMBIGUOUS';
 }
 
-function classifyRestTransportError(error) {
-  const status = Number(error?.response?.status ?? error?.status ?? error?.statusCode);
-  if (error?.code === 'NOT_FOUND' || status === 404) return 'TRANSPORT_AMBIGUOUS';
-  return classifyTransportError(error);
+const HTTP_CONFLICT_AMBIGUOUS = 'HTTP_CONFLICT_AMBIGUOUS';
+
+function exactManagedIamPolicyTarget(target) {
+  if (target?.hostname === 'cloudresourcemanager.googleapis.com'
+    && target.search === ''
+    && target.pathname === `/v1/projects/${PROJECT}:setIamPolicy`) return true;
+  if (target?.hostname !== 'storage.googleapis.com' || target.search !== '') return false;
+  return [GCP_IDENTITY.bucket, GCP_IDENTITY.buildSourceBucket].some((bucket) => (
+    target.pathname === `/storage/v1/b/${encodeURIComponent(bucket)}/iam`
+  ));
+}
+
+function classifyAuthenticatedErrorPayload({ status, payload, target }) {
+  if (status === 403) return 'FORBIDDEN';
+  if (status === 404) return 'TRANSPORT_AMBIGUOUS';
+  if (status !== 409) return 'TRANSPORT_AMBIGUOUS';
+  const apiError = payload?.error;
+  if (!plainComputeRow(payload) || !plainComputeRow(apiError) || Number(apiError.code) !== 409) {
+    return HTTP_CONFLICT_AMBIGUOUS;
+  }
+  const rawCodes = [];
+  if (typeof apiError.status === 'string') rawCodes.push(apiError.status);
+  if (Object.hasOwn(apiError, 'errors')) {
+    if (!Array.isArray(apiError.errors) || apiError.errors.length === 0) return HTTP_CONFLICT_AMBIGUOUS;
+    for (const error of apiError.errors) {
+      if (!plainComputeRow(error)) return HTTP_CONFLICT_AMBIGUOUS;
+      const code = typeof error.reason === 'string' ? error.reason
+        : typeof error.code === 'string' ? error.code : null;
+      if (code === null) return HTTP_CONFLICT_AMBIGUOUS;
+      rawCodes.push(code);
+    }
+  }
+  const mappings = new Map([
+    ['alreadyExists', 'ALREADY_EXISTS'],
+    ['ALREADY_EXISTS', 'ALREADY_EXISTS'],
+    ['operationInProgress', 'SQL_OPERATION_IN_PROGRESS'],
+    ['OPERATION_IN_PROGRESS', 'SQL_OPERATION_IN_PROGRESS'],
+    ['invalidState', 'SQL_INVALID_STATE'],
+    ['INVALID_STATE', 'SQL_INVALID_STATE'],
+    ['ABORTED', 'IAM_POLICY_ETAG_MISMATCH'],
+  ]);
+  const mapped = rawCodes.map((code) => mappings.get(code));
+  if (mapped.length === 0 || mapped.some((code) => code === undefined)
+    || new Set(mapped).size !== 1) return HTTP_CONFLICT_AMBIGUOUS;
+  const [classification] = mapped;
+  if (classification.startsWith('SQL_') && target?.hostname !== 'sqladmin.googleapis.com') {
+    return HTTP_CONFLICT_AMBIGUOUS;
+  }
+  if (classification === 'IAM_POLICY_ETAG_MISMATCH' && !exactManagedIamPolicyTarget(target)) {
+    return HTTP_CONFLICT_AMBIGUOUS;
+  }
+  return classification;
+}
+
+function classifyRestTransportError(error, target = null) {
+  let status;
+  try {
+    status = Number(error?.response?.status ?? error?.status ?? error?.statusCode);
+  } catch { return 'TRANSPORT_AMBIGUOUS'; }
+  try {
+    if (error?.code === 'NOT_FOUND' || status === 404) return 'TRANSPORT_AMBIGUOUS';
+    if (status === 409) {
+      let payload = error?.response?.data ?? error?.response?.body ?? null;
+      if (typeof payload === 'string') {
+        try { payload = JSON.parse(payload); } catch { return HTTP_CONFLICT_AMBIGUOUS; }
+      }
+      return classifyAuthenticatedErrorPayload({ status, payload, target });
+    }
+    return classifyTransportError(error);
+  } catch { return status === 409 ? HTTP_CONFLICT_AMBIGUOUS : 'TRANSPORT_AMBIGUOUS'; }
+}
+
+function classifyAuthenticatedHttpError({ status, text, target }) {
+  let payload = null;
+  if (status === 409) {
+    try { payload = JSON.parse(text); } catch { return HTTP_CONFLICT_AMBIGUOUS; }
+  }
+  return classifyAuthenticatedErrorPayload({ status, payload, target });
 }
 
 function secretBearingArgument(value) {
@@ -588,15 +721,20 @@ export function createGcloudExecutor({ executable, prefixArgs = [], execFile = e
   if (typeof executable !== 'string' || !executable
     || !Array.isArray(prefixArgs) || prefixArgs.some((value) => typeof value !== 'string')
     || typeof execFile !== 'function') throw new Error('gcloud executor configuration is invalid');
-  return async (argv, { maxBuffer = 1024 * 1024 } = {}) => {
+  return async (argv, { maxBuffer = 1024 * 1024, signal, timeout = 120_000 } = {}) => {
     const args = nonInteractiveGcloudArgs(prefixArgs, argv);
     if (!Number.isSafeInteger(maxBuffer) || maxBuffer < 1 || maxBuffer > 32 * 1024 * 1024) {
       throw new Error('gcloud output limit is invalid');
     }
+    if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 120_000
+      || (signal !== undefined && (
+        !signal || typeof signal !== 'object' || typeof signal.aborted !== 'boolean'
+      ))) throw new Error('gcloud invocation deadline is invalid');
     let result;
     try {
       result = await execFile(executable, args, {
-        encoding: 'utf8', maxBuffer, windowsHide: true,
+        encoding: 'utf8', maxBuffer, windowsHide: true, timeout,
+        ...(signal === undefined ? {} : { signal }),
       });
     } catch (cause) {
       const error = commandError(classifyTransportError(cause, argv));
@@ -705,13 +843,15 @@ export function createGcloudAuthenticatedRequest({
   getTokenInfo,
   environment = process.env,
   now = Date.now,
+  createTimeoutSignal = (milliseconds) => AbortSignal.timeout(milliseconds),
 } = {}) {
   if (typeof executable !== 'string' || !executable || !Array.isArray(prefixArgs)
     || prefixArgs.some((value) => typeof value !== 'string')
     || typeof account !== 'string' || !/^[^\s@]+@[^\s@]+$/.test(account)
     || typeof execFile !== 'function' || typeof fetchImpl !== 'function'
     || (getTokenInfo !== undefined && typeof getTokenInfo !== 'function')
-    || !environment || typeof environment !== 'object' || typeof now !== 'function') {
+    || !environment || typeof environment !== 'object' || typeof now !== 'function'
+    || typeof createTimeoutSignal !== 'function') {
     throw new Error('gcloud HTTPS authentication configuration is invalid');
   }
   const tokenInfoClient = getTokenInfo ? null : new OAuth2Client();
@@ -720,7 +860,18 @@ export function createGcloudAuthenticatedRequest({
   let refreshAfter = 0;
   let cachedPrincipal = null;
   let principalRefreshAfter = 0;
-  const assertNoAuthOverrides = async () => {
+  const requestSignal = (signal) => {
+    let timeoutSignal;
+    try { timeoutSignal = createTimeoutSignal(120_000); } catch {
+      throw commandError('TRANSPORT_AMBIGUOUS');
+    }
+    if (!(timeoutSignal instanceof AbortSignal)) throw commandError('TRANSPORT_AMBIGUOUS');
+    if (signal === undefined) return timeoutSignal;
+    try { return AbortSignal.any([signal, timeoutSignal]); } catch {
+      throw commandError('TRANSPORT_AMBIGUOUS');
+    }
+  };
+  const assertNoAuthOverrides = async (signal) => {
     const environmentOverride = Object.entries(environment).some(([name, value]) => (
       name.startsWith('CLOUDSDK_AUTH_') && value !== undefined && value !== null
         && String(value).trim() !== ''
@@ -731,7 +882,10 @@ export function createGcloudAuthenticatedRequest({
       result = await execFile(executable, nonInteractiveGcloudArgs(prefixArgs, [
         'config', 'list',
         '--format=json', `--project=${PROJECT}`,
-      ]), { encoding: 'utf8', maxBuffer: 64 * 1024, windowsHide: true });
+      ]), {
+        encoding: 'utf8', maxBuffer: 64 * 1024, windowsHide: true, timeout: 120_000,
+        ...(signal === undefined ? {} : { signal }),
+      });
     } catch (cause) {
       throw commandError(classifyTransportError(cause));
     }
@@ -752,19 +906,25 @@ export function createGcloudAuthenticatedRequest({
     ));
     if (propertyOverride) throw commandError('GCLOUD_AUTH_OVERRIDE');
   };
-  const getToken = async () => {
+  const getToken = async (signal) => {
+    if (signal?.aborted) throw commandError('TRANSPORT_AMBIGUOUS');
     const current = Number(now());
     if (cachedToken && Number.isFinite(current) && current < refreshAfter) return cachedToken;
-    await assertNoAuthOverrides();
+    await assertNoAuthOverrides(signal);
+    if (signal?.aborted) throw commandError('TRANSPORT_AMBIGUOUS');
     let result;
     try {
       result = await execFile(executable, nonInteractiveGcloudArgs(prefixArgs, [
         'auth', 'print-access-token',
         `--account=${account}`, `--project=${PROJECT}`,
-      ]), { encoding: 'utf8', maxBuffer: 64 * 1024, windowsHide: true });
+      ]), {
+        encoding: 'utf8', maxBuffer: 64 * 1024, windowsHide: true, timeout: 120_000,
+        ...(signal === undefined ? {} : { signal }),
+      });
     } catch (cause) {
       throw commandError(classifyTransportError(cause));
     }
+    if (signal?.aborted) throw commandError('TRANSPORT_AMBIGUOUS');
     const token = String(result?.stdout ?? '').trim();
     if (token.length < 20 || token.length > 8192 || /\s|[\u0000-\u001f\u007f]/.test(token)) {
       throw commandError('GCLOUD_ACCESS_TOKEN_INVALID');
@@ -774,14 +934,42 @@ export function createGcloudAuthenticatedRequest({
     return cachedToken;
   };
 
-  const getPrincipal = async () => {
+  const getPrincipal = async (signal) => {
+    if (signal?.aborted) throw commandError('TRANSPORT_AMBIGUOUS');
     const current = Number(now());
     if (cachedPrincipal && Number.isFinite(current) && current < principalRefreshAfter) {
       return cachedPrincipal;
     }
-    const token = await getToken();
+    const token = await getToken(signal);
     let info;
-    try { info = await inspectToken(token); } catch { throw commandError('REST_AUTH_UNKNOWN'); }
+    let abortListener = null;
+    let aborted = false;
+    try {
+      if (signal?.aborted) throw commandError('TRANSPORT_AMBIGUOUS');
+      if (signal === undefined) {
+        info = await inspectToken(token);
+      } else {
+        const abortPromise = new Promise((_resolve, reject) => {
+          abortListener = () => {
+            aborted = true;
+            reject(commandError('TRANSPORT_AMBIGUOUS'));
+          };
+          signal.addEventListener('abort', abortListener, { once: true });
+          if (signal.aborted) abortListener();
+        });
+        info = await Promise.race([
+          Promise.resolve().then(() => inspectToken(token)),
+          abortPromise,
+        ]);
+      }
+      if (signal?.aborted) throw commandError('TRANSPORT_AMBIGUOUS');
+    } catch {
+      throw commandError(aborted || signal?.aborted ? 'TRANSPORT_AMBIGUOUS' : 'REST_AUTH_UNKNOWN');
+    } finally {
+      if (abortListener !== null) {
+        try { signal.removeEventListener('abort', abortListener); } catch { /* best-effort cleanup only */ }
+      }
+    }
     if (typeof info?.email !== 'string' || !/^[^\s@]+@[^\s@]+$/.test(info.email)) {
       throw commandError('REST_AUTH_UNKNOWN');
     }
@@ -790,17 +978,21 @@ export function createGcloudAuthenticatedRequest({
     return cachedPrincipal;
   };
 
-  const request = async ({ method, url, body }) => {
+  const request = async ({ method, url, body, signal }) => {
     if (!['GET', 'POST', 'PATCH', 'PUT'].includes(method) || typeof url !== 'string') {
       throw new Error('Authenticated request is invalid');
     }
+    if (signal !== undefined && (
+      !signal || typeof signal !== 'object' || typeof signal.aborted !== 'boolean'
+    )) throw new Error('Authenticated request is invalid');
     let target;
     try { target = new URL(url); } catch { throw new Error('Authenticated request is invalid'); }
     if (target.protocol !== 'https:' || !target.hostname.endsWith('.googleapis.com')) {
       throw new Error('Authenticated request is invalid');
     }
-    await getPrincipal();
-    const token = await getToken();
+    const transportSignal = requestSignal(signal);
+    await getPrincipal(transportSignal);
+    const token = await getToken(transportSignal);
     let response;
     try {
       response = await fetchImpl(target.href, {
@@ -813,36 +1005,43 @@ export function createGcloudAuthenticatedRequest({
           ...(body === undefined ? {} : { 'content-type': 'application/json' }),
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: AbortSignal.timeout(120_000),
+        signal: transportSignal,
       });
     } catch {
       throw commandError('TRANSPORT_AMBIGUOUS');
     }
     let responseMetadataValid = false;
+    let responseOk = null;
+    let responseStatus = null;
     try {
+      responseOk = response?.ok;
+      responseStatus = response?.status;
       responseMetadataValid = response?.redirected === false
         && response.url === target.href
-        && typeof response.ok === 'boolean'
-        && Number.isSafeInteger(response.status)
-        && response.status >= 100 && response.status <= 599;
+        && typeof responseOk === 'boolean'
+        && Number.isSafeInteger(responseStatus)
+        && responseStatus >= 100 && responseStatus <= 599;
     } catch { responseMetadataValid = false; }
     if (!responseMetadataValid) {
       await cancelUnreadAuthenticatedResponse(response);
       throw commandError('TRANSPORT_AMBIGUOUS');
     }
-    const text = await readBoundedAuthenticatedResponse(response);
-    if (!response.ok) {
-      const error = commandError(response.status === 403 ? 'FORBIDDEN'
-        : response.status === 404 ? 'TRANSPORT_AMBIGUOUS'
-          : response.status === 409 ? 'ALREADY_EXISTS' : 'TRANSPORT_AMBIGUOUS');
+    let text;
+    try { text = await readBoundedAuthenticatedResponse(response); } catch (error) {
+      if (responseOk === false && responseStatus === 409) {
+        throw commandError(HTTP_CONFLICT_AMBIGUOUS);
+      }
       throw error;
     }
+    if (!responseOk) throw commandError(classifyAuthenticatedHttpError({
+      status: responseStatus, text, target,
+    }));
     if (!text) return null;
     try { return JSON.parse(text); } catch { throw commandError('CONTROL_PLANE_OUTPUT_INVALID'); }
   };
   Object.defineProperty(request, 'getPrincipal', {
     enumerable: false,
-    value: getPrincipal,
+    value: (signal) => getPrincipal(requestSignal(signal)),
   });
   return request;
 }
@@ -900,47 +1099,118 @@ export function createDefaultGcloudAuthenticatedRequest({ environment = process.
   });
 }
 
-export function createAuthenticatedRequest({ auth = new GoogleAuth({
-  scopes: ['https://www.googleapis.com/auth/cloud-platform'],
-}) } = {}) {
-  if (!auth || typeof auth.getClient !== 'function') throw new Error('Google authentication client is invalid');
+export function createAuthenticatedRequest({
+  auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] }),
+  createTimeoutSignal = (milliseconds) => AbortSignal.timeout(milliseconds),
+} = {}) {
+  if (!auth || typeof auth.getClient !== 'function' || typeof createTimeoutSignal !== 'function') {
+    throw new Error('Google authentication client is invalid');
+  }
   let clientPromise;
   const getClient = () => (clientPromise ??= auth.getClient());
-  const request = async ({ method, url, body }) => {
+  const requestDeadline = (callerSignal) => {
+    let timeoutSignal;
+    try { timeoutSignal = createTimeoutSignal(120_000); } catch {
+      throw commandError('TRANSPORT_AMBIGUOUS');
+    }
+    if (!(timeoutSignal instanceof AbortSignal)) throw commandError('TRANSPORT_AMBIGUOUS');
+    if (callerSignal === undefined) {
+      return { signal: timeoutSignal, abortSources: [timeoutSignal] };
+    }
+    let signal;
+    try { signal = AbortSignal.any([callerSignal, timeoutSignal]); } catch {
+      throw commandError('TRANSPORT_AMBIGUOUS');
+    }
+    return { signal, abortSources: [callerSignal, timeoutSignal] };
+  };
+  const awaitWithinDeadline = async (operation, deadline) => {
+    if (typeof operation !== 'function' || !deadline || !(deadline.signal instanceof AbortSignal)
+      || !Array.isArray(deadline.abortSources) || deadline.abortSources.length < 1
+      || deadline.abortSources.some((signal) => !(signal instanceof AbortSignal))) {
+      throw commandError('TRANSPORT_AMBIGUOUS');
+    }
+    if (deadline.abortSources.some((signal) => signal.aborted)) {
+      throw commandError('TRANSPORT_AMBIGUOUS');
+    }
+    const listeners = [];
+    let aborted = false;
+    try {
+      const abortPromise = new Promise((_resolve, reject) => {
+        const abortListener = () => {
+          if (aborted) return;
+          aborted = true;
+          reject(commandError('TRANSPORT_AMBIGUOUS'));
+        };
+        for (const signal of deadline.abortSources) {
+          signal.addEventListener('abort', abortListener, { once: true });
+          listeners.push([signal, abortListener]);
+        }
+        if (deadline.abortSources.some((signal) => signal.aborted)) abortListener();
+      });
+      const pending = aborted ? new Promise(() => {}) : Promise.resolve().then(operation);
+      const result = await Promise.race([pending, abortPromise]);
+      if (deadline.abortSources.some((signal) => signal.aborted)) {
+        throw commandError('TRANSPORT_AMBIGUOUS');
+      }
+      return result;
+    } catch (error) {
+      if (aborted || deadline.abortSources.some((signal) => signal.aborted)) {
+        throw commandError('TRANSPORT_AMBIGUOUS');
+      }
+      throw error;
+    } finally {
+      for (const [signal, listener] of listeners) {
+        try { signal.removeEventListener('abort', listener); } catch { /* best-effort cleanup only */ }
+      }
+    }
+  };
+  const request = async ({ method, url, body, signal }) => {
     if (!['GET', 'POST', 'PATCH', 'PUT'].includes(method)
-      || typeof url !== 'string' || !url.startsWith('https://')) {
+      || typeof url !== 'string' || (signal !== undefined && (
+        !signal || typeof signal !== 'object' || typeof signal.aborted !== 'boolean'
+      ))) {
       throw new Error('Authenticated request is invalid');
     }
+    let target;
+    try { target = new URL(url); } catch { throw new Error('Authenticated request is invalid'); }
+    if (target.protocol !== 'https:' || !target.hostname.endsWith('.googleapis.com')) {
+      throw new Error('Authenticated request is invalid');
+    }
+    const deadline = requestDeadline(signal);
     try {
-      const client = await getClient();
+      const client = await awaitWithinDeadline(getClient, deadline);
       client.quotaProjectId = PROJECT;
-      const response = await client.request({
-        method, url, data: body, timeout: 120_000,
+      if (typeof client.request !== 'function') throw new Error('authenticated request unavailable');
+      const response = await awaitWithinDeadline(() => client.request({
+        method, url: target.href, data: body, timeout: 120_000,
         headers: { 'x-goog-user-project': PROJECT },
-      });
+        signal: deadline.signal,
+      }), deadline);
       return response.data;
     } catch (cause) {
-      throw commandError(classifyRestTransportError(cause));
+      throw commandError(classifyRestTransportError(cause, target));
+    }
+  };
+  const getPrincipal = async (deadline) => {
+    try {
+      const client = await awaitWithinDeadline(getClient, deadline);
+      if (typeof client.getAccessToken !== 'function' || typeof client.getTokenInfo !== 'function') {
+        throw new Error('credential identity unavailable');
+      }
+      const response = await awaitWithinDeadline(() => client.getAccessToken(), deadline);
+      const token = typeof response === 'string' ? response : response?.token;
+      if (typeof token !== 'string' || !token) throw new Error('credential token unavailable');
+      const info = await awaitWithinDeadline(() => client.getTokenInfo(token), deadline);
+      if (typeof info?.email !== 'string' || !info.email) throw new Error('credential email unavailable');
+      return info.email;
+    } catch (cause) {
+      throw commandError(cause?.code === 'TRANSPORT_AMBIGUOUS'
+        ? 'TRANSPORT_AMBIGUOUS' : 'REST_AUTH_UNKNOWN');
     }
   };
   Object.defineProperty(request, 'getPrincipal', {
     enumerable: false,
-    value: async () => {
-      try {
-        const client = await getClient();
-        if (typeof client.getAccessToken !== 'function' || typeof client.getTokenInfo !== 'function') {
-          throw new Error('credential identity unavailable');
-        }
-        const response = await client.getAccessToken();
-        const token = typeof response === 'string' ? response : response?.token;
-        if (typeof token !== 'string' || !token) throw new Error('credential token unavailable');
-        const info = await client.getTokenInfo(token);
-        if (typeof info?.email !== 'string' || !info.email) throw new Error('credential email unavailable');
-        return info.email;
-      } catch {
-        throw commandError('REST_AUTH_UNKNOWN');
-      }
-    },
+    value: (signal) => getPrincipal(requestDeadline(signal)),
   });
   return request;
 }
@@ -991,6 +1261,7 @@ export async function ensureExactResource({ id, mutate, read, create, compare, i
     await create();
   } catch (error) {
     if (classifyTransportError(error) === 'ALREADY_EXISTS') throw commandError('RESOURCE_COLLISION');
+    if (error?.code !== 'TRANSPORT_AMBIGUOUS') throw error;
     let recovered;
     try { recovered = await read(); } catch { throw commandError('CREATE_RESULT_AMBIGUOUS'); }
     if (recovered?.status === 'present' && compare(recovered.value)) {
@@ -1045,6 +1316,30 @@ export function assertExactCustomRoleDefinitions({ contract, roles }) {
   return true;
 }
 
+function assertExactCustomRoleInventory({ contract, roles }) {
+  if (!contract || !Array.isArray(contract.resources?.customRoles) || !Array.isArray(roles)) {
+    throw commandError('CUSTOM_ROLE_ALLOWLIST_MISMATCH');
+  }
+  const expectedNames = new Set(contract.resources.customRoles.map((role) => role?.name));
+  if (expectedNames.size !== contract.resources.customRoles.length
+    || [...expectedNames].some((name) => typeof name !== 'string' || name.length === 0)) {
+    throw commandError('CUSTOM_ROLE_ALLOWLIST_MISMATCH');
+  }
+  const actualNames = new Set();
+  for (const role of roles) {
+    if (!plainComputeRow(role) || typeof role.name !== 'string'
+      || !expectedNames.has(role.name) || actualNames.has(role.name)
+      || (Object.hasOwn(role, 'deleted') && role.deleted !== false)) {
+      throw commandError('CUSTOM_ROLE_ALLOWLIST_MISMATCH');
+    }
+    actualNames.add(role.name);
+  }
+  if (actualNames.size !== expectedNames.size) {
+    throw commandError('CUSTOM_ROLE_ALLOWLIST_MISMATCH');
+  }
+  return true;
+}
+
 function managedIamScopes(contract) {
   return [
     'project', `bucket:${contract.resources.bucket.name}`,
@@ -1053,6 +1348,134 @@ function managedIamScopes(contract) {
     ...contract.resources.secrets.map(({ id }) => `secret:${id}`),
     ...contract.resources.serviceAccounts.map(({ id }) => `service-account:${id}`),
   ];
+}
+
+const BUCKET_IAM_BASELINE_IDS = Object.freeze([
+  'bucket-iam-baseline', 'build-source-bucket-iam-baseline',
+]);
+
+function bucketForIamBaseline(id) {
+  if (id === 'bucket-iam-baseline') return GCP_IDENTITY.bucket;
+  if (id === 'build-source-bucket-iam-baseline') return GCP_IDENTITY.buildSourceBucket;
+  throw commandError('UNKNOWN_PROVISION_STEP');
+}
+
+function canonicalPolicyEtag(value) {
+  if (typeof value !== 'string' || value.length < 4 || value.length > 256
+    || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
+    return false;
+  }
+  try {
+    const decoded = Buffer.from(value, 'base64');
+    return decoded.length > 0 && decoded.toString('base64') === value;
+  } catch { return false; }
+}
+
+function groupedIamBindings(tuples) {
+  const membersByRole = new Map();
+  for (const { role, member } of tuples) {
+    const members = membersByRole.get(role) ?? [];
+    members.push(member);
+    membersByRole.set(role, members);
+  }
+  return [...membersByRole.entries()]
+    .map(([role, members]) => ({ role, members: [...members].sort() }))
+    .sort((left, right) => left.role.localeCompare(right.role));
+}
+
+function analyzeBucketIamBaselinePolicy({ contract, bucket, policy }) {
+  if (!contract || !plainComputeRow(policy)
+    || Object.keys(policy).some((key) => !['version', 'kind', 'resourceId', 'bindings', 'etag'].includes(key))
+    || policy.version !== 1 || policy.kind !== 'storage#policy'
+    || policy.resourceId !== `projects/_/buckets/${bucket}`
+    || !canonicalPolicyEtag(policy.etag)) {
+    throw commandError('IAM_ALLOWLIST_MISMATCH');
+  }
+  const bindings = policy.bindings ?? [];
+  if (!Array.isArray(bindings)) throw commandError('IAM_ALLOWLIST_MISMATCH');
+
+  const configured = contract.iam.bindings
+    .filter(({ scope }) => scope === `bucket:${bucket}`)
+    .map(({ role, member }) => ({
+      role, member: member.replace('__PROJECT_NUMBER__', PROJECT_NUMBER),
+    }));
+  const configuredKeys = new Set(configured.map(canonicalJson));
+  if (configuredKeys.size !== configured.length) throw commandError('IAM_ALLOWLIST_MISMATCH');
+  const officialDefaults = [
+    { role: 'roles/storage.legacyBucketOwner', member: `projectEditor:${PROJECT}` },
+    { role: 'roles/storage.legacyBucketOwner', member: `projectOwner:${PROJECT}` },
+    { role: 'roles/storage.legacyBucketReader', member: `projectViewer:${PROJECT}` },
+    { role: 'roles/storage.legacyObjectOwner', member: `projectEditor:${PROJECT}` },
+    { role: 'roles/storage.legacyObjectOwner', member: `projectOwner:${PROJECT}` },
+    { role: 'roles/storage.legacyObjectReader', member: `projectViewer:${PROJECT}` },
+  ];
+  const defaultKeys = new Set(officialDefaults.map(canonicalJson));
+  const seenRoles = new Set();
+  const seenTuples = new Set();
+  const retained = [];
+  let defaultsPresent = false;
+  for (const binding of bindings) {
+    if (!plainComputeRow(binding)
+      || Object.keys(binding).some((key) => !['role', 'members'].includes(key))
+      || typeof binding.role !== 'string' || !Array.isArray(binding.members)
+      || binding.members.length === 0 || seenRoles.has(binding.role)) {
+      throw commandError('IAM_ALLOWLIST_MISMATCH');
+    }
+    seenRoles.add(binding.role);
+    const seenMembers = new Set();
+    for (const member of binding.members) {
+      if (typeof member !== 'string' || member.length === 0 || seenMembers.has(member)) {
+        throw commandError('IAM_ALLOWLIST_MISMATCH');
+      }
+      seenMembers.add(member);
+      const tuple = { role: binding.role, member };
+      const key = canonicalJson(tuple);
+      if (seenTuples.has(key)) throw commandError('IAM_ALLOWLIST_MISMATCH');
+      seenTuples.add(key);
+      if (configuredKeys.has(key)) retained.push(tuple);
+      else if (defaultKeys.has(key)) defaultsPresent = true;
+      else throw commandError('IAM_ALLOWLIST_MISMATCH');
+    }
+  }
+  return {
+    exact: !defaultsPresent,
+    sanitizedPolicy: {
+      version: 1,
+      kind: 'storage#policy',
+      resourceId: `projects/_/buckets/${bucket}`,
+      bindings: groupedIamBindings(retained),
+      etag: policy.etag,
+    },
+  };
+}
+
+function analyzeOperatorProjectIamPolicy({ contract, projectNumber, policy, enabledApis }) {
+  if (!contract || !plainComputeRow(policy)
+    || Object.keys(policy).some((key) => !['version', 'bindings', 'auditConfigs', 'etag'].includes(key))
+    || ![1, 3].includes(policy.version)
+    || !canonicalPolicyEtag(policy.etag)
+    || !Array.isArray(policy.bindings)
+    || (Object.hasOwn(policy, 'auditConfigs') && !Array.isArray(policy.auditConfigs))) {
+    throw commandError('IAM_ALLOWLIST_MISMATCH');
+  }
+  assertManagedIamPoliciesSubset({
+    contract, projectNumber,
+    policiesByScope: { project: policy }, scopes: ['project'],
+    requireProtectedBaseline: true, enabledApis,
+  });
+  const expected = contract.iam.operatorBucketIamBinding;
+  const matches = policy.bindings.filter(({ role }) => role === expected.role);
+  if (matches.length > 1) throw commandError('IAM_ALLOWLIST_MISMATCH');
+  if (matches.length === 0) {
+    if (policy.bindings.some((binding) => Object.hasOwn(binding, 'condition')) || policy.version === 3) {
+      throw commandError('IAM_ALLOWLIST_MISMATCH');
+    }
+    return { exact: false, writePolicy: structuredClone(policy) };
+  }
+  if (policy.version !== 3 || !exact(matches[0], {
+    role: expected.role, members: [expected.member], condition: expected.condition,
+  })) throw commandError('IAM_ALLOWLIST_MISMATCH');
+  return { exact: true, writePolicy: null };
 }
 
 function assertManagedIamPolicies({
@@ -1075,6 +1498,12 @@ function assertManagedIamPolicies({
   const configured = contract.iam.bindings.map(({ scope, member, role }) => ({
     scope, member: member.replace('__PROJECT_NUMBER__', String(projectNumber)), role,
   }));
+  const operatorBucketIam = {
+    scope: contract.iam.operatorBucketIamBinding.scope,
+    member: contract.iam.operatorBucketIamBinding.member,
+    role: contract.iam.operatorBucketIamBinding.role,
+    condition: structuredClone(contract.iam.operatorBucketIamBinding.condition),
+  };
   const automatic = contract.iam.automaticProjectBindings.map(({ member, role, required }) => ({
     scope: 'project', member: member.replace('__PROJECT_NUMBER__', String(projectNumber)),
     role, required,
@@ -1104,6 +1533,7 @@ function assertManagedIamPolicies({
   const required = [
     ...baseline,
     ...configured,
+    operatorBucketIam,
     ...permittedAutomatic.filter((binding) => binding.required).map(({ required: ignored, ...binding }) => {
       void ignored;
       return binding;
@@ -1111,6 +1541,7 @@ function assertManagedIamPolicies({
   ];
   const allowedKeys = new Set([
     ...configured,
+    operatorBucketIam,
     ...baseline,
     ...permittedAutomatic.map(({ required: ignored, ...binding }) => {
       void ignored;
@@ -1126,8 +1557,15 @@ function assertManagedIamPolicies({
     const bindings = policy.bindings ?? [];
     if (!Array.isArray(bindings)) throw commandError('IAM_ALLOWLIST_MISMATCH');
     for (const binding of bindings) {
-      if (typeof binding?.role !== 'string' || !Array.isArray(binding.members)
-        || binding.members.length === 0 || binding.condition) {
+      if (!plainComputeRow(binding)
+        || Object.keys(binding).some((key) => !['role', 'members', 'condition'].includes(key))
+        || typeof binding.role !== 'string' || !Array.isArray(binding.members)
+        || binding.members.length === 0) {
+        throw commandError('IAM_ALLOWLIST_MISMATCH');
+      }
+      const hasCondition = Object.hasOwn(binding, 'condition');
+      if (hasCondition && (scope !== 'project'
+        || !exact(binding.condition, operatorBucketIam.condition))) {
         throw commandError('IAM_ALLOWLIST_MISMATCH');
       }
       for (const member of binding.members) {
@@ -1135,7 +1573,9 @@ function assertManagedIamPolicies({
         if (workloadMembers.has(member) && binding.role === 'roles/iam.serviceAccountTokenCreator') {
           throw commandError('IAM_ALLOWLIST_MISMATCH');
         }
-        const key = canonicalJson({ scope, member, role: binding.role });
+        const actual = { scope, member, role: binding.role };
+        if (hasCondition) actual.condition = structuredClone(binding.condition);
+        const key = canonicalJson(actual);
         if (!allowedKeys.has(key) || actualKeys.has(key)) {
           throw commandError('IAM_ALLOWLIST_MISMATCH');
         }
@@ -1179,6 +1619,10 @@ function sameNetwork(value, expected) {
 
 const SERVICE_NETWORKING_CONNECTION_SERVICE = 'services/servicenetworking.googleapis.com';
 const SERVICE_NETWORKING_PEERING = 'servicenetworking-googleapis-com';
+const SQL_OPERATION_STATUSES = new Set(['PENDING', 'RUNNING', 'DONE']);
+const SQL_INSTANCE_QUIET_TIMEOUT_MS = 10 * 60 * 1_000;
+const SQL_DATABASE_OPERATION_TIMEOUT_MS = 10 * 60 * 1_000;
+const SQL_INSTANCE_CREATE_TIMEOUT_MS = 30 * 60 * 1_000;
 
 function serviceNetworkingNetworkName(network) {
   return `projects/${PROJECT_NUMBER}/global/networks/${network}`;
@@ -1566,6 +2010,82 @@ function exactManagedSubnetLocalRoute(value) {
     && !Object.hasOwn(value, 'asPaths');
 }
 
+function exactManagedPsaAddress(value) {
+  const network = `${COMPUTE_NETWORK_PREFIX}${GCP_IDENTITY.network}`;
+  return plainComputeRow(value)
+    && value.kind === 'compute#address'
+    && value.name === GCP_IDENTITY.psaRange
+    && value.selfLink === `${COMPUTE_GLOBAL_ADDRESS_PREFIX}${GCP_IDENTITY.psaRange}`
+    && value.address === '10.25.0.0' && value.prefixLength === 16
+    && value.addressType === 'INTERNAL' && value.ipVersion === 'IPV4'
+    && value.networkTier === 'PREMIUM' && value.status === 'RESERVED'
+    && value.purpose === 'VPC_PEERING' && !Object.hasOwn(value, 'region')
+    && value.network === network;
+}
+
+function exactManagedPsaConnection(value) {
+  return plainComputeRow(value)
+    && value.service === SERVICE_NETWORKING_CONNECTION_SERVICE
+    && value.network === serviceNetworkingNetworkName(GCP_IDENTITY.network)
+    && value.peering === SERVICE_NETWORKING_PEERING
+    && exact(value.reservedPeeringRanges, [GCP_IDENTITY.psaRange]);
+}
+
+function exactManagedCloudSqlPrivateIp(value) {
+  if (!plainComputeRow(value) || !Array.isArray(value.ipAddresses)
+    || value.ipAddresses.length !== 1) return null;
+  const [entry] = value.ipAddresses;
+  if (!plainComputeRow(entry) || entry.type !== 'PRIVATE'
+    || !canonicalIpv4(entry.ipAddress) || value.privateIp !== entry.ipAddress
+    || !cidrContainedBy(`${entry.ipAddress}/32`, '10.25.0.0/16')) return null;
+  return entry.ipAddress;
+}
+
+function exactManagedPsaPeeringRoute(value, { connection, privateIp } = {}) {
+  const network = `${COMPUTE_NETWORK_PREFIX}${GCP_IDENTITY.network}`;
+  if (!exactManagedPsaConnection(connection) || !canonicalIpv4(privateIp)) return false;
+  const octets = privateIp.split('.');
+  const expectedRange = `${octets[0]}.${octets[1]}.${octets[2]}.0/24`;
+  const allowedFields = new Set([
+    'creationTimestamp', 'description', 'destRange', 'id', 'kind', 'name', 'network',
+    'nextHopPeering', 'priority', 'routeType', 'selfLink',
+  ]);
+  return plainComputeRow(value)
+    && Object.keys(value).every((key) => allowedFields.has(key))
+    && /^peering-route-[a-f0-9]{16}$/.test(value.name ?? '')
+    && value.selfLink === `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/routes/${value.name}`
+    && value.kind === 'compute#route'
+    && value.description === `Auto generated route via peering [${SERVICE_NETWORKING_PEERING}].`
+    && value.destRange === expectedRange
+    && cidrContainedBy(value.destRange, '10.25.0.0/16')
+    && value.network === network
+    && value.nextHopPeering === SERVICE_NETWORKING_PEERING
+    && value.priority === 0
+    && (!Object.hasOwn(value, 'routeType') || value.routeType === 'SUBNET')
+    && /^\d+$/.test(String(value.id ?? '')) && BigInt(value.id) > 0n
+    && typeof value.creationTimestamp === 'string'
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?[+-]\d{2}:\d{2}$/.test(value.creationTimestamp);
+}
+
+function cloudSqlCidrProof(value) {
+  const ip = value?.settings?.ipConfiguration ?? {};
+  return {
+    state: value?.state,
+    privateIp: value?.privateIp,
+    settingsVersion: value?.settings?.settingsVersion,
+    privateNetwork: ip.privateNetwork,
+    allocatedIpRange: ip.allocatedIpRange,
+    ipv4Enabled: ip.ipv4Enabled,
+  };
+}
+
+function boundedOpaqueApiString(value, maxLength) {
+  if (typeof value !== 'string' || value.length < 1 || value.length > maxLength
+    || /[\u0000-\u001f\u007f]/u.test(value)) return false;
+  try { encodeURIComponent(value); } catch { return false; }
+  return true;
+}
+
 export function assertCidrAvailable({
   desired, network, networks, subnets, routes, addresses, kind = 'subnet',
 }) {
@@ -1582,37 +2102,43 @@ export function assertCidrAvailable({
   assertCidrNoOverlap({ desired, network, subnets, routes, addresses });
 }
 
-function assertProjectWideCidrAvailability({ networks, subnets, routes, addresses }) {
+function assertProjectWideCidrAvailability({
+  networks, subnets, routes, addresses, psaConnection = null, cloudSql = null,
+}) {
   const inventory = {
     networks: requireObjectList(networks), subnets: requireObjectList(subnets),
     routes: requireObjectList(routes), addresses: requireObjectList(addresses),
   };
   const allNetworks = validateComputeInventory(inventory);
-  const managedNetwork = `${COMPUTE_NETWORK_PREFIX}${GCP_IDENTITY.network}`;
   const exactSubnets = inventory.subnets.filter(exactManagedSubnet);
   const exactSubnetRoutes = inventory.routes.filter(exactManagedSubnetLocalRoute);
   const exactSubnetPair = exactSubnets.length === 1 && exactSubnetRoutes.length === 1;
   const exactSubnetRoute = exactSubnetPair ? exactSubnetRoutes[0] : null;
+  const exactPsaAddresses = inventory.addresses.filter(exactManagedPsaAddress);
+  const privateIp = exactManagedCloudSqlPrivateIp(cloudSql);
+  const exactPsaRoutes = privateIp === null ? [] : inventory.routes.filter((route) => (
+    exactManagedPsaPeeringRoute(route, { connection: psaConnection, privateIp })
+  ));
+  if (cloudSql !== null && (
+    privateIp === null || exactPsaAddresses.length !== 1
+    || !exactManagedPsaConnection(psaConnection) || exactPsaRoutes.length !== 1
+  )) throw commandError('CIDR_OVERLAP');
+  const exactPsaRoute = exactPsaRoutes.length === 1 ? exactPsaRoutes[0] : null;
   const unmanagedInventory = {
     ...inventory,
     subnets: exactSubnetPair
       ? inventory.subnets.filter((item) => !exactManagedSubnet(item))
       : inventory.subnets,
-    routes: inventory.routes.filter((item) => item !== exactSubnetRoute),
-    addresses: inventory.addresses.filter((item) => !(
-      item.name === GCP_IDENTITY.psaRange
-      && item.selfLink === `${COMPUTE_GLOBAL_ADDRESS_PREFIX}${GCP_IDENTITY.psaRange}`
-      && item.address === '10.25.0.0' && item.prefixLength === 16
-      && item.addressType === 'INTERNAL' && item.ipVersion === 'IPV4'
-      && item.networkTier === 'PREMIUM' && item.status === 'RESERVED'
-      && item.purpose === 'VPC_PEERING' && !Object.hasOwn(item, 'region')
-      && item.network === managedNetwork
-    )),
+    routes: inventory.routes.filter((item) => item !== exactSubnetRoute && item !== exactPsaRoute),
+    addresses: exactPsaAddresses.length === 1
+      ? inventory.addresses.filter((item) => item !== exactPsaAddresses[0])
+      : inventory.addresses,
   };
   for (const network of allNetworks) {
     assertCidrNoOverlap({ desired: '10.24.0.0/26', network, ...unmanagedInventory });
     assertCidrNoOverlap({ desired: '10.25.0.0/16', network, ...unmanagedInventory });
   }
+  return { managedPsaRoute: exactPsaRoute === null ? null : { ...exactPsaRoute } };
 }
 
 function apiForProvisionStep(id) {
@@ -1621,7 +2147,8 @@ function apiForProvisionStep(id) {
   if (['vpc', 'subnet', 'psa-range'].includes(id)) return 'compute.googleapis.com';
   if (id === 'psa-connection') return 'servicenetworking.googleapis.com';
   if (['cloud-sql-instance', 'database'].includes(id) || id.startsWith('db-user:')) return 'sqladmin.googleapis.com';
-  if (id === 'bucket' || id === 'build-source-bucket') return 'storage.googleapis.com';
+  if (id === 'bucket' || id === 'build-source-bucket'
+    || BUCKET_IAM_BASELINE_IDS.includes(id)) return 'storage.googleapis.com';
   if (id.startsWith('secret-')) return 'secretmanager.googleapis.com';
   if (id === 'notification-channel' || id.startsWith('monitoring-policy:')) return 'monitoring.googleapis.com';
   if (id === 'budget') return 'billingbudgets.googleapis.com';
@@ -1791,7 +2318,28 @@ function exactAsset({ asset, assetType, name, location, parent = ASSET_PROJECT_P
     && asset.parentFullResourceName === parent && asset.parentAssetType === parentAssetType;
 }
 
-function exactTopLevelManagedAsset(asset) {
+const CLOUD_SQL_BACKUP_RUN_STATES = new Set([
+  'SQL_BACKUP_RUN_STATUS_UNSPECIFIED', 'ENQUEUED', 'OVERDUE', 'RUNNING', 'FAILED',
+  'SUCCESSFUL', 'SKIPPED', 'DELETION_PENDING', 'DELETION_FAILED', 'DELETED',
+]);
+
+function cloudSqlAssetInstanceName() {
+  return `//cloudsql.googleapis.com/projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}`;
+}
+
+function canonicalCloudSqlBackupLocation(value) {
+  return typeof value === 'string' && (
+    /^(?:asia|eu|us)$/.test(value)
+    || /^[a-z][a-z0-9]*(?:-[a-z0-9]+)+[0-9]+$/.test(value)
+  );
+}
+
+function canonicalPositiveInt64(value) {
+  return typeof value === 'string' && /^[1-9]\d{0,18}$/.test(value)
+    && BigInt(value) <= 9_223_372_036_854_775_807n;
+}
+
+function exactTopLevelManagedAsset(asset, projectNumber) {
   const repositoryPath = `projects/${PROJECT}/locations/asia-east2/repositories/${GCP_IDENTITY.repository}`;
   const repositoryDisplayNames = new Set([GCP_IDENTITY.repository, repositoryPath]);
   const serviceAccountDisplays = {
@@ -1804,7 +2352,10 @@ function exactTopLevelManagedAsset(asset) {
   const serviceAccounts = new Map(Object.values(GCP_IDENTITY.serviceAccounts).map((email) => [
     `//iam.googleapis.com/projects/${PROJECT}/serviceAccounts/${email}`, serviceAccountDisplays[email.split('@')[0]],
   ]));
-  const secrets = new Set(Object.values(GCP_IDENTITY.secrets).map((id) => `//secretmanager.googleapis.com/projects/${PROJECT}/secrets/${id}`));
+  const secrets = new Map(Object.values(GCP_IDENTITY.secrets).map((id) => {
+    const displayName = `projects/${projectNumber}/secrets/${id}`;
+    return [`//secretmanager.googleapis.com/${displayName}`, displayName];
+  }));
   const jobs = new Set(Object.values(GCP_IDENTITY.jobs).map((id) => `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/jobs/${id}`));
   for (const service of [GCP_IDENTITY.service, GCP_IDENTITY.candidateService]) {
     if (exactAsset({ asset, assetType: 'run.googleapis.com/Service', name: `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/services/${service}`, location: 'asia-east2' })) return asset.displayName === undefined || asset.displayName === service;
@@ -1812,7 +2363,9 @@ function exactTopLevelManagedAsset(asset) {
   if (exactAsset({ asset, assetType: 'artifactregistry.googleapis.com/Repository', name: `//artifactregistry.googleapis.com/${repositoryPath}`, location: 'asia-east2' })) return asset.displayName === undefined || repositoryDisplayNames.has(asset.displayName);
   if (exactAsset({ asset, assetType: 'storage.googleapis.com/Bucket', name: `//storage.googleapis.com/${GCP_IDENTITY.bucket}`, location: 'asia-east2' })) return true;
   if (exactAsset({ asset, assetType: 'storage.googleapis.com/Bucket', name: `//storage.googleapis.com/${GCP_IDENTITY.buildSourceBucket}`, location: 'asia-east2' })) return true;
-  if (exactAsset({ asset, assetType: 'sqladmin.googleapis.com/Instance', name: `//sqladmin.googleapis.com/projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}`, location: 'asia-east2' })) return true;
+  if (exactAsset({ asset, assetType: 'sqladmin.googleapis.com/Instance', name: cloudSqlAssetInstanceName(), location: 'asia-east2' })) {
+    return asset.displayName === undefined || asset.displayName === GCP_IDENTITY.cloudSqlInstance;
+  }
   if (exactAsset({ asset, assetType: 'compute.googleapis.com/Network', name: `//compute.googleapis.com/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`, location: 'global' })) return true;
   if (exactAsset({ asset, assetType: 'compute.googleapis.com/Subnetwork', name: `//compute.googleapis.com/projects/${PROJECT}/regions/asia-east2/subnetworks/${GCP_IDENTITY.subnet}`, location: 'asia-east2' })) return true;
   if (exactAsset({ asset, assetType: 'compute.googleapis.com/Address', name: `//compute.googleapis.com/projects/${PROJECT}/global/addresses/${GCP_IDENTITY.psaRange}`, location: 'global' })) return true;
@@ -1822,13 +2375,14 @@ function exactTopLevelManagedAsset(asset) {
     location: 'global', parent: `//cloudresourcemanager.googleapis.com/projects/${PROJECT_NUMBER}`,
   })) return true;
   if (serviceAccounts.has(asset.name) && exactAsset({ asset, assetType: 'iam.googleapis.com/ServiceAccount', name: asset.name, location: 'global' })) return asset.displayName === undefined || asset.displayName === serviceAccounts.get(asset.name);
-  if (secrets.has(asset.name) && exactAsset({ asset, assetType: 'secretmanager.googleapis.com/Secret', name: asset.name, location: 'global' })) return true;
+  if (secrets.has(asset.name) && exactAsset({ asset, assetType: 'secretmanager.googleapis.com/Secret', name: asset.name, location: 'global' })) return asset.displayName === secrets.get(asset.name);
   if (jobs.has(asset.name) && exactAsset({ asset, assetType: 'run.googleapis.com/Job', name: asset.name, location: 'asia-east2' })) return true;
   return REQUIRED_CUSTOM_ROLES.some(({ id }) => exactAsset({ asset, assetType: 'iam.googleapis.com/Role', name: `//iam.googleapis.com/projects/${PROJECT}/roles/${id}`, location: 'global' }));
 }
 
 function exactManagedDescendantAsset(asset) {
   const repository = `//artifactregistry.googleapis.com/projects/${PROJECT}/locations/asia-east2/repositories/${GCP_IDENTITY.repository}`;
+  const cloudSqlInstance = cloudSqlAssetInstanceName();
   if (asset.assetType === 'run.googleapis.com/Revision') {
     return [GCP_IDENTITY.service, GCP_IDENTITY.candidateService].some((serviceName) => {
       const service = `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/services/${serviceName}`;
@@ -1843,6 +2397,14 @@ function exactManagedDescendantAsset(asset) {
     return asset.name.startsWith(prefix) && /^[0-9a-f]{64}$/.test(asset.name.slice(prefix.length))
       && asset.location === 'asia-east2' && asset.parentFullResourceName === repository
       && asset.parentAssetType === 'artifactregistry.googleapis.com/Repository';
+  }
+  if (asset.assetType === 'sqladmin.googleapis.com/BackupRun') {
+    const prefix = `${cloudSqlInstance}/backupRuns/`;
+    return asset.name.startsWith(prefix) && canonicalPositiveInt64(asset.name.slice(prefix.length))
+      && canonicalCloudSqlBackupLocation(asset.location)
+      && asset.parentFullResourceName === cloudSqlInstance
+      && asset.parentAssetType === 'sqladmin.googleapis.com/Instance'
+      && CLOUD_SQL_BACKUP_RUN_STATES.has(asset.state);
   }
   return false;
 }
@@ -1876,11 +2438,18 @@ function assetHasManagedMarker(asset) {
   return hasManagedName(text) || /hkbuddyv1/i.test(text);
 }
 
-function assertCloudAssetInventory(assets) {
+function assertCloudAssetInventory(assets, projectNumber) {
   if (!Array.isArray(assets) || assets.some((asset) => !cloudAssetMetadataIsValid(asset))) {
     throw commandError('CLOUD_ASSET_INVENTORY_AMBIGUOUS');
   }
-  if (assets.some((asset) => asset.project !== ASSET_PROJECT)) {
+  const assetIdentities = new Set();
+  for (const asset of assets) {
+    const identity = `${asset.assetType}\u0000${asset.name}`;
+    if (assetIdentities.has(identity)) throw commandError('CLOUD_ASSET_INVENTORY_AMBIGUOUS');
+    assetIdentities.add(identity);
+  }
+  if (!/^\d{6,20}$/.test(String(projectNumber ?? ''))
+    || assets.some((asset) => asset.project !== `projects/${projectNumber}`)) {
     throw commandError('CLOUD_ASSET_INVENTORY_WRONG_PROJECT');
   }
   for (const asset of assets) {
@@ -1892,11 +2461,12 @@ function assertCloudAssetInventory(assets) {
     }
     const managedDescendantParent = asset.parentFullResourceName
       === `//artifactregistry.googleapis.com/projects/${PROJECT}/locations/asia-east2/repositories/${GCP_IDENTITY.repository}`
+      || asset.parentFullResourceName === cloudSqlAssetInstanceName()
       || [GCP_IDENTITY.service, GCP_IDENTITY.candidateService].some((service) => (
         asset.parentFullResourceName
         === `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/services/${service}`
       ));
-    if ((assetHasManagedMarker(asset) || managedDescendantParent) && !exactTopLevelManagedAsset(asset)
+    if ((assetHasManagedMarker(asset) || managedDescendantParent) && !exactTopLevelManagedAsset(asset, projectNumber)
       && !exactManagedDescendantAsset(asset) && !exactManagedGeneratedAsset(asset)) {
       throw commandError('RESOURCE_COLLISION');
     }
@@ -1921,6 +2491,8 @@ function provisionSteps(contract) {
     ...contract.resources.customRoles.map(({ id }) => `custom-role:${id}`),
     'vpc', 'subnet', 'psa-range', 'psa-connection', 'cloud-sql-instance', 'database',
     'bucket', 'build-source-bucket',
+    OPERATOR_BUCKET_IAM_STEP,
+    'bucket-iam-baseline', 'build-source-bucket-iam-baseline',
     ...contract.resources.secrets.map(({ id }) => `secret-container:${id}`),
     `secret-version:${GCP_IDENTITY.secrets.dbAppUrl}`,
     `secret-version:${GCP_IDENTITY.secrets.dbMigratorUrl}`,
@@ -1944,8 +2516,11 @@ const STATIC_EXPECTED_STEPS = [
   'service-account:hkbuddy-v1-migrator', 'service-account:hkbuddy-v1-deployer',
   'service-account:hkbuddy-v1-acceptance',
   'custom-role:hkbuddyV1AcceptanceBucketMetadataReader',
+  'custom-role:hkbuddyV1BucketIamPolicyOperator',
   'vpc', 'subnet', 'psa-range', 'psa-connection', 'cloud-sql-instance', 'database',
   'bucket', 'build-source-bucket',
+  OPERATOR_BUCKET_IAM_STEP,
+  'bucket-iam-baseline', 'build-source-bucket-iam-baseline',
   ...SECRET_CONTAINER_IDS.map((id) => `secret-container:${id}`),
   `secret-version:${GCP_IDENTITY.secrets.dbAppUrl}`, `secret-version:${GCP_IDENTITY.secrets.dbMigratorUrl}`,
   `secret-version:${GCP_IDENTITY.secrets.session}`, 'db-user:hkbuddy_app',
@@ -1958,6 +2533,8 @@ export const EXPECTED_PROVISION_STEPS = Object.freeze(STATIC_EXPECTED_STEPS);
 function preMutationParent(id) {
   if (id === 'subnet' || id === 'psa-connection') return 'vpc';
   if (id === 'database' || id.startsWith('db-user:')) return 'cloud-sql-instance';
+  if (id === 'bucket-iam-baseline') return 'bucket';
+  if (id === 'build-source-bucket-iam-baseline') return 'build-source-bucket';
   if (id.startsWith('secret-version:')) {
     return `secret-container:${id.slice('secret-version:'.length)}`;
   }
@@ -2133,6 +2710,8 @@ export async function runGcpProvision({
   }
   if (!plane || typeof plane.read !== 'function' || typeof plane.create !== 'function'
     || typeof plane.compare !== 'function'
+    || typeof plane.auditOperatorBucketIamRecovery !== 'function'
+    || typeof plane.waitForOperatorBucketIamAccess !== 'function'
     || typeof plane.auditUserManagedServiceAccountKeys !== 'function'
     || typeof plane.auditManagedIamPolicies !== 'function'
     || typeof plane.auditPreMutationState !== 'function'
@@ -2145,13 +2724,67 @@ export async function runGcpProvision({
   const completed = [];
   const secretVersions = {};
   let mutationPerformed = false;
+  let operatorRecovery;
+  try {
+    operatorRecovery = await plane.auditOperatorBucketIamRecovery();
+    if (!plainComputeRow(operatorRecovery)
+      || !exact(Object.keys(operatorRecovery), ['existingBuckets'])
+      || !Array.isArray(operatorRecovery.existingBuckets)
+      || new Set(operatorRecovery.existingBuckets).size !== operatorRecovery.existingBuckets.length
+      || operatorRecovery.existingBuckets.some((bucket) => ![
+        GCP_IDENTITY.bucket, GCP_IDENTITY.buildSourceBucket,
+      ].includes(bucket))) {
+      throw commandError('OPERATOR_BUCKET_IAM_RECOVERY_INVALID');
+    }
+  } catch (error) {
+    return publish(writeOutput, 1, {
+      ...safeFailureReport(
+        error?.code ?? 'OPERATOR_BUCKET_IAM_RECOVERY_INVALID',
+        completed, 'operator-bucket-iam-recovery-audit', false,
+      ),
+      mutationPerformed: false,
+    });
+  }
+  for (const id of [
+    `custom-role:${OPERATOR_BUCKET_IAM_ROLE_ID}`,
+    OPERATOR_BUCKET_IAM_STEP,
+  ]) {
+    try {
+      await ensureExactResource({
+        id, mutate: true,
+        read: () => plane.read(id),
+        create: () => {
+          mutationPerformed = true;
+          return plane.create(id);
+        },
+        compare: (value) => plane.compare(id, value),
+      });
+    } catch (error) {
+      return publish(writeOutput, 1, safeFailureReport(
+        error?.code ?? 'OPERATOR_BUCKET_IAM_RECOVERY_FAILED',
+        completed, id, mutationPerformed,
+      ));
+    }
+  }
+  if (operatorRecovery.existingBuckets.length > 0) {
+    try {
+      await plane.waitForOperatorBucketIamAccess({
+        buckets: operatorRecovery.existingBuckets,
+      });
+    } catch (error) {
+      return publish(writeOutput, 1, safeFailureReport(
+        error?.code ?? 'OPERATOR_BUCKET_IAM_PROPAGATION_TIMEOUT',
+        completed, 'operator-bucket-iam-propagation', mutationPerformed,
+      ));
+    }
+  }
   try {
     await plane.auditPreMutationState({ notificationChannel: selection.channel });
   } catch (error) {
-    return publish(writeOutput, 1, {
-      ...safeFailureReport(error?.code ?? 'PRE_MUTATION_AUDIT_FAILED', [], 'pre-mutation-audit'),
-      mutationPerformed: false,
-    });
+    return publish(writeOutput, 1, safeFailureReport(
+      error?.code ?? 'PRE_MUTATION_AUDIT_FAILED', completed,
+      'pre-mutation-audit', mutationPerformed,
+    ));
   }
   for (const id of STATIC_EXPECTED_STEPS) {
     if (id === 'billing' || id === `secret-version:${GCP_IDENTITY.secrets.dbAppUrl}`) {
@@ -2247,6 +2880,18 @@ export async function runGcpProvision({
         });
       }
       completed.push(id);
+      if (id === OPERATOR_BUCKET_IAM_STEP) {
+        try {
+          await plane.waitForOperatorBucketIamAccess({
+            buckets: [GCP_IDENTITY.bucket, GCP_IDENTITY.buildSourceBucket],
+          });
+        } catch (error) {
+          return publish(writeOutput, 1, safeFailureReport(
+            error?.code ?? 'OPERATOR_BUCKET_IAM_PROPAGATION_TIMEOUT',
+            completed, 'operator-bucket-iam-propagation', mutationPerformed,
+          ));
+        }
+      }
       if (id.startsWith('secret-version:')) {
         const secretId = id.slice('secret-version:'.length);
         const version = secretVersionFromValue(contextValue(plane, id));
@@ -2287,13 +2932,21 @@ export async function runGcpProvision({
 // converts fixed operation IDs to argv arrays or authenticated HTTPS requests;
 // it never receives a shell command string.
 export class GcpControlPlane {
-  constructor({ contract, notificationChannel, gcloud, request }) {
+  constructor({
+    contract, notificationChannel, gcloud, request,
+    now = Date.now, sleep = (milliseconds) => new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds)),
+  }) {
+    if (typeof now !== 'function' || typeof sleep !== 'function') {
+      throw commandError('CONTROL_PLANE_INVALID');
+    }
     this.contract = contract;
     this.notificationChannel = notificationChannel == null
       ? null
       : canonicalMonitoringChannelName(notificationChannel);
     this.gcloud = gcloud;
     this.request = request;
+    this.now = now;
+    this.sleep = sleep;
     this.cache = new Map();
     this.createdUsers = new Set();
   }
@@ -2333,6 +2986,260 @@ export class GcpControlPlane {
     return new Set(enabledAfter);
   }
 
+  async auditOperatorBucketIamRecovery() {
+    const project = await this.read('project');
+    const billing = await this.read('billing');
+    if (project?.status !== 'present' || !this.compare('project', project.value)
+      || billing?.status !== 'present' || !this.compare('billing', billing.value)) {
+      throw commandError('SHARED_PROJECT_BASELINE_INVALID');
+    }
+    let organization;
+    let billingAccount;
+    try {
+      organization = await this.#gcloud([
+        'organizations', 'describe', ORGANIZATION, `--project=${PROJECT}`, '--format=json',
+      ]);
+      billingAccount = await this.#gcloud([
+        'billing', 'accounts', 'describe', BILLING_ACCOUNT,
+        `--project=${PROJECT}`, '--format=json',
+      ]);
+    } catch {
+      throw commandError('SHARED_PROJECT_BASELINE_INVALID');
+    }
+    if (!isExactOrganizationResource(organization)
+      || !isExactBillingAccountResource(billingAccount)) {
+      throw commandError('SHARED_PROJECT_BASELINE_INVALID');
+    }
+    const assets = await this.#auditCloudAssetInventory();
+    const enabledBefore = await this.#enabledApis();
+    const enabledApis = await this.auditManagedIamPolicies({ projectOnly: true });
+    if (!sameStringSet(enabledBefore, enabledApis)) {
+      throw commandError('IAM_ALLOWLIST_MISMATCH');
+    }
+    await this.#auditManagedIdentityInventory(enabledApis);
+
+    const roleId = `custom-role:${OPERATOR_BUCKET_IAM_ROLE_ID}`;
+    const role = await this.read(roleId);
+    if (!['present', 'absent'].includes(role?.status)
+      || (role.status === 'present' && !this.compare(roleId, role.value))) {
+      throw commandError('CUSTOM_ROLE_ALLOWLIST_MISMATCH');
+    }
+    const binding = await this.read(OPERATOR_BUCKET_IAM_STEP);
+    if (!['present', 'absent'].includes(binding?.status)
+      || (binding.status === 'present' && !this.compare(OPERATOR_BUCKET_IAM_STEP, binding.value))) {
+      throw commandError('IAM_ALLOWLIST_MISMATCH');
+    }
+
+    const assetNames = new Set(assets.filter(({ assetType }) => (
+      assetType === 'storage.googleapis.com/Bucket'
+    )).map(({ name }) => name));
+    const existingBuckets = [GCP_IDENTITY.bucket, GCP_IDENTITY.buildSourceBucket].filter((bucket) => (
+      assetNames.has(`//storage.googleapis.com/${bucket}`)
+    ));
+    for (const bucket of existingBuckets) {
+      await this.#operatorBucketPermissionState(bucket);
+    }
+    return { existingBuckets };
+  }
+
+  async #readOperatorBucketIamBinding() {
+    const writeKey = `${OPERATOR_BUCKET_IAM_STEP}:write`;
+    this.cache.delete(writeKey);
+    const enabledBefore = await this.#enabledApis();
+    const policy = await this.#rest({
+      method: 'POST',
+      url: `https://cloudresourcemanager.googleapis.com/v1/projects/${PROJECT}:getIamPolicy`,
+      body: { options: { requestedPolicyVersion: 3 } },
+    });
+    const enabledAfter = await this.#enabledApis();
+    if (!sameStringSet(enabledBefore, enabledAfter)) {
+      throw commandError('IAM_ALLOWLIST_MISMATCH');
+    }
+    const analysis = analyzeOperatorProjectIamPolicy({
+      contract: this.contract, projectNumber: this.#projectNumber(),
+      policy, enabledApis: enabledAfter,
+    });
+    if (analysis.exact) return { status: 'present', value: { exact: true } };
+    this.cache.set(writeKey, {
+      policy: structuredClone(analysis.writePolicy),
+      enabledApis: [...enabledAfter].sort(),
+    });
+    return { status: 'absent' };
+  }
+
+  async #createOperatorBucketIamBinding() {
+    const cached = this.cache.get(`${OPERATOR_BUCKET_IAM_STEP}:write`);
+    if (!plainComputeRow(cached) || !Array.isArray(cached.enabledApis)
+      || cached.enabledApis.some((api) => typeof api !== 'string')) {
+      throw commandError('OPERATOR_BUCKET_IAM_STATE_INVALID');
+    }
+    const enabledApis = new Set(cached.enabledApis);
+    const analysis = analyzeOperatorProjectIamPolicy({
+      contract: this.contract, projectNumber: this.#projectNumber(),
+      policy: cached.policy, enabledApis,
+    });
+    if (analysis.exact || !exact(analysis.writePolicy, cached.policy)) {
+      throw commandError('OPERATOR_BUCKET_IAM_STATE_INVALID');
+    }
+    const binding = this.contract.iam.operatorBucketIamBinding;
+    const body = {
+      policy: {
+        ...structuredClone(cached.policy),
+        version: 3,
+        bindings: [
+          ...structuredClone(cached.policy.bindings),
+          {
+            role: binding.role, members: [binding.member],
+            condition: structuredClone(binding.condition),
+          },
+        ],
+      },
+      updateMask: 'bindings,etag,version',
+    };
+    const response = await this.#rest({
+      method: 'POST',
+      url: `https://cloudresourcemanager.googleapis.com/v1/projects/${PROJECT}:setIamPolicy`,
+      body,
+    });
+    try {
+      const responseAnalysis = analyzeOperatorProjectIamPolicy({
+        contract: this.contract, projectNumber: this.#projectNumber(),
+        policy: response, enabledApis,
+      });
+      if (!responseAnalysis.exact) throw new Error('binding absent');
+    } catch {
+      throw commandError('TRANSPORT_AMBIGUOUS');
+    }
+    return response;
+  }
+
+  async #operatorBucketPermissionState(bucket) {
+    const target = new URL(
+      `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucket)}/iam/testPermissions`,
+    );
+    for (const permission of OPERATOR_BUCKET_IAM_PERMISSIONS) {
+      target.searchParams.append('permissions', permission);
+    }
+    const response = await this.#rest({ method: 'GET', url: target.href });
+    if (!plainComputeRow(response)
+      || !exact(Object.keys(response).sort(), ['kind', 'permissions'])
+      || response.kind !== 'storage#testIamPermissionsResponse'
+      || !Array.isArray(response.permissions)
+      || response.permissions.some((permission) => typeof permission !== 'string')
+      || new Set(response.permissions).size !== response.permissions.length) {
+      throw commandError('OPERATOR_BUCKET_IAM_PERMISSION_INVALID');
+    }
+    const returned = new Set(response.permissions);
+    if (returned.size === 0) return false;
+    if (!sameStringSet(returned, new Set(OPERATOR_BUCKET_IAM_PERMISSIONS))) {
+      throw commandError('OPERATOR_BUCKET_IAM_PERMISSION_INVALID');
+    }
+    let policy;
+    try {
+      policy = await this.#rest({
+        method: 'GET',
+        url: `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucket)}/iam?optionsRequestedPolicyVersion=3`,
+      });
+    } catch (error) {
+      if (classifyTransportError(error) === 'FORBIDDEN') return false;
+      throw error;
+    }
+    analyzeBucketIamBaselinePolicy({ contract: this.contract, bucket, policy });
+    return true;
+  }
+
+  async waitForOperatorBucketIamAccess({ buckets } = {}) {
+    const allowedBuckets = new Set([GCP_IDENTITY.bucket, GCP_IDENTITY.buildSourceBucket]);
+    if (!Array.isArray(buckets) || buckets.length === 0
+      || new Set(buckets).size !== buckets.length
+      || buckets.some((bucket) => !allowedBuckets.has(bucket))) {
+      throw commandError('OPERATOR_BUCKET_IAM_PERMISSION_INVALID');
+    }
+    const startedAt = this.now();
+    if (!Number.isFinite(startedAt)) throw commandError('OPERATOR_BUCKET_IAM_PROPAGATION_TIMEOUT');
+    const deadline = startedAt + OPERATOR_BUCKET_IAM_PROPAGATION_TIMEOUT_MS;
+    const pending = new Set(buckets);
+    let delay = 1_000;
+    while (pending.size > 0) {
+      for (const bucket of [...pending]) {
+        if (await this.#operatorBucketPermissionState(bucket)) pending.delete(bucket);
+      }
+      if (pending.size === 0) return true;
+      await this.#waitWithinDeadline(delay, deadline, 'OPERATOR_BUCKET_IAM_PROPAGATION_TIMEOUT');
+      delay = Math.min(delay * 2, 10_000);
+    }
+    throw commandError('OPERATOR_BUCKET_IAM_PROPAGATION_TIMEOUT');
+  }
+
+  async #readProjectWideCidrAudit(enabledApis) {
+    if (!(enabledApis instanceof Set)) throw commandError('CIDR_AUDIT_INVALID');
+    if (!enabledApis.has('compute.googleapis.com')) return null;
+    const [networks, subnets, routes, addresses] = await Promise.all([
+      this.#gcloud(['compute', 'networks', 'list', `--project=${PROJECT}`, '--format=json']),
+      this.#gcloud(['compute', 'networks', 'subnets', 'list', `--project=${PROJECT}`, '--format=json']),
+      this.#gcloud(['compute', 'routes', 'list', `--project=${PROJECT}`, '--format=json']),
+      this.#gcloud(['compute', 'addresses', 'list', `--project=${PROJECT}`, '--format=json']),
+    ]);
+    const networkInventory = requireObjectList(networks);
+    const subnetInventory = requireObjectList(subnets);
+    const routeInventory = requireObjectList(routes);
+    const normalizedAddresses = normalizeGcloudComputeAddresses(addresses);
+    validateComputeInventory({
+      networks: networkInventory, subnets: subnetInventory,
+      routes: routeInventory, addresses: normalizedAddresses,
+    });
+
+    let psaConnectionStatus = null;
+    let psaConnectionValue = null;
+    if (enabledApis.has('servicenetworking.googleapis.com')) {
+      const peeringLists = await Promise.all(networkInventory.map(async ({ name }) => (
+        requireServiceNetworkingConnections(await this.#gcloud([
+          'services', 'vpc-peerings', 'list', `--network=${name}`,
+          '--service=servicenetworking.googleapis.com', `--project=${PROJECT}`, '--format=json',
+        ]), name)
+      )));
+      const targetNetwork = serviceNetworkingNetworkName(GCP_IDENTITY.network);
+      const allPeerings = peeringLists.flatMap(requireObjectList);
+      if (allPeerings.some((peering) => (
+        peering.reservedPeeringRanges.includes(GCP_IDENTITY.psaRange)
+        && !sameNetwork(peering.network, targetNetwork)
+      ))) throw commandError('RESOURCE_COLLISION');
+      psaConnectionValue = allPeerings.find(({ network }) => network === targetNetwork) ?? null;
+      psaConnectionStatus = psaConnectionValue === null ? 'absent' : 'present';
+    }
+
+    let cloudSqlStatus = null;
+    let cloudSql = null;
+    let cloudSqlProof = null;
+    if (enabledApis.has('sqladmin.googleapis.com')) {
+      const current = await this.read('cloud-sql-instance');
+      if (!['present', 'absent'].includes(current?.status)) {
+        throw commandError('RESOURCE_STATE_UNKNOWN');
+      }
+      if (current.status === 'present' && !this.compare('cloud-sql-instance', current.value)) {
+        throw commandError('RESOURCE_COLLISION');
+      }
+      cloudSqlStatus = current.status;
+      if (current.status === 'present') {
+        cloudSql = current.value;
+        cloudSqlProof = cloudSqlCidrProof(current.value);
+      }
+    }
+
+    const cidrAudit = assertProjectWideCidrAvailability({
+      networks: networkInventory, subnets: subnetInventory,
+      routes: routeInventory, addresses: normalizedAddresses,
+      psaConnection: psaConnectionValue, cloudSql,
+    });
+    return {
+      psaConnectionStatus,
+      psaConnectionValue,
+      cloudSqlStatus,
+      cloudSqlProof,
+      managedPsaRoute: cidrAudit.managedPsaRoute,
+    };
+  }
+
   async auditPreMutationState({ notificationChannel } = {}) {
     const project = await this.read('project');
     const billing = await this.read('billing');
@@ -2365,32 +3272,7 @@ export class GcpControlPlane {
     }
     await this.#auditManagedIdentityInventory(enabledApis);
 
-    if (enabledApis.has('compute.googleapis.com')) {
-      const [networks, subnets, routes, addresses] = await Promise.all([
-        this.#gcloud(['compute', 'networks', 'list', `--project=${PROJECT}`, '--format=json']),
-        this.#gcloud(['compute', 'networks', 'subnets', 'list', `--project=${PROJECT}`, '--format=json']),
-        this.#gcloud(['compute', 'routes', 'list', `--project=${PROJECT}`, '--format=json']),
-        this.#gcloud(['compute', 'addresses', 'list', `--project=${PROJECT}`, '--format=json']),
-      ]);
-      const networkInventory = requireObjectList(networks);
-      assertProjectWideCidrAvailability({
-        networks, subnets, routes, addresses: normalizeGcloudComputeAddresses(addresses),
-      });
-      if (enabledApis.has('servicenetworking.googleapis.com')) {
-        const peeringLists = await Promise.all(networkInventory.map(async ({ name }) => (
-          requireServiceNetworkingConnections(await this.#gcloud([
-            'services', 'vpc-peerings', 'list', `--network=${name}`, '--service=servicenetworking.googleapis.com',
-            `--project=${PROJECT}`, '--format=json',
-          ]), name)
-        )));
-        const targetNetwork = serviceNetworkingNetworkName(GCP_IDENTITY.network);
-        if (peeringLists.flatMap(requireObjectList).some((peering) => (
-          Array.isArray(peering?.reservedPeeringRanges)
-          && peering.reservedPeeringRanges.includes(GCP_IDENTITY.psaRange)
-          && !sameNetwork(peering.network, targetNetwork)
-        ))) throw commandError('RESOURCE_COLLISION');
-      }
-    }
+    const cidrAuditContext = await this.#readProjectWideCidrAudit(enabledApis);
 
     const context = {
       notificationChannel: canonicalMonitoringChannelName(notificationChannel),
@@ -2409,6 +3291,21 @@ export class GcpControlPlane {
         if (parentStatus !== 'present') throw commandError('RESOURCE_STATE_UNKNOWN');
       }
       const current = await this.read(id, context);
+      if (id === 'psa-connection' && cidrAuditContext !== null
+        && cidrAuditContext.psaConnectionStatus !== null && (
+        current?.status !== cidrAuditContext.psaConnectionStatus
+        || (current.status === 'present' && !exact(current.value, cidrAuditContext.psaConnectionValue))
+      )) throw commandError('RESOURCE_STATE_UNKNOWN');
+      if (id === 'cloud-sql-instance' && cidrAuditContext !== null
+        && cidrAuditContext.cloudSqlStatus !== null) {
+        const currentPrivateIp = current?.status === 'present'
+          ? exactManagedCloudSqlPrivateIp(current.value) : null;
+        if (current?.status !== cidrAuditContext.cloudSqlStatus
+          || (current.status === 'present' && (
+            currentPrivateIp === null || currentPrivateIp !== cidrAuditContext.cloudSqlProof?.privateIp
+            || !exact(cloudSqlCidrProof(current.value), cidrAuditContext.cloudSqlProof)
+          ))) throw commandError('RESOURCE_STATE_UNKNOWN');
+      }
       if (id === 'notification-channel' && current?.status !== 'present') {
         throw commandError('ALERT_CHANNEL_REQUIRED');
       }
@@ -2420,6 +3317,16 @@ export class GcpControlPlane {
       }
       auditStatuses.set(id, current.status);
     }
+    if (cidrAuditContext !== null) {
+      try {
+        const currentCidrAudit = await this.#readProjectWideCidrAudit(enabledApis);
+        if (!exact(currentCidrAudit, cidrAuditContext)) {
+          throw commandError('RESOURCE_STATE_UNKNOWN');
+        }
+      } catch {
+        throw commandError('RESOURCE_STATE_UNKNOWN');
+      }
+    }
     return true;
   }
 
@@ -2429,6 +3336,9 @@ export class GcpControlPlane {
       if (result?.status === 'present') this.cache.set(id, result.value);
       return result;
     } catch (error) {
+      if (Number.isFinite(context?.deadline)) {
+        this.#assertBeforeDeadline(context.deadline, context.timeoutCode ?? 'RESOURCE_STATE_UNKNOWN');
+      }
       const code = classifyTransportError(error);
       if (code === 'NOT_FOUND') return { status: 'absent' };
       if (code === 'FORBIDDEN') return { status: 'unknown', code: 'FORBIDDEN' };
@@ -2461,6 +3371,28 @@ export class GcpControlPlane {
     }
   }
 
+  #deadlineInvocationOptions(deadline, timeoutCode) {
+    const remaining = deadline - this.now();
+    if (!Number.isFinite(remaining) || remaining <= 0) throw commandError(timeoutCode);
+    const milliseconds = Math.max(1, Math.ceil(remaining));
+    return {
+      signal: AbortSignal.timeout(milliseconds),
+      timeout: Math.min(120_000, milliseconds),
+    };
+  }
+
+  async #restWithinDeadline(input, deadline, timeoutCode) {
+    try {
+      const { signal } = this.#deadlineInvocationOptions(deadline, timeoutCode);
+      const result = await this.#rest({ ...input, signal });
+      this.#assertBeforeDeadline(deadline, timeoutCode);
+      return result;
+    } catch (error) {
+      this.#assertBeforeDeadline(deadline, timeoutCode);
+      throw error;
+    }
+  }
+
   async #listAll({ url, itemKey }) {
     const items = [];
     const seenTokens = new Set();
@@ -2489,7 +3421,9 @@ export class GcpControlPlane {
   #projectNumber() {
     const project = this.cache.get('project');
     const value = String(project?.projectNumber ?? '');
-    if (!/^\d{6,20}$/.test(value)) throw commandError('PROJECT_NUMBER_UNAVAILABLE');
+    if (!/^\d{6,20}$/.test(value) || value !== PROJECT_NUMBER) {
+      throw commandError('PROJECT_NUMBER_UNAVAILABLE');
+    }
     return value;
   }
 
@@ -2523,10 +3457,17 @@ export class GcpControlPlane {
   }
 
   async #auditCustomRoles() {
-    const roles = requireObjectList(await this.#gcloud([
-      'iam', 'roles', 'list', `--project=${PROJECT}`, '--format=json',
-    ]));
-    return assertExactCustomRoleDefinitions({ contract: this.contract, roles });
+    const listedRoles = await this.#gcloud([
+      'iam', 'roles', 'list', '--show-deleted', `--project=${PROJECT}`, '--format=json',
+    ]);
+    assertExactCustomRoleInventory({ contract: this.contract, roles: listedRoles });
+    const describedRoles = [];
+    for (const role of this.contract.resources.customRoles) {
+      describedRoles.push(await this.#gcloud([
+        'iam', 'roles', 'describe', role.id, `--project=${PROJECT}`, '--format=json',
+      ]));
+    }
+    return assertExactCustomRoleDefinitions({ contract: this.contract, roles: describedRoles });
   }
 
   async #auditManagedIdentityInventory(enabledApis) {
@@ -2569,9 +3510,16 @@ export class GcpControlPlane {
     }
     if (enabledApis.has('secretmanager.googleapis.com')) {
       const secrets = await this.#gcloud(['secrets', 'list', `--project=${PROJECT}`, '--format=json']);
+      const secretNamePrefix = `projects/${this.#projectNumber()}/secrets/`;
+      const seenSecretNames = new Set();
       assertManagedIdentityInventory(secrets, this.contract.resources.secrets.map(({ id }) => id), (item) => {
-        if (typeof item.name !== 'string' || (item.name.includes('hkbuddy-v1')
-          && !item.name.startsWith(`projects/${PROJECT}/secrets/`))) throw commandError('LIST_RESPONSE_AMBIGUOUS');
+        if (!plainComputeRow(item) || typeof item.name !== 'string'
+          || !item.name.startsWith(secretNamePrefix)
+          || !/^[A-Za-z0-9_-]{1,255}$/.test(item.name.slice(secretNamePrefix.length))
+          || seenSecretNames.has(item.name)) {
+          throw commandError('LIST_RESPONSE_AMBIGUOUS');
+        }
+        seenSecretNames.add(item.name);
         return item.name;
       });
     }
@@ -2629,7 +3577,7 @@ export class GcpControlPlane {
     } catch (error) {
       throw commandError('CLOUD_ASSET_INVENTORY_UNAVAILABLE');
     }
-    return assertCloudAssetInventory(assets);
+    return assertCloudAssetInventory(assets, this.#projectNumber());
   }
 
   async #read(id, context) {
@@ -2702,27 +3650,53 @@ export class GcpControlPlane {
       return listing.length === 1 ? { status: 'present', value: listing[0] } : { status: 'absent' };
     }
     if (id === 'cloud-sql-instance') {
+      const invocationOptions = Number.isFinite(context?.deadline)
+        ? this.#deadlineInvocationOptions(context.deadline, context.timeoutCode ?? 'SQL_INSTANCE_NOT_QUIET')
+        : undefined;
       const raw = await this.#gcloud([
         'sql', 'instances', 'describe', GCP_IDENTITY.cloudSqlInstance, `--project=${PROJECT}`, '--format=json',
-      ]);
+      ], invocationOptions);
       const privateIp = raw?.ipAddresses?.find(({ type }) => type === 'PRIVATE')?.ipAddress;
       return { status: 'present', value: { ...raw, privateIp } };
     }
     if (id === 'database') {
-      return { status: 'present', value: await this.#gcloud([
-        'sql', 'databases', 'describe', GCP_IDENTITY.database, `--instance=${GCP_IDENTITY.cloudSqlInstance}`,
+      const listing = requireCloudSqlDatabases(await this.#gcloud([
+        'sql', 'databases', 'list', `--instance=${GCP_IDENTITY.cloudSqlInstance}`,
         `--project=${PROJECT}`, '--format=json',
-      ]) };
+      ]));
+      const target = listing.find(({ name }) => name === GCP_IDENTITY.database);
+      return target ? { status: 'present', value: target } : { status: 'absent' };
     }
     if (id === 'bucket' || id === 'build-source-bucket') {
       const bucket = id === 'bucket' ? GCP_IDENTITY.bucket : GCP_IDENTITY.buildSourceBucket;
-      const value = await this.#gcloud([
+      await this.#gcloud([
         'storage', 'buckets', 'describe', `gs://${bucket}`, `--project=${PROJECT}`, '--format=json',
       ]);
-      if (String(value?.projectNumber ?? '') !== this.#projectNumber()) {
+      const value = await this.#rest({
+        method: 'GET',
+        url: `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucket)}?projection=full`,
+      });
+      if (!plainComputeRow(value) || value.name !== bucket
+        || String(value.projectNumber ?? '') !== this.#projectNumber()) {
         throw commandError('BUCKET_ID_COLLISION');
       }
       return { status: 'present', value };
+    }
+    if (id === OPERATOR_BUCKET_IAM_STEP) return this.#readOperatorBucketIamBinding();
+    if (BUCKET_IAM_BASELINE_IDS.includes(id)) {
+      const bucket = bucketForIamBaseline(id);
+      const writeKey = `${id}:write`;
+      this.cache.delete(writeKey);
+      const policy = await this.#rest({
+        method: 'GET',
+        url: `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucket)}/iam?optionsRequestedPolicyVersion=3`,
+      });
+      const analysis = analyzeBucketIamBaselinePolicy({ contract: this.contract, bucket, policy });
+      if (analysis.exact) {
+        return { status: 'present', value: { exact: true } };
+      }
+      this.cache.set(writeKey, structuredClone(analysis.sanitizedPolicy));
+      return { status: 'absent' };
     }
     if (id.startsWith('secret-container:')) {
       const secretId = id.slice('secret-container:'.length);
@@ -2832,12 +3806,39 @@ export class GcpControlPlane {
           },
         },
       });
-      return this.#waitForSqlOperation(operation, 'v1');
+      return this.#waitForSqlOperation(operation, 'v1', {
+        expectedType: 'CREATE', timeoutMs: SQL_INSTANCE_CREATE_TIMEOUT_MS,
+      });
     }
-    if (id === 'database') return this.#gcloud([
-      'sql', 'databases', 'create', GCP_IDENTITY.database, `--instance=${GCP_IDENTITY.cloudSqlInstance}`,
-      `--project=${PROJECT}`, '--format=json',
-    ]);
+    if (id === 'database') {
+      const startedAt = this.now();
+      if (!Number.isFinite(startedAt)) throw commandError('SQL_INSTANCE_NOT_QUIET');
+      const deadline = startedAt + SQL_INSTANCE_QUIET_TIMEOUT_MS;
+      let retryDelay = 2_000;
+      while (this.now() < deadline) {
+        await this.#assertCloudSqlReadyAndQuiet(deadline);
+        this.#assertBeforeDeadline(deadline, 'SQL_INSTANCE_NOT_QUIET');
+        let operation;
+        try {
+          operation = await this.#restWithinDeadline({
+            method: 'POST',
+            url: `https://sqladmin.googleapis.com/v1/projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}/databases`,
+            body: {
+              project: PROJECT, instance: GCP_IDENTITY.cloudSqlInstance, name: GCP_IDENTITY.database,
+            },
+          }, deadline, 'SQL_INSTANCE_NOT_QUIET');
+        } catch (error) {
+          if (!['SQL_OPERATION_IN_PROGRESS', 'SQL_INVALID_STATE'].includes(error?.code)) throw error;
+          await this.#waitWithinDeadline(retryDelay, deadline, 'SQL_INSTANCE_NOT_QUIET');
+          retryDelay = Math.min(retryDelay * 2, 15_000);
+          continue;
+        }
+        return this.#waitForSqlOperation(operation, 'v1', {
+          expectedType: 'CREATE_DATABASE', timeoutMs: SQL_DATABASE_OPERATION_TIMEOUT_MS,
+        });
+      }
+      throw commandError('SQL_INSTANCE_NOT_QUIET');
+    }
     if (id === 'bucket' || id === 'build-source-bucket') {
       const definition = id === 'bucket'
         ? this.contract.resources.bucket : this.contract.resources.buildSourceBucket;
@@ -2856,6 +3857,35 @@ export class GcpControlPlane {
         }] },
       },
       });
+    }
+    if (id === OPERATOR_BUCKET_IAM_STEP) return this.#createOperatorBucketIamBinding();
+    if (BUCKET_IAM_BASELINE_IDS.includes(id)) {
+      const bucket = bucketForIamBaseline(id);
+      const writeKey = `${id}:write`;
+      const body = this.cache.get(writeKey);
+      let analysis;
+      try {
+        analysis = analyzeBucketIamBaselinePolicy({ contract: this.contract, bucket, policy: body });
+      } catch {
+        throw commandError('BUCKET_IAM_BASELINE_STATE_INVALID');
+      }
+      if (!analysis.exact || !exact(body, analysis.sanitizedPolicy)) {
+        throw commandError('BUCKET_IAM_BASELINE_STATE_INVALID');
+      }
+      const response = await this.#rest({
+        method: 'PUT',
+        url: `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucket)}/iam`,
+        body: structuredClone(body),
+      });
+      try {
+        const responseAnalysis = analyzeBucketIamBaselinePolicy({
+          contract: this.contract, bucket, policy: response,
+        });
+        if (!responseAnalysis.exact) throw new Error('legacy binding remained');
+      } catch {
+        throw commandError('TRANSPORT_AMBIGUOUS');
+      }
+      return response;
     }
     if (id.startsWith('secret-container:')) {
       const secretId = id.slice('secret-container:'.length);
@@ -2957,11 +3987,14 @@ export class GcpControlPlane {
     }
     if (id === 'cloud-sql-instance') return this.#compareCloudSql(value);
     if (id === 'database') return value.name === GCP_IDENTITY.database && value.instance === GCP_IDENTITY.cloudSqlInstance
-      && value.project === PROJECT;
+      && value.project === PROJECT && value.selfLink === cloudSqlDatabaseSelfLink(GCP_IDENTITY.database);
     if (id === 'bucket' || id === 'build-source-bucket') return this.#compareBucket(id, value);
+    if (id === OPERATOR_BUCKET_IAM_STEP || BUCKET_IAM_BASELINE_IDS.includes(id)) {
+      return value.exact === true;
+    }
     if (id.startsWith('secret-container:')) {
       const secretId = id.slice('secret-container:'.length);
-      return value.name === `projects/${PROJECT}/secrets/${secretId}`
+      return value.name === `projects/${this.#projectNumber()}/secrets/${secretId}`
         && exact(value.replication, { automatic: {} })
         && exact(value.labels, { application: 'hong-kong-buddy', environment: 'production-v1' })
         && !Object.hasOwn(value, 'expireTime') && !Object.hasOwn(value, 'ttl')
@@ -2993,9 +4026,7 @@ export class GcpControlPlane {
     const backup = settings.backupConfiguration ?? {};
     const retention = backup.backupRetentionSettings ?? {};
     const ip = settings.ipConfiguration ?? {};
-    const onlyPrivate = Array.isArray(value.ipAddresses)
-      && value.ipAddresses.length > 0
-      && value.ipAddresses.every(({ type }) => type === 'PRIVATE');
+    const privateIp = exactManagedCloudSqlPrivateIp(value);
     return value.name === GCP_IDENTITY.cloudSqlInstance && value.project === PROJECT
       && value.region === 'asia-east2' && value.databaseVersion === 'POSTGRES_16'
       && value.state === 'RUNNABLE' && settings.edition === 'ENTERPRISE'
@@ -3005,7 +4036,7 @@ export class GcpControlPlane {
       && ip.ipv4Enabled === false
       && ip.privateNetwork === `projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`
       && ip.allocatedIpRange === GCP_IDENTITY.psaRange
-      && ip.sslMode === 'ENCRYPTED_ONLY' && onlyPrivate && Boolean(value.privateIp)
+      && ip.sslMode === 'ENCRYPTED_ONLY' && privateIp !== null
       && backup.enabled === true && backup.startTime === '18:00'
       && backup.pointInTimeRecoveryEnabled === true
       && Number(backup.transactionLogRetentionDays) === 7
@@ -3035,20 +4066,36 @@ export class GcpControlPlane {
   }
 
   async #readSecretVersion(secretId) {
+    const secretName = `projects/${this.#projectNumber()}/secrets/${secretId}`;
+    const versionPrefix = `${secretName}/versions/`;
     const listedVersions = await this.#listAll({
       url: `https://secretmanager.googleapis.com/v1/projects/${PROJECT}/secrets/${secretId}/versions?pageSize=100&filter=state%3AENABLED`,
       itemKey: 'versions',
     });
-    const versions = listedVersions.filter(({ name, state }) => (
-      state === 'ENABLED' && NUMERIC_VERSION.test(String(name ?? '').split('/').at(-1))
-    ));
+    const seenVersions = new Set();
+    const versions = listedVersions.map((item) => {
+      if (!plainComputeRow(item) || item.state !== 'ENABLED'
+        || typeof item.name !== 'string' || !item.name.startsWith(versionPrefix)) {
+        throw commandError('LIST_RESPONSE_AMBIGUOUS');
+      }
+      const version = item.name.slice(versionPrefix.length);
+      if (!NUMERIC_VERSION.test(version) || seenVersions.has(version)) {
+        throw commandError('LIST_RESPONSE_AMBIGUOUS');
+      }
+      seenVersions.add(version);
+      return { item, version };
+    });
     if (versions.length === 0) return { status: 'absent' };
     if (versions.length !== 1) return { status: 'present', value: { exact: false } };
-    const version = versions[0].name.split('/').at(-1);
+    const [{ version }] = versions;
     const access = await this.#rest({
       method: 'GET',
       url: `https://secretmanager.googleapis.com/v1/projects/${PROJECT}/secrets/${secretId}/versions/${version}:access`,
     });
+    if (!plainComputeRow(access) || access.name !== `${versionPrefix}${version}`
+      || !plainComputeRow(access.payload) || typeof access.payload.data !== 'string') {
+      throw commandError('SECRET_VERSION_INVALID');
+    }
     let secretValue;
     try { secretValue = Buffer.from(access.payload.data, 'base64').toString('utf8'); } catch {
       return { status: 'present', value: { exact: false } };
@@ -3129,26 +4176,159 @@ export class GcpControlPlane {
         databaseRoles: [...definition.databaseRoles],
       },
     });
-    return this.#waitForSqlOperation(result);
+    return this.#waitForSqlOperation(result, 'v1beta4', { expectedType: 'CREATE_USER' });
   }
 
-  async #waitForSqlOperation(operation, apiVersion = 'v1beta4') {
+  #assertSqlOperationIdentity(operation, { expectedName = null, expectedType = null } = {}) {
+    if (!plainComputeRow(operation)
+      || operation.kind !== 'sql#operation'
+      || !boundedOpaqueApiString(operation.name, 1_024)
+      || !SQL_OPERATION_STATUSES.has(operation.status)
+      || typeof operation.operationType !== 'string'
+      || !/^[A-Z][A-Z0-9_]{0,63}$/.test(operation.operationType)
+      || operation.targetId !== GCP_IDENTITY.cloudSqlInstance
+      || operation.targetProject !== PROJECT
+      || (expectedName !== null && operation.name !== expectedName)
+      || (expectedType !== null && operation.operationType !== expectedType)) {
+      throw commandError('SQL_OPERATION_AMBIGUOUS');
+    }
+    return operation;
+  }
+
+  #assertSqlOperationSucceeded(operation) {
+    if (!Object.hasOwn(operation, 'error')) return operation;
+    const wrapper = operation.error;
+    if (!plainComputeRow(wrapper) || wrapper.kind !== 'sql#operationErrors'
+      || !Array.isArray(wrapper.errors) || wrapper.errors.length === 0
+      || wrapper.errors.some((error) => !plainComputeRow(error)
+        || typeof error.code !== 'string' || error.code.length === 0
+        || typeof error.message !== 'string' || error.message.length === 0)) {
+      throw commandError('SQL_OPERATION_AMBIGUOUS');
+    }
+    throw commandError('SQL_OPERATION_FAILED');
+  }
+
+  async #waitWithinDeadline(delay, deadline, timeoutCode) {
+    const remaining = deadline - this.now();
+    if (!Number.isFinite(remaining) || remaining <= 0) throw commandError(timeoutCode);
+    await this.sleep(Math.min(delay, remaining));
+    this.#assertBeforeDeadline(deadline, timeoutCode);
+  }
+
+  #assertBeforeDeadline(deadline, timeoutCode) {
+    const current = this.now();
+    if (!Number.isFinite(current) || !Number.isFinite(deadline) || current >= deadline) {
+      throw commandError(timeoutCode);
+    }
+  }
+
+  async #listCloudSqlOperations(deadline) {
+    const items = [];
+    const operationNames = new Set();
+    const pageTokens = new Set();
+    let pageToken = null;
+    for (let page = 0; page < 1_000; page += 1) {
+      this.#assertBeforeDeadline(deadline, 'SQL_INSTANCE_NOT_QUIET');
+      const url = new URL(`https://sqladmin.googleapis.com/v1/projects/${PROJECT}/operations`);
+      url.searchParams.set('instance', GCP_IDENTITY.cloudSqlInstance);
+      url.searchParams.set('maxResults', '500');
+      if (pageToken !== null) url.searchParams.set('pageToken', pageToken);
+      const response = await this.#restWithinDeadline(
+        { method: 'GET', url: url.href }, deadline, 'SQL_INSTANCE_NOT_QUIET',
+      );
+      if (!plainComputeRow(response) || response.kind !== 'sql#operationsList'
+        || Object.keys(response).some((key) => !['kind', 'items', 'nextPageToken'].includes(key))) {
+        throw commandError('PAGINATION_AMBIGUOUS');
+      }
+      const pageItems = Object.hasOwn(response, 'items') ? requireObjectList(response.items) : [];
+      for (const operation of pageItems) {
+        this.#assertSqlOperationIdentity(operation);
+        if (operation.targetId !== GCP_IDENTITY.cloudSqlInstance
+          || operation.targetProject !== PROJECT
+          || typeof operation.operationType !== 'string'
+          || !/^[A-Z][A-Z0-9_]{0,63}$/.test(operation.operationType)
+          || operationNames.has(operation.name)) throw commandError('PAGINATION_AMBIGUOUS');
+        operationNames.add(operation.name);
+        items.push(operation);
+      }
+      if (!Object.hasOwn(response, 'nextPageToken') || response.nextPageToken === '') return items;
+      const token = response.nextPageToken;
+      if (!boundedOpaqueApiString(token, 2_048)
+        || pageTokens.has(token)) throw commandError('PAGINATION_AMBIGUOUS');
+      pageTokens.add(token);
+      pageToken = token;
+    }
+    throw commandError('PAGINATION_AMBIGUOUS');
+  }
+
+  async #assertCloudSqlReadyAndQuiet(existingDeadline = null) {
+    const startedAt = this.now();
+    if (!Number.isFinite(startedAt)) throw commandError('SQL_INSTANCE_NOT_QUIET');
+    const deadline = existingDeadline ?? startedAt + SQL_INSTANCE_QUIET_TIMEOUT_MS;
+    this.#assertBeforeDeadline(deadline, 'SQL_INSTANCE_NOT_QUIET');
+    let delay = 2_000;
+    while (this.now() < deadline) {
+      const before = await this.read('cloud-sql-instance', {
+        deadline, timeoutCode: 'SQL_INSTANCE_NOT_QUIET',
+      });
+      this.#assertBeforeDeadline(deadline, 'SQL_INSTANCE_NOT_QUIET');
+      if (before?.status !== 'present' || !this.compare('cloud-sql-instance', before.value)) {
+        throw commandError('SQL_INSTANCE_NOT_READY');
+      }
+      const beforePrivateIp = exactManagedCloudSqlPrivateIp(before.value);
+      if (beforePrivateIp === null) throw commandError('SQL_INSTANCE_NOT_READY');
+      const operations = await this.#listCloudSqlOperations(deadline);
+      if (operations.some(({ status }) => status === 'PENDING' || status === 'RUNNING')) {
+        await this.#waitWithinDeadline(delay, deadline, 'SQL_INSTANCE_NOT_QUIET');
+        delay = Math.min(delay * 2, 15_000);
+        continue;
+      }
+      const after = await this.read('cloud-sql-instance', {
+        deadline, timeoutCode: 'SQL_INSTANCE_NOT_QUIET',
+      });
+      this.#assertBeforeDeadline(deadline, 'SQL_INSTANCE_NOT_QUIET');
+      if (after?.status !== 'present' || !this.compare('cloud-sql-instance', after.value)) {
+        throw commandError('SQL_INSTANCE_NOT_READY');
+      }
+      const afterPrivateIp = exactManagedCloudSqlPrivateIp(after.value);
+      if (afterPrivateIp === null || afterPrivateIp !== beforePrivateIp
+        || !exact(cloudSqlCidrProof(before.value), cloudSqlCidrProof(after.value))) {
+        await this.#waitWithinDeadline(delay, deadline, 'SQL_INSTANCE_NOT_QUIET');
+        delay = Math.min(delay * 2, 15_000);
+        continue;
+      }
+      return { value: after.value, deadline };
+    }
+    throw commandError('SQL_INSTANCE_NOT_QUIET');
+  }
+
+  async #waitForSqlOperation(operation, apiVersion = 'v1beta4', {
+    expectedType = null, timeoutMs = SQL_DATABASE_OPERATION_TIMEOUT_MS,
+  } = {}) {
     if (!['v1', 'v1beta4'].includes(apiVersion)) throw commandError('SQL_OPERATION_AMBIGUOUS');
     const apiPath = apiVersion === 'v1' ? 'v1' : 'sql/v1beta4';
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw commandError('SQL_OPERATION_AMBIGUOUS');
     const name = operation?.name;
-    if (!name) throw commandError('SQL_OPERATION_AMBIGUOUS');
-    for (let attempt = 0; attempt < 600; attempt += 1) {
-      const current = attempt === 0 && operation.status === 'DONE'
-        ? operation
-        : await this.#rest({
-          method: 'GET',
-          url: `https://sqladmin.googleapis.com/${apiPath}/projects/${PROJECT}/operations/${name}`,
-        });
-      if (current?.status === 'DONE') {
-        if (current.error?.errors?.length) throw commandError('SQL_OPERATION_FAILED');
-        return current;
+    this.#assertSqlOperationIdentity(operation, { expectedType });
+    const startedAt = this.now();
+    if (!Number.isFinite(startedAt)) throw commandError('SQL_OPERATION_TIMEOUT');
+    const deadline = startedAt + timeoutMs;
+    let current = operation;
+    let delay = 2_000;
+    while (this.now() < deadline) {
+      if (current.status === 'DONE') {
+        return this.#assertSqlOperationSucceeded(current);
       }
-      await new Promise((resolveDelay) => setTimeout(resolveDelay, 2_000));
+      current = await this.#restWithinDeadline({
+          method: 'GET',
+          url: `https://sqladmin.googleapis.com/${apiPath}/projects/${PROJECT}/operations/${encodeURIComponent(name)}`,
+        }, deadline, 'SQL_OPERATION_TIMEOUT');
+      this.#assertSqlOperationIdentity(current, { expectedName: name, expectedType });
+      if (current?.status === 'DONE') {
+        return this.#assertSqlOperationSucceeded(current);
+      }
+      await this.#waitWithinDeadline(delay, deadline, 'SQL_OPERATION_TIMEOUT');
+      delay = Math.min(delay * 2, 15_000);
     }
     throw commandError('SQL_OPERATION_TIMEOUT');
   }
@@ -3451,6 +4631,17 @@ export class GcpControlPlane {
       contract: this.contract, projectNumber: this.#projectNumber(), policiesByScope,
       enabledApis: enabledAfter,
     });
+    try {
+      const cidrAudit = await this.#readProjectWideCidrAudit(enabledAfter);
+      if (cidrAudit === null
+        || cidrAudit.psaConnectionStatus !== 'present'
+        || cidrAudit.cloudSqlStatus !== 'present'
+        || cidrAudit.managedPsaRoute === null) {
+        throw commandError('FINAL_READBACK_FAILED');
+      }
+    } catch {
+      throw commandError('FINAL_READBACK_FAILED');
+    }
   }
 }
 

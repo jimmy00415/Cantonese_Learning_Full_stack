@@ -15,8 +15,13 @@ import {
   verifyImageReleaseRoot,
 } from '../scripts/image-release-contract.js';
 import { writeImageReleaseManifest } from '../scripts/create-image-release-manifest.js';
+import { CANONICAL_WAV } from '../src/media/canonical-wav.js';
 import { finalizeReleaseEvidenceRecord } from '../src/services/release-evidence.js';
-import { finalizeEvidenceRecord } from '../src/services/voice-evidence.js';
+import {
+  finalizeEvidenceRecord,
+  iosVoiceEvidenceContract,
+  iosVoiceNormalizationBinding,
+} from '../src/services/voice-evidence.js';
 import {
   LATENCY_ACCEPTANCE_CONTRACT,
   finalizeLatencyAcceptanceRecord,
@@ -32,6 +37,7 @@ import {
 import {
   buildReleasePlan,
   containsForbiddenPersistedSecret,
+  createReleaseGcloudExecutor,
   inspectCollectedEvidenceArtifact,
   prepareReleaseArchive,
   runPrepareReleaseArchive,
@@ -233,6 +239,90 @@ function releaseInput(overrides = {}) {
     previousImageDigest: PREVIOUS_IMAGE_DIGEST,
     ...overrides,
   };
+}
+
+function validIosVoiceAcceptancePayload(occurredAt = '2026-08-29T08:00:00.000Z') {
+  const platform = 'win32-x64';
+  const payload = {
+    schemaVersion: iosVoiceEvidenceContract.schemaVersion,
+    commitSha: RELEASE_SHA,
+    capability: 'ios-voice',
+    normalizerContractVersion: CANONICAL_WAV.contractVersion,
+    reportSource: iosVoiceEvidenceContract.reportSource,
+    deviceReportSha256: '4'.repeat(64),
+    deviceReportByteLength: 1_024,
+    deviceRunId: '88888888-8888-4888-8888-888888888888',
+    deviceModelIdentifier: 'iPhone16,1',
+    iosVersion: '19.0',
+    safariVersion: '19.0',
+    captureMimeType: 'audio/mp4',
+    deviceObservedAt: occurredAt,
+    rawCaptureFormat: iosVoiceEvidenceContract.rawCaptureFormat,
+    rawCaptureSha256: '1'.repeat(64),
+    rawCaptureByteLength: 4_096,
+    fixtureSha256: '2'.repeat(64),
+    fixtureDurationMs: 1_000,
+    fixtureByteLength: 32_044,
+    normalizationStepsSha256: '3'.repeat(64),
+    normalizationStepsByteLength: 2_048,
+    normalizerPackage: iosVoiceEvidenceContract.normalizer.package,
+    normalizerPlatform: platform,
+    normalizerBinarySha256: iosVoiceEvidenceContract.normalizer.platforms[platform].binarySha256,
+    normalizerVersion: iosVoiceEvidenceContract.normalizer.platforms[platform].version,
+    normalizerArguments: [...iosVoiceEvidenceContract.normalizer.arguments],
+    normalizerExitCode: 0,
+    normalizationBindingSha256: null,
+    verifiedStepIds: [...iosVoiceEvidenceContract.stepIds],
+    occurredAt,
+    result: 'pass',
+  };
+  payload.normalizationBindingSha256 = iosVoiceNormalizationBinding(payload);
+  return payload;
+}
+
+async function materializedReleaseEvidenceInput(t, { mutateIos } = {}) {
+  const directory = await mkdtemp(join(tmpdir(), 'hkbuddy-release-semantic-evidence-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const iosPayload = validIosVoiceAcceptancePayload();
+  mutateIos?.(iosPayload);
+  iosPayload.normalizationBindingSha256 = iosVoiceNormalizationBinding(iosPayload);
+  const records = {
+    legacyInventory: finalizeReleaseEvidenceRecord({
+      schemaVersion: 1, commitSha: RELEASE_SHA, result: true,
+    }),
+    dependencyAcceptance: finalizeReleaseEvidenceRecord({
+      schemaVersion: 1, commitSha: RELEASE_SHA, result: true,
+    }),
+    llmSmoke: finalizeReleaseEvidenceRecord({
+      schemaVersion: 1, commitSha: RELEASE_SHA, capability: 'llm', result: 'pass',
+    }),
+    asrSmoke: finalizeEvidenceRecord({
+      schemaVersion: 1, commitSha: RELEASE_SHA, capability: 'asr', result: 'pass',
+    }),
+    ttsSmoke: finalizeEvidenceRecord({
+      schemaVersion: 1, commitSha: RELEASE_SHA, capability: 'tts', result: 'pass',
+    }),
+    iosVoiceAcceptance: finalizeEvidenceRecord(iosPayload),
+  };
+  const evidence = {};
+  for (const [key, record] of Object.entries(records)) {
+    const filePath = join(directory, `${key}.json`);
+    const contents = `${JSON.stringify(record, null, 2)}\n`;
+    await writeFile(filePath, contents, { flag: 'wx' });
+    evidence[key] = {
+      ...EVIDENCE[key],
+      filePath,
+      artifactSha256: record.artifactSha256,
+      objectSha256: createHash('sha256').update(contents).digest('hex'),
+    };
+  }
+  const acceptanceOutputs = Object.fromEntries(Object.entries(ACCEPTANCE_OUTPUTS)
+    .map(([key, output]) => [key, { ...output, filePath: evidence[key].filePath }]));
+  return releaseInput({
+    acceptanceOutputs,
+    evidence,
+    legacyInventory: evidence.legacyInventory,
+  });
 }
 
 function exactCloudBuildReceipt() {
@@ -1368,6 +1458,16 @@ async function appendTestMutationCheckpoint(store, {
   return intent;
 }
 
+function secretVersionSafeResult(expected) {
+  return {
+    artifactSha256: expected.artifactSha256,
+    kind: 'secret-version',
+    name: `projects/${PROJECT}/secrets/${expected.secret}`,
+    objectSha256: expected.objectSha256,
+    version: expected.secretVersion,
+  };
+}
+
 async function appendTestMutationIntent(store, {
   operationId, mutationOrdinal, reconcileKind, plan = buildReleasePlan(releaseInput()),
 }) {
@@ -2113,6 +2213,329 @@ test('evidence artifact verification separates semantic digest from exact object
   }, { releaseSha: RELEASE_SHA }), /evidence artifact/i);
 });
 
+test('release gcloud executor writes one exact evidence buffer to stdin', async () => {
+  const payload = Buffer.from('{"artifact":"verified"}\n');
+  let invocation = null;
+  let written = null;
+  const receipt = {
+    name: `projects/${PROJECT}/secrets/hkbuddy-v1-legacy-inventory/versions/11`,
+    state: 'ENABLED',
+  };
+  const executor = createReleaseGcloudExecutor({
+    ordinaryExecutor: async () => { throw new Error('ordinary executor must remain inert'); },
+    resolveLaunch: () => ({ executable: 'controlled-gcloud', prefixArgs: ['gcloud.py'] }),
+    execFileImpl: (executable, argv, options, callback) => {
+      invocation = { executable, argv, options };
+      return {
+        kill: () => undefined,
+        stdin: {
+          once: () => undefined,
+          end: (bytes) => {
+            written = Buffer.from(bytes);
+            queueMicrotask(() => callback(null, JSON.stringify(receipt)));
+          },
+        },
+      };
+    },
+  });
+  const actual = await executor([
+    'secrets', 'versions', 'add', 'hkbuddy-v1-legacy-inventory', '--data-file=-',
+    `--project=${PROJECT}`, '--format=json',
+  ], { stdin: payload });
+  assert.deepEqual(actual, receipt);
+  assert.deepEqual(written, payload);
+  assert.equal(invocation.executable, 'controlled-gcloud');
+  assert.deepEqual(invocation.argv, [
+    'gcloud.py', 'secrets', 'versions', 'add', 'hkbuddy-v1-legacy-inventory',
+    '--data-file=-', `--project=${PROJECT}`, '--format=json', '--quiet',
+  ]);
+  assert.equal(invocation.options.shell, false);
+  assert.equal(invocation.options.timeout, 120_000);
+});
+
+test('release gcloud executor reads one exact Secret payload as private base64url text', async () => {
+  const payload = Buffer.from('{"artifact":"verified"}\n').toString('base64url');
+  let invocation = null;
+  const executor = createReleaseGcloudExecutor({
+    ordinaryExecutor: async () => { throw new Error('ordinary executor must remain inert'); },
+    resolveLaunch: () => ({ executable: 'controlled-gcloud', prefixArgs: ['gcloud.py'] }),
+    execFileImpl: (executable, argv, options, callback) => {
+      invocation = { executable, argv, options };
+      queueMicrotask(() => callback(null, `${payload}\n`));
+      return { kill: () => undefined };
+    },
+  });
+  const actual = await executor([
+    'secrets', 'versions', 'access', '11', '--secret=hkbuddy-v1-legacy-inventory',
+    `--project=${PROJECT}`, '--format=get(payload.data)',
+  ], { maxBuffer: 2 * 1024 * 1024, text: true });
+  assert.equal(actual, payload);
+  assert.equal(invocation.executable, 'controlled-gcloud');
+  assert.deepEqual(invocation.argv, [
+    'gcloud.py', 'secrets', 'versions', 'access', '11',
+    '--secret=hkbuddy-v1-legacy-inventory', `--project=${PROJECT}`,
+    '--format=get(payload.data)', '--quiet',
+  ]);
+  assert.equal(invocation.options.encoding, 'utf8');
+  assert.equal(invocation.options.maxBuffer, 2 * 1024 * 1024);
+});
+
+test('evidence phase rejects self-hashed invalid iOS voice semantics before Secret mutation', async (t) => {
+  const current = new Date('2026-08-29T08:00:00.000Z');
+  const mutations = [
+    ['schema', (value) => { value.schemaVersion = 3; }],
+    ['result', (value) => { value.result = 'fail'; }],
+    ['normalizer contract', (value) => { value.normalizerContractVersion = 'canonical-wav-v999'; }],
+    ['normalizer binary', (value) => { value.normalizerBinarySha256 = '5'.repeat(64); }],
+    ['stale', (value) => {
+      value.occurredAt = '2026-05-29T07:59:59.000Z';
+      value.deviceObservedAt = value.occurredAt;
+    }],
+    ['future', (value) => {
+      value.occurredAt = '2026-08-29T08:05:01.000Z';
+      value.deviceObservedAt = value.occurredAt;
+    }],
+  ];
+  for (const [name, mutateIos] of mutations) {
+    await t.test(name, async (st) => {
+      const input = await materializedReleaseEvidenceInput(st, { mutateIos });
+      const calls = [];
+      const result = await runGcpRelease({
+        argv: ['--phase=evidence', `--confirm-release=${RELEASE_SHA}`],
+        input,
+        verifyEvidence: undefined,
+        execute: async (argv) => {
+          calls.push(argv);
+          throw new Error('Secret mutation must remain inert');
+        },
+        now: () => current,
+        writeOutput: () => undefined,
+      });
+      assert.equal(result.exitCode, 1, name);
+      assert.equal(result.publicReport.code, 'RELEASE_PHASE_FAILED', name);
+      assert.equal(result.publicReport.mutationPerformed, false, name);
+      assert.deepEqual(calls, [], name);
+    });
+  }
+});
+
+test('evidence phase rejects invalid iOS semantics when the current clock is undefined', async (t) => {
+  const input = await materializedReleaseEvidenceInput(t, {
+    mutateIos: (value) => { value.schemaVersion = 3; },
+  });
+  const calls = [];
+  const result = await runGcpRelease({
+    argv: ['--phase=evidence', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    verifyEvidence: undefined,
+    execute: async (argv) => {
+      calls.push(argv);
+      throw new Error('Secret mutation must remain inert');
+    },
+    now: () => undefined,
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.publicReport.code, 'RELEASE_PHASE_FAILED');
+  assert.equal(result.publicReport.mutationPerformed, false);
+  assert.deepEqual(calls, []);
+});
+
+test('evidence phase accepts one current iOS voice v4 artifact and publishes planned versions', async (t) => {
+  const input = await materializedReleaseEvidenceInput(t);
+  const versionsBySecret = Object.fromEntries(Object.values(input.evidence).map((value) => (
+    [value.secret, value.secretVersion]
+  )));
+  const calls = [];
+  const publishedBySecret = new Map();
+  const result = await runGcpRelease({
+    argv: ['--phase=evidence', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    verifyEvidence: undefined,
+    execute: async (argv, { stdin } = {}) => {
+      calls.push(argv);
+      if (argv[0] === 'storage') {
+        return argv[1] === 'objects' && argv[2] === 'list' ? [] : { done: true };
+      }
+      const isPublish = argv[0] === 'secrets' && argv[1] === 'versions' && argv[2] === 'add';
+      const secret = isPublish
+        ? argv[3]
+        : argv.find((value) => value.startsWith('--secret=')).slice('--secret='.length);
+      if (isPublish) publishedBySecret.set(secret, Buffer.from(stdin));
+      if (argv[2] === 'access') return publishedBySecret.get(secret).toString('base64url');
+      const version = isPublish ? versionsBySecret[secret] : argv[3];
+      return { name: `projects/${PROJECT}/secrets/${secret}/versions/${version}`, state: 'ENABLED' };
+    },
+    now: () => new Date('2026-08-29T08:00:00.000Z'),
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  assert.equal(calls.some((argv) => argv[0] === 'secrets'
+    && argv[1] === 'versions' && argv[2] === 'add'), true);
+});
+
+test('evidence publication streams the verified bytes after the source path is replaced', async (t) => {
+  const input = await materializedReleaseEvidenceInput(t);
+  const iosEntry = input.evidence.iosVoiceAcceptance;
+  const verifiedBytes = await readFile(iosEntry.filePath);
+  const versionsBySecret = Object.fromEntries(Object.values(input.evidence).map((value) => (
+    [value.secret, value.secretVersion]
+  )));
+  let sourceReplaced = false;
+  let publishedIosBytes = null;
+  const publishedBySecret = new Map();
+  const result = await runGcpRelease({
+    argv: ['--phase=evidence', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    verifyEvidence: undefined,
+    execute: async (argv, { stdin } = {}) => {
+      if (argv[0] === 'storage') {
+        return argv[1] === 'objects' && argv[2] === 'list' ? [] : { done: true };
+      }
+      const isPublish = argv[0] === 'secrets' && argv[1] === 'versions' && argv[2] === 'add';
+      if (isPublish && !sourceReplaced) {
+        await writeFile(iosEntry.filePath, '{"tampered":true}\n');
+        sourceReplaced = true;
+      }
+      const secret = isPublish
+        ? argv[3]
+        : argv.find((value) => value.startsWith('--secret=')).slice('--secret='.length);
+      const version = isPublish ? versionsBySecret[secret] : argv[3];
+      if (isPublish) publishedBySecret.set(secret, Buffer.from(stdin));
+      if (isPublish && secret === iosEntry.secret) {
+        const dataFile = argv.find((value) => value.startsWith('--data-file='))
+          ?.slice('--data-file='.length);
+        publishedIosBytes = dataFile === '-' ? Buffer.from(stdin) : await readFile(dataFile);
+      }
+      if (argv[2] === 'access') return publishedBySecret.get(secret).toString('base64url');
+      return { name: `projects/${PROJECT}/secrets/${secret}/versions/${version}`, state: 'ENABLED' };
+    },
+    now: () => new Date('2026-08-29T08:00:00.000Z'),
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  assert.equal(sourceReplaced, true);
+  assert.equal(createHash('sha256').update(publishedIosBytes).digest('hex'), iosEntry.objectSha256);
+  assert.deepEqual(publishedIosBytes, verifiedBytes);
+  assert.notEqual(createHash('sha256').update(await readFile(iosEntry.filePath)).digest('hex'),
+    iosEntry.objectSha256);
+});
+
+test('inventory publication streams the verified legacy bytes after the source path is replaced', async (t) => {
+  const input = await materializedReleaseEvidenceInput(t);
+  const legacyEntry = input.evidence.legacyInventory;
+  const verifiedBytes = await readFile(legacyEntry.filePath);
+  let publishedBytes = null;
+  const result = await runGcpRelease({
+    argv: ['--phase=inventory', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    verifyEvidence: undefined,
+    execute: async (argv, { stdin } = {}) => {
+      const isPublish = argv[0] === 'secrets' && argv[1] === 'versions' && argv[2] === 'add';
+      if (isPublish) {
+        await writeFile(legacyEntry.filePath, '{"tampered":true}\n');
+        const dataFile = argv.find((value) => value.startsWith('--data-file='))
+          ?.slice('--data-file='.length);
+        publishedBytes = dataFile === '-' ? Buffer.from(stdin) : await readFile(dataFile);
+      }
+      if (argv[2] === 'access') return publishedBytes.toString('base64url');
+      return {
+        name: `projects/${PROJECT}/secrets/${legacyEntry.secret}/versions/${legacyEntry.secretVersion}`,
+        state: 'ENABLED',
+      };
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  assert.equal(createHash('sha256').update(publishedBytes).digest('hex'), legacyEntry.objectSha256);
+  assert.deepEqual(publishedBytes, verifiedBytes);
+  assert.notEqual(createHash('sha256').update(await readFile(legacyEntry.filePath)).digest('hex'),
+    legacyEntry.objectSha256);
+});
+
+test('evidence publication stops before GCS deletion when Secret payload readback drifts', async (t) => {
+  const input = await materializedReleaseEvidenceInput(t);
+  const versionsBySecret = Object.fromEntries(Object.values(input.evidence).map((value) => (
+    [value.secret, value.secretVersion]
+  )));
+  const calls = [];
+  const result = await runGcpRelease({
+    argv: ['--phase=evidence', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    verifyEvidence: undefined,
+    execute: async (argv) => {
+      calls.push(argv);
+      if (argv[0] === 'storage') throw new Error('GCS deletion must remain inert');
+      const secret = argv[2] === 'add'
+        ? argv[3] : argv.find((value) => value.startsWith('--secret=')).slice('--secret='.length);
+      const version = argv[2] === 'add' ? versionsBySecret[secret] : argv[3];
+      if (argv[2] === 'access') return Buffer.from('{"tampered":true}\n').toString('base64url');
+      return {
+        name: `projects/${PROJECT}/secrets/${secret}/versions/${version}`,
+        state: 'ENABLED',
+      };
+    },
+    now: () => new Date('2026-08-29T08:00:00.000Z'),
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.publicReport.mutationPerformed, true);
+  assert.equal(calls.some((argv) => argv[0] === 'secrets' && argv[2] === 'access'), true);
+  assert.equal(calls.some((argv) => argv[0] === 'storage'), false);
+});
+
+test('inventory publication rejects a drifted Secret payload readback', async (t) => {
+  const input = await materializedReleaseEvidenceInput(t);
+  const legacyEntry = input.evidence.legacyInventory;
+  const calls = [];
+  const result = await runGcpRelease({
+    argv: ['--phase=inventory', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    verifyEvidence: undefined,
+    execute: async (argv) => {
+      calls.push(argv);
+      if (argv[2] === 'access') return Buffer.from('{"tampered":true}\n').toString('base64url');
+      return {
+        name: `projects/${PROJECT}/secrets/${legacyEntry.secret}/versions/${legacyEntry.secretVersion}`,
+        state: 'ENABLED',
+      };
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.publicReport.mutationPerformed, true);
+  assert.equal(calls.some((argv) => argv[0] === 'secrets' && argv[2] === 'access'), true);
+});
+
+test('receipt-bound cleanup and rollback do not reapply current iOS freshness to historical evidence', async (t) => {
+  const input = await materializedReleaseEvidenceInput(t, {
+    mutateIos: (value) => {
+      value.occurredAt = '2026-05-29T07:59:59.000Z';
+      value.deviceObservedAt = value.occurredAt;
+    },
+  });
+  for (const phase of ['candidate-cleanup', 'rollback']) {
+    await t.test(phase, async () => {
+      const calls = [];
+      const result = await runGcpRelease({
+        argv: [`--phase=${phase}`, `--confirm-release=${RELEASE_SHA}`],
+        input,
+        verifyEvidence: undefined,
+        execute: async (argv) => {
+          calls.push(argv);
+          throw new Error('stop after historical evidence verification');
+        },
+        now: () => new Date('2026-08-29T08:00:00.000Z'),
+        writeOutput: () => undefined,
+      });
+      assert.equal(result.exitCode, 1, phase);
+      assert.equal(result.publicReport.code, 'RELEASE_PHASE_FAILED', phase);
+      assert.equal(result.publicReport.mutationPerformed, false, phase);
+      assert.equal(calls.length, 1, phase);
+    });
+  }
+});
+
 test('generation-bound private evidence collection derives exact safe digests from downloaded bytes', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'hkbuddy-collected-evidence-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -2277,7 +2700,7 @@ test('collection restart adopts one exact local copy and leaves untouched destin
   assert.deepEqual(Object.keys(result.publicReport.collectedEvidence), Object.keys(outputs));
 });
 
-test('evidence publication accepts and reads back only the planned numeric versions', async () => {
+test('evidence publication accepts and reads back only the planned numeric versions', async (t) => {
   assert.equal(validateEvidenceVersionReceipt({
     name: `projects/${PROJECT}/secrets/hkbuddy-v1-llm-smoke/versions/13`,
     state: 'ENABLED',
@@ -2287,11 +2710,13 @@ test('evidence publication accepts and reads back only the planned numeric versi
     state: 'ENABLED',
   }, { secret: 'hkbuddy-v1-llm-smoke', secretVersion: '13' }), /evidence version/i);
 
-  const versionsBySecret = Object.fromEntries(Object.values(EVIDENCE).map((value) => (
+  const input = await materializedReleaseEvidenceInput(t);
+  const versionsBySecret = Object.fromEntries(Object.values(input.evidence).map((value) => (
     [value.secret, value.secretVersion]
   )));
   const evidenceCalls = [];
-  const executor = async (argv) => {
+  const publishedBySecret = new Map();
+  const executor = async (argv, { stdin } = {}) => {
     evidenceCalls.push(argv);
     if (argv[0] === 'storage') {
       return argv[1] === 'objects' && argv[2] === 'list' ? [] : { done: true };
@@ -2300,33 +2725,28 @@ test('evidence publication accepts and reads back only the planned numeric versi
     const secret = isPublish
       ? argv[3]
       : argv.find((value) => value.startsWith('--secret=')).slice('--secret='.length);
+    if (isPublish) publishedBySecret.set(secret, Buffer.from(stdin));
+    if (argv[2] === 'access') return publishedBySecret.get(secret).toString('base64url');
     const version = isPublish ? versionsBySecret[secret] : argv[3];
     return { name: `projects/${PROJECT}/secrets/${secret}/versions/${version}`, state: 'ENABLED' };
   };
-  let inventoryVerified = null;
   const inventory = await runGcpRelease({
     argv: ['--phase=inventory', `--confirm-release=${RELEASE_SHA}`],
-    input: releaseInput({
-      imageDigest: IMAGE_DIGEST,
-      databaseSecretVersions: null,
-      evidence: null,
-      acceptanceOutputs: null,
-      previousRevision: null,
-      previousImageDigest: null,
-    }),
+    input,
     execute: executor,
-    verifyEvidence: async (value) => { inventoryVerified = value; },
+    verifyEvidence: undefined,
+    now: () => new Date('2026-08-29T08:00:00.000Z'),
     writeOutput: () => undefined,
   });
   assert.equal(inventory.exitCode, 0);
-  assert.deepEqual(Object.keys(inventoryVerified), ['legacyInventory']);
   assert.deepEqual(inventory.publicReport.evidenceSecretVersions, { legacyInventory: '11' });
 
   const accepted = await runGcpRelease({
     argv: ['--phase=evidence', `--confirm-release=${RELEASE_SHA}`],
-    input: releaseInput(), executor,
+    input, executor,
     execute: executor,
-    verifyEvidence: async () => true,
+    verifyEvidence: undefined,
+    now: () => new Date('2026-08-29T08:00:00.000Z'),
     writeOutput: () => undefined,
   });
   assert.equal(accepted.exitCode, 0);
@@ -2350,8 +2770,9 @@ test('evidence publication accepts and reads back only the planned numeric versi
 
   const mismatched = await runGcpRelease({
     argv: ['--phase=evidence', `--confirm-release=${RELEASE_SHA}`],
-    input: releaseInput(),
-    verifyEvidence: async () => true,
+    input,
+    verifyEvidence: undefined,
+    now: () => new Date('2026-08-29T08:00:00.000Z'),
     execute: async (argv) => {
       if (argv[2] === 'add') return {
         name: `projects/${PROJECT}/secrets/${argv[3]}/versions/99`, state: 'ENABLED',
@@ -2364,8 +2785,8 @@ test('evidence publication accepts and reads back only the planned numeric versi
   assert.equal(mismatched.publicReport.mutationPerformed, true);
 });
 
-test('evidence deletion restart proves exact object absence before advancing without a duplicate delete', async () => {
-  const input = releaseInput();
+test('evidence deletion restart proves exact object absence before advancing without a duplicate delete', async (t) => {
+  const input = await materializedReleaseEvidenceInput(t);
   const plan = buildReleasePlan(input);
   const store = createTestStateStore();
   const publishIds = plan.operations
@@ -2376,6 +2797,10 @@ test('evidence deletion restart proves exact object absence before advancing wit
     ordinal += 1;
     await appendTestMutationCheckpoint(store, {
       operationId, mutationOrdinal: ordinal, reconcileKind: 'secret-version-add',
+      plan,
+      safeResult: secretVersionSafeResult(
+        plan.evidence[operationId.slice(operationId.indexOf(':') + 1)],
+      ),
     });
   }
   const firstKey = Object.keys(ACCEPTANCE_OUTPUTS)[0];
@@ -2384,6 +2809,7 @@ test('evidence deletion restart proves exact object absence before advancing wit
     operationId: `evidence-output-delete:${firstKey}`,
     mutationOrdinal: ordinal,
     reconcileKind: 'gcs-object-delete',
+    plan,
   });
   const appendIntent = store.appendIntent;
   store.appendIntent = async (payload, options) => {
@@ -2404,6 +2830,8 @@ test('evidence deletion restart proves exact object absence before advancing wit
     argv: ['--phase=evidence', `--confirm-release=${RELEASE_SHA}`],
     input,
     openStateStore: async () => store,
+    verifyEvidence: undefined,
+    now: () => new Date('2026-08-29T08:00:00.000Z'),
     execute: async (argv) => {
       calls.push(argv);
       if (argv[0] === 'storage') {
@@ -2434,12 +2862,15 @@ test('evidence deletion restart proves exact object absence before advancing wit
   assert.equal(checkpoints[0].outcome, 'adopted-restart');
 });
 
-test('secret-version restart adopts only the exact planned numeric version without adding another', async () => {
+test('secret-version restart adopts only the exact planned numeric version without adding another', async (t) => {
+  const input = await materializedReleaseEvidenceInput(t);
+  const plan = buildReleasePlan(input, { phase: 'inventory' });
   const store = createTestStateStore();
   await appendTestMutationIntent(store, {
     operationId: 'inventory-publish:legacyInventory',
     mutationOrdinal: 1,
     reconcileKind: 'secret-version-add',
+    plan,
   });
   store.appendIntent = async () => { throw new Error('restart must not add another version'); };
   const checkpoints = [];
@@ -2451,12 +2882,17 @@ test('secret-version restart adopts only the exact planned numeric version witho
   const calls = [];
   const result = await runGcpRelease({
     argv: ['--phase=inventory', `--confirm-release=${RELEASE_SHA}`],
-    input: releaseInput(),
+    input,
     openStateStore: async () => store,
-    verifyEvidence: async () => true,
+    verifyEvidence: undefined,
+    now: () => new Date('2026-08-29T08:00:00.000Z'),
     execute: async (argv) => {
       calls.push(argv);
-      assert.deepEqual(argv.slice(0, 3), ['secrets', 'versions', 'describe']);
+      assert.deepEqual(argv.slice(0, 2), ['secrets', 'versions']);
+      if (argv[2] === 'access') {
+        return (await readFile(input.evidence.legacyInventory.filePath)).toString('base64url');
+      }
+      assert.equal(argv[2], 'describe');
       return {
         name: `projects/${PROJECT}/secrets/${EVIDENCE.legacyInventory.secret}/versions/${EVIDENCE.legacyInventory.secretVersion}`,
         state: 'ENABLED',
@@ -2466,7 +2902,7 @@ test('secret-version restart adopts only the exact planned numeric version witho
   });
   assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
   assert.equal(result.publicReport.mutationPerformed, false);
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
   assert.equal(calls.some((argv) => argv[2] === 'add'), false);
   assert.equal(checkpoints.length, 1);
   assert.equal(checkpoints[0].outcome, 'adopted-restart');
@@ -3207,8 +3643,8 @@ test('all-checkpoint acceptance restart reconstructs every exact Job execution w
   assert.equal(store.records.at(-1).recordType, 'terminal');
 });
 
-test('all-checkpoint inventory restart reconstructs the exact Secret version without adding one', async () => {
-  const input = releaseInput();
+test('all-checkpoint inventory restart reconstructs the exact Secret version without adding one', async (t) => {
+  const input = await materializedReleaseEvidenceInput(t);
   const plan = buildReleasePlan(input, { phase: 'inventory' });
   const expected = plan.evidence.legacyInventory;
   const store = createTestStateStore();
@@ -3217,11 +3653,7 @@ test('all-checkpoint inventory restart reconstructs the exact Secret version wit
     mutationOrdinal: 1,
     reconcileKind: 'secret-version-add',
     plan,
-    safeResult: {
-      kind: 'secret-version',
-      name: `projects/${PROJECT}/secrets/${expected.secret}`,
-      version: expected.secretVersion,
-    },
+    safeResult: secretVersionSafeResult(expected),
   });
   const calls = [];
   let persisted = null;
@@ -3229,6 +3661,8 @@ test('all-checkpoint inventory restart reconstructs the exact Secret version wit
     argv: ['--phase=inventory', `--confirm-release=${RELEASE_SHA}`],
     input,
     openStateStore: async () => store,
+    verifyEvidence: undefined,
+    now: () => new Date('2026-08-29T08:00:00.000Z'),
     loadPhaseReceipt: async () => null,
     persistReceipt: async (_releasePlan, receipt) => {
       persisted = structuredClone(receipt);
@@ -3236,9 +3670,12 @@ test('all-checkpoint inventory restart reconstructs the exact Secret version wit
     },
     execute: async (argv) => {
       calls.push(argv);
-      assert.deepEqual(argv.slice(0, 4), [
-        'secrets', 'versions', 'describe', expected.secretVersion,
-      ]);
+      assert.deepEqual(argv.slice(0, 2), ['secrets', 'versions']);
+      assert.equal(argv[3], expected.secretVersion);
+      if (argv[2] === 'access') {
+        return (await readFile(expected.filePath)).toString('base64url');
+      }
+      assert.equal(argv[2], 'describe');
       return {
         name: `projects/${PROJECT}/secrets/${expected.secret}/versions/${expected.secretVersion}`,
         state: 'ENABLED',
@@ -3249,15 +3686,15 @@ test('all-checkpoint inventory restart reconstructs the exact Secret version wit
 
   assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
   assert.equal(result.publicReport.mutationPerformed, false);
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2);
   assert.deepEqual(persisted.outputs.evidenceSecretVersions, {
     legacyInventory: expected.secretVersion,
   });
   assert.equal(store.records.at(-1).recordType, 'terminal');
 });
 
-test('all-checkpoint evidence restart reconstructs exact Secret versions and deleted object truth', async () => {
-  const input = releaseInput();
+test('all-checkpoint evidence restart reconstructs exact Secret versions and deleted object truth', async (t) => {
+  const input = await materializedReleaseEvidenceInput(t);
   const plan = buildReleasePlan(input, { phase: 'evidence' });
   const store = createTestStateStore();
   let mutationOrdinal = 0;
@@ -3269,11 +3706,7 @@ test('all-checkpoint evidence restart reconstructs exact Secret versions and del
       mutationOrdinal,
       reconcileKind: 'secret-version-add',
       plan,
-      safeResult: {
-        kind: 'secret-version',
-        name: `projects/${PROJECT}/secrets/${expected.secret}`,
-        version: expected.secretVersion,
-      },
+      safeResult: secretVersionSafeResult(expected),
     });
   }
   for (const key of Object.keys(plan.acceptanceOutputs)) {
@@ -3306,6 +3739,8 @@ test('all-checkpoint evidence restart reconstructs exact Secret versions and del
     argv: ['--phase=evidence', `--confirm-release=${RELEASE_SHA}`],
     input,
     openStateStore: async () => store,
+    verifyEvidence: undefined,
+    now: () => new Date('2026-08-29T08:00:00.000Z'),
     loadPhaseReceipt: async () => null,
     persistReceipt: async (_releasePlan, receipt) => {
       persisted = structuredClone(receipt);
@@ -3320,6 +3755,11 @@ test('all-checkpoint evidence restart reconstructs exact Secret versions and del
           state: 'ENABLED',
         };
       }
+      if (argv[0] === 'secrets' && argv[2] === 'access') {
+        const secret = argv.find((value) => value.startsWith('--secret=')).slice('--secret='.length);
+        const expected = Object.values(input.evidence).find((value) => value.secret === secret);
+        return (await readFile(expected.filePath)).toString('base64url');
+      }
       if (argv[0] === 'storage' && argv[1] === 'objects' && argv[2] === 'list') return [];
       throw new Error(`recovery attempted a mutation: ${argv.join(' ')}`);
     },
@@ -3328,7 +3768,7 @@ test('all-checkpoint evidence restart reconstructs exact Secret versions and del
 
   assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
   assert.equal(result.publicReport.mutationPerformed, false);
-  assert.equal(calls.every((argv) => argv[2] === 'describe' || argv[2] === 'list'), true);
+  assert.equal(calls.every((argv) => ['access', 'describe', 'list'].includes(argv[2])), true);
   assert.equal(calls.filter((argv) => argv[0] === 'storage').length,
     Object.keys(plan.acceptanceOutputs).length + 1);
   assert.equal(persisted.outputs.outputResidueCount, 0);

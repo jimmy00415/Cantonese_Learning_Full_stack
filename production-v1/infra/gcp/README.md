@@ -50,6 +50,11 @@ The Tasks 1–2 operator boundary uses only these executable V1 identities:
   `hkbuddy-v1-deployer@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com`,
   and
   `hkbuddy-v1-acceptance@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com`
+- project custom roles:
+  `hkbuddyV1AcceptanceBucketMetadataReader`, with only
+  `storage.buckets.get`, and `hkbuddyV1BucketIamPolicyOperator`, with only
+  `storage.buckets.get`, `storage.buckets.getIamPolicy`, and
+  `storage.buckets.setIamPolicy`
 - generated/bootstrap Secret containers: `hkbuddy-v1-db-app-url`,
   `hkbuddy-v1-db-migrator-url`, `hkbuddy-v1-session-secret`, and
   `hkbuddy-v1-db-bootstrap-state`
@@ -82,6 +87,13 @@ type, and every label key/value. This includes the bare legacy Artifact
 Registry repository identity and all prior resource aliases. The separate
 legacy-inventory workflow remains explicitly read-only evidence and does not
 authorize adopting any discovered legacy resource.
+
+Cloud SQL assets use the official `//cloudsql.googleapis.com/...` full resource
+name while retaining their `sqladmin.googleapis.com/*` asset types. Instance
+and BackupRun descendants are accepted only with exact project, parent, type,
+and canonical identity fields. Cloud Asset is inventory evidence, not a live
+health source: BackupRun state and location are validated only as official
+schema values because inventory can lag the authoritative Cloud SQL API.
 
 The complete identities, APIs, IAM bindings, probes, backup controls, alert
 policies, and budget thresholds live in `resource-contract.json`. The contract
@@ -136,6 +148,18 @@ Global IPv6 rejects regional fields. Regional IPv6 may carry prefix length 96,
 Missing address/selfLink, transient `RESERVING`, unknown purpose/status,
 noncanonical IP, foreign project, or contradictory scope fails closed.
 
+After Cloud SQL allocates its private address, Service Networking installs one
+imported `/24` route inside the managed PSA `/16`. Preflight exempts that route
+only when four live facts agree: the exact managed PSA Address, the exact
+Service Networking connection and reserved range, an exact `RUNNABLE`
+private-only Cloud SQL instance with one canonical private IPv4 address, and one
+exact auto-generated peering route whose `/24` contains that address. Missing,
+duplicate, static, tagged, foreign, or otherwise drifted routes remain CIDR
+collisions. Networks, subnets, routes, addresses, every Service Networking
+connection, and the Cloud SQL instance are then read again. The complete CIDR
+audit must remain valid, while the managed connection, private-network proof,
+and exact imported-route proof must be unchanged before the audit can finish.
+
 The billing account must report `currencyCode=HKD`. Google requires a fixed
 budget amount to use the billing account's native currency, so the reviewed
 live ruling is `HKD 2300` rather than the earlier `USD 300` draft. Any currency
@@ -180,13 +204,84 @@ npm run gcp:provision -- --confirm-project=motion-expert-hk-ltd-webpage --notifi
 No abbreviated confirmation, alternate project, extra flag, or legacy identity
 is accepted. The project and its billing link must already exist and match the
 immutable shared baseline; neither is ever created, linked, patched, or adopted.
-Every confirmed run performs the complete read-only collision and network-CIDR
-audit before its first API enablement, create, POST, or IAM mutation. The
-operator then creates the real email channel in that project and completes its
-external email verification. A rerun with the numeric verified channel creates
-and reads back the budget and alert policies before any VPC, HA Cloud SQL,
-storage, secret, or workload-IAM mutation. The script reports the exact resume
-boundary and never rolls back or deletes partial resources.
+Every confirmed run first proves the fixed CLI/REST operator, immutable project,
+organization and billing parent, Cloud Asset resource identities, existing V1
+bucket ownership, and the complete version-3 project IAM policy. It may then
+create or adopt the exact bucket-policy operator custom role and add its one
+conditioned project binding before the ordinary complete collision and
+network-CIDR audit. This narrow early recovery is necessary because removing a
+Cloud Storage convenience binding can otherwise remove the same operator's
+ability to read the resulting bucket policy. It is the only permitted mutation
+before the full audit; unknown role state, alternate conditions, duplicate or
+extra members, project-policy drift, or an unprovable response blocks it.
+
+The fixed binding grants `user:admin@motionexp.com` only the three custom-role
+permissions above and only when all of these are true: service is
+`storage.googleapis.com`, resource type is `storage.googleapis.com/Bucket`, and
+resource name is exactly one of the two V1 `projects/_/buckets/...` names. It
+does not grant object read/write/delete access and does not apply to any other
+bucket in the shared project. The project policy is read and written as version
+3 with its authoritative `etag`; response loss can recover only from an exact
+full-policy readback. Propagation is bounded and verified by exact effective
+permission probes plus real bucket-policy GETs. A timeout preserves the desired
+narrow binding and reports `operator-bucket-iam-propagation` for an idempotent
+rerun; it never falls back to project-wide Storage Admin or legacy grants.
+
+After that recovery and its readback, the script restarts the complete ordinary
+pre-mutation audit. The operator creates the real email channel in that project
+and completes its external email verification. A rerun with the numeric verified
+channel creates and reads back the budget and alert policies before any VPC, HA
+Cloud SQL, storage, secret, or workload-IAM mutation. The script reports the
+exact resume boundary and never rolls back or deletes partial resources.
+
+Cloud Storage creates each uniform-access bucket with four legacy convenience
+role groups derived from the shared project's Owner, Editor, and Viewer basic
+roles. These broad generated bucket grants are not part of the V1 IAM
+allowlist. Basic project Owner alone does not intrinsically preserve all three
+bucket-policy permissions after those local grants are removed; the exact
+conditioned project binding above is therefore established and proven first.
+Immediately after both buckets exist, two fixed IAM-baseline steps
+read each policy through the Storage JSON API with policy version 3 requested.
+Only the exact platform defaults for this project ID and an already-present
+subset of that bucket's configured V1 bindings are accepted. The step removes
+only those exact defaults, preserves the configured subset, and writes the
+complete edited policy with the authoritative read `etag`. Unknown, foreign,
+conditional, duplicate, malformed, or missing-etag policy state fails before
+the PUT. A concurrent `ABORTED` etag conflict is deterministic and is never
+adopted; only a lost transport response can recover through one exact policy
+readback. A separate exact post-write readback is mandatory. Both bucket
+baselines complete before any Secret version or database-user credential write,
+and the terminal IAM readback still requires the final configured allowlist.
+
+### 2026-09-01 cross-machine resume note
+
+The last confirmed live attempt accepted the media-bucket policy write and then
+stopped at `bucket-iam-baseline` because the old implementation had removed its
+own effective readback authority. It did not reach a Secret-version or database-
+user write. The build-source bucket retained its generated convenience policy.
+The recovery role/binding and early gate described above are committed code, not
+an assertion that the recovery has already run in GCP. The original workstation
+subsequently required gcloud reauthentication, so the next operator must follow
+the authentication, preflight, and exact resume commands in the top-level
+`production-v1/README.md`, then treat the returned JSON as the new live truth.
+Do not manually repair either bucket policy.
+
+Database absence is determined from the successful, project- and
+instance-scoped `gcloud sql databases list` JSON response with one exact
+canonical built-in `postgres` row as a positive completeness witness; an empty
+list or generic database `describe` 404 is never accepted as absence.
+Immediately before the database insert, provisioning reads the exact instance,
+exhaustively paginates the official Cloud SQL v1 operations list, waits while
+any operation is `PENDING` or `RUNNING`, and reads the instance again. Only a
+stable quiet instance can receive the official v1 `databases.insert` request. Its returned
+`CREATE_DATABASE` operation is identity-bound and polled with a wall-clock
+deadline until an error-free `DONE`, followed by the ordinary exact database
+list readback. The remaining wall-clock deadline is propagated into every
+in-flight gcloud and authenticated REST read. Official Cloud SQL
+`operationInProgress` and `invalidState` conflicts trigger a bounded backoff and
+complete readiness re-proof. A received but unknown or malformed HTTP 409 is a
+deterministic, non-recoverable conflict; only a genuine lost transport response
+can use exact readback recovery.
 
 ## CLI launch on Windows
 
@@ -239,8 +334,21 @@ published before the dependency Job can run. Each evidence member separates
 its local absolute JSON path, semantic artifact SHA-256, exact object-byte
 SHA-256, fixed Secret ID, and expected numeric Secret version. The release
 runner verifies the file bytes, embedded commit/artifact binding, size, and
-basic secret-safety before its first Secret Manager mutation. It must not
-contain credentials. `previousRevision` and `previousImageDigest` are one
+basic secret-safety before its first Secret Manager mutation. In the confirmed
+`evidence` phase it additionally validates the iOS artifact as the complete
+current v4 contract: exact release SHA and semantic artifact hash, canonical-WAV
+normalizer contract, pinned normalizer identity/result, and both device/evidence
+clocks. A merely self-hashed JSON object cannot be published. Receipt-bound
+cleanup and rollback later verify the immutable historical bytes and hashes
+without pretending that the original acceptance is still fresh. Every
+inventory/evidence payload is frozen from those validated bytes before any
+cloud mutation and sent to `gcloud secrets versions add --data-file=-` over
+stdin; the original path is never reopened for publication. The mutation plan,
+exact numeric-version metadata readback, private payload readback, and durable
+safe result bind both the semantic artifact SHA-256 and exact object SHA-256.
+Payload readback uses the CLI's checksum-verified Secret access response and is
+never copied into a receipt or public report. Evidence must not contain credentials.
+`previousRevision` and `previousImageDigest` are one
 fail-closed pair: both are `null` only for an evidenced empty-host first
 release; every later release supplies the exact controller revision
 `hkbuddy-v1-api-<12-lowercase-hex>` and its immutable `sha256:` image digest.
@@ -293,10 +401,14 @@ be changed only after the active account reads back as the reviewed owner
 The manifest is deliberately refreshed between boundaries: `build` supplies
 the immutable image digest; successful Jobs supply numeric GCS generations;
 `collect` supplies the four semantic/object digest pairs; and Secret Manager
-supplies numeric versions. Before `readiness`, `workload`, and `mobile`, refresh
-the matching `task8Evidence` absolute path and exact artifact/object hashes.
-The controlled `workload` phase alone may begin with its two hashes as 64 zeroes;
-after it creates and validates the create-only artifact, refresh those hashes
+supplies numeric versions. The initial manifest carries complete unresolved
+locator contracts for all three controlled phases: `readiness`, `workload`, and
+`mobile` each has its final absolute paths and full privacy-reference shape, but
+every artifact, object, and boundary SHA-256 is exactly 64 zeroes. Each matching
+phase rejects prebuilt evidence, creates and validates its own create-only
+bundle, and returns the resolved hashes. Before the next phase, carry forward
+the resolved earlier entries while leaving each not-yet-run entry as its full
+zero contract; refresh the just-completed entry from its authoritative receipt
 before `mobile` or `promote`. A value from stdout is never accepted on its own:
 the next phase requires the corresponding exact control-plane or file readback.
 
