@@ -604,8 +604,9 @@ cannot read, list, overwrite, or delete staged objects, and the bucket removes
 them through its one-day lifecycle. The deployer reads only that repository and
 has `roles/run.developer`.
 The acceptance identity is DB/GCS-only: it can read the app and migrator URL
-Secret containers, exercise and clean up private bucket objects, and write
-platform logs. Its normal object grant is complemented only by the custom
+Secret containers plus the exact release-bound legacy inventory mounted by the
+dependency Job, exercise and clean up private bucket objects, and write platform
+logs. Its normal object grant is complemented only by the custom
 `storage.buckets.get` permission on the fixed media bucket so the dependency
 Job can attest the bucket's exact production project number; it receives no
 bucket-list or storage-admin role. It has no Vertex AI, STT, TTS,

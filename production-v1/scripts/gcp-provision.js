@@ -170,6 +170,7 @@ const REQUIRED_IAM_BINDINGS = Object.freeze([
   ...[GCP_IDENTITY.secrets.legacy, GCP_IDENTITY.secrets.dependencies, GCP_IDENTITY.secrets.llm, GCP_IDENTITY.secrets.asr, GCP_IDENTITY.secrets.tts, GCP_IDENTITY.secrets.ios].map((id) => ({ scope: `secret:${id}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.deployer}`, role: 'roles/secretmanager.secretVersionAdder' })),
   ...['runtime', 'migrator', 'build', 'acceptance'].map((name) => ({ scope: `service-account:hkbuddy-v1-${name}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.deployer}`, role: 'roles/iam.serviceAccountUser' })),
   { scope: 'service-account:hkbuddy-v1-build', member: 'serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-cloudbuild.iam.gserviceaccount.com', role: 'roles/iam.serviceAccountTokenCreator' },
+  { scope: `secret:${GCP_IDENTITY.secrets.legacy}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.acceptance}`, role: 'roles/secretmanager.secretAccessor' },
 ]);
 const FORBIDDEN_TEXT = Object.freeze([
   'hkbuddy-pilot-0630', 'hkbuddy-pilot-0630.azurewebsites.net',
@@ -2563,7 +2564,7 @@ const STATIC_EXPECTED_STEPS = [
   `secret-version:${GCP_IDENTITY.secrets.dbAppUrl}`, `secret-version:${GCP_IDENTITY.secrets.dbMigratorUrl}`,
   `secret-version:${GCP_IDENTITY.secrets.session}`, 'db-user:hkbuddy_app',
   'db-user:hkbuddy_migrator', `secret-version:${GCP_IDENTITY.secrets.bootstrap}`,
-  ...Array.from({ length: 36 }, (_, index) => `iam:${String(index + 1).padStart(2, '0')}`),
+  ...Array.from({ length: 37 }, (_, index) => `iam:${String(index + 1).padStart(2, '0')}`),
 ];
 
 export const EXPECTED_PROVISION_STEPS = Object.freeze(STATIC_EXPECTED_STEPS);

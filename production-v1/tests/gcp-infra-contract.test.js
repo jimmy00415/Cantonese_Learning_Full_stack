@@ -650,6 +650,11 @@ test('the executable contract fixes the isolated GCP topology and least-privileg
       && role === ACCEPTANCE_BUCKET_METADATA_ROLE.name
   )), true);
   assert.equal(contract.iam.bindings.some(({ scope, member, role }) => (
+    scope === `secret:${GCP_IDENTITY.secrets.legacy}`
+      && member === `serviceAccount:${GCP_IDENTITY.serviceAccounts.acceptance}`
+      && role === 'roles/secretmanager.secretAccessor'
+  )), true, 'the dependency acceptance Job must read the exact release-bound legacy inventory');
+  assert.equal(contract.iam.bindings.some(({ scope, member, role }) => (
     scope === `secret:${GCP_IDENTITY.secrets.dbMigratorUrl}` && member === runtime
       && role === 'roles/secretmanager.secretAccessor'
   )), false);

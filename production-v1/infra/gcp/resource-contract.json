@@ -705,6 +705,11 @@
         "scope": "service-account:hkbuddy-v1-build",
         "member": "serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-cloudbuild.iam.gserviceaccount.com",
         "role": "roles/iam.serviceAccountTokenCreator"
+      },
+      {
+        "scope": "secret:hkbuddy-v1-legacy-inventory",
+        "member": "serviceAccount:hkbuddy-v1-acceptance@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
+        "role": "roles/secretmanager.secretAccessor"
       }
     ]
   },
