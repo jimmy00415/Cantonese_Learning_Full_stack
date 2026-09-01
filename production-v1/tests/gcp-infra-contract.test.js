@@ -3778,6 +3778,10 @@ const EXPECTED_MEDIA_BUCKET_BINDINGS = Object.freeze([
 
 const EXPECTED_BUILD_SOURCE_BUCKET_BINDINGS = Object.freeze([
   {
+    role: 'roles/storage.objectCreator',
+    members: ['user:admin@motionexp.com'],
+  },
+  {
     role: 'roles/storage.objectViewer',
     members: [`serviceAccount:${GCP_IDENTITY.serviceAccounts.build}`],
   },
@@ -5607,11 +5611,22 @@ test('build source bucket is regional private lifecycle-bounded non-adopted and 
     retentionPolicy: null,
   });
   assert.equal(EXPECTED_PROVISION_STEPS.includes('build-source-bucket'), true);
+  assert.equal(EXPECTED_PROVISION_STEPS.includes('iam:36'), true);
   assert.equal(contract.iam.bindings.some(({ scope, member, role }) => (
     scope === `bucket:${GCP_IDENTITY.buildSourceBucket}`
       && member === `serviceAccount:${GCP_IDENTITY.serviceAccounts.build}`
       && role === 'roles/storage.objectViewer'
   )), true);
+  assert.equal(contract.iam.bindings.some(({ scope, member, role }) => (
+    scope === `bucket:${GCP_IDENTITY.buildSourceBucket}`
+      && member === 'user:admin@motionexp.com'
+      && role === 'roles/storage.objectCreator'
+  )), true, 'the fixed operator must be able to upload the frozen source archive');
+  assert.equal(contract.iam.bindings.some(({ scope, member, role }) => (
+    scope === `bucket:${GCP_IDENTITY.buildSourceBucket}`
+      && member === 'user:admin@motionexp.com'
+      && ['roles/storage.objectAdmin', 'roles/storage.objectUser'].includes(role)
+  )), false, 'source upload must not grant read, list, overwrite, or delete authority');
 
   const requests = [];
   const plane = new GcpControlPlane({

@@ -597,7 +597,11 @@ deployer can act as
 only through service-account-scoped
 `roles/iam.serviceAccountUser` bindings. There is no project-wide `actAs`
 grant. The build identity writes only to the `hkbuddy-v1` repository and project
-logs; the deployer reads only that repository and has `roles/run.developer`.
+logs. The fixed human operator has create-only object authority on the exact
+build-source bucket so `gcloud builds submit` can stage one frozen archive; it
+cannot read, list, overwrite, or delete staged objects, and the bucket removes
+them through its one-day lifecycle. The deployer reads only that repository and
+has `roles/run.developer`.
 The acceptance identity is DB/GCS-only: it can read the app and migrator URL
 Secret containers, exercise and clean up private bucket objects, and write
 platform logs. Its normal object grant is complemented only by the custom

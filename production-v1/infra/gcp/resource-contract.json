@@ -621,6 +621,11 @@
         "role": "roles/storage.objectViewer"
       },
       {
+        "scope": "bucket:hkbuddy-v1-582852715831-build-source",
+        "member": "user:admin@motionexp.com",
+        "role": "roles/storage.objectCreator"
+      },
+      {
         "scope": "project",
         "member": "serviceAccount:hkbuddy-v1-build@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/logging.logWriter"

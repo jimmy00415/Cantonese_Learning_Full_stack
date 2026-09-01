@@ -160,6 +160,7 @@ const REQUIRED_IAM_BINDINGS = Object.freeze([
   { scope: `secret:${GCP_IDENTITY.secrets.dbMigratorUrl}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.migrator}`, role: 'roles/secretmanager.secretAccessor' },
   { scope: `repository:${GCP_IDENTITY.repository}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.build}`, role: 'roles/artifactregistry.writer' },
   { scope: `bucket:${GCP_IDENTITY.buildSourceBucket}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.build}`, role: 'roles/storage.objectViewer' },
+  { scope: `bucket:${GCP_IDENTITY.buildSourceBucket}`, member: `user:${REQUIRED_OPERATOR_ACCOUNT}`, role: 'roles/storage.objectCreator' },
   { scope: 'project', member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.build}`, role: 'roles/logging.logWriter' },
   { scope: `repository:${GCP_IDENTITY.repository}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.deployer}`, role: 'roles/artifactregistry.reader' },
   { scope: 'project', member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.deployer}`, role: 'roles/cloudbuild.builds.editor' },
@@ -2559,7 +2560,7 @@ const STATIC_EXPECTED_STEPS = [
   `secret-version:${GCP_IDENTITY.secrets.dbAppUrl}`, `secret-version:${GCP_IDENTITY.secrets.dbMigratorUrl}`,
   `secret-version:${GCP_IDENTITY.secrets.session}`, 'db-user:hkbuddy_app',
   'db-user:hkbuddy_migrator', `secret-version:${GCP_IDENTITY.secrets.bootstrap}`,
-  ...Array.from({ length: 35 }, (_, index) => `iam:${String(index + 1).padStart(2, '0')}`),
+  ...Array.from({ length: 36 }, (_, index) => `iam:${String(index + 1).padStart(2, '0')}`),
 ];
 
 export const EXPECTED_PROVISION_STEPS = Object.freeze(STATIC_EXPECTED_STEPS);
