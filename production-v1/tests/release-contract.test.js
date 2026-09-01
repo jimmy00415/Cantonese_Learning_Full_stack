@@ -6458,7 +6458,7 @@ test('an exact accepted but failed Cloud Run execution is terminalized once and 
   liveJob.status = {
     observedGeneration: 2,
     conditions: [{ type: 'Ready', status: 'True' }],
-    executionCount: 1,
+    executionCount: 2,
     latestCreatedExecution: {
       name: `${job.job}-zpxcw`,
       completionStatus: 'EXECUTION_FAILED',
@@ -6551,6 +6551,29 @@ test('an exact accepted but failed Cloud Run execution is terminalized once and 
   const auditLogPath = join(directory, 'audit.log');
   await writeFile(auditLogPath, auditLog);
   const auditLogSha256 = createHash('sha256').update(auditLog).digest('hex');
+
+  liveJob.status.executionCount = 0;
+  const recordCountBeforeInvalidRecovery = store.records.length;
+  const invalidCountResult = await runGcpRelease({
+    argv: ['--phase=acceptance', `--confirm-release=${RELEASE_SHA}`], input,
+    loadReceipts: async () => fixtureReceiptChain(plan, 'inventory'),
+    openStateStore: async () => store,
+    environment: {
+      V1_FAILED_EXECUTION_LOG_PATH: executeLogPath,
+      V1_FAILED_EXECUTION_LOG_SHA256: executeLogSha256,
+      V1_FAILED_EXECUTION_AUDIT_LOG_PATH: auditLogPath,
+      V1_FAILED_EXECUTION_AUDIT_LOG_SHA256: auditLogSha256,
+    },
+    execute: async (argv) => {
+      if (argv[1] === 'jobs' && argv[2] === 'describe') return structuredClone(liveJob);
+      throw new Error(`unexpected invalid-count recovery operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(invalidCountResult.publicReport.code,
+    'CLOUD_RUN_EXECUTION_FAILURE_EVIDENCE_INVALID');
+  assert.equal(store.records.length, recordCountBeforeInvalidRecovery);
+  liveJob.status.executionCount = 2;
 
   const calls = [];
   const result = await runGcpRelease({

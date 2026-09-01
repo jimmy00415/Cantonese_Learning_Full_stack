@@ -5731,7 +5731,7 @@ async function recoverFailedAcceptanceExecute({
     expectedJob,
   });
   const authority = validateReadyReleaseJobReadback(rawJob, expectedJob);
-  if (rawJob?.status?.executionCount !== 1
+  if (positiveCanonicalInteger(rawJob?.status?.executionCount) === null
     || rawJob?.status?.latestCreatedExecution?.name !== logEvidence.executionName
     || rawJob?.status?.latestCreatedExecution?.completionStatus !== 'EXECUTION_FAILED') {
     throw new Error('Cloud Run failed execution recovery is invalid');
