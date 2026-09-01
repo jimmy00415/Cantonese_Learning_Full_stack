@@ -2938,15 +2938,19 @@ test('build receipt captures one successful verified build, source hash, and fin
 
   const sdkObserved = structuredClone(build);
   Object.assign(sdkObserved, {
+    artifacts: { images: [...build.images] },
     createTime: '2026-08-26T01:00:00.123456Z',
     startTime: '2026-08-26T01:00:01.123456Z',
     finishTime: '2026-08-26T01:01:01.123456Z',
+    name: `projects/${PROJECT_NUMBER}/locations/${REGION}/builds/${BUILD_ID}`,
     logUrl: `https://console.cloud.google.com/cloud-build/builds;region=${REGION}/${BUILD_ID}?project=${PROJECT}`,
+    queueTtl: '3600s',
     timing: {
       BUILD: { startTime: '2026-08-26T01:00:01.123456Z', endTime: '2026-08-26T01:01:00.123456Z' },
       FETCHSOURCE: { startTime: '2026-08-26T01:00:00.123456Z', endTime: '2026-08-26T01:00:01.123456Z' },
       PUSH: { startTime: '2026-08-26T01:01:00.123456Z', endTime: '2026-08-26T01:01:01.123456Z' },
       SETUPBUILD: { startTime: '2026-08-26T01:00:01.000000Z', endTime: '2026-08-26T01:00:01.123456Z' },
+      STORAGE_SOURCE: { startTime: '2026-08-26T01:00:00.123456Z', endTime: '2026-08-26T01:00:01.123456Z' },
     },
   });
   sdkObserved.steps = sdkObserved.steps.map((step, index) => ({
@@ -2964,6 +2968,16 @@ test('build receipt captures one successful verified build, source hash, and fin
     startTime: '2026-08-26T01:01:00.123456Z',
     endTime: '2026-08-26T01:01:01.123456Z',
   };
+  sdkObserved.options.pool = {};
+  const sdkSourceUri = Object.keys(sdkObserved.sourceProvenance.fileHashes)[0];
+  sdkObserved.sourceProvenance.fileHashes[sdkSourceUri].fileHash.push({
+    type: 'MD5',
+    value: 'VK3mYmoHJY_f-ksa5llUWA==',
+  });
+  sdkObserved.results.buildStepOutputs = sdkObserved.steps.map(() => '');
+  sdkObserved.results.buildStepResults = Object.fromEntries(
+    sdkObserved.steps.map(({ id }) => [id, {}]),
+  );
   const sdkReceipt = validateBuildReceipt(sdkObserved, {
     releaseSha: RELEASE_SHA,
     sourceArchiveSha256: SOURCE_SHA,
@@ -2971,13 +2985,26 @@ test('build receipt captures one successful verified build, source hash, and fin
   });
   assert.equal(sdkReceipt.buildReceiptSha256, receipt.buildReceiptSha256);
 
+  const urlSafeSourceSha = 'f5fd199d013332165346b8bf3e13f702ac4b3ce4e267d365713f147f8d2db708';
+  const urlSafeObserved = JSON.parse(JSON.stringify(build).replaceAll(SOURCE_SHA, urlSafeSourceSha));
+  const urlSafeSourceUri = Object.keys(urlSafeObserved.sourceProvenance.fileHashes)[0];
+  urlSafeObserved.sourceProvenance.fileHashes[urlSafeSourceUri].fileHash[0].value = Buffer
+    .from(urlSafeSourceSha, 'hex').toString('base64').replaceAll('+', '-').replaceAll('/', '_');
+  assert.doesNotThrow(() => validateBuildReceipt(urlSafeObserved, {
+    releaseSha: RELEASE_SHA,
+    sourceArchiveSha256: urlSafeSourceSha,
+    buildConfigSha256: BUILD_CONFIG_SHA,
+  }));
+
   const invalidReceipts = [
     (value) => { delete value.name; },
+    (value) => { value.name = `projects/999999999999/locations/${REGION}/builds/${BUILD_ID}`; },
     (value) => { value.projectId = 'foreign-project'; },
     (value) => { value.timeout = '1201s'; },
     (value) => { value.substitutions.EXTRA = 'drift'; },
     (value) => { value.substitutions._BUILD_CONFIG_SHA256 = 'f'.repeat(64); },
     (value) => { value.options.workerPool = 'projects/foreign/workerPools/pool'; },
+    (value) => { value.options.pool = { name: 'projects/foreign/workerPools/pool' }; },
     (value) => { value.steps[0].name = 'node:latest'; },
     (value) => { value.steps[1].status = 'FAILURE'; },
     (value) => { value.steps[2].args.push('--secret=forbidden'); },
@@ -2986,19 +3013,46 @@ test('build receipt captures one successful verified build, source hash, and fin
     (value) => { value.source.storageSource.generation = '124'; },
     (value) => { value.sourceProvenance.fileHashes.extra = { fileHash: [] }; },
     (value) => { value.results.buildStepImages.pop(); },
+    (value) => { value.results.buildStepOutputs = ['', '', '', '', 'smuggled']; },
+    (value) => {
+      value.results.buildStepResults = Object.fromEntries(
+        value.steps.map(({ id }) => [id, id === 'build' ? { unexpected: true } : {}]),
+      );
+    },
     (value) => { value.results.images[0].name = `${value.results.images[0].name}-foreign`; },
     (value) => { delete value.results.images[0].artifactRegistryPackage; },
     (value) => { value.results.images[0].artifactRegistryPackage = value.results.images[0].artifactRegistryPackage.replace('/hkbuddy-v1/', '/foreign/'); },
     (value) => { value.results.images[0].pushTiming = { recipe: 'smuggled' }; },
     (value) => { value.results.images[0].status = 'SUCCESS'; },
     (value) => { value.approval = { result: 'APPROVED' }; },
+    (value) => { value.artifacts = { images: ['foreign-image'] }; },
+    (value) => { value.queueTtl = '3601s'; },
     (value) => { value.warning = [{ priority: 'INFO' }]; },
     (value) => { value.warnings = [{ priority: 'INFO' }]; },
     (value) => { value.createTime = 'not-rfc3339'; },
     (value) => { value.steps[0].timing = { recipe: 'smuggled' }; },
+    (value) => {
+      value.timing = {
+        FETCHSOURCE: { startTime: '2026-08-26T01:00:00.123456Z', endTime: '2026-08-26T01:00:01.123456Z' },
+        STORAGE_SOURCE: { startTime: '2026-08-26T01:00:00.123456Z', endTime: '2026-08-26T01:00:02.123456Z' },
+      };
+    },
   ];
   for (const mutate of invalidReceipts) {
     const changed = structuredClone(build);
+    mutate(changed);
+    assert.throws(() => validateBuildReceipt(changed, {
+      releaseSha: RELEASE_SHA,
+      sourceArchiveSha256: SOURCE_SHA,
+      buildConfigSha256: BUILD_CONFIG_SHA,
+    }), /Cloud Build receipt/i);
+  }
+  for (const mutate of [
+    (value) => { value.sourceProvenance.fileHashes[sdkSourceUri].fileHash[1].value = 'not-base64'; },
+    (value) => { value.sourceProvenance.fileHashes[sdkSourceUri].fileHash[1].type = 'SHA512'; },
+    (value) => { value.sourceProvenance.fileHashes[sdkSourceUri].fileHash.push({ ...value.sourceProvenance.fileHashes[sdkSourceUri].fileHash[1] }); },
+  ]) {
+    const changed = structuredClone(sdkObserved);
     mutate(changed);
     assert.throws(() => validateBuildReceipt(changed, {
       releaseSha: RELEASE_SHA,

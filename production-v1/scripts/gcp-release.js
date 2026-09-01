@@ -1742,6 +1742,17 @@ function validCloudBuildTimeSpan(value) {
     && Date.parse(value.startTime) <= Date.parse(value.endTime);
 }
 
+function decodeCloudBuildHash(value, expectedByteLength) {
+  if (typeof value !== 'string' || !Number.isSafeInteger(expectedByteLength)
+    || expectedByteLength < 1) throw new Error();
+  const decoded = Buffer.from(value, 'base64');
+  const standard = decoded.toString('base64');
+  const urlSafePadded = standard.replaceAll('+', '-').replaceAll('/', '_');
+  if (decoded.length !== expectedByteLength
+    || (value !== standard && value !== urlSafePadded)) throw new Error();
+  return decoded;
+}
+
 function validateOutputOnlyBuildObservation(value) {
   const observedTimes = ['createTime', 'startTime', 'finishTime'].filter((key) => (
     Object.hasOwn(value, key)
@@ -1758,9 +1769,12 @@ function validateOutputOnlyBuildObservation(value) {
         .test(value.logUrl))) throw new Error();
   if (Object.hasOwn(value, 'timing')) {
     const keys = Object.keys(value.timing ?? {});
-    const allowed = new Set(['BUILD', 'FETCHSOURCE', 'PUSH', 'SETUPBUILD']);
+    const allowed = new Set(['BUILD', 'FETCHSOURCE', 'PUSH', 'SETUPBUILD', 'STORAGE_SOURCE']);
     if (keys.length < 1 || keys.some((key) => !allowed.has(key)
       || !validCloudBuildTimeSpan(value.timing[key]))) throw new Error();
+    if (Object.hasOwn(value.timing, 'STORAGE_SOURCE')
+      && (!Object.hasOwn(value.timing, 'FETCHSOURCE')
+        || !exact(value.timing.STORAGE_SOURCE, value.timing.FETCHSOURCE))) throw new Error();
   }
 }
 
@@ -1770,7 +1784,9 @@ function normalizeCloudBuildReceipt(value, { releaseSha, sourceArchiveSha256, bu
       'id', 'images', 'name', 'options', 'projectId', 'results', 'serviceAccount',
       'source', 'sourceProvenance', 'status', 'steps', 'substitutions', 'timeout',
     ];
-    const outputOnlyBuildKeys = ['createTime', 'finishTime', 'logUrl', 'startTime', 'timing'];
+    const outputOnlyBuildKeys = [
+      'artifacts', 'createTime', 'finishTime', 'logUrl', 'queueTtl', 'startTime', 'timing',
+    ];
     const actualBuildKeys = Object.keys(value ?? {});
     if (!RELEASE_SHA.test(String(releaseSha ?? ''))
       || !DIGEST.test(String(sourceArchiveSha256 ?? ''))
@@ -1779,14 +1795,19 @@ function normalizeCloudBuildReceipt(value, { releaseSha, sourceArchiveSha256, bu
       || actualBuildKeys.some((key) => !requiredBuildKeys.includes(key)
         && !outputOnlyBuildKeys.includes(key))
       || !BUILD_ID.test(String(value.id ?? ''))
-      || value.name !== `projects/${PROJECT}/locations/${REGION}/builds/${value.id}`
+      || ![
+        `projects/${PROJECT}/locations/${REGION}/builds/${value.id}`,
+        `projects/${GCP_IDENTITY.projectNumber}/locations/${REGION}/builds/${value.id}`,
+      ].includes(value.name)
       || value.projectId !== PROJECT
       || value.status !== 'SUCCESS'
       || value.serviceAccount !== BUILD_SERVICE_ACCOUNT
-      || value.timeout !== '1200s') throw new Error();
+      || value.timeout !== '1200s'
+      || (Object.hasOwn(value, 'queueTtl') && value.queueTtl !== '3600s')) throw new Error();
     validateOutputOnlyBuildObservation(value);
 
     const imageName = `asia-east2-docker.pkg.dev/${PROJECT}/${REPOSITORY}/${STABLE_SERVICE}:${releaseSha}`;
+    const optionKeys = Object.keys(value.options ?? {});
     if (!exact(value.images, [imageName])
       || !exactKeys(value.substitutions, [
         '_BUILD_CONFIG_SHA256', '_RELEASE_SHA', '_SOURCE_SHA256',
@@ -1796,10 +1817,23 @@ function normalizeCloudBuildReceipt(value, { releaseSha, sourceArchiveSha256, bu
         _RELEASE_SHA: releaseSha,
         _SOURCE_SHA256: sourceArchiveSha256,
       })
-      || !exactKeys(value.options, ['logging', 'requestedVerifyOption', 'sourceProvenanceHash'])
+      || ['logging', 'requestedVerifyOption', 'sourceProvenanceHash']
+        .some((key) => !optionKeys.includes(key))
+      || optionKeys.some((key) => ![
+        'logging', 'pool', 'requestedVerifyOption', 'sourceProvenanceHash',
+      ].includes(key))
+      || (Object.hasOwn(value.options, 'pool') && !exactKeys(value.options.pool, []))
       || value.options.logging !== 'CLOUD_LOGGING_ONLY'
       || value.options.requestedVerifyOption !== 'VERIFIED'
-      || !exact(value.options.sourceProvenanceHash, ['SHA256'])) throw new Error();
+      || !exact(value.options.sourceProvenanceHash, ['SHA256'])
+      || (Object.hasOwn(value, 'artifacts')
+        && (!exactKeys(value.artifacts, ['images'])
+          || !exact(value.artifacts.images, [imageName])))) throw new Error();
+    const normalizedOptions = {
+      logging: value.options.logging,
+      requestedVerifyOption: value.options.requestedVerifyOption,
+      sourceProvenanceHash: value.options.sourceProvenanceHash,
+    };
 
     const expectedSteps = expectedCloudBuildSteps({
       releaseSha, sourceArchiveSha256, buildConfigSha256,
@@ -1842,13 +1876,24 @@ function normalizeCloudBuildReceipt(value, { releaseSha, sourceArchiveSha256, bu
     if (!exactKeys(value.sourceProvenance.fileHashes, [sourceUri])) throw new Error();
     const hashRecord = value.sourceProvenance.fileHashes[sourceUri];
     if (!exactKeys(hashRecord, ['fileHash']) || !Array.isArray(hashRecord.fileHash)
-      || hashRecord.fileHash.length !== 1
-      || !exactKeys(hashRecord.fileHash[0], ['type', 'value'])
-      || hashRecord.fileHash[0].type !== 'SHA256') throw new Error();
-    const decoded = Buffer.from(hashRecord.fileHash[0].value, 'base64');
-    if (decoded.length !== 32
-      || decoded.toString('base64') !== hashRecord.fileHash[0].value
-      || decoded.toString('hex') !== sourceArchiveSha256) throw new Error();
+      || ![1, 2].includes(hashRecord.fileHash.length)
+      || hashRecord.fileHash.some((entry) => !exactKeys(entry, ['type', 'value']))) throw new Error();
+    const hashesByType = new Map(hashRecord.fileHash.map((entry) => [entry.type, entry]));
+    if (hashesByType.size !== hashRecord.fileHash.length
+      || !hashesByType.has('SHA256')
+      || [...hashesByType.keys()].some((type) => !['MD5', 'SHA256'].includes(type))
+      || (hashRecord.fileHash.length === 2 && !hashesByType.has('MD5'))) throw new Error();
+    const decoded = decodeCloudBuildHash(hashesByType.get('SHA256').value, 32);
+    if (decoded.toString('hex') !== sourceArchiveSha256) throw new Error();
+    if (hashesByType.has('MD5')) decodeCloudBuildHash(hashesByType.get('MD5').value, 16);
+    const normalizedSourceProvenance = {
+      fileHashes: {
+        [sourceUri]: {
+          fileHash: [{ type: 'SHA256', value: decoded.toString('base64') }],
+        },
+      },
+      resolvedStorageSource: value.sourceProvenance.resolvedStorageSource,
+    };
 
     const expectedBuilderImages = [NODE_BUILDER, NODE_BUILDER, DOCKER_BUILDER, DOCKER_BUILDER, DOCKER_BUILDER]
       .map((builder) => `sha256:${builder.split('@sha256:')[1]}`);
@@ -1858,8 +1903,18 @@ function normalizeCloudBuildReceipt(value, { releaseSha, sourceArchiveSha256, bu
       `projects/${PROJECT}/locations/${REGION}/repositories/${REPOSITORY}`,
       `packages/${STABLE_SERVICE}/versions/${builtImage?.digest}`,
     ].join('/');
-    if (!exactKeys(value.results, ['buildStepImages', 'images'])
+    const resultKeys = Object.keys(value.results ?? {});
+    if (['buildStepImages', 'images'].some((key) => !resultKeys.includes(key))
+      || resultKeys.some((key) => ![
+        'buildStepImages', 'buildStepOutputs', 'buildStepResults', 'images',
+      ].includes(key))
       || !exact(value.results.buildStepImages, expectedBuilderImages)
+      || (Object.hasOwn(value.results, 'buildStepOutputs')
+        && !exact(value.results.buildStepOutputs, expectedSteps.map(() => '')))
+      || (Object.hasOwn(value.results, 'buildStepResults')
+        && (!exactKeys(value.results.buildStepResults, expectedSteps.map(({ id }) => id))
+          || Object.values(value.results.buildStepResults)
+            .some((result) => !exactKeys(result, []))))
       || !Array.isArray(value.results.images) || value.results.images.length !== 1
       || !['artifactRegistryPackage', 'digest', 'name'].every((key) => builtImageKeys.includes(key))
       || builtImageKeys.some((key) => ![
@@ -1883,13 +1938,13 @@ function normalizeCloudBuildReceipt(value, { releaseSha, sourceArchiveSha256, bu
     return Object.freeze(canonical({
       id: value.id,
       images: value.images,
-      name: value.name,
-      options: value.options,
+      name: `projects/${PROJECT}/locations/${REGION}/builds/${value.id}`,
+      options: normalizedOptions,
       projectId: value.projectId,
       results: normalizedResults,
       serviceAccount: value.serviceAccount,
       source: value.source,
-      sourceProvenance: value.sourceProvenance,
+      sourceProvenance: normalizedSourceProvenance,
       status: value.status,
       steps,
       substitutions: value.substitutions,
@@ -6691,6 +6746,11 @@ export async function runGcpRelease({
   if (selection.phase === 'mobile') {
     let mobileStage = 'journal';
     try {
+      if (!unresolvedTask8Contract(plan.task8Evidence.mobile)) {
+        const error = new Error('Pre-existing mobile evidence is forbidden');
+        error.code = 'MOBILE_PREBUILT_EVIDENCE_FORBIDDEN';
+        throw error;
+      }
       if (typeof openStateStore !== 'function' || typeof journalAttemptId !== 'function') {
         throw new Error('Release journal is unavailable');
       }
