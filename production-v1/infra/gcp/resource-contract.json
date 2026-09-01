@@ -46,6 +46,7 @@
     "iam.googleapis.com",
     "artifactregistry.googleapis.com",
     "cloudbuild.googleapis.com",
+    "containeranalysis.googleapis.com",
     "run.googleapis.com",
     "compute.googleapis.com",
     "servicenetworking.googleapis.com",
@@ -442,6 +443,11 @@
         "member": "serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-cloudbuild.iam.gserviceaccount.com",
         "role": "roles/cloudbuild.serviceAgent",
         "required": true
+      },
+      {
+        "member": "serviceAccount:service-__PROJECT_NUMBER__@container-analysis.iam.gserviceaccount.com",
+        "role": "roles/containeranalysis.ServiceAgent",
+        "required": false
       },
       {
         "member": "serviceAccount:service-__PROJECT_NUMBER__@containerregistry.iam.gserviceaccount.com",

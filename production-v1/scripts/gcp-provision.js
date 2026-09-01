@@ -41,7 +41,8 @@ const REQUIRED_APIS = Object.freeze([
   'cloudresourcemanager.googleapis.com', 'serviceusage.googleapis.com',
   'cloudbilling.googleapis.com', 'billingbudgets.googleapis.com',
   'iam.googleapis.com', 'artifactregistry.googleapis.com',
-  'cloudbuild.googleapis.com', 'run.googleapis.com', 'compute.googleapis.com',
+  'cloudbuild.googleapis.com', 'containeranalysis.googleapis.com',
+  'run.googleapis.com', 'compute.googleapis.com',
   'servicenetworking.googleapis.com', 'sqladmin.googleapis.com',
   'storage.googleapis.com', 'secretmanager.googleapis.com',
   'aiplatform.googleapis.com', 'speech.googleapis.com',
@@ -85,6 +86,7 @@ const REQUIRED_FORBIDDEN_WORKLOAD_ROLES = Object.freeze([
 const REQUIRED_AUTOMATIC_PROJECT_BINDINGS = Object.freeze([
   { member: `user:${REQUIRED_OPERATOR_ACCOUNT}`, role: 'roles/owner', required: true },
   { member: 'serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-cloudbuild.iam.gserviceaccount.com', role: 'roles/cloudbuild.serviceAgent', required: true },
+  { member: 'serviceAccount:service-__PROJECT_NUMBER__@container-analysis.iam.gserviceaccount.com', role: 'roles/containeranalysis.ServiceAgent', required: false },
   { member: 'serviceAccount:service-__PROJECT_NUMBER__@containerregistry.iam.gserviceaccount.com', role: 'roles/containerregistry.ServiceAgent', required: false },
   { member: 'serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-pubsub.iam.gserviceaccount.com', role: 'roles/pubsub.serviceAgent', required: false },
   { member: 'serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-artifactregistry.iam.gserviceaccount.com', role: 'roles/artifactregistry.serviceAgent', required: false },
@@ -1512,6 +1514,7 @@ function assertManagedIamPolicies({
   }));
   const serviceAgentApi = new Map([
     ['roles/cloudbuild.serviceAgent', 'cloudbuild.googleapis.com'],
+    ['roles/containeranalysis.ServiceAgent', 'containeranalysis.googleapis.com'],
     ['roles/containerregistry.ServiceAgent', 'containerregistry.googleapis.com'],
     ['roles/pubsub.serviceAgent', 'pubsub.googleapis.com'],
     ['roles/artifactregistry.serviceAgent', 'artifactregistry.googleapis.com'],

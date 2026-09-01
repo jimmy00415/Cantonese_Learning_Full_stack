@@ -76,6 +76,7 @@ const BUCKET_IAM_OPERATOR_BINDING = Object.freeze({
 const AUTOMATIC_PROJECT_BINDINGS = Object.freeze([
   { member: 'user:admin@motionexp.com', role: 'roles/owner', required: true },
   { member: 'serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-cloudbuild.iam.gserviceaccount.com', role: 'roles/cloudbuild.serviceAgent', required: true },
+  { member: 'serviceAccount:service-__PROJECT_NUMBER__@container-analysis.iam.gserviceaccount.com', role: 'roles/containeranalysis.ServiceAgent', required: false },
   { member: 'serviceAccount:service-__PROJECT_NUMBER__@containerregistry.iam.gserviceaccount.com', role: 'roles/containerregistry.ServiceAgent', required: false },
   { member: 'serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-pubsub.iam.gserviceaccount.com', role: 'roles/pubsub.serviceAgent', required: false },
   { member: 'serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-artifactregistry.iam.gserviceaccount.com', role: 'roles/artifactregistry.serviceAgent', required: false },
@@ -91,7 +92,8 @@ const AUTOMATIC_PROJECT_BINDINGS = Object.freeze([
   { member: 'serviceAccount:__PROJECT_NUMBER__@cloudservices.gserviceaccount.com', role: 'roles/compute.instanceGroupManagerServiceAgent', required: false },
 ]);
 const AUTOMATIC_BINDING_APIS = Object.freeze([
-  'cloudbuild.googleapis.com', 'containerregistry.googleapis.com', 'pubsub.googleapis.com',
+  'cloudbuild.googleapis.com', 'containeranalysis.googleapis.com',
+  'containerregistry.googleapis.com', 'pubsub.googleapis.com',
   'artifactregistry.googleapis.com', 'compute.googleapis.com', 'servicenetworking.googleapis.com',
   'sqladmin.googleapis.com', 'run.googleapis.com', 'aiplatform.googleapis.com',
   'speech.googleapis.com', 'monitoring.googleapis.com', 'logging.googleapis.com',
@@ -544,7 +546,8 @@ test('the executable contract fixes the isolated GCP topology and least-privileg
     'cloudresourcemanager.googleapis.com', 'serviceusage.googleapis.com',
     'cloudbilling.googleapis.com', 'billingbudgets.googleapis.com',
     'iam.googleapis.com', 'artifactregistry.googleapis.com',
-    'cloudbuild.googleapis.com', 'run.googleapis.com', 'compute.googleapis.com',
+    'cloudbuild.googleapis.com', 'containeranalysis.googleapis.com',
+    'run.googleapis.com', 'compute.googleapis.com',
     'servicenetworking.googleapis.com', 'sqladmin.googleapis.com',
     'storage.googleapis.com', 'secretmanager.googleapis.com',
     'aiplatform.googleapis.com', 'speech.googleapis.com',
@@ -3092,6 +3095,34 @@ test('managed IAM final readback is an exact per-scope allowlist and forbids wor
     assert.doesNotThrow(() => assertManagedIamPoliciesSubset({
       ...input,
       enabledApis: new Set(['containerregistry.googleapis.com', 'pubsub.googleapis.com']),
+    }));
+    assert.throws(
+      () => assertManagedIamPoliciesSubset({
+        ...input,
+        enabledApis: new Set(['cloudbuild.googleapis.com']),
+      }),
+      (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
+    );
+  });
+
+  await t.test('Container Analysis service agent is allowed only while its exact API is enabled', () => {
+    const policy = { bindings: [
+      ...contract.project.protectedBindings.map(({ role, member }) => ({ role, members: [member] })),
+      {
+        role: 'roles/containeranalysis.ServiceAgent',
+        members: [`serviceAccount:service-${PROJECT_NUMBER}@container-analysis.iam.gserviceaccount.com`],
+      },
+    ] };
+    const input = {
+      contract,
+      projectNumber: PROJECT_NUMBER,
+      policiesByScope: { project: policy },
+      scopes: ['project'],
+      requireProtectedBaseline: true,
+    };
+    assert.doesNotThrow(() => assertManagedIamPoliciesSubset({
+      ...input,
+      enabledApis: new Set(['containeranalysis.googleapis.com']),
     }));
     assert.throws(
       () => assertManagedIamPoliciesSubset({
@@ -6748,7 +6779,8 @@ test('real control plane completes narrow IAM recovery before no-channel API dis
   const allApis = [
     'cloudresourcemanager.googleapis.com', 'serviceusage.googleapis.com', 'cloudbilling.googleapis.com',
     'billingbudgets.googleapis.com', 'iam.googleapis.com', 'artifactregistry.googleapis.com',
-    'cloudbuild.googleapis.com', 'run.googleapis.com', 'compute.googleapis.com', 'servicenetworking.googleapis.com',
+    'cloudbuild.googleapis.com', 'containeranalysis.googleapis.com',
+    'run.googleapis.com', 'compute.googleapis.com', 'servicenetworking.googleapis.com',
     'sqladmin.googleapis.com', 'storage.googleapis.com', 'secretmanager.googleapis.com', 'aiplatform.googleapis.com',
     'speech.googleapis.com', 'texttospeech.googleapis.com', 'monitoring.googleapis.com', 'logging.googleapis.com',
   ];

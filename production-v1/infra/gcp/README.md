@@ -369,7 +369,8 @@ phase is first inspected without confirmation and then repeated with the exact
 `--confirm-release=40_HEX_SHA`; no phase may be skipped. Build
 completion requires the custom build identity; a fresh production-only install;
 an exact `DEPENDENCY_SECURITY_EXCEPTION_REVIEWED` gate receipt before the image
-step; verified provenance; successful image/corpus and OCI-label checks; one
+step; verified provenance backed by the required Container Analysis API and the
+Google-managed Cloud Build service agent; successful image/corpus and OCI-label checks; one
 Build ID; the archive hash; and the final digest. A missing, failed, expired, or
 drifted dependency gate is a failed build receipt. `inventory` publishes and
 reads back the legacy inventory's one planned
