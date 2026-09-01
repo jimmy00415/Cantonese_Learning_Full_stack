@@ -1185,7 +1185,7 @@ test('voice release evidence is artifact/config/commit bound and expires dynamic
   };
   const unverified = loadConfig({ ...baseEnvironment, NODE_ENV: 'test' }, { now: () => new Date(occurredAt) });
   const asrRecord = finalizeEvidenceRecord({
-    schemaVersion: 1, commitSha, capability: 'asr', provider: 'google-stt-v2', contractVersion: 'google-stt-v2-v2',
+    schemaVersion: 1, commitSha, capability: 'asr', provider: 'google-stt-v2', contractVersion: 'google-stt-v2-v3',
     providerConfigDigest: providerConfigDigest(unverified.asr, 'asr'), occurredAt, result: 'pass', latencyMs: 120,
     fixtureSha256: 'a'.repeat(64), fixtureDurationMs: 1_000,
   });

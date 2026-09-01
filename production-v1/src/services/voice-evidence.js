@@ -204,7 +204,7 @@ export function providerConfigDescriptor(config, capability) {
       languageCodes: [...settings.languageCodes],
       allowedResponseLanguages: Object.keys(GOOGLE_RESPONSE_LANGUAGE_CODES),
       responseLanguageCodes: { ...GOOGLE_RESPONSE_LANGUAGE_CODES },
-      languageOrderPolicy: 'selected-first-then-configured-order-v1',
+      languageOrderPolicy: 'selected-only-regional-chirp2-v1',
       contentType: 'application/json',
       inputEncoding: 'canonical-wav-v1',
       credentialVersion: settings.credentialVersion ?? null,
@@ -425,7 +425,7 @@ export function validateIosVoiceEvidence(record, {
 
 export const voiceEvidenceContracts = Object.freeze({
   asr: 'azure-asr-v1',
-  googleAsr: 'google-stt-v2-v2',
+  googleAsr: 'google-stt-v2-v3',
   azureTts: 'azure-tts-v1',
   minimaxTts: 'minimax-tts-v1',
   googleTts: 'google-tts-v3',

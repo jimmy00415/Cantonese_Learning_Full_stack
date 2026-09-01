@@ -23,7 +23,7 @@ test('Google speech evidence binds exact regional recognizer and one selected vo
     languageCodes: ['yue-Hant-HK', 'en-US', 'cmn-Hans-CN'],
     allowedResponseLanguages: ['en', 'yue-Hant-HK', 'cmn-Hans-CN'],
     responseLanguageCodes: { en: 'en-US', 'yue-Hant-HK': 'yue-Hant-HK', 'cmn-Hans-CN': 'cmn-Hans-CN' },
-    languageOrderPolicy: 'selected-first-then-configured-order-v1',
+    languageOrderPolicy: 'selected-only-regional-chirp2-v1',
     contentType: 'application/json', inputEncoding: 'canonical-wav-v1', credentialVersion: 'runtime-sa-rotation-v1',
   });
   assert.deepEqual(providerConfigDescriptor(tts, 'tts'), {

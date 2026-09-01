@@ -60,10 +60,10 @@ function googleAsrUrl(settings) {
   return `https://${settings.location}-speech.googleapis.com/v2/projects/${settings.projectId}/locations/${settings.location}/recognizers/${settings.recognizer}:recognize`;
 }
 
-function googleLanguageCodes(settings, responseLanguage) {
+function googleLanguageCodes(responseLanguage) {
   const selected = GOOGLE_RESPONSE_LANGUAGES[responseLanguage];
   if (!selected) throw speechError('VOICE_TRANSCRIPTION_REJECTED', 502, false, 'rejected');
-  return [selected, ...settings.languageCodes.filter((language) => language !== selected)];
+  return [selected];
 }
 
 function parseGooglePayload(buffer) {
@@ -112,7 +112,7 @@ export function createAsrProvider({
     if (!google && responseLanguage !== 'yue-Hant-HK') {
       throw speechError('VOICE_TRANSCRIPTION_REJECTED', 502, false, 'rejected');
     }
-    const googleLanguages = google ? googleLanguageCodes(config.settings, responseLanguage) : null;
+    const googleLanguages = google ? googleLanguageCodes(responseLanguage) : null;
     const startedAt = now();
     try {
       const result = await withSpeechDeadline({

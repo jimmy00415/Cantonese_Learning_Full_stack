@@ -198,9 +198,13 @@ test('Google STT V2 and TTS issue locale-bound ADC requests with no hidden fallb
   const asrResult = await asr.transcribe(Buffer.from('RIFFcanonical-wav'), { responseLanguage: 'en' });
   const asrBody = JSON.parse(requests[0].init.body);
   assert.match(requests[0].url, /asia-southeast1-speech\.googleapis\.com\/v2\/projects\/motion-expert-hk-ltd-webpage\/locations\/asia-southeast1\/recognizers\/_:recognize$/);
-  assert.deepEqual(asrBody.config.languageCodes, ['en-US', 'yue-Hant-HK', 'cmn-Hans-CN']);
+  assert.deepEqual(asrBody.config.languageCodes, ['en-US']);
   assert.equal(asrBody.config.model, 'chirp_2');
   assert.equal(asrResult.transcript, '你好');
+  await asr.transcribe(Buffer.from('RIFFcanonical-wav'), { responseLanguage: 'yue-Hant-HK' });
+  await asr.transcribe(Buffer.from('RIFFcanonical-wav'), { responseLanguage: 'cmn-Hans-CN' });
+  assert.deepEqual(JSON.parse(requests[1].init.body).config.languageCodes, ['yue-Hant-HK']);
+  assert.deepEqual(JSON.parse(requests[2].init.body).config.languageCodes, ['cmn-Hans-CN']);
 
   const tts = createTtsProvider({
     config: { provider: 'google-tts', settings: {
@@ -214,13 +218,13 @@ test('Google STT V2 and TTS issue locale-bound ADC requests with no hidden fallb
     googleAuthProvider: auth,
   });
   const ttsResult = await tts.synthesize('Hello', { responseLanguage: 'en' });
-  const ttsBody = JSON.parse(requests[1].init.body);
-  assert.equal(requests[1].url, 'https://asia-southeast1-texttospeech.googleapis.com/v1/text:synthesize');
+  const ttsBody = JSON.parse(requests[3].init.body);
+  assert.equal(requests[3].url, 'https://asia-southeast1-texttospeech.googleapis.com/v1/text:synthesize');
   assert.deepEqual(ttsBody.voice, { languageCode: 'en-US', name: 'en-US-Chirp3-HD-Achernar' });
   assert.deepEqual(ttsBody.audioConfig, { audioEncoding: 'MP3' });
   assert.equal(ttsResult.buffer.toString('ascii'), 'ID3fixture');
   await assert.rejects(tts.synthesize('未知', { responseLanguage: 'fr' }), (error) => error.code === 'VOICE_SYNTHESIS_REJECTED');
-  assert.equal(requests.length, 2);
+  assert.equal(requests.length, 4);
 });
 
 test('Google STT rejects unsupported response locales before ADC transport', async () => {
