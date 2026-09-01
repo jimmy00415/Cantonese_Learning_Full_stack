@@ -517,7 +517,6 @@ function normalizeTransportStderr(value) {
 function canonicalDescribeAbsence(argv, stderr) {
   const projectFlag = `--project=${PROJECT}`;
   const formatFlag = '--format=json';
-  const role = 'hkbuddyV1AcceptanceBucketMetadataReader';
   const descriptors = [
     [
       ['artifacts', 'repositories', 'describe', GCP_IDENTITY.repository, '--location=asia-east2', projectFlag, formatFlag],
@@ -534,14 +533,13 @@ function canonicalDescribeAbsence(argv, stderr) {
         [argv, `ERROR: (gcloud.iam.service-accounts.describe) NOT_FOUND: Unknown service account. This command is authenticated as ${REQUIRED_OPERATOR_ACCOUNT} which is the active account specified by the [core/account] property`],
       ];
     }),
-    [
+    ...REQUIRED_CUSTOM_ROLES.flatMap(({ id: role }) => [[
       ['iam', 'roles', 'describe', role, projectFlag, formatFlag],
       `ERROR: (gcloud.iam.roles.describe) NOT_FOUND: Role [projects/${PROJECT}/roles/${role}] was not found.`,
-    ],
-    [
+    ], [
       ['iam', 'roles', 'describe', role, projectFlag, formatFlag],
       `ERROR: (gcloud.iam.roles.describe) NOT_FOUND: The role named projects/${PROJECT}/roles/${role} was not found. This command is authenticated as ${REQUIRED_OPERATOR_ACCOUNT} which is the active account specified by the [core/account] property.`,
-    ],
+    ]]),
     [
       ['compute', 'networks', 'describe', GCP_IDENTITY.network, projectFlag, formatFlag],
       `ERROR: (gcloud.compute.networks.describe) Could not fetch resource:\n - The resource 'projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}' was not found`,
@@ -2299,12 +2297,15 @@ function assertBudgetInventory(budgets, projectNumber) {
 
 function cloudAssetMetadataIsValid(asset) {
   const optionalStrings = ['displayName', 'description', 'location', 'state'];
+  const backupRunParentTypeOmitted = asset?.assetType === 'sqladmin.googleapis.com/BackupRun'
+    && !Object.hasOwn(asset, 'parentAssetType');
   if (!asset || typeof asset !== 'object' || Array.isArray(asset)
     || typeof asset.name !== 'string' || !asset.name.startsWith('//')
     || typeof asset.assetType !== 'string' || asset.assetType.length < 3
     || typeof asset.project !== 'string'
     || typeof asset.parentFullResourceName !== 'string' || !asset.parentFullResourceName.startsWith('//')
-    || typeof asset.parentAssetType !== 'string' || asset.parentAssetType.length < 3
+    || (!backupRunParentTypeOmitted
+      && (typeof asset.parentAssetType !== 'string' || asset.parentAssetType.length < 3))
     || optionalStrings.some((field) => Object.hasOwn(asset, field) && typeof asset[field] !== 'string')) return false;
   if (Object.hasOwn(asset, 'labels') && (
     !asset.labels || typeof asset.labels !== 'object' || Array.isArray(asset.labels)
@@ -2383,6 +2384,20 @@ function exactTopLevelManagedAsset(asset, projectNumber) {
 function exactManagedDescendantAsset(asset) {
   const repository = `//artifactregistry.googleapis.com/projects/${PROJECT}/locations/asia-east2/repositories/${GCP_IDENTITY.repository}`;
   const cloudSqlInstance = cloudSqlAssetInstanceName();
+  if (asset.assetType === 'iam.googleapis.com/ServiceAccountKey') {
+    const keyMatch = new RegExp(
+      `^//iam\\.googleapis\\.com/projects/${PROJECT}/serviceAccounts/([1-9]\\d{5,30})/keys/([0-9a-f]{40})$`,
+    ).exec(asset.name);
+    if (!keyMatch) return false;
+    const keyId = keyMatch[2];
+    return Object.values(GCP_IDENTITY.serviceAccounts).some((email) => (
+      asset.displayName === `projects/${PROJECT}/serviceAccounts/${email}/keys/${keyId}`
+      && asset.location === 'global'
+      && asset.parentFullResourceName
+        === `//iam.googleapis.com/projects/${PROJECT}/serviceAccounts/${email}`
+      && asset.parentAssetType === 'iam.googleapis.com/ServiceAccount'
+    ));
+  }
   if (asset.assetType === 'run.googleapis.com/Revision') {
     return [GCP_IDENTITY.service, GCP_IDENTITY.candidateService].some((serviceName) => {
       const service = `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/services/${serviceName}`;
@@ -2403,7 +2418,8 @@ function exactManagedDescendantAsset(asset) {
     return asset.name.startsWith(prefix) && canonicalPositiveInt64(asset.name.slice(prefix.length))
       && canonicalCloudSqlBackupLocation(asset.location)
       && asset.parentFullResourceName === cloudSqlInstance
-      && asset.parentAssetType === 'sqladmin.googleapis.com/Instance'
+      && (!Object.hasOwn(asset, 'parentAssetType')
+        || asset.parentAssetType === 'sqladmin.googleapis.com/Instance')
       && CLOUD_SQL_BACKUP_RUN_STATES.has(asset.state);
   }
   return false;
@@ -2419,13 +2435,18 @@ function exactManagedGeneratedAsset(asset) {
       && exact(labels, { application: 'hong_kong_buddy', environment: 'production_v1', hkbuddy_contract: policy.id.replaceAll('-', '_') });
   }
   if (asset.assetType === 'monitoring.googleapis.com/NotificationChannel') {
+    const acceptedLabels = [
+      { email_address: REQUIRED_MONITORING.notificationChannel.requiredEmailAddress },
+      {
+        email_address: REQUIRED_MONITORING.notificationChannel.requiredEmailAddress,
+        resolve_delivery_enabled: 'true',
+      },
+    ];
     return asset.displayName === REQUIRED_MONITORING.notificationChannel.displayName
       && new RegExp(`^//monitoring\\.googleapis\\.com/projects/${PROJECT_NUMBER}/notificationChannels/[1-9]\\d*$`).test(asset.name)
       && asset.location === 'global' && asset.parentFullResourceName === ASSET_PROJECT_PARENT
       && asset.parentAssetType === ASSET_PROJECT_TYPE
-      && exact(labels, {
-        email_address: REQUIRED_MONITORING.notificationChannel.requiredEmailAddress,
-      });
+      && acceptedLabels.some((expected) => exact(labels, expected));
   }
   return false;
 }
@@ -3566,6 +3587,7 @@ export class GcpControlPlane {
   }
 
   async #auditCloudAssetInventory() {
+    await this.auditUserManagedServiceAccountKeys();
     let assets;
     try {
       assets = await this.#gcloud([

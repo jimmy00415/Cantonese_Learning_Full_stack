@@ -849,6 +849,11 @@ test('gcloud classifies canonical absence only when describe argv and resource i
       stderr: `ERROR: (gcloud.iam.roles.describe) NOT_FOUND: Role [projects/${PROJECT}/roles/${role}] was not found.`,
     },
     {
+      name: 'operator custom role with authenticated SDK detail',
+      argv: ['iam', 'roles', 'describe', BUCKET_IAM_OPERATOR_ROLE.id, `--project=${PROJECT}`, '--format=json'],
+      stderr: `ERROR: (gcloud.iam.roles.describe) NOT_FOUND: The role named projects/${PROJECT}/roles/${BUCKET_IAM_OPERATOR_ROLE.id} was not found. This command is authenticated as admin@motionexp.com which is the active account specified by the [core/account] property.`,
+    },
+    {
       name: 'Compute network',
       argv: ['compute', 'networks', 'describe', GCP_IDENTITY.network, `--project=${PROJECT}`, '--format=json'],
       stderr: `ERROR: (gcloud.compute.networks.describe) Could not fetch resource:\n - The resource 'projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}' was not found`,
@@ -922,8 +927,10 @@ test('gcloud classifies canonical absence only when describe argv and resource i
           (error) => error.code === 'TRANSPORT_AMBIGUOUS',
         );
       }
-      const wrongResourceStderr = fixture.stderr.includes(role)
-        ? fixture.stderr.replaceAll(role, `${role}Foreign`)
+      const roleToken = [role, BUCKET_IAM_OPERATOR_ROLE.id]
+        .find((candidate) => fixture.stderr.includes(candidate));
+      const wrongResourceStderr = roleToken
+        ? fixture.stderr.replaceAll(roleToken, `${roleToken}Foreign`)
         : fixture.stderr.replaceAll('hkbuddy-v1', 'hkbuddy-v1-foreign');
       await assert.rejects(
         () => executorFor(wrongResourceStderr)(fixture.argv),
@@ -6497,6 +6504,7 @@ test('real control plane rejects each missing protected baseline binding before 
           if (args[0] === 'services' && args[1] === 'list') {
             return enabledServiceRows(['iam.googleapis.com', 'serviceusage.googleapis.com']);
           }
+          if (args[0] === 'iam' && args[1] === 'service-accounts' && args[2] === 'keys') return [];
           if (args[0] === 'asset' && args[1] === 'search-all-resources') return [];
           if (args[0] === 'projects' && args[1] === 'get-iam-policy') return {
             bindings: contract.project.protectedBindings.filter((binding) => binding !== missing).map(({ role, member }) => ({ role, members: [member] })),
@@ -6623,6 +6631,7 @@ test('real Cloud Asset audit fails closed before host mutation for disabled-serv
     if (args[0] === 'billing' && args[1] === 'projects') return {
       billingEnabled: true, billingAccountName: `billingAccounts/${GCP_IDENTITY.billingAccountId}`,
     };
+    if (args[0] === 'iam' && args[1] === 'service-accounts' && args[2] === 'keys') return [];
     if (args[0] === 'asset' && args[1] === 'search-all-resources') {
       if (assets instanceof Error) throw assets;
       return assets;
@@ -6795,6 +6804,50 @@ test('Cloud Asset rejects Secret project aliases malformed identities displays a
   }
 });
 
+test('Cloud Asset accepts exact managed service-account key descendants only after the user-key audit', async () => {
+  const contract = await contractFixture();
+  const email = GCP_IDENTITY.serviceAccounts.runtime;
+  const keyId = 'a'.repeat(40);
+  const keyAsset = {
+    name: `//iam.googleapis.com/projects/${PROJECT}/serviceAccounts/101929703898041757987/keys/${keyId}`,
+    assetType: 'iam.googleapis.com/ServiceAccountKey',
+    project: ASSET_PROJECT,
+    displayName: `projects/${PROJECT}/serviceAccounts/${email}/keys/${keyId}`,
+    location: 'global',
+    parentFullResourceName: `//iam.googleapis.com/projects/${PROJECT}/serviceAccounts/${email}`,
+    parentAssetType: 'iam.googleapis.com/ServiceAccount',
+  };
+  const accepted = assetAuditControlPlane({ contract, assets: [keyAsset] });
+  assert.equal(await accepted.plane.auditPreMutationState(), true);
+  assert.equal(accepted.gcloudCalls.filter((args) => (
+    args[0] === 'iam' && args[1] === 'service-accounts' && args[2] === 'keys'
+      && args.includes('--managed-by=user')
+  )).length, contract.resources.serviceAccounts.length);
+
+  const userManaged = assetAuditControlPlane({
+    contract,
+    assets: [keyAsset],
+    gcloudRows: { 'iam service-accounts keys': [{ name: 'user-managed-key' }] },
+  });
+  await assert.rejects(
+    () => userManaged.plane.auditPreMutationState(),
+    (error) => error.code === 'USER_MANAGED_SERVICE_ACCOUNT_KEY',
+  );
+  assert.equal(userManaged.gcloudCalls.some((args) => args[0] === 'asset'), false);
+
+  const foreignParent = assetAuditControlPlane({
+    contract,
+    assets: [{
+      ...keyAsset,
+      parentFullResourceName: `//iam.googleapis.com/projects/${PROJECT}/serviceAccounts/foreign@${PROJECT}.iam.gserviceaccount.com`,
+    }],
+  });
+  await assert.rejects(
+    () => foreignParent.plane.auditPreMutationState(),
+    (error) => error.code === 'RESOURCE_COLLISION',
+  );
+});
+
 test('Cloud Asset managed identities require exact type name numeric project field canonical parent and metadata shapes', async (t) => {
   const contract = await contractFixture();
   const exactService = cloudAsset();
@@ -6863,7 +6916,7 @@ test('live Monitoring channel identity composes project-ID REST names with numer
       assetType: 'monitoring.googleapis.com/NotificationChannel',
       project: `projects/${PROJECT_NUMBER}`,
       displayName: 'HK Buddy V1 operations',
-      labels: { email_address: 'admin@motionexp.com' },
+      labels: { email_address: 'admin@motionexp.com', resolve_delivery_enabled: 'true' },
       location: 'global',
       parentFullResourceName: `//cloudresourcemanager.googleapis.com/projects/${PROJECT}`,
       parentAssetType: 'cloudresourcemanager.googleapis.com/Project',
@@ -6880,6 +6933,25 @@ test('live Monitoring channel identity composes project-ID REST names with numer
 
   await fixture.plane.auditPreMutationState({ notificationChannel: PROJECT_ID_CHANNEL });
   assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+
+  const rejected = assetAuditControlPlane({
+    contract,
+    assets: [cloudAsset({
+      name: `//monitoring.googleapis.com/projects/${PROJECT_NUMBER}/notificationChannels/123456789`,
+      assetType: 'monitoring.googleapis.com/NotificationChannel',
+      project: `projects/${PROJECT_NUMBER}`,
+      displayName: 'HK Buddy V1 operations',
+      labels: { email_address: 'admin@motionexp.com', resolve_delivery_enabled: 'false' },
+      location: 'global',
+      parentFullResourceName: `//cloudresourcemanager.googleapis.com/projects/${PROJECT}`,
+      parentAssetType: 'cloudresourcemanager.googleapis.com/Project',
+      state: 'VERIFICATION_STATUS_VERIFIED',
+    })],
+  });
+  await assert.rejects(
+    () => rejected.plane.auditPreMutationState(),
+    (error) => error.code === 'RESOURCE_COLLISION',
+  );
 });
 
 test('an omitted default verification enum is classified as an unverified managed channel', async () => {
@@ -6998,6 +7070,12 @@ test('Cloud Asset accepts the exact live Cloud SQL name and only canonical Backu
   };
   const accepted = assetAuditControlPlane({ contract, assets: [instance, backupRun, projectBackup] });
   assert.equal(await accepted.plane.auditPreMutationState(), true);
+  const liveBackupRun = { ...backupRun };
+  delete liveBackupRun.parentAssetType;
+  const acceptedLiveShape = assetAuditControlPlane({
+    contract, assets: [instance, liveBackupRun, projectBackup],
+  });
+  assert.equal(await acceptedLiveShape.plane.auditPreMutationState(), true);
   for (const [location, state] of [
     ['asia', 'SUCCESSFUL'],
     ['europe-west12', 'FAILED'],
