@@ -10,6 +10,7 @@ import {
   finalizeReleaseEvidenceRecord,
   gcsIdentitySha256,
   postgresIdentitySha256,
+  postgresPoolConnectionString,
   validateLegacyResourceInventory,
 } from '../src/services/release-evidence.js';
 import { GCP_IDENTITY } from '../src/gcp-identity.js';
@@ -1552,17 +1553,17 @@ export async function createRealAcceptanceRuntime({
     statement_timeout: operationDeadlineMs,
   };
   const appPoolOptions = {
-    connectionString: databaseUrl,
+    connectionString: postgresPoolConnectionString(databaseUrl),
     options: `-c search_path=${schema} -c statement_timeout=${operationDeadlineMs}`,
     ...postgresDeadlineOptions,
   };
   const migratorPoolOptions = {
-    connectionString: migratorDatabaseUrl,
+    connectionString: postgresPoolConnectionString(migratorDatabaseUrl),
     options: `-c search_path=${schema} -c statement_timeout=${operationDeadlineMs}`,
     ...postgresDeadlineOptions,
   };
   const rawAdminPool = new PoolClass({
-    connectionString: migratorDatabaseUrl,
+    connectionString: postgresPoolConnectionString(migratorDatabaseUrl),
     options: `-c statement_timeout=${operationDeadlineMs}`,
     ...postgresDeadlineOptions,
   });

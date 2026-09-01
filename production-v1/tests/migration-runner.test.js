@@ -60,7 +60,7 @@ test('one-shot migration runner applies every missing migration and verifies the
     databaseUrl: 'postgresql://private.example.test/v1?sslmode=require',
     poolFactory(options) {
       assert.deepEqual(options, {
-        connectionString: 'postgresql://private.example.test/v1?sslmode=require',
+        connectionString: 'postgresql://private.example.test/v1?sslmode=require&uselibpqcompat=true',
         options: '-c search_path=public',
         connectionTimeoutMillis: 30_000,
         query_timeout: 60_000,

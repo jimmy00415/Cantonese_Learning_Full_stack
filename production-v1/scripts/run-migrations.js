@@ -4,7 +4,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { Pool } from 'pg';
 
-import { assertSecurePostgresRuntimeUrl } from '../src/services/release-evidence.js';
+import {
+  assertSecurePostgresRuntimeUrl,
+  postgresPoolConnectionString,
+} from '../src/services/release-evidence.js';
 
 const MIGRATION_FILE = /^(\d{3})_[a-z0-9][a-z0-9_-]*\.sql$/;
 const ADVISORY_LOCK = 'hong-kong-buddy-production-v1-migrations';
@@ -79,7 +82,7 @@ export async function runMigrations({
   });
   const expected = migrations.map(({ version }) => version);
   const pool = poolFactory({
-    connectionString: databaseUrl,
+    connectionString: postgresPoolConnectionString(databaseUrl),
     options: '-c search_path=public',
     connectionTimeoutMillis: 30_000,
     query_timeout: 60_000,

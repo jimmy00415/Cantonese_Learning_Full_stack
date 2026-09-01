@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import pg from 'pg';
 
 import { loadConfig } from '../src/config.js';
 import {
@@ -11,6 +12,7 @@ import {
   gcsIdentitySha256,
   llmProviderConfigDigest,
   postgresIdentitySha256,
+  postgresPoolConnectionString,
   readReleaseEvidenceRecord,
   validateDependencyAcceptanceEvidence,
   validateLegacyResourceInventory,
@@ -350,6 +352,23 @@ test('resource identities are credential-free canonical hashes and reject ambigu
     container: 'v1-private',
   }), /identity/i);
   assert.throws(() => blobIdentitySha256({ connectionString: 'UseDevelopmentStorage=true', container: 'v1-private' }), /identity/i);
+});
+
+test('PostgreSQL pool URLs preserve the reviewed identity while opting into libpq require semantics', () => {
+  const requireUrl = 'postgresql://private-user:private-password@10.25.0.3:5432/hkbuddy_v1?sslmode=require';
+  assert.equal(
+    postgresPoolConnectionString(requireUrl),
+    `${requireUrl}&uselibpqcompat=true`,
+  );
+  const client = new pg.Client({ connectionString: postgresPoolConnectionString(requireUrl) });
+  assert.equal(client.connectionParameters.ssl.rejectUnauthorized, false);
+
+  const verifyFullUrl = 'postgresql://private-user:private-password@10.25.0.3:5432/hkbuddy_v1?sslmode=verify-full';
+  assert.equal(postgresPoolConnectionString(verifyFullUrl), verifyFullUrl);
+  assert.throws(
+    () => postgresPoolConnectionString('postgresql://10.25.0.3/hkbuddy_v1?sslmode=disable'),
+    /PostgreSQL|sslmode/i,
+  );
 });
 
 test('dependency acceptance binds the exact commit, inventory, current resources, cleanup, and isolated run', () => {

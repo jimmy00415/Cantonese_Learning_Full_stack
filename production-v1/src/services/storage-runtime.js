@@ -12,6 +12,7 @@ import {
   blobIdentitySha256,
   gcsIdentitySha256,
   postgresIdentitySha256,
+  postgresPoolConnectionString,
 } from './release-evidence.js';
 
 const STORE_DRIVERS = new Set(['atomic-file', 'postgres']);
@@ -197,7 +198,9 @@ async function createStore({ config, poolFactory }) {
     return new AtomicFileStore({ filePath: config.atomicFilePath });
   }
   const pool = await poolFactory({
-    connectionString: config.databaseUrl,
+    connectionString: config.nodeEnv === 'production'
+      ? postgresPoolConnectionString(config.databaseUrl)
+      : config.databaseUrl,
     options: '-c search_path=public',
     connectionTimeoutMillis: boundedRuntimeTimeout(config.postgresConnectionTimeoutMs, 5_000, 30_000),
     query_timeout: boundedRuntimeTimeout(config.postgresQueryTimeoutMs, 10_000, 30_000),

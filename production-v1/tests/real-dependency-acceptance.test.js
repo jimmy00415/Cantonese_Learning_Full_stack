@@ -529,6 +529,21 @@ function realRuntimeOptions({
   };
 }
 
+test('real dependency acceptance gives every PostgreSQL pool libpq require semantics', async () => {
+  const fixture = realRuntimeOptions();
+  const runtime = await createRealAcceptanceRuntime(fixture.options);
+  assert.deepEqual(
+    fixture.postgres.state.options.map(({ connectionString }) => connectionString),
+    [
+      `${MIGRATOR_DATABASE_URL}&uselibpqcompat=true`,
+      `${MIGRATOR_DATABASE_URL}&uselibpqcompat=true`,
+      `${DATABASE_URL}&uselibpqcompat=true`,
+      `${DATABASE_URL}&uselibpqcompat=true`,
+    ],
+  );
+  await runtime.close();
+});
+
 async function flushAsyncWork() {
   for (let index = 0; index < 4; index += 1) {
     await new Promise((resolveImmediate) => setImmediate(resolveImmediate));

@@ -259,6 +259,14 @@ export function assertSecurePostgresRuntimeUrl(databaseUrl) {
   postgresIdentity(databaseUrl, { requireSecureTransport: true });
 }
 
+export function postgresPoolConnectionString(databaseUrl) {
+  assertSecurePostgresRuntimeUrl(databaseUrl);
+  const parsed = new URL(databaseUrl);
+  return parsed.searchParams.get('sslmode') === 'require'
+    ? `${databaseUrl}&uselibpqcompat=true`
+    : databaseUrl;
+}
+
 function parseConnectionString(value) {
   if (typeof value !== 'string' || !value.trim()) throw new Error('Azure Blob identity is invalid');
   const parts = new Map();

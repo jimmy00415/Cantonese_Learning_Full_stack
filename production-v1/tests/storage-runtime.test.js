@@ -122,7 +122,7 @@ test('postgres plus GCS initializes the store first through the injected ADC sto
     poolFactory: (options) => {
       log.push('pool.create');
       assert.deepEqual(options, {
-        connectionString: databaseUrl,
+        connectionString: `${databaseUrl}&uselibpqcompat=true`,
         options: '-c search_path=public',
         connectionTimeoutMillis: 1_600,
         query_timeout: 2_600,
