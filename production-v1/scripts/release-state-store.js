@@ -93,6 +93,12 @@ function canonicalIso(value) {
   try { return new Date(value).toISOString() === value; } catch { return false; }
 }
 
+function rfc3339Instant(value) {
+  return typeof value === 'string'
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3,9}Z$/u.test(value)
+    && Number.isFinite(Date.parse(value));
+}
+
 function assertSafeResult(value) {
   if (!isPlainObject(value) || typeof value.kind !== 'string') fail();
   if (value.kind === 'none') {
@@ -227,9 +233,44 @@ function assertAbortPayload(payload) {
     if (!exactKeys(payload, ['intentRecordSha256', 'reason'])) fail();
     return;
   }
-  if (payload.reason !== 'authoritative-cloud-run-failed-precondition'
+  if (![
+    'authoritative-cloud-run-execution-failed',
+    'authoritative-cloud-run-failed-precondition',
+  ].includes(payload.reason)
     || !exactKeys(payload, ['evidence', 'intentRecordSha256', 'reason'])) fail();
   const evidence = payload.evidence;
+  if (payload.reason === 'authoritative-cloud-run-execution-failed') {
+    if (!exactKeys(evidence, [
+      'auditLogSha256', 'commandSha256', 'executionCompletionTime',
+      'executionCreatedAt', 'executionName', 'executionReadbackSha256', 'executionUid',
+      'failedCount', 'httpStatus', 'job', 'jobGeneration', 'jobReadbackSha256', 'jobUid',
+      'logSha256', 'operationAttemptId', 'platformOperationId', 'project', 'region',
+      'terminalReason', 'terminalStateSha256',
+    ])
+      || !DIGEST.test(String(evidence.auditLogSha256 ?? ''))
+      || !DIGEST.test(String(evidence.commandSha256 ?? ''))
+      || !rfc3339Instant(evidence.executionCompletionTime)
+      || !rfc3339Instant(evidence.executionCreatedAt)
+      || Date.parse(evidence.executionCompletionTime) < Date.parse(evidence.executionCreatedAt)
+      || !/^[a-z][a-z0-9-]{0,62}-[a-z0-9](?:[a-z0-9-]{0,48}[a-z0-9])?$/u
+        .test(String(evidence.executionName ?? ''))
+      || !DIGEST.test(String(evidence.executionReadbackSha256 ?? ''))
+      || !UUID_V4.test(String(evidence.executionUid ?? ''))
+      || evidence.failedCount !== 1
+      || evidence.httpStatus !== 200
+      || !/^[a-z][a-z0-9-]{0,62}$/u.test(String(evidence.job ?? ''))
+      || !Number.isSafeInteger(evidence.jobGeneration) || evidence.jobGeneration < 1
+      || !DIGEST.test(String(evidence.jobReadbackSha256 ?? ''))
+      || !UUID_V4.test(String(evidence.jobUid ?? ''))
+      || !DIGEST.test(String(evidence.logSha256 ?? ''))
+      || !OPERATION_ATTEMPT_ID.test(String(evidence.operationAttemptId ?? ''))
+      || !UUID_V4.test(String(evidence.platformOperationId ?? ''))
+      || !/^[a-z][a-z0-9-]{4,61}[a-z0-9]$/u.test(String(evidence.project ?? ''))
+      || !/^[a-z]+-[a-z]+[0-9]$/u.test(String(evidence.region ?? ''))
+      || evidence.terminalReason !== 'NonZeroExitCode'
+      || !DIGEST.test(String(evidence.terminalStateSha256 ?? ''))) fail();
+    return;
+  }
   if (!exactKeys(evidence, [
     'commandSha256', 'executionListSha256', 'httpStatus', 'job', 'jobGeneration',
     'jobReadbackSha256', 'jobUid', 'logSha256', 'operationAttemptId', 'project',
@@ -336,8 +377,10 @@ export function validateJournalRecords(records, { allowOpenIntent = true } = {})
     let checkpointCount = 0;
     let mutationOrdinal = 0;
     let lastCheckpoint = null;
+    let requiredTerminal = null;
     for (const record of records) {
       assertRecordShape(record);
+      if (requiredTerminal !== null && record.recordType !== 'terminal') fail();
       if (record.generation !== (previous?.generation ?? 0) + 1
         || record.previousRecordSha256 !== (previous?.recordSha256 ?? null)) fail();
       releaseSha ??= record.releaseSha;
@@ -383,6 +426,22 @@ export function validateJournalRecords(records, { allowOpenIntent = true } = {})
             || record.payload.evidence.commandSha256 !== openIntent.payload.commandSha256
             || record.payload.evidence.operationAttemptId
               !== openIntent.payload.operationAttemptId)) fail();
+        if (record.payload.reason === 'authoritative-cloud-run-execution-failed') {
+          if (record.phase !== 'acceptance'
+            || openIntent.payload.reconcileKind !== 'cloud-run-job-execute'
+            || openIntent.operationId !== 'dependency-acceptance-execute'
+            || record.payload.evidence.commandSha256 !== openIntent.payload.commandSha256
+            || record.payload.evidence.operationAttemptId
+              !== openIntent.payload.operationAttemptId
+            || record.payload.evidence.job !== 'hkbuddy-v1-dependency-acceptance'
+            || lastCheckpoint?.operationId !== 'dependency-acceptance-deploy') fail();
+          requiredTerminal = {
+            checkpointCount,
+            checkpointRecordSha256: lastCheckpoint.recordSha256,
+            evidenceSha256: sha256(canonicalJson(record.payload.evidence)),
+            operationId: record.operationId,
+          };
+        }
         openIntent = null;
       } else {
         if (openIntent !== null || lastCheckpoint === null
@@ -396,6 +455,23 @@ export function validateJournalRecords(records, { allowOpenIntent = true } = {})
         if (canonicalJson(record.payload.responseLossOperationIds) !== canonicalJson(responseLossIds)) fail();
         if (Object.hasOwn(record.payload.terminalState, 'mutationCount')
           && record.payload.terminalState.mutationCount !== checkpointCount) fail();
+        if (requiredTerminal !== null) {
+          const expectedTerminalState = {
+            code: 'CLOUD_RUN_EXECUTION_FAILED',
+            evidenceSha256: requiredTerminal.evidenceSha256,
+            mutationCount: requiredTerminal.checkpointCount,
+            operationId: requiredTerminal.operationId,
+            phase: 'acceptance',
+          };
+          if (record.payload.status !== 'phase-blocked'
+            || record.payload.checkpointRecordSha256
+              !== requiredTerminal.checkpointRecordSha256
+            || record.payload.mutationCount !== requiredTerminal.checkpointCount
+            || record.payload.receiptSha256 !== sha256(canonicalJson(expectedTerminalState))
+            || canonicalJson(record.payload.terminalState)
+              !== canonicalJson(expectedTerminalState)) fail();
+          requiredTerminal = null;
+        }
         attempt = null;
         lastCheckpoint = null;
       }
@@ -1214,6 +1290,10 @@ export async function openReleaseStateStore({
       records,
       async appendIntent(payload, { operationId } = {}) {
         if (!OPERATION_ID.test(String(operationId ?? ''))) fail();
+        const previous = records.at(-1);
+        if (previous?.recordType === 'terminal'
+          && previous.phasePlanSha256 === phasePlanSha256
+          && previous.payload?.terminalState?.code === 'CLOUD_RUN_EXECUTION_FAILED') fail();
         return append(envelope('intent', operationId, payload));
       },
       async appendCheckpoint(payload) {

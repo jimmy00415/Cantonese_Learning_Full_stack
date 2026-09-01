@@ -53,6 +53,7 @@ import {
   validateEvidenceArtifactFile,
   validateEvidenceVersionReceipt,
   validateMigrationExecutionReceipt,
+  validateFailedReleaseJobExecutionReceipt,
   validateRejectedCloudRunExecutionLog,
   validateReleaseReceiptChain,
   validateReleaseJobReadback,
@@ -6441,6 +6442,193 @@ test('an exact Cloud Run FAILED_PRECONDITION log closes only the rejected accept
   assert.equal(store.records.at(-2).recordType, 'abort');
   assert.equal(store.records.at(-2).payload.evidence.logSha256, logSha256);
   assert.equal(store.records.at(-1).recordType, 'terminal');
+});
+
+test('an exact accepted but failed Cloud Run execution is terminalized once and never executed again', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'hkbuddy-execute-failure-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const input = releaseInput();
+  const plan = buildReleasePlan(input, { phase: 'acceptance' });
+  const key = 'dependency-acceptance';
+  const job = plan.expectedJobs[key];
+  const store = createTestStateStore();
+  const liveJob = realV1JobReadback(job);
+  liveJob.metadata.uid = '12d057cc-bcf8-4192-95fa-bd7527627e46';
+  liveJob.metadata.generation = 2;
+  liveJob.status = {
+    observedGeneration: 2,
+    conditions: [{ type: 'Ready', status: 'True' }],
+    executionCount: 1,
+    latestCreatedExecution: {
+      name: `${job.job}-zpxcw`,
+      completionStatus: 'EXECUTION_FAILED',
+    },
+  };
+  await appendTestMutationCheckpoint(store, {
+    operationId: `${key}-deploy`, mutationOrdinal: 1,
+    reconcileKind: 'cloud-run-job-replace', plan,
+    safeResult: cloudRunJobSafeResult(plan, `${key}-deploy`, liveJob),
+  });
+  const executeIntent = await appendTestMutationIntent(store, {
+    operationId: `${key}-execute`, mutationOrdinal: 2,
+    reconcileKind: 'cloud-run-job-execute', plan,
+  });
+  executeIntent.payload.commandSha256 = createHash('sha256').update(JSON.stringify(canonicalFixture(
+    plan.operations.find(({ id }) => id === `${key}-execute`).argv,
+  ))).digest('hex');
+  executeIntent.createdAt = '2026-09-01T07:23:29.795Z';
+  const execution = {
+    apiVersion: 'run.googleapis.com/v1',
+    kind: 'Execution',
+    metadata: {
+      annotations: { 'run.googleapis.com/operation-id': 'a92d7b02-9063-4a63-99c8-12f48faf7fdd' },
+      creationTimestamp: '2026-09-01T07:23:31.115251Z',
+      labels: {
+        'run.googleapis.com/job': job.job,
+        'run.googleapis.com/jobGeneration': '2',
+        'run.googleapis.com/jobUid': liveJob.metadata.uid,
+      },
+      name: `${job.job}-zpxcw`,
+      uid: '1b7e2daa-49a8-4e2e-8813-5de165d60c1d',
+    },
+    spec: { taskCount: job.taskCount, parallelism: job.parallelism },
+    status: {
+      completionTime: '2026-09-01T07:23:46.489773Z',
+      conditions: [{
+        lastTransitionTime: '2026-09-01T07:23:46.489773Z',
+        message: 'Task exited with a redacted error.',
+        reason: 'NonZeroExitCode',
+        status: 'False',
+        type: 'Completed',
+      }],
+      failedCount: 1,
+    },
+  };
+  const explicitNullCounter = structuredClone(execution);
+  explicitNullCounter.status.succeededCount = null;
+  assert.throws(() => validateFailedReleaseJobExecutionReceipt(explicitNullCounter, {
+    expectedJob: job,
+    executionName: execution.metadata.name,
+    intentCreatedAt: executeIntent.createdAt,
+    jobGeneration: 2,
+    jobUid: liveJob.metadata.uid,
+  }), /failed execution readback/i);
+  const executeLog = [
+    `2026-09-01 15:23:30,884 DEBUG root Running [gcloud.run.jobs.execute] with arguments: [--format: "json", --project: "${PROJECT}", --quiet: "True", --region: "${REGION}", --wait: "True", JOB: "${job.job}"]`,
+    `2026-09-01 15:23:31,756 DEBUG urllib3.connectionpool https://${REGION}-run.googleapis.com:443 "POST /apis/run.googleapis.com/v1/namespaces/${PROJECT}/jobs/${job.job}:run?alt=json HTTP/1.1" 200 None`,
+    '2026-09-01 15:23:47,295 DEBUG root (gcloud.run.jobs.execute) The execution failed.',
+    `gcloud run jobs executions describe ${execution.metadata.name}`,
+    `Or visit https://console.cloud.google.com/run/jobs/executions/details/${REGION}/${execution.metadata.name}?project=${PROJECT_NUMBER}`,
+    '',
+  ].join('\n');
+  const executeLogPath = join(directory, 'execute-failure.log');
+  await writeFile(executeLogPath, executeLog);
+  const executeLogSha256 = createHash('sha256').update(executeLog).digest('hex');
+
+  const auditEntry = {
+    labels: { 'run.googleapis.com/execution_name': execution.metadata.name },
+    logName: `projects/${PROJECT}/logs/cloudaudit.googleapis.com%2Fsystem_event`,
+    protoPayload: {
+      methodName: '/Jobs.RunJob',
+      resourceName: `namespaces/${PROJECT}/executions/${execution.metadata.name}`,
+      response: structuredClone(execution),
+      status: {
+        code: 10,
+        message: `Execution ${execution.metadata.name} has failed to complete, 0/1 tasks were a success.`,
+      },
+    },
+    resource: {
+      labels: { job_name: job.job, location: REGION, project_id: PROJECT },
+      type: 'cloud_run_job',
+    },
+  };
+  const auditJson = JSON.stringify([{ textPayload: 'unrelated' }, auditEntry], null, 2);
+  const auditLog = [
+    `2026-09-01 15:24:34,722 DEBUG root Running [gcloud.logging.read] with arguments: [--format: "json", --limit: "100", --order: "asc", --project: "${PROJECT}", LOG_FILTER: "resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"${job.job}\" AND labels.\"run.googleapis.com/execution_name\"=\"${execution.metadata.name}\""]`,
+    `2026-09-01 15:25:19,247 INFO ___FILE_ONLY___ ${auditJson}`,
+    '',
+  ].join('\n');
+  const auditLogPath = join(directory, 'audit.log');
+  await writeFile(auditLogPath, auditLog);
+  const auditLogSha256 = createHash('sha256').update(auditLog).digest('hex');
+
+  const calls = [];
+  const result = await runGcpRelease({
+    argv: ['--phase=acceptance', `--confirm-release=${RELEASE_SHA}`], input,
+    loadReceipts: async () => fixtureReceiptChain(plan, 'inventory'),
+    openStateStore: async () => store,
+    environment: {
+      V1_FAILED_EXECUTION_LOG_PATH: executeLogPath,
+      V1_FAILED_EXECUTION_LOG_SHA256: executeLogSha256,
+      V1_FAILED_EXECUTION_AUDIT_LOG_PATH: auditLogPath,
+      V1_FAILED_EXECUTION_AUDIT_LOG_SHA256: auditLogSha256,
+    },
+    execute: async (argv) => {
+      calls.push(argv);
+      if (argv[1] === 'jobs' && argv[2] === 'describe') return structuredClone(liveJob);
+      if (argv[1] === 'jobs' && argv[2] === 'executions' && argv[3] === 'describe') {
+        return structuredClone(execution);
+      }
+      throw new Error(`unexpected recovery operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.publicReport.code, 'CLOUD_RUN_EXECUTION_FAILURE_RECOVERED', JSON.stringify({
+    calls, records: store.records,
+  }));
+  assert.equal(result.publicReport.mutationPerformed, false);
+  assert.equal(calls.length, 3);
+  assert.equal(calls.some((argv) => argv[2] === 'execute'), false);
+  assert.equal(store.records.at(-2).recordType, 'abort');
+  assert.equal(store.records.at(-2).payload.reason, 'authoritative-cloud-run-execution-failed');
+  assert.equal(store.records.at(-1).recordType, 'terminal');
+  assert.equal(JSON.stringify(store.records).includes('redacted error'), false);
+
+  store.records.pop();
+  let restartExecutorCalls = 0;
+  let acceptancePhasePlanSha256 = null;
+  const resumed = await runGcpRelease({
+    argv: ['--phase=acceptance', `--confirm-release=${RELEASE_SHA}`], input,
+    loadReceipts: async () => fixtureReceiptChain(plan, 'inventory'),
+    openStateStore: async (options) => {
+      acceptancePhasePlanSha256 = options.phasePlanSha256;
+      return store;
+    },
+    execute: async () => {
+      restartExecutorCalls += 1;
+      throw new Error('abort-tail recovery must not call GCP');
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(resumed.exitCode, 1);
+  assert.equal(resumed.publicReport.code, 'CLOUD_RUN_EXECUTION_FAILURE_TERMINAL_RECOVERED');
+  assert.equal(resumed.publicReport.mutationPerformed, false);
+  assert.equal(restartExecutorCalls, 0);
+  assert.equal(store.records.at(-2).recordType, 'abort');
+  assert.equal(store.records.at(-1).recordType, 'terminal');
+  for (const record of store.records) {
+    record.phase = 'acceptance';
+    record.phasePlanSha256 = acceptancePhasePlanSha256;
+  }
+  const recordCount = store.records.length;
+  let tombstoneExecutorCalls = 0;
+  const tombstoned = await runGcpRelease({
+    argv: ['--phase=acceptance', `--confirm-release=${RELEASE_SHA}`], input,
+    loadReceipts: async () => fixtureReceiptChain(plan, 'inventory'),
+    openStateStore: async () => store,
+    execute: async () => {
+      tombstoneExecutorCalls += 1;
+      throw new Error('terminal tombstone must not call GCP');
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(tombstoned.exitCode, 1);
+  assert.equal(tombstoned.publicReport.code, 'CLOUD_RUN_EXECUTION_FAILED');
+  assert.equal(tombstoned.publicReport.tombstoned, true);
+  assert.equal(tombstoned.publicReport.mutationPerformed, false);
+  assert.equal(tombstoneExecutorCalls, 0);
+  assert.equal(store.records.length, recordCount);
 });
 
 test('migration phase persists the canonical short v1 execution identity with omitted zero counters', async () => {

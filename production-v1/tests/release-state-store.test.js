@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { link, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1113,6 +1114,101 @@ test('state store accepts an authoritative acceptance execute rejection only for
     evidence,
   }), /journal/i);
   await invalid.close();
+});
+
+test('an authoritative failed Cloud Run execution must terminalize and tombstones the same phase plan', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hkbuddy-state-execute-failure-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const receiptDirectory = join(root, 'receipts');
+  await mkdir(receiptDirectory);
+  const store = await openReleaseStateStore({
+    receiptDirectory,
+    releaseSha: RELEASE_SHA,
+    releaseIdentitySha256: RELEASE_IDENTITY,
+    phase: 'acceptance',
+    phasePlanSha256: PLAN_SHA,
+    attemptId: ATTEMPT_ID,
+    receiptHeadSha256: RECEIPT_HEAD,
+    now: () => new Date(CREATED_AT),
+    allowTemporaryState: true,
+  });
+  const deployIntent = await store.appendIntent({
+    ...common().payload,
+    reconcileKind: 'cloud-run-job-replace',
+  }, { operationId: 'dependency-acceptance-deploy' });
+  const deployCheckpoint = await store.appendCheckpoint({
+    intentRecordSha256: deployIntent.recordSha256,
+    classification: 'after', outcome: 'applied', observationSha256: '2'.repeat(64),
+    safeResult: { kind: 'resource', state: 'present', identitySha256: '3'.repeat(64), valueSha256: '4'.repeat(64) },
+  });
+  const executeIntent = await store.appendIntent({
+    ...common().payload,
+    mutationOrdinal: 2,
+    operationAttemptId: '5'.repeat(32),
+    commandSha256: '6'.repeat(64),
+    reconcileKind: 'cloud-run-job-execute',
+    beforeSha256: '7'.repeat(64),
+    afterSha256: '8'.repeat(64),
+  }, { operationId: 'dependency-acceptance-execute' });
+  const evidence = {
+    auditLogSha256: '9'.repeat(64),
+    commandSha256: executeIntent.payload.commandSha256,
+    executionCompletionTime: '2026-09-01T07:23:46.489773Z',
+    executionCreatedAt: '2026-09-01T07:23:31.115251Z',
+    executionName: 'hkbuddy-v1-dependency-acceptance-zpxcw',
+    executionReadbackSha256: 'a'.repeat(64),
+    executionUid: '1b7e2daa-49a8-4e2e-8813-5de165d60c1d',
+    failedCount: 1,
+    httpStatus: 200,
+    job: 'hkbuddy-v1-dependency-acceptance',
+    jobGeneration: 2,
+    jobReadbackSha256: 'b'.repeat(64),
+    jobUid: '12d057cc-bcf8-4192-95fa-bd7527627e46',
+    logSha256: 'c'.repeat(64),
+    operationAttemptId: executeIntent.payload.operationAttemptId,
+    platformOperationId: 'a92d7b02-9063-4a63-99c8-12f48faf7fdd',
+    project: 'motion-expert-hk-ltd-webpage',
+    region: 'asia-east2',
+    terminalReason: 'NonZeroExitCode',
+    terminalStateSha256: 'd'.repeat(64),
+  };
+  await store.appendAbort({
+    intentRecordSha256: executeIntent.recordSha256,
+    reason: 'authoritative-cloud-run-execution-failed',
+    evidence,
+  });
+
+  await assert.rejects(() => store.appendIntent({
+    ...common().payload,
+    mutationOrdinal: 3,
+  }, { operationId: 'llm-smoke-deploy' }), /journal/i);
+  await assert.rejects(() => store.appendTerminal({
+    status: 'phase-blocked', checkpointRecordSha256: deployCheckpoint.recordSha256,
+    receiptSha256: 'e'.repeat(64),
+    terminalState: {
+      code: 'WRONG_FAILURE', evidenceSha256: 'f'.repeat(64), mutationCount: 1,
+      operationId: executeIntent.operationId, phase: 'acceptance',
+    },
+    mutationCount: 1, responseLossOperationIds: [],
+  }), /journal/i);
+
+  const digest = (value) => createHash('sha256').update(value).digest('hex');
+  const evidenceSha256 = digest(canonicalJson(evidence));
+  const terminalState = {
+    code: 'CLOUD_RUN_EXECUTION_FAILED', evidenceSha256, mutationCount: 1,
+    operationId: executeIntent.operationId, phase: 'acceptance',
+  };
+  await store.appendTerminal({
+    status: 'phase-blocked', checkpointRecordSha256: deployCheckpoint.recordSha256,
+    receiptSha256: digest(canonicalJson(terminalState)),
+    terminalState,
+    mutationCount: 1, responseLossOperationIds: [],
+  });
+  assert.equal(validateJournalRecords(store.records), true);
+  await assert.rejects(() => store.appendIntent({
+    ...common().payload,
+  }, { operationId: 'dependency-acceptance-deploy' }), /journal/i);
+  await store.close();
 });
 
 test('state store reopens one matching in-flight attempt and rejects plan drift', async (t) => {

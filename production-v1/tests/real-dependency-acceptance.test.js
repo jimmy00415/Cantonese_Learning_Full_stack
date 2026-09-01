@@ -897,6 +897,56 @@ test('provider opening and functional failures still produce only safe failed ev
     assert.equal(serialized.includes('private object content'), false);
     assert.equal(serialized.includes(DATABASE_URL), false);
   });
+
+  await t.test('allowlisted staged failure preserves only completed stages and the failing stage', async () => {
+    const privateFailure = new Error(`private object content ${DATABASE_URL}`);
+    privateFailure.acceptanceStage = 'postgres-media-voice-recovery';
+    privateFailure.completedChecks = CORE_CHECKS.slice(0, -1).map((name, index) => ({
+      name,
+      status: 'pass',
+      latencyMs: index + 0.125,
+    }));
+    privateFailure.privateCredential = 'private-token';
+    const fixture = instrumentedRun({
+      runtime: { runChecks: async () => { throw privateFailure; } },
+    });
+
+    const result = await fixture.run();
+
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.publicReport.code, 'DEPENDENCY_ACCEPTANCE_FAILED');
+    assert.deepEqual(result.publicReport.checks.slice(0, -4), [
+      ...privateFailure.completedChecks,
+      { name: 'postgres-media-voice-recovery', status: 'fail' },
+    ]);
+    const serialized = JSON.stringify({ result, record: fixture.artifacts[0].record });
+    assert.equal(serialized.includes('private object content'), false);
+    assert.equal(serialized.includes('private-token'), false);
+    assert.equal(serialized.includes(DATABASE_URL), false);
+  });
+
+  await t.test('forged or impossible staged failure progress is discarded', async () => {
+    const privateFailure = new Error(`private staged error ${DATABASE_URL}`);
+    privateFailure.acceptanceStage = 'postgres-media-fencing';
+    privateFailure.completedChecks = [{
+      name: 'postgres-integrity-events', status: 'pass', latencyMs: 1,
+    }];
+    const fixture = instrumentedRun({
+      runtime: { runChecks: async () => { throw privateFailure; } },
+    });
+
+    const result = await fixture.run();
+
+    assert.equal(result.exitCode, 1);
+    assert.deepEqual(result.publicReport.checks, [
+      { name: 'acceptance-execution', status: 'fail' },
+      { name: 'gcs-prefix-cleanup', status: 'pass' },
+      { name: 'postgres-schema-cleanup', status: 'pass' },
+      { name: 'dependency-close', status: 'pass' },
+    ]);
+    assert.equal(JSON.stringify(result).includes('private staged error'), false);
+    assert.equal(JSON.stringify(result).includes(DATABASE_URL), false);
+  });
 });
 
 test('metadata attestation requires the exact dedicated acceptance service account', async (t) => {
@@ -954,18 +1004,22 @@ test('real acceptance rejects unavailable or wrong execution identity before tou
 
 test('storage ADC and bucket project ownership must match the dedicated production identity', async (t) => {
   const cases = [
-    ['well-known-file credential', { storageCredentialType: 'JWT' }, 'DEPENDENCY_GCS_IDENTITY_INVALID'],
+    ['well-known-file credential', { storageCredentialType: 'JWT' },
+      'DEPENDENCY_GCS_IDENTITY_INVALID', 'gcs-adc-identity'],
     ['cross-account credential', {
       storageClientEmail: `hkbuddy-runtime@${PROJECT_ID}.iam.gserviceaccount.com`,
-    }, 'DEPENDENCY_GCS_IDENTITY_INVALID'],
-    ['cross-project bucket', { bucketProjectNumber: '1234567890' }, 'DEPENDENCY_GCS_RESOURCE_INVALID'],
+    }, 'DEPENDENCY_GCS_IDENTITY_INVALID', 'gcs-adc-identity'],
+    ['cross-project bucket', { bucketProjectNumber: '1234567890' },
+      'DEPENDENCY_GCS_RESOURCE_INVALID', 'gcs-bucket-project'],
   ];
-  for (const [name, providerOptions, code] of cases) {
+  for (const [name, providerOptions, code, stage] of cases) {
     await t.test(name, async () => {
       const fixture = realRuntimeOptions({ provider: createFakeBucket(providerOptions) });
       const runtime = await createRealAcceptanceRuntime(fixture.options);
       await assert.rejects(runtime.runChecks(), (error) => (
         error?.code === code && error.message === code
+          && error.acceptanceStage === stage
+          && Array.isArray(error.completedChecks) && error.completedChecks.length === 0
       ));
       assert.equal(fixture.postgres.state.sql.length, 0);
       assert.equal(fixture.provider.calls.writes.length, 0);
@@ -982,6 +1036,8 @@ test('real acceptance rejects every PostgreSQL major other than 16 before acquir
   await assert.rejects(runtime.runChecks(), (error) => (
     error?.code === 'DEPENDENCY_POSTGRES_VERSION_INVALID'
       && error.message === 'DEPENDENCY_POSTGRES_VERSION_INVALID'
+      && error.acceptanceStage === 'postgres-server-version'
+      && Array.isArray(error.completedChecks) && error.completedChecks.length === 0
   ));
   assert.equal(fixture.provider.calls.writes.length, 0);
   assert.equal(fixture.postgres.state.sql.some(([, sql]) => /CREATE SCHEMA/i.test(sql)), false);
@@ -1055,6 +1111,29 @@ test('real runtime uses project-scoped attached ADC and proves intended GCS life
   assert.deepEqual([...fixture.provider.objects], []);
   assert.equal(fixture.postgres.state.schemaExists, false);
   assert.deepEqual(fixture.postgres.state.ended.sort(), [0, 1, 2, 3]);
+});
+
+test('real runtime preserves allowlisted granular media failure progress through its setup boundary', async () => {
+  const completedChecks = passChecks().slice(0, -1);
+  const fixture = realRuntimeOptions({
+    exerciseChecks: async () => {
+      const error = new Error(`private provider detail ${DATABASE_URL}`);
+      Object.defineProperties(error, {
+        acceptanceStage: { value: 'postgres-media-voice-recovery', enumerable: false },
+        completedChecks: { value: Object.freeze(completedChecks), enumerable: false },
+      });
+      throw error;
+    },
+  });
+  const runtime = await createRealAcceptanceRuntime(fixture.options);
+
+  await assert.rejects(runtime.runChecks(), (error) => (
+    error?.acceptanceStage === 'postgres-media-voice-recovery'
+      && error.completedChecks === completedChecks
+  ));
+  assert.equal(await runtime.cleanupGcsPrefix(GCS_PREFIX), 0);
+  assert.equal(await runtime.dropSchema(SCHEMA), true);
+  await runtime.close();
 });
 
 test('real runtime uses migrator only for isolated DDL and a duplicate publish preserves the first evidence object', async () => {

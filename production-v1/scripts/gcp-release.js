@@ -2634,6 +2634,221 @@ export function validateRejectedCloudRunExecutionLog(bytes, {
   });
 }
 
+function rfc3339Instant(value) {
+  return typeof value === 'string'
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3,9}Z$/u.test(value)
+    && Number.isFinite(Date.parse(value));
+}
+
+export function validateFailedCloudRunExecutionLog(bytes, {
+  expectedLogSha256, intent, job, project, region,
+} = {}) {
+  if (!Buffer.isBuffer(bytes) || bytes.length < 1 || bytes.length > 256 * 1024
+    || !DIGEST.test(String(expectedLogSha256 ?? ''))
+    || createHash('sha256').update(bytes).digest('hex') !== expectedLogSha256
+    || intent?.recordType !== 'intent'
+    || intent?.payload?.reconcileKind !== 'cloud-run-job-execute'
+    || intent?.operationId !== 'dependency-acceptance-execute'
+    || !DIGEST.test(String(intent.payload.commandSha256 ?? ''))
+    || !/^[0-9a-f]{32}$/u.test(String(intent.payload.operationAttemptId ?? ''))
+    || !/^[a-z][a-z0-9-]{0,62}$/u.test(String(job ?? ''))
+    || !/^[a-z][a-z0-9-]{4,61}[a-z0-9]$/u.test(String(project ?? ''))
+    || !/^[a-z]+-[a-z]+[0-9]$/u.test(String(region ?? ''))) {
+    throw new Error('Cloud Run failed execution evidence is invalid');
+  }
+  const text = bytes.toString('utf8');
+  if (Buffer.from(text, 'utf8').length !== bytes.length || text.includes('\u0000')) {
+    throw new Error('Cloud Run failed execution evidence is invalid');
+  }
+  const runningLines = text.split(/\r?\n/u).filter((line) => (
+    line.includes('Running [gcloud.run.jobs.execute] with arguments:')
+  ));
+  const commandLine = runningLines[0] ?? '';
+  const postPattern = new RegExp([
+    '"POST /apis/run\\.googleapis\\.com/v1/namespaces/',
+    escapeRegex(project), '/jobs/', escapeRegex(job),
+    ':run\\?alt=json HTTP/1\\.1" 200(?:\\s|$)',
+  ].join(''), 'gu');
+  const postMatches = text.match(postPattern) ?? [];
+  const describePattern = new RegExp(`gcloud run jobs executions describe (${escapeRegex(job)}-[a-z0-9](?:[a-z0-9-]{0,48}[a-z0-9])?)`, 'gu');
+  const executionNames = [...text.matchAll(describePattern)].map((match) => match[1]);
+  const uniqueExecutionNames = [...new Set(executionNames)];
+  if (runningLines.length !== 1
+    || !commandLine.includes(`--project: "${project}"`)
+    || !commandLine.includes(`--region: "${region}"`)
+    || !commandLine.includes('--wait: "True"')
+    || !commandLine.includes('--format: "json"')
+    || !commandLine.includes(`JOB: "${job}"`)
+    || postMatches.length !== 1
+    || uniqueExecutionNames.length !== 1
+    || !text.includes('(gcloud.run.jobs.execute) The execution failed.')) {
+    throw new Error('Cloud Run failed execution evidence is invalid');
+  }
+  return Object.freeze({
+    commandSha256: intent.payload.commandSha256,
+    executionName: uniqueExecutionNames[0],
+    httpStatus: 200,
+    logSha256: expectedLogSha256,
+    operationAttemptId: intent.payload.operationAttemptId,
+  });
+}
+
+export function validateFailedReleaseJobExecutionReceipt(value, {
+  expectedJob, executionName, intentCreatedAt, jobGeneration, jobUid,
+} = {}) {
+  const name = validateCloudRunExecutionIdentity(value, { job: expectedJob?.job });
+  const metadata = value?.metadata;
+  const status = value?.status;
+  const generation = positiveCanonicalInteger(
+    metadata?.labels?.['run.googleapis.com/jobGeneration'],
+  );
+  const labelledJobUid = String(metadata?.labels?.['run.googleapis.com/jobUid'] ?? '').toLowerCase();
+  const executionUid = String(metadata?.uid ?? '').toLowerCase();
+  const operationId = String(metadata?.annotations?.['run.googleapis.com/operation-id'] ?? '').toLowerCase();
+  const createdAt = metadata?.creationTimestamp;
+  const completionTime = status?.completionTime;
+  const completed = Array.isArray(status?.conditions)
+    ? status.conditions.filter(({ type } = {}) => type === 'Completed') : [];
+  const condition = completed[0];
+  const intentTime = Date.parse(intentCreatedAt);
+  const createdTime = Date.parse(createdAt);
+  const completionTimeMs = Date.parse(completionTime);
+  const zeroCounter = (key) => Object.hasOwn(status ?? {}, key)
+    ? nonnegativeInteger(status[key]) : 0;
+  if (!expectedJob || name !== executionName
+    || !UUID_V4.test(executionUid) || !UUID_V4.test(operationId)
+    || !UUID_V4.test(String(jobUid ?? '')) || labelledJobUid !== String(jobUid).toLowerCase()
+    || generation === null || generation !== jobGeneration
+    || !rfc3339Instant(createdAt) || !rfc3339Instant(completionTime)
+    || !Number.isFinite(intentTime) || createdTime < intentTime
+    || createdTime - intentTime > 5 * 60_000
+    || completionTimeMs < createdTime
+    || completionTimeMs - createdTime > (expectedJob.timeoutSeconds + 300) * 1000
+    || nonnegativeInteger(value?.spec?.taskCount) !== expectedJob.taskCount
+    || nonnegativeInteger(value?.spec?.parallelism) !== expectedJob.parallelism
+    || nonnegativeInteger(status?.failedCount) !== 1
+    || zeroCounter('succeededCount') !== 0
+    || zeroCounter('cancelledCount') !== 0
+    || zeroCounter('retriedCount') !== 0
+    || zeroCounter('runningCount') !== 0
+    || completed.length !== 1 || condition?.status !== 'False'
+    || condition?.reason !== 'NonZeroExitCode'
+    || condition?.lastTransitionTime !== completionTime) {
+    throw new Error('Cloud Run failed execution readback is invalid');
+  }
+  const terminalState = Object.freeze({
+    cancelledCount: 0,
+    completed: Object.freeze({
+      lastTransitionTime: completionTime,
+      reason: 'NonZeroExitCode',
+      status: 'False',
+      type: 'Completed',
+    }),
+    failedCount: 1,
+    retriedCount: 0,
+    runningCount: 0,
+    succeededCount: 0,
+  });
+  return Object.freeze({
+    completionTime,
+    createdAt,
+    executionName: name,
+    executionUid,
+    failedCount: 1,
+    platformOperationId: operationId,
+    terminalReason: 'NonZeroExitCode',
+    terminalStateSha256: canonicalSha256(terminalState),
+  });
+}
+
+function gcloudFileOnlyJson(text) {
+  const lines = text.split(/\r?\n/u);
+  const marker = '___FILE_ONLY___ ';
+  const first = lines.findIndex((line) => line.includes(marker));
+  if (first < 0) throw new Error('Cloud Run failed execution audit evidence is invalid');
+  const payload = [];
+  for (const line of lines.slice(first)) {
+    if (/^\d{4}-\d{2}-\d{2} /u.test(line)) {
+      const markerIndex = line.indexOf(marker);
+      if (markerIndex >= 0) {
+        const suffix = line.slice(markerIndex + marker.length);
+        if (suffix.length > 0) payload.push(suffix);
+      }
+    } else {
+      payload.push(line);
+    }
+  }
+  try { return JSON.parse(payload.join('\n')); } catch {
+    throw new Error('Cloud Run failed execution audit evidence is invalid');
+  }
+}
+
+export function validateFailedCloudRunAuditLog(bytes, {
+  expectedAuditLogSha256, expectedExecution, expectedJob, project, region,
+} = {}) {
+  if (!Buffer.isBuffer(bytes) || bytes.length < 1 || bytes.length > 1024 * 1024
+    || !DIGEST.test(String(expectedAuditLogSha256 ?? ''))
+    || createHash('sha256').update(bytes).digest('hex') !== expectedAuditLogSha256
+    || !expectedExecution || !expectedJob) {
+    throw new Error('Cloud Run failed execution audit evidence is invalid');
+  }
+  const text = bytes.toString('utf8');
+  if (Buffer.from(text, 'utf8').length !== bytes.length || text.includes('\u0000')) {
+    throw new Error('Cloud Run failed execution audit evidence is invalid');
+  }
+  const runningLines = text.split(/\r?\n/u).filter((line) => (
+    line.includes('Running [gcloud.logging.read] with arguments:')
+  ));
+  const commandLine = runningLines[0] ?? '';
+  if (runningLines.length !== 1
+    || !commandLine.includes('--format: "json"')
+    || !commandLine.includes('--limit: "100"')
+    || !commandLine.includes('--order: "asc"')
+    || !commandLine.includes(`--project: "${project}"`)
+    || !commandLine.includes(`job_name="${expectedJob.job}"`)
+    || !commandLine.includes(`execution_name"="${expectedExecution.executionName}"`)) {
+    throw new Error('Cloud Run failed execution audit evidence is invalid');
+  }
+  const entries = gcloudFileOnlyJson(text);
+  if (!Array.isArray(entries) || entries.length < 1 || entries.length > 100) {
+    throw new Error('Cloud Run failed execution audit evidence is invalid');
+  }
+  const expectedResourceName = `namespaces/${project}/executions/${expectedExecution.executionName}`;
+  const matches = entries.filter((entry) => (
+    entry?.protoPayload?.methodName === '/Jobs.RunJob'
+    && entry?.protoPayload?.resourceName === expectedResourceName
+    && entry?.labels?.['run.googleapis.com/execution_name'] === expectedExecution.executionName
+  ));
+  if (matches.length !== 1) throw new Error('Cloud Run failed execution audit evidence is invalid');
+  const entry = matches[0];
+  const expectedMessage = `Execution ${expectedExecution.executionName} has failed to complete, 0/1 tasks were a success.`;
+  if (entry.logName !== `projects/${project}/logs/cloudaudit.googleapis.com%2Fsystem_event`
+    || entry.resource?.type !== 'cloud_run_job'
+    || entry.resource?.labels?.project_id !== project
+    || entry.resource?.labels?.location !== region
+    || entry.resource?.labels?.job_name !== expectedJob.job
+    || entry.protoPayload?.status?.code !== 10
+    || entry.protoPayload?.status?.message !== expectedMessage) {
+    throw new Error('Cloud Run failed execution audit evidence is invalid');
+  }
+  const auditExecution = validateFailedReleaseJobExecutionReceipt(
+    entry.protoPayload.response,
+    {
+      expectedJob,
+      executionName: expectedExecution.executionName,
+      intentCreatedAt: expectedExecution.intentCreatedAt,
+      jobGeneration: expectedExecution.jobGeneration,
+      jobUid: expectedExecution.jobUid,
+    },
+  );
+  const comparable = ({ intentCreatedAt: ignored, jobGeneration: ignoredGeneration,
+    jobUid: ignoredUid, ...member }) => member;
+  if (!exact(comparable(expectedExecution), auditExecution)) {
+    throw new Error('Cloud Run failed execution audit evidence is invalid');
+  }
+  return Object.freeze({ auditLogSha256: expectedAuditLogSha256 });
+}
+
 function validateFailedReleaseJobAuthority(value, expected) {
   validateReleaseJobReadback(value, expected);
   const generation = positiveOrZeroInteger(value?.metadata?.generation);
@@ -5364,6 +5579,237 @@ async function closePromotionAttemptForReproof(stateStore) {
   });
 }
 
+async function readImmutableRecoveryFile(filePath, { maxBytes, message }) {
+  if (!isAbsoluteFile(filePath) || !Number.isSafeInteger(maxBytes) || maxBytes < 1) {
+    throw new Error(message);
+  }
+  const metadata = await lstat(filePath);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1
+    || metadata.size < 1 || metadata.size > maxBytes) throw new Error(message);
+  const bytes = await readFile(filePath);
+  const metadataAfter = await lstat(filePath);
+  if (bytes.length !== metadata.size || metadataAfter.size !== metadata.size
+    || metadataAfter.dev !== metadata.dev || metadataAfter.ino !== metadata.ino
+    || metadataAfter.nlink !== 1 || !metadataAfter.isFile()
+    || metadataAfter.isSymbolicLink()) throw new Error(message);
+  return bytes;
+}
+
+function failedExecutionTerminalState(evidence, mutationCount, operationId) {
+  return Object.freeze({
+    code: 'CLOUD_RUN_EXECUTION_FAILED',
+    evidenceSha256: canonicalSha256(evidence),
+    mutationCount,
+    operationId,
+    phase: 'acceptance',
+  });
+}
+
+async function appendFailedExecutionTerminal(stateStore, abortRecord) {
+  if (!stateStore || typeof stateStore.appendTerminal !== 'function'
+    || abortRecord?.recordType !== 'abort'
+    || abortRecord?.payload?.reason !== 'authoritative-cloud-run-execution-failed'
+    || abortRecord.operationId !== 'dependency-acceptance-execute') {
+    throw new Error('Cloud Run failed execution terminal is invalid');
+  }
+  const attemptId = abortRecord.attemptId ?? stateStore.attemptId;
+  const checkpoints = stateStore.records.filter((record) => (
+    record.recordType === 'checkpoint'
+    && (record.attemptId ?? attemptId) === attemptId
+  ));
+  if (checkpoints.length !== 1
+    || checkpoints[0].operationId !== 'dependency-acceptance-deploy') {
+    throw new Error('Cloud Run failed execution terminal is invalid');
+  }
+  const terminalState = failedExecutionTerminalState(
+    abortRecord.payload.evidence, checkpoints.length, abortRecord.operationId,
+  );
+  await stateStore.appendTerminal({
+    status: 'phase-blocked',
+    checkpointRecordSha256: checkpoints[0].recordSha256,
+    receiptSha256: canonicalSha256(terminalState),
+    terminalState,
+    mutationCount: checkpoints.length,
+    responseLossOperationIds: checkpoints
+      .filter(({ payload }) => ['adopted-response-loss', 'adopted-restart'].includes(payload.outcome))
+      .map((record) => record.operationId),
+  });
+  return terminalState;
+}
+
+function failedExecutionTerminalTombstone(records, plan, phasePlanSha256) {
+  if (!Array.isArray(records) || records.length < 5
+    || !DIGEST.test(String(phasePlanSha256 ?? ''))) return null;
+  const terminal = records.at(-1);
+  const abortRecord = records.at(-2);
+  if (terminal?.recordType !== 'terminal' || terminal.phase !== 'acceptance'
+    || terminal.phasePlanSha256 !== phasePlanSha256
+    || terminal.operationId !== null
+    || abortRecord?.recordType !== 'abort'
+    || abortRecord.operationId !== 'dependency-acceptance-execute'
+    || abortRecord.payload?.reason !== 'authoritative-cloud-run-execution-failed'
+    || abortRecord.phase !== 'acceptance'
+    || abortRecord.phasePlanSha256 !== phasePlanSha256
+    || abortRecord.attemptId !== terminal.attemptId) return null;
+  const attemptRecords = records.filter(({ attemptId }) => attemptId === terminal.attemptId);
+  const checkpoints = attemptRecords.filter(({ recordType }) => recordType === 'checkpoint');
+  const executeIntent = attemptRecords.find(({ recordType, operationId }) => (
+    recordType === 'intent' && operationId === 'dependency-acceptance-execute'
+  ));
+  const checkpoint = checkpoints[0];
+  const evidence = abortRecord.payload.evidence;
+  const expectedJob = plan?.expectedJobs?.['dependency-acceptance'];
+  const executeMember = plan?.operations?.find(
+    ({ id }) => id === 'dependency-acceptance-execute',
+  );
+  const terminalState = terminal.payload?.terminalState;
+  const evidenceSha256 = canonicalSha256(evidence);
+  const expectedTerminalState = failedExecutionTerminalState(
+    evidence, 1, 'dependency-acceptance-execute',
+  );
+  const responseLossOperationIds = checkpoints
+    .filter(({ payload }) => ['adopted-response-loss', 'adopted-restart'].includes(payload.outcome))
+    .map(({ operationId }) => operationId);
+  if (checkpoints.length !== 1
+    || checkpoint.operationId !== 'dependency-acceptance-deploy'
+    || checkpoint.phasePlanSha256 !== phasePlanSha256
+    || executeIntent?.phasePlanSha256 !== phasePlanSha256
+    || executeIntent?.payload?.reconcileKind !== 'cloud-run-job-execute'
+    || executeIntent.payload.commandSha256 !== canonicalSha256(executeMember?.argv)
+    || evidence?.commandSha256 !== executeIntent.payload.commandSha256
+    || evidence?.operationAttemptId !== executeIntent.payload.operationAttemptId
+    || evidence?.job !== expectedJob?.job
+    || evidence?.project !== PROJECT || evidence?.region !== REGION
+    || terminal.payload?.status !== 'phase-blocked'
+    || terminal.payload?.checkpointRecordSha256 !== checkpoint.recordSha256
+    || terminal.payload?.mutationCount !== 1
+    || terminal.payload?.receiptSha256 !== canonicalSha256(expectedTerminalState)
+    || !exact(terminalState, expectedTerminalState)
+    || terminalState.evidenceSha256 !== evidenceSha256
+    || (terminal.payload.terminalStateSha256 !== undefined
+      && terminal.payload.terminalStateSha256 !== canonicalSha256(expectedTerminalState))
+    || !exact(terminal.payload?.responseLossOperationIds, responseLossOperationIds)) return null;
+  return Object.freeze({
+    completed: Object.freeze(checkpoints.map(({ operationId }) => operationId)),
+    evidence,
+    operationId: abortRecord.operationId,
+    terminalState,
+  });
+}
+
+async function recoverFailedAcceptanceExecute({
+  stateStore, plan, intent, executor, logPath, expectedLogSha256,
+  auditLogPath, expectedAuditLogSha256,
+}) {
+  if (!stateStore || typeof stateStore.appendAbort !== 'function'
+    || typeof stateStore.appendTerminal !== 'function'
+    || intent?.recordType !== 'intent'
+    || intent?.operationId !== 'dependency-acceptance-execute'
+    || intent?.payload?.reconcileKind !== 'cloud-run-job-execute') {
+    throw new Error('Cloud Run failed execution recovery is invalid');
+  }
+  const key = 'dependency-acceptance';
+  const expectedJob = plan.expectedJobs[key];
+  const executeMember = plan.operations.find(({ id }) => id === intent.operationId);
+  if (!expectedJob || expectedJob.job !== DEPENDENCY_ACCEPTANCE_JOB || !executeMember
+    || intent.payload.commandSha256 !== canonicalSha256(executeMember.argv)) {
+    throw new Error('Cloud Run failed execution recovery is invalid');
+  }
+  const executeLogBytes = await readImmutableRecoveryFile(logPath, {
+    maxBytes: 256 * 1024,
+    message: 'Cloud Run failed execution recovery is invalid',
+  });
+  const logEvidence = validateFailedCloudRunExecutionLog(executeLogBytes, {
+    expectedLogSha256, intent, job: expectedJob.job, project: PROJECT, region: REGION,
+  });
+  const rawJob = await revalidateCheckpointedJobDeployment({
+    executor,
+    plan,
+    records: stateStore.records,
+    attemptId: stateStore.attemptId,
+    deployOperationId: `${key}-deploy`,
+    expectedJob,
+  });
+  const authority = validateReadyReleaseJobReadback(rawJob, expectedJob);
+  if (rawJob?.status?.executionCount !== 1
+    || rawJob?.status?.latestCreatedExecution?.name !== logEvidence.executionName
+    || rawJob?.status?.latestCreatedExecution?.completionStatus !== 'EXECUTION_FAILED') {
+    throw new Error('Cloud Run failed execution recovery is invalid');
+  }
+  const describeArgv = [
+    'run', 'jobs', 'executions', 'describe', logEvidence.executionName,
+    `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+  ];
+  const firstRawExecution = await executor(describeArgv);
+  const secondRawExecution = await executor(describeArgv);
+  if (!exact(firstRawExecution, secondRawExecution)) {
+    throw new Error('Cloud Run failed execution readback drifted');
+  }
+  const execution = validateFailedReleaseJobExecutionReceipt(firstRawExecution, {
+    expectedJob,
+    executionName: logEvidence.executionName,
+    intentCreatedAt: intent.createdAt,
+    jobGeneration: authority.generation,
+    jobUid: authority.uid,
+  });
+  const auditLogBytes = await readImmutableRecoveryFile(auditLogPath, {
+    maxBytes: 1024 * 1024,
+    message: 'Cloud Run failed execution recovery is invalid',
+  });
+  validateFailedCloudRunAuditLog(auditLogBytes, {
+    expectedAuditLogSha256,
+    expectedExecution: {
+      ...execution,
+      intentCreatedAt: intent.createdAt,
+      jobGeneration: authority.generation,
+      jobUid: authority.uid,
+    },
+    expectedJob,
+    project: PROJECT,
+    region: REGION,
+  });
+  const evidence = Object.freeze({
+    auditLogSha256: expectedAuditLogSha256,
+    commandSha256: logEvidence.commandSha256,
+    executionCompletionTime: execution.completionTime,
+    executionCreatedAt: execution.createdAt,
+    executionName: execution.executionName,
+    executionReadbackSha256: canonicalSha256(firstRawExecution),
+    executionUid: execution.executionUid,
+    failedCount: execution.failedCount,
+    httpStatus: logEvidence.httpStatus,
+    job: expectedJob.job,
+    jobGeneration: authority.generation,
+    jobReadbackSha256: canonicalSha256(rawJob),
+    jobUid: authority.uid,
+    logSha256: logEvidence.logSha256,
+    operationAttemptId: logEvidence.operationAttemptId,
+    platformOperationId: execution.platformOperationId,
+    project: PROJECT,
+    region: REGION,
+    terminalReason: execution.terminalReason,
+    terminalStateSha256: execution.terminalStateSha256,
+  });
+  let abortRecord;
+  try {
+    abortRecord = await stateStore.appendAbort({
+      intentRecordSha256: intent.recordSha256,
+      reason: 'authoritative-cloud-run-execution-failed',
+      evidence,
+    });
+  } catch (error) {
+    error.code = 'RELEASE_JOURNAL_WRITE_FAILED';
+    throw error;
+  }
+  try {
+    await appendFailedExecutionTerminal(stateStore, abortRecord);
+  } catch (error) {
+    error.code = 'RELEASE_JOURNAL_WRITE_FAILED';
+    throw error;
+  }
+  return evidence;
+}
+
 async function recoverRejectedAcceptanceExecute({
   stateStore, plan, intent, executor, logPath, expectedLogSha256,
 }) {
@@ -7253,6 +7699,13 @@ export async function runGcpRelease({
       finalOperationId: finalPublicMutations[0].operationId,
       mutationOperationIds: mutationMembers.map(({ id }) => id),
     }) : null;
+  const releasePhasePlanSha256 = mutationMembers.length > 0 ? canonicalSha256({
+    releaseIdentitySha256: plan.releaseIdentitySha256,
+    semanticReleaseSpecSha256: plan.semanticReleaseSpecSha256,
+    phase: selection.phase,
+    operations: selected.map(({ id, argv: operationArgv }) => ({ id, argv: operationArgv })),
+    mutationContracts: mutationPlanIdentities,
+  }) : null;
   if (mutationMembers.length > 0 && stateStore === null) {
     try {
       if (typeof openStateStore !== 'function' || typeof journalAttemptId !== 'function') {
@@ -7264,13 +7717,7 @@ export async function runGcpRelease({
         releaseSha: plan.releaseSha,
         releaseIdentitySha256: plan.releaseIdentitySha256,
         phase: selection.phase,
-        phasePlanSha256: canonicalSha256({
-          releaseIdentitySha256: plan.releaseIdentitySha256,
-          semanticReleaseSpecSha256: plan.semanticReleaseSpecSha256,
-          phase: selection.phase,
-          operations: selected.map(({ id, argv: operationArgv }) => ({ id, argv: operationArgv })),
-          mutationContracts: mutationPlanIdentities,
-        }),
+        phasePlanSha256: releasePhasePlanSha256,
         attemptId: releaseJournalAttemptId,
         receiptHeadSha256: priorReceipts.at(-1)?.receiptSha256 ?? null,
         now,
@@ -7282,11 +7729,52 @@ export async function runGcpRelease({
         throw new Error('Release journal is invalid');
       }
       releaseJournalAttemptId = stateStore.attemptId ?? releaseJournalAttemptId;
+      const failedExecutionTombstone = failedExecutionTerminalTombstone(
+        stateStore.records, plan, releasePhasePlanSha256,
+      );
+      if (failedExecutionTombstone !== null) {
+        await stateStore.close();
+        return publish(writeOutput, 1, {
+          status: 'failed', code: failedExecutionTombstone.terminalState.code,
+          tombstoned: true,
+          mutationPerformed: false, releaseSha: plan.releaseSha,
+          phase: selection.phase,
+          completed: [...failedExecutionTombstone.completed],
+          recoveredOperationId: failedExecutionTombstone.operationId,
+          evidence: failedExecutionTombstone.evidence,
+        });
+      }
       const lastTerminalIndex = stateStore.records.findLastIndex(
         (record) => record.recordType === 'terminal',
       );
       openJournalRecords = stateStore.records.slice(lastTerminalIndex + 1);
       if (openJournalRecords.length > 0) {
+        const failedExecutionAbortTail = openJournalRecords.at(-1);
+        if (failedExecutionAbortTail?.recordType === 'abort'
+          && failedExecutionAbortTail.payload?.reason
+            === 'authoritative-cloud-run-execution-failed') {
+          try {
+            await appendFailedExecutionTerminal(stateStore, failedExecutionAbortTail);
+          } catch {
+            await stateStore.close().catch(() => undefined);
+            return publish(writeOutput, 1, {
+              status: 'failed', code: 'RELEASE_JOURNAL_WRITE_FAILED',
+              mutationPerformed: false, releaseSha: plan.releaseSha,
+              phase: selection.phase, completed: [],
+            });
+          }
+          await stateStore.close();
+          return publish(writeOutput, 1, {
+            status: 'failed', code: 'CLOUD_RUN_EXECUTION_FAILURE_TERMINAL_RECOVERED',
+            mutationPerformed: false, releaseSha: plan.releaseSha,
+            phase: selection.phase,
+            completed: openJournalRecords
+              .filter(({ recordType }) => recordType === 'checkpoint')
+              .map(({ operationId }) => operationId),
+            recoveredOperationId: failedExecutionAbortTail.operationId,
+            evidence: failedExecutionAbortTail.payload.evidence,
+          });
+        }
         validateReconciliationPrefix({
           operationIds: mutationMembers.map(({ id }) => id),
           records: openJournalRecords,
@@ -7421,6 +7909,59 @@ export async function runGcpRelease({
       status: 'failed', code: 'CONTROL_PLANE_UNAVAILABLE', mutationPerformed: false,
       releaseSha: plan.releaseSha, phase: selection.phase,
     });
+  }
+  const failedExecutionLogPath = environment?.V1_FAILED_EXECUTION_LOG_PATH;
+  const failedExecutionLogSha256 = environment?.V1_FAILED_EXECUTION_LOG_SHA256;
+  const failedExecutionAuditLogPath = environment?.V1_FAILED_EXECUTION_AUDIT_LOG_PATH;
+  const failedExecutionAuditLogSha256 = environment?.V1_FAILED_EXECUTION_AUDIT_LOG_SHA256;
+  const failedExecutionRecoveryRequested = [
+    failedExecutionLogPath,
+    failedExecutionLogSha256,
+    failedExecutionAuditLogPath,
+    failedExecutionAuditLogSha256,
+  ].some((value) => value !== undefined);
+  if (failedExecutionRecoveryRequested) {
+    try {
+      if (selection.phase !== 'acceptance' || !hasOpenJournalAttempt
+        || existingJournalIntent?.operationId !== 'dependency-acceptance-execute'
+        || existingJournalIntent?.payload?.reconcileKind !== 'cloud-run-job-execute'
+        || typeof failedExecutionLogPath !== 'string'
+        || !DIGEST.test(String(failedExecutionLogSha256 ?? ''))
+        || typeof failedExecutionAuditLogPath !== 'string'
+        || !DIGEST.test(String(failedExecutionAuditLogSha256 ?? ''))) {
+        throw new Error('Cloud Run failed execution recovery request is invalid');
+      }
+      const recoveredOperationId = existingJournalIntent.operationId;
+      const evidence = await recoverFailedAcceptanceExecute({
+        stateStore,
+        plan,
+        intent: existingJournalIntent,
+        executor,
+        logPath: failedExecutionLogPath,
+        expectedLogSha256: failedExecutionLogSha256,
+        auditLogPath: failedExecutionAuditLogPath,
+        expectedAuditLogSha256: failedExecutionAuditLogSha256,
+      });
+      await stateStore.close();
+      return publish(writeOutput, 1, {
+        status: 'failed', code: 'CLOUD_RUN_EXECUTION_FAILURE_RECOVERED',
+        mutationPerformed: false, releaseSha: plan.releaseSha, phase: selection.phase,
+        completed: openJournalRecords
+          .filter(({ recordType }) => recordType === 'checkpoint')
+          .map(({ operationId }) => operationId),
+        recoveredOperationId,
+        evidence,
+      });
+    } catch (error) {
+      await stateStore?.close().catch(() => undefined);
+      return publish(writeOutput, 1, {
+        status: 'failed',
+        code: error?.code === 'RELEASE_JOURNAL_WRITE_FAILED'
+          ? error.code : 'CLOUD_RUN_EXECUTION_FAILURE_EVIDENCE_INVALID',
+        mutationPerformed: false, releaseSha: plan.releaseSha, phase: selection.phase,
+        completed: [],
+      });
+    }
   }
   const rejectedExecutionLogPath = environment?.V1_REJECTED_EXECUTION_LOG_PATH;
   const rejectedExecutionLogSha256 = environment?.V1_REJECTED_EXECUTION_LOG_SHA256;

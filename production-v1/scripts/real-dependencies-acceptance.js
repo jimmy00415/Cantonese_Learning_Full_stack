@@ -62,6 +62,27 @@ const GCS_CORE_CHECK_NAMES = Object.freeze([
   'gcs-private-full-range-head',
   'postgres-media-fencing',
 ]);
+const ACCEPTANCE_SETUP_STAGE_NAMES = Object.freeze([
+  'gcp-execution-identity',
+  'gcs-adc-identity',
+  'gcs-bucket-project',
+  'postgres-server-version',
+  'postgres-migrator-identity',
+  'acceptance-scope-freshness',
+  'gcs-scope-ownership',
+  'postgres-schema-ownership',
+  'postgres-migration',
+  'postgres-app-identity',
+  'dependency-core-checks',
+]);
+const MEDIA_FAILURE_STAGE_NAMES = Object.freeze([
+  'postgres-media-voice-recovery',
+  'postgres-media-tts-recovery',
+  'postgres-media-deletion-fencing',
+  'postgres-media-provider-revocation',
+  'postgres-media-delete-first',
+  'postgres-media-final-cleanup',
+]);
 const DEFAULT_OPERATION_DEADLINE_MS = 30_000;
 const DEFAULT_COMMAND_DEADLINE_MS = 15 * 60_000;
 const DEFAULT_CLEANUP_DEADLINE_MS = 90_000;
@@ -534,12 +555,36 @@ function hasCoreChecks(checks) {
   return GCS_CORE_CHECK_NAMES.every((name) => names.has(name));
 }
 
-function safeFailureChecks(checks, cleanup) {
+function safeFailureProgress(error) {
+  const stage = error?.acceptanceStage;
+  if (ACCEPTANCE_SETUP_STAGE_NAMES.includes(stage)
+    && Array.isArray(error?.completedChecks) && error.completedChecks.length === 0) {
+    return { checks: [], stage };
+  }
+  const stageIndex = MEDIA_FAILURE_STAGE_NAMES.includes(stage)
+    ? GCS_CORE_CHECK_NAMES.indexOf('postgres-media-fencing')
+    : GCS_CORE_CHECK_NAMES.indexOf(stage);
+  const rawCompleted = error?.completedChecks;
+  if (stageIndex < 0 || !Array.isArray(rawCompleted) || rawCompleted.length !== stageIndex) {
+    return { checks: [], stage: null };
+  }
+  const completed = rawCompleted.length === 0 ? [] : safeChecks(rawCompleted);
+  if (!completed || completed.some(({ name }, index) => name !== GCS_CORE_CHECK_NAMES[index])) {
+    return { checks: [], stage: null };
+  }
+  return { checks: completed, stage };
+}
+
+function safeFailureChecks(checks, cleanup, failureStage = null) {
   const completed = safeChecks(checks) ?? [];
   const names = new Set(completed.map(({ name }) => name));
   const append = (name, status) => {
     if (!names.has(name)) completed.push({ name, status });
   };
+  if ([...ACCEPTANCE_SETUP_STAGE_NAMES, ...GCS_CORE_CHECK_NAMES,
+    ...MEDIA_FAILURE_STAGE_NAMES].includes(failureStage)) {
+    append(failureStage, 'fail');
+  }
   append('acceptance-execution', 'fail');
   append('gcs-prefix-cleanup', cleanup.gcsPrefixObjectCount === 0 ? 'pass' : 'fail');
   append('postgres-schema-cleanup', cleanup.schemaAbsent === true ? 'pass' : 'fail');
@@ -566,7 +611,21 @@ function requireInvariant(value) {
 
 async function measure(checks, name, operation) {
   const startedAt = performance.now();
-  await operation();
+  try {
+    await operation();
+  } catch (operationError) {
+    const error = deadlineError('DEPENDENCY_ACCEPTANCE_STAGE_FAILED');
+    const failureStage = MEDIA_FAILURE_STAGE_NAMES.includes(operationError?.acceptanceStage)
+      ? operationError.acceptanceStage : name;
+    Object.defineProperties(error, {
+      acceptanceStage: { value: failureStage, enumerable: false },
+      completedChecks: {
+        value: Object.freeze(checks.map((check) => Object.freeze({ ...check }))),
+        enumerable: false,
+      },
+    });
+    throw error;
+  }
   checks.push({
     name,
     status: 'pass',
@@ -964,6 +1023,8 @@ async function runPostgresAndGcsChecks({
   });
 
   await measure(checks, 'postgres-media-fencing', async () => {
+    let mediaFailureStage = 'postgres-media-voice-recovery';
+    try {
     const voiceId = randomUUID();
     const firstVoiceKey = `${gcsPrefix}attempts/voice/${randomUUID()}`;
     const secondVoiceKey = `${gcsPrefix}attempts/voice/${randomUUID()}`;
@@ -1100,6 +1161,7 @@ async function runPostgresAndGcsChecks({
       now: addMs(recoveryNow, 4),
     });
 
+    mediaFailureStage = 'postgres-media-tts-recovery';
     const ttsKeyOne = `${gcsPrefix}attempts/tts/${randomUUID()}`;
     const ttsKeyTwo = `${gcsPrefix}attempts/tts/${randomUUID()}`;
     const ttsNow = addMs(occurredAt, 2_000);
@@ -1181,6 +1243,7 @@ async function runPostgresAndGcsChecks({
       now: addMs(ttsNow, 8),
     });
 
+    mediaFailureStage = 'postgres-media-deletion-fencing';
     const lifecycleKey = `${gcsPrefix}lifecycle/${randomUUID()}`;
     const queued = await storeOne.enqueueMediaDeletion({
       storageKey: lifecycleKey,
@@ -1315,6 +1378,7 @@ async function runPostgresAndGcsChecks({
       now: addMs(ttsNow, 32),
     });
 
+    mediaFailureStage = 'postgres-media-provider-revocation';
     const beforeWriteOwner = await storeOne.createOrResumeSession({
       tokenHash: sha256(`provider-before-write:${runId}`),
       now: addMs(ttsNow, 40),
@@ -1390,6 +1454,7 @@ async function runPostgresAndGcsChecks({
     }
     requireInvariant(beforeAttachFenced);
 
+    mediaFailureStage = 'postgres-media-delete-first';
     const deleteFirstOwner = await storeTwo.createOrResumeSession({
       tokenHash: sha256(`delete-first:${runId}`),
       now: addMs(ttsNow, 70),
@@ -1433,6 +1498,7 @@ async function runPostgresAndGcsChecks({
     requireInvariant(Number(deleteFirstState.rows[0]?.uploads) === 0
       && Number(deleteFirstState.rows[0]?.buckets) === 0);
 
+    mediaFailureStage = 'postgres-media-final-cleanup';
     const revoked = await storeOne.revokeSessionAndEnqueueMedia({
       sessionId: owner.session.id,
       now: addMs(ttsNow, 80),
@@ -1493,6 +1559,23 @@ async function runPostgresAndGcsChecks({
       && !accessible.has(recoveredTtsKey)
       && !accessible.has(beforeWriteKey)
       && !accessible.has(beforeAttachKey));
+    } catch (error) {
+      const stagedError = error instanceof Error
+        ? error : deadlineError('DEPENDENCY_ACCEPTANCE_STAGE_FAILED');
+      try {
+        Object.defineProperty(stagedError, 'acceptanceStage', {
+          value: mediaFailureStage, enumerable: false, configurable: true,
+        });
+        throw stagedError;
+      } catch (annotationError) {
+        if (annotationError === stagedError) throw annotationError;
+        const replacement = deadlineError('DEPENDENCY_ACCEPTANCE_STAGE_FAILED');
+        Object.defineProperty(replacement, 'acceptanceStage', {
+          value: mediaFailureStage, enumerable: false,
+        });
+        throw replacement;
+      }
+    }
   });
 
   requireInvariant(hasCoreChecks(checks));
@@ -1665,6 +1748,7 @@ export async function createRealAcceptanceRuntime({
   return {
     async runChecks({ signal = null } = {}) {
       activeSignal = signal;
+      let setupFailureStage = 'gcp-execution-identity';
       try {
         const identityStartedAt = performance.now();
         let executionIdentity;
@@ -1683,6 +1767,7 @@ export async function createRealAcceptanceRuntime({
         if (executionIdentity !== ACCEPTANCE_SERVICE_ACCOUNT) {
           throw deadlineError('DEPENDENCY_GCP_IDENTITY_INVALID');
         }
+        setupFailureStage = 'gcs-adc-identity';
         const storageIdentityStartedAt = performance.now();
         const storageIdentity = await withDeadline(
           () => attestStorageAdcIdentity(storage),
@@ -1695,6 +1780,7 @@ export async function createRealAcceptanceRuntime({
         if (storageIdentity !== ACCEPTANCE_SERVICE_ACCOUNT) {
           throw deadlineError('DEPENDENCY_GCS_IDENTITY_INVALID');
         }
+        setupFailureStage = 'gcs-bucket-project';
         await gcsClient.assertBucketIdentity();
         const identityLatencyMs = Math.max(0, performance.now() - identityStartedAt);
         const storageIdentityLatencyMs = Math.max(0, performance.now() - storageIdentityStartedAt);
@@ -1708,11 +1794,13 @@ export async function createRealAcceptanceRuntime({
           { name: 'gcs-adc-identity', status: 'pass', latencyMs: storageIdentityLatencyMs },
           { name: 'gcs-bucket-project', status: 'pass', latencyMs: storageIdentityLatencyMs },
         ];
+        setupFailureStage = 'postgres-server-version';
         const version = await adminPool.query('SHOW server_version_num');
         const versionNumber = Number(version.rows[0]?.server_version_num);
         if (!Number.isSafeInteger(versionNumber) || versionNumber < 160_000 || versionNumber >= 170_000) {
           throw deadlineError('DEPENDENCY_POSTGRES_VERSION_INVALID');
         }
+        setupFailureStage = 'postgres-migrator-identity';
         const migratorIdentity = await adminPool.query(`
           SELECT current_user AS current_user,
             has_schema_privilege(current_user, 'public', 'CREATE') AS can_create_schema,
@@ -1721,6 +1809,7 @@ export async function createRealAcceptanceRuntime({
         if (migratorIdentity.rows[0]?.current_user !== MIGRATOR_DATABASE_USER) {
           throw deadlineError('DEPENDENCY_POSTGRES_IDENTITY_INVALID');
         }
+        setupFailureStage = 'acceptance-scope-freshness';
         const existingSchema = await adminPool.query(
           'SELECT count(*)::int AS count FROM pg_namespace WHERE nspname = $1',
           [schema],
@@ -1731,6 +1820,7 @@ export async function createRealAcceptanceRuntime({
         if (await prefixObjectCount({ stopAfterFirst: true }) !== 0) {
           throw new Error('Acceptance GCS prefix is not fresh');
         }
+        setupFailureStage = 'gcs-scope-ownership';
         gcsOwnershipState = 'ambiguous';
         try {
           await gcsClient.putObject({
@@ -1751,6 +1841,7 @@ export async function createRealAcceptanceRuntime({
           throw gcsError('DEPENDENCY_GCS_OWNERSHIP_INVALID');
         }
         gcsOwnershipState = 'owned';
+        setupFailureStage = 'postgres-schema-ownership';
         schemaOwnershipState = 'ambiguous';
         try {
           await adminPool.query(ownedSchemaCreation);
@@ -1765,6 +1856,7 @@ export async function createRealAcceptanceRuntime({
           throw deadlineError('DEPENDENCY_POSTGRES_OWNERSHIP_INVALID');
         }
         schemaOwnershipState = 'owned';
+        setupFailureStage = 'postgres-migration';
         const migration = await withDeadline((operationSignal) => readMigration({ signal: operationSignal }), {
           timeoutMs: operationDeadlineMs,
           code: 'DEPENDENCY_OPERATION_DEADLINE_EXCEEDED',
@@ -1777,6 +1869,7 @@ export async function createRealAcceptanceRuntime({
         await migratorPool.query(`GRANT USAGE ON SCHEMA "${schema}" TO "${APP_DATABASE_USER}"`);
         await migratorPool.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA "${schema}" TO "${APP_DATABASE_USER}"`);
         await migratorPool.query(`GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA "${schema}" TO "${APP_DATABASE_USER}"`);
+        setupFailureStage = 'postgres-app-identity';
         const appIdentity = await poolOne.query(`
           SELECT current_user AS current_user,
             has_schema_privilege(current_user, $1, 'CREATE') AS can_create_schema,
@@ -1787,6 +1880,7 @@ export async function createRealAcceptanceRuntime({
           || appIdentity.rows[0]?.can_create_database !== false) {
           throw deadlineError('DEPENDENCY_POSTGRES_IDENTITY_INVALID');
         }
+        setupFailureStage = 'dependency-core-checks';
         const dependencyChecks = await exerciseChecks({
           stores: [storeOne, storeTwo],
           pools: [poolOne, poolTwo],
@@ -1797,6 +1891,26 @@ export async function createRealAcceptanceRuntime({
           signal: activeSignal,
         });
         return [...identityChecks, ...dependencyChecks];
+      } catch (error) {
+        if ([...GCS_CORE_CHECK_NAMES, ...MEDIA_FAILURE_STAGE_NAMES]
+          .includes(error?.acceptanceStage)) throw error;
+        const safeError = error instanceof Error
+          ? error : deadlineError('DEPENDENCY_ACCEPTANCE_STAGE_FAILED');
+        try {
+          Object.defineProperties(safeError, {
+            acceptanceStage: { value: setupFailureStage, enumerable: false, configurable: true },
+            completedChecks: { value: Object.freeze([]), enumerable: false, configurable: true },
+          });
+          throw safeError;
+        } catch (annotationError) {
+          if (annotationError === safeError) throw annotationError;
+          const replacement = deadlineError('DEPENDENCY_ACCEPTANCE_STAGE_FAILED');
+          Object.defineProperties(replacement, {
+            acceptanceStage: { value: setupFailureStage, enumerable: false },
+            completedChecks: { value: Object.freeze([]), enumerable: false },
+          });
+          throw replacement;
+        }
       } finally {
         activeSignal = null;
       }
@@ -2237,6 +2351,7 @@ export async function runRealDependencyAcceptance({
 
   let runtime = null;
   let checks = [];
+  let failureStage = null;
   let functionalSuccess = false;
   const cleanup = {
     gcsPrefixObjectCount: null,
@@ -2270,7 +2385,10 @@ export async function runRealDependencyAcceptance({
       commandDeadlineMs,
     );
     functionalSuccess = Boolean(safeChecks(checks) && hasCoreChecks(checks));
-  } catch {
+  } catch (error) {
+    const progress = safeFailureProgress(error);
+    checks = progress.checks;
+    failureStage = progress.stage;
     functionalSuccess = false;
   } finally {
     commandBudget.dispose();
@@ -2329,7 +2447,7 @@ export async function runRealDependencyAcceptance({
     gcsIdentitySha256: config.gcsIdentitySha256,
     schema: config.schema,
     gcsPrefix: config.gcsPrefix,
-    checks: result ? safeChecks(checks) : safeFailureChecks(checks, cleanup),
+    checks: result ? safeChecks(checks) : safeFailureChecks(checks, cleanup, failureStage),
     schemaAbsent: cleanup.schemaAbsent,
     gcsPrefixObjectCount: cleanup.gcsPrefixObjectCount,
     result,
