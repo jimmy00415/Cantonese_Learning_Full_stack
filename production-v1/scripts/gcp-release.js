@@ -5313,9 +5313,17 @@ async function recoverRejectedAcceptanceExecute({
     || metadata.size > 128 * 1024) {
     throw new Error('Cloud Run rejection recovery is invalid');
   }
-  const logBytes = await readBoundedOrdinaryFile(logPath, {
-    expectedByteLength: metadata.size, maximumBytes: 128 * 1024,
-  });
+  // Windows Store virtualization can make AppData's canonical parent differ from its visible
+  // pathname. The immutable expected digest, bounded size, and before/after file identity still
+  // bind this external gcloud log without weakening ordinary release-artifact reads.
+  const logBytes = await readFile(logPath);
+  const metadataAfter = await lstat(logPath);
+  if (logBytes.length !== metadata.size || metadataAfter.size !== metadata.size
+    || metadataAfter.dev !== metadata.dev || metadataAfter.ino !== metadata.ino
+    || metadataAfter.nlink !== metadata.nlink || !metadataAfter.isFile()
+    || metadataAfter.isSymbolicLink()) {
+    throw new Error('Cloud Run rejection recovery is invalid');
+  }
   const rejection = validateRejectedCloudRunExecutionLog(logBytes, {
     expectedLogSha256, intent, job: expectedJob.job, project: PROJECT, region: REGION,
   });
