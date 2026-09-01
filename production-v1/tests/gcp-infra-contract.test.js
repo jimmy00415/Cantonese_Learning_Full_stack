@@ -5408,6 +5408,77 @@ test('database user creation requires an exact CREATE_USER operation identity', 
   }
 });
 
+test('database user readback resolves the live list summary through users.get', async () => {
+  const contract = await contractFixture();
+  const password = Buffer.alloc(32, 7).toString('base64url');
+  const context = {
+    sensitive: {
+      databaseUrl: `postgresql://hkbuddy_app:${password}@10.25.0.3:5432/hkbuddy_v1?sslmode=require`,
+    },
+  };
+  const exactOperation = {
+    kind: 'sql#operation', name: 'create-user-operation', operationType: 'CREATE_USER',
+    status: 'DONE', targetId: GCP_IDENTITY.cloudSqlInstance, targetProject: PROJECT,
+  };
+  const listSummary = {
+    kind: 'sql#usersList',
+    items: [{
+      kind: 'sql#user', etag: 'summary-etag', name: 'hkbuddy_app', host: '',
+      instance: GCP_IDENTITY.cloudSqlInstance, project: PROJECT,
+    }],
+  };
+  const detail = {
+    ...listSummary.items[0], etag: 'detail-etag',
+    databaseRoles: ['pg_read_all_data', 'pg_write_all_data'],
+  };
+  const requests = [];
+  const plane = new GcpControlPlane({
+    contract, notificationChannel: CHANNEL,
+    gcloud: async () => { throw new Error('gcloud must not run'); },
+    request: async (input) => {
+      requests.push(input);
+      if (input.method === 'POST') return exactOperation;
+      if (input.url.endsWith('/users/hkbuddy_app')) return detail;
+      if (input.url.endsWith('/users')) return listSummary;
+      throw new Error(`unexpected request ${input.method} ${input.url}`);
+    },
+  });
+
+  await plane.create('db-user:hkbuddy_app', context);
+  const readback = await plane.read('db-user:hkbuddy_app');
+
+  assert.equal(readback.status, 'present');
+  assert.equal(plane.compare('db-user:hkbuddy_app', readback.value), true);
+  assert.deepEqual(requests.slice(1), [
+    {
+      method: 'GET',
+      url: `https://sqladmin.googleapis.com/sql/v1beta4/projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}/users`,
+    },
+    {
+      method: 'GET',
+      url: `https://sqladmin.googleapis.com/sql/v1beta4/projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}/users/hkbuddy_app`,
+    },
+  ]);
+
+  for (const property of ['type', 'iamStatus']) {
+    const malformed = new GcpControlPlane({
+      contract, notificationChannel: CHANNEL,
+      gcloud: async () => { throw new Error('gcloud must not run'); },
+      request: async (input) => {
+        if (input.method === 'POST') return exactOperation;
+        if (input.url.endsWith('/users/hkbuddy_app')) {
+          return { ...detail, [property]: undefined };
+        }
+        if (input.url.endsWith('/users')) return listSummary;
+        throw new Error(`unexpected request ${input.method} ${input.url}`);
+      },
+    });
+    await malformed.create('db-user:hkbuddy_app', context);
+    const malformedReadback = await malformed.read('db-user:hkbuddy_app');
+    assert.equal(malformed.compare('db-user:hkbuddy_app', malformedReadback.value), false, property);
+  }
+});
+
 test('live gcloud bucket metadata binds to exact Storage JSON project ownership for both bucket classes', async (t) => {
   for (const [id, bucket, restValue] of [
     ['bucket', GCP_IDENTITY.bucket, exactBucket()],

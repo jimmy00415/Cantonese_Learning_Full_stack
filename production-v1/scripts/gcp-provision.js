@@ -4173,12 +4173,26 @@ export class GcpControlPlane {
       if (marker.status !== 'present') return { status: 'unknown', code: 'DB_USER_BINDING_AMBIGUOUS' };
       this.cache.set(`secret-version:${GCP_IDENTITY.secrets.bootstrap}`, marker.value);
     }
-    return { status: 'present', value: matches[0] };
+    const detail = await this.#rest({
+      method: 'GET',
+      url: `https://sqladmin.googleapis.com/sql/v1beta4/projects/${PROJECT}/instances/${GCP_IDENTITY.cloudSqlInstance}/users/${encodeURIComponent(user)}`,
+    });
+    if (!plainComputeRow(detail)) throw commandError('LIST_RESPONSE_AMBIGUOUS');
+    return {
+      status: 'present',
+      value: {
+        ...detail,
+        ...(Object.hasOwn(detail, 'type') ? {} : { type: 'BUILT_IN' }),
+        ...(Object.hasOwn(detail, 'iamStatus') ? {} : { iamStatus: 'IAM_STATUS_UNSPECIFIED' }),
+      },
+    };
   }
 
   #compareDatabaseUser(user, value) {
     const definition = this.contract.resources.cloudSql.users.find(({ name }) => name === user);
-    return value.name === user && value.type === 'BUILT_IN'
+    return value.kind === 'sql#user' && value.name === user && value.host === ''
+      && value.instance === GCP_IDENTITY.cloudSqlInstance && value.project === PROJECT
+      && value.type === 'BUILT_IN' && value.iamStatus === 'IAM_STATUS_UNSPECIFIED'
       && exact([...(value.databaseRoles ?? [])].sort(), [...definition.databaseRoles].sort())
       && !value.databaseRoles.includes('roles/cloudsql.admin')
       && (user !== 'hkbuddy_app' || !value.databaseRoles.includes('cloudsqlsuperuser'));
