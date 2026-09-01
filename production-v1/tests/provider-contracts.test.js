@@ -163,6 +163,7 @@ test('Vertex AI uses ADC generateContent and normalizes candidate text without e
   const body = JSON.parse(request.init.body);
   assert.equal(request.url, 'https://aiplatform.googleapis.com/v1/projects/motion-expert-hk-ltd-webpage/locations/global/publishers/google/models/gemini-2.5-flash:generateContent');
   assert.deepEqual(body.generationConfig.responseMimeType, 'application/json');
+  assert.equal(Object.hasOwn(body.generationConfig, 'thinkingConfig'), false);
   assert.match(body.systemInstruction.parts[0].text, /one strict JSON object/i);
   assert.match(body.contents.at(-1).parts[0].text, /untrusted_reference_data/);
   assert.deepEqual(result, {
@@ -688,6 +689,8 @@ test('confirmed provider smoke emits one strict commit/config-bound immutable ev
   assert.equal(gitCalls, 2);
   assert.equal(records.length, 1);
   assert.match(requestedBody, /\{\\"ok\\":true\}/);
+  assert.equal(JSON.parse(requestedBody).generationConfig.maxOutputTokens, 64);
+  assert.deepEqual(JSON.parse(requestedBody).generationConfig.thinkingConfig, { thinkingBudget: 0 });
   const record = records[0];
   assert.deepEqual(Object.keys(record).sort(), [
     'artifactSha256', 'capability', 'commitSha', 'contractVersion', 'httpClass',

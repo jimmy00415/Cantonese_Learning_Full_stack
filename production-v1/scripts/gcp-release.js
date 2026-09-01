@@ -57,6 +57,12 @@ const DEPENDENCY_ACCEPTANCE_JOB = GCP_IDENTITY.jobs.dependencies;
 const LLM_SMOKE_JOB = GCP_IDENTITY.jobs.llm;
 const ASR_SMOKE_JOB = GCP_IDENTITY.jobs.asr;
 const TTS_SMOKE_JOB = GCP_IDENTITY.jobs.tts;
+const FAILED_ACCEPTANCE_EXECUTION_JOBS = Object.freeze({
+  'dependency-acceptance': DEPENDENCY_ACCEPTANCE_JOB,
+  'llm-smoke': LLM_SMOKE_JOB,
+  'asr-smoke': ASR_SMOKE_JOB,
+  'tts-smoke': TTS_SMOKE_JOB,
+});
 const REPOSITORY = GCP_IDENTITY.repository;
 const MEDIA_BUCKET = GCP_IDENTITY.bucket;
 const BUILD_SERVICE_ACCOUNT = `projects/${PROJECT}/serviceAccounts/${GCP_IDENTITY.serviceAccounts.build}`;
@@ -81,6 +87,14 @@ const DOCKER_BUILDER = 'gcr.io/cloud-builders/docker@sha256:2e8d40d8e48dc14fab42
 const ACCEPTANCE_RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function failedAcceptanceExecutionContract(operationId) {
+  if (typeof operationId !== 'string' || !operationId.endsWith('-execute')) return null;
+  const key = operationId.slice(0, -'-execute'.length);
+  const job = FAILED_ACCEPTANCE_EXECUTION_JOBS[key];
+  if (!job || operationId !== `${key}-execute`) return null;
+  return Object.freeze({ deployOperationId: `${key}-deploy`, job, key, operationId });
+}
 const PHASES = Object.freeze([
   'build', 'migration', 'inventory', 'acceptance', 'collect', 'evidence', 'candidate',
   'readiness', 'workload', 'mobile', 'candidate-cleanup', 'promote', 'rollback',
@@ -2643,12 +2657,13 @@ function rfc3339Instant(value) {
 export function validateFailedCloudRunExecutionLog(bytes, {
   expectedLogSha256, intent, job, project, region,
 } = {}) {
+  const acceptanceExecution = failedAcceptanceExecutionContract(intent?.operationId);
   if (!Buffer.isBuffer(bytes) || bytes.length < 1 || bytes.length > 256 * 1024
     || !DIGEST.test(String(expectedLogSha256 ?? ''))
     || createHash('sha256').update(bytes).digest('hex') !== expectedLogSha256
     || intent?.recordType !== 'intent'
     || intent?.payload?.reconcileKind !== 'cloud-run-job-execute'
-    || intent?.operationId !== 'dependency-acceptance-execute'
+    || acceptanceExecution === null || acceptanceExecution.job !== job
     || !DIGEST.test(String(intent.payload.commandSha256 ?? ''))
     || !/^[0-9a-f]{32}$/u.test(String(intent.payload.operationAttemptId ?? ''))
     || !/^[a-z][a-z0-9-]{0,62}$/u.test(String(job ?? ''))
@@ -5605,11 +5620,31 @@ function failedExecutionTerminalState(evidence, mutationCount, operationId) {
   });
 }
 
-async function appendFailedExecutionTerminal(stateStore, abortRecord) {
+function failedExecutionCheckpointOperationIds(plan, operationId) {
+  const contract = failedAcceptanceExecutionContract(operationId);
+  if (contract === null || !Array.isArray(plan?.operations)) return null;
+  const operationIds = plan.operations
+    .filter((member) => member.phase === 'acceptance' && operationMayMutate(member.id))
+    .map(({ id }) => id);
+  const executeIndex = operationIds.indexOf(operationId);
+  if (executeIndex < 1 || operationIds[executeIndex - 1] !== contract.deployOperationId) {
+    return null;
+  }
+  return Object.freeze(operationIds.slice(0, executeIndex));
+}
+
+async function appendFailedExecutionTerminal(stateStore, abortRecord, plan) {
+  const contract = failedAcceptanceExecutionContract(abortRecord?.operationId);
+  const expectedJob = contract === null ? null : plan?.expectedJobs?.[contract.key];
+  const expectedCheckpointOperationIds = failedExecutionCheckpointOperationIds(
+    plan, abortRecord?.operationId,
+  );
   if (!stateStore || typeof stateStore.appendTerminal !== 'function'
     || abortRecord?.recordType !== 'abort'
     || abortRecord?.payload?.reason !== 'authoritative-cloud-run-execution-failed'
-    || abortRecord.operationId !== 'dependency-acceptance-execute') {
+    || contract === null || expectedJob?.job !== contract.job
+    || abortRecord.payload?.evidence?.job !== contract.job
+    || expectedCheckpointOperationIds === null) {
     throw new Error('Cloud Run failed execution terminal is invalid');
   }
   const attemptId = abortRecord.attemptId ?? stateStore.attemptId;
@@ -5617,16 +5652,16 @@ async function appendFailedExecutionTerminal(stateStore, abortRecord) {
     record.recordType === 'checkpoint'
     && (record.attemptId ?? attemptId) === attemptId
   ));
-  if (checkpoints.length !== 1
-    || checkpoints[0].operationId !== 'dependency-acceptance-deploy') {
+  if (!exact(checkpoints.map(({ operationId }) => operationId), expectedCheckpointOperationIds)) {
     throw new Error('Cloud Run failed execution terminal is invalid');
   }
+  const checkpoint = checkpoints.at(-1);
   const terminalState = failedExecutionTerminalState(
     abortRecord.payload.evidence, checkpoints.length, abortRecord.operationId,
   );
   await stateStore.appendTerminal({
     status: 'phase-blocked',
-    checkpointRecordSha256: checkpoints[0].recordSha256,
+    checkpointRecordSha256: checkpoint.recordSha256,
     receiptSha256: canonicalSha256(terminalState),
     terminalState,
     mutationCount: checkpoints.length,
@@ -5642,11 +5677,12 @@ function failedExecutionTerminalTombstone(records, plan, phasePlanSha256) {
     || !DIGEST.test(String(phasePlanSha256 ?? ''))) return null;
   const terminal = records.at(-1);
   const abortRecord = records.at(-2);
+  const contract = failedAcceptanceExecutionContract(abortRecord?.operationId);
   if (terminal?.recordType !== 'terminal' || terminal.phase !== 'acceptance'
     || terminal.phasePlanSha256 !== phasePlanSha256
     || terminal.operationId !== null
     || abortRecord?.recordType !== 'abort'
-    || abortRecord.operationId !== 'dependency-acceptance-execute'
+    || contract === null
     || abortRecord.payload?.reason !== 'authoritative-cloud-run-execution-failed'
     || abortRecord.phase !== 'acceptance'
     || abortRecord.phasePlanSha256 !== phasePlanSha256
@@ -5654,35 +5690,43 @@ function failedExecutionTerminalTombstone(records, plan, phasePlanSha256) {
   const attemptRecords = records.filter(({ attemptId }) => attemptId === terminal.attemptId);
   const checkpoints = attemptRecords.filter(({ recordType }) => recordType === 'checkpoint');
   const executeIntent = attemptRecords.find(({ recordType, operationId }) => (
-    recordType === 'intent' && operationId === 'dependency-acceptance-execute'
+    recordType === 'intent' && operationId === contract.operationId
   ));
-  const checkpoint = checkpoints[0];
+  const checkpoint = checkpoints.at(-1);
   const evidence = abortRecord.payload.evidence;
-  const expectedJob = plan?.expectedJobs?.['dependency-acceptance'];
+  const expectedJob = plan?.expectedJobs?.[contract.key];
   const executeMember = plan?.operations?.find(
-    ({ id }) => id === 'dependency-acceptance-execute',
+    ({ id }) => id === contract.operationId,
+  );
+  const expectedCheckpointOperationIds = failedExecutionCheckpointOperationIds(
+    plan, contract.operationId,
   );
   const terminalState = terminal.payload?.terminalState;
   const evidenceSha256 = canonicalSha256(evidence);
   const expectedTerminalState = failedExecutionTerminalState(
-    evidence, 1, 'dependency-acceptance-execute',
+    evidence, checkpoints.length, contract.operationId,
   );
   const responseLossOperationIds = checkpoints
     .filter(({ payload }) => ['adopted-response-loss', 'adopted-restart'].includes(payload.outcome))
     .map(({ operationId }) => operationId);
-  if (checkpoints.length !== 1
-    || checkpoint.operationId !== 'dependency-acceptance-deploy'
+  if (expectedCheckpointOperationIds === null
+    || !exact(checkpoints.map(({ operationId }) => operationId), expectedCheckpointOperationIds)
+    || checkpoint.operationId !== contract.deployOperationId
+    || attemptRecords.some((record) => (
+      record.phase !== 'acceptance' || record.phasePlanSha256 !== phasePlanSha256
+    ))
     || checkpoint.phasePlanSha256 !== phasePlanSha256
     || executeIntent?.phasePlanSha256 !== phasePlanSha256
     || executeIntent?.payload?.reconcileKind !== 'cloud-run-job-execute'
     || executeIntent.payload.commandSha256 !== canonicalSha256(executeMember?.argv)
+    || abortRecord.payload?.intentRecordSha256 !== executeIntent.recordSha256
     || evidence?.commandSha256 !== executeIntent.payload.commandSha256
     || evidence?.operationAttemptId !== executeIntent.payload.operationAttemptId
-    || evidence?.job !== expectedJob?.job
+    || expectedJob?.job !== contract.job || evidence?.job !== expectedJob.job
     || evidence?.project !== PROJECT || evidence?.region !== REGION
     || terminal.payload?.status !== 'phase-blocked'
     || terminal.payload?.checkpointRecordSha256 !== checkpoint.recordSha256
-    || terminal.payload?.mutationCount !== 1
+    || terminal.payload?.mutationCount !== checkpoints.length
     || terminal.payload?.receiptSha256 !== canonicalSha256(expectedTerminalState)
     || !exact(terminalState, expectedTerminalState)
     || terminalState.evidenceSha256 !== evidenceSha256
@@ -5701,17 +5745,18 @@ async function recoverFailedAcceptanceExecute({
   stateStore, plan, intent, executor, logPath, expectedLogSha256,
   auditLogPath, expectedAuditLogSha256,
 }) {
+  const contract = failedAcceptanceExecutionContract(intent?.operationId);
   if (!stateStore || typeof stateStore.appendAbort !== 'function'
     || typeof stateStore.appendTerminal !== 'function'
     || intent?.recordType !== 'intent'
-    || intent?.operationId !== 'dependency-acceptance-execute'
+    || contract === null
     || intent?.payload?.reconcileKind !== 'cloud-run-job-execute') {
     throw new Error('Cloud Run failed execution recovery is invalid');
   }
-  const key = 'dependency-acceptance';
+  const key = contract.key;
   const expectedJob = plan.expectedJobs[key];
   const executeMember = plan.operations.find(({ id }) => id === intent.operationId);
-  if (!expectedJob || expectedJob.job !== DEPENDENCY_ACCEPTANCE_JOB || !executeMember
+  if (!expectedJob || expectedJob.job !== contract.job || !executeMember
     || intent.payload.commandSha256 !== canonicalSha256(executeMember.argv)) {
     throw new Error('Cloud Run failed execution recovery is invalid');
   }
@@ -5802,7 +5847,7 @@ async function recoverFailedAcceptanceExecute({
     throw error;
   }
   try {
-    await appendFailedExecutionTerminal(stateStore, abortRecord);
+    await appendFailedExecutionTerminal(stateStore, abortRecord, plan);
   } catch (error) {
     error.code = 'RELEASE_JOURNAL_WRITE_FAILED';
     throw error;
@@ -7754,7 +7799,7 @@ export async function runGcpRelease({
           && failedExecutionAbortTail.payload?.reason
             === 'authoritative-cloud-run-execution-failed') {
           try {
-            await appendFailedExecutionTerminal(stateStore, failedExecutionAbortTail);
+            await appendFailedExecutionTerminal(stateStore, failedExecutionAbortTail, plan);
           } catch {
             await stateStore.close().catch(() => undefined);
             return publish(writeOutput, 1, {
@@ -7923,7 +7968,7 @@ export async function runGcpRelease({
   if (failedExecutionRecoveryRequested) {
     try {
       if (selection.phase !== 'acceptance' || !hasOpenJournalAttempt
-        || existingJournalIntent?.operationId !== 'dependency-acceptance-execute'
+        || failedAcceptanceExecutionContract(existingJournalIntent?.operationId) === null
         || existingJournalIntent?.payload?.reconcileKind !== 'cloud-run-job-execute'
         || typeof failedExecutionLogPath !== 'string'
         || !DIGEST.test(String(failedExecutionLogSha256 ?? ''))

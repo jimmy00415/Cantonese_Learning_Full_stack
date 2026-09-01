@@ -1211,6 +1211,107 @@ test('an authoritative failed Cloud Run execution must terminalize and tombstone
   await store.close();
 });
 
+test('state store binds a failed LLM execution to its paired deploy and full mutation prefix', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hkbuddy-state-llm-execute-failure-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const receiptDirectory = join(root, 'receipts');
+  await mkdir(receiptDirectory);
+  const store = await openReleaseStateStore({
+    receiptDirectory,
+    releaseSha: RELEASE_SHA,
+    releaseIdentitySha256: RELEASE_IDENTITY,
+    phase: 'acceptance',
+    phasePlanSha256: PLAN_SHA,
+    attemptId: ATTEMPT_ID,
+    receiptHeadSha256: RECEIPT_HEAD,
+    now: () => new Date(CREATED_AT),
+    allowTemporaryState: true,
+  });
+  const appendCheckpoint = async ({ operationId, mutationOrdinal, reconcileKind }) => {
+    const digit = String(mutationOrdinal);
+    const intent = await store.appendIntent({
+      ...common().payload,
+      mutationOrdinal,
+      operationAttemptId: digit.repeat(32),
+      commandSha256: digit.repeat(64),
+      reconcileKind,
+      beforeSha256: `${digit}a`.repeat(32),
+      afterSha256: `${digit}b`.repeat(32),
+    }, { operationId });
+    const checkpoint = await store.appendCheckpoint({
+      intentRecordSha256: intent.recordSha256,
+      classification: 'after', outcome: 'applied',
+      observationSha256: intent.payload.afterSha256,
+      safeResult: {
+        kind: 'resource', state: 'present',
+        identitySha256: `${digit}c`.repeat(32), valueSha256: `${digit}d`.repeat(32),
+      },
+    });
+    return { intent, checkpoint };
+  };
+  await appendCheckpoint({
+    operationId: 'dependency-acceptance-deploy', mutationOrdinal: 1,
+    reconcileKind: 'cloud-run-job-replace',
+  });
+  await appendCheckpoint({
+    operationId: 'dependency-acceptance-execute', mutationOrdinal: 2,
+    reconcileKind: 'cloud-run-job-execute',
+  });
+  const { checkpoint: llmDeployCheckpoint } = await appendCheckpoint({
+    operationId: 'llm-smoke-deploy', mutationOrdinal: 3,
+    reconcileKind: 'cloud-run-job-replace',
+  });
+  const executeIntent = await store.appendIntent({
+    ...common().payload,
+    mutationOrdinal: 4,
+    operationAttemptId: '4'.repeat(32),
+    commandSha256: '4'.repeat(64),
+    reconcileKind: 'cloud-run-job-execute',
+    beforeSha256: '4a'.repeat(32),
+    afterSha256: '4b'.repeat(32),
+  }, { operationId: 'llm-smoke-execute' });
+  const evidence = {
+    auditLogSha256: '9'.repeat(64),
+    commandSha256: executeIntent.payload.commandSha256,
+    executionCompletionTime: '2026-09-01T08:22:30.446069Z',
+    executionCreatedAt: '2026-09-01T08:22:20.881140Z',
+    executionName: 'hkbuddy-v1-llm-smoke-bdv6v',
+    executionReadbackSha256: 'a'.repeat(64),
+    executionUid: 'ad5590ab-eea7-4a47-ab8d-e65dc6377040',
+    failedCount: 1,
+    httpStatus: 200,
+    job: 'hkbuddy-v1-llm-smoke',
+    jobGeneration: 1,
+    jobReadbackSha256: 'b'.repeat(64),
+    jobUid: '12d057cc-bcf8-4192-95fa-bd7527627e46',
+    logSha256: 'c'.repeat(64),
+    operationAttemptId: executeIntent.payload.operationAttemptId,
+    platformOperationId: 'e6319080-2839-444c-8f61-6a48ad7a42f6',
+    project: 'motion-expert-hk-ltd-webpage',
+    region: 'asia-east2',
+    terminalReason: 'NonZeroExitCode',
+    terminalStateSha256: 'd'.repeat(64),
+  };
+  await store.appendAbort({
+    intentRecordSha256: executeIntent.recordSha256,
+    reason: 'authoritative-cloud-run-execution-failed',
+    evidence,
+  });
+  const evidenceSha256 = createHash('sha256').update(canonicalJson(evidence)).digest('hex');
+  const terminalState = {
+    code: 'CLOUD_RUN_EXECUTION_FAILED', evidenceSha256, mutationCount: 3,
+    operationId: executeIntent.operationId, phase: 'acceptance',
+  };
+  await store.appendTerminal({
+    status: 'phase-blocked', checkpointRecordSha256: llmDeployCheckpoint.recordSha256,
+    receiptSha256: createHash('sha256').update(canonicalJson(terminalState)).digest('hex'),
+    terminalState,
+    mutationCount: 3, responseLossOperationIds: [],
+  });
+  assert.equal(validateJournalRecords(store.records), true);
+  await store.close();
+});
+
 test('state store reopens one matching in-flight attempt and rejects plan drift', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'hkbuddy-state-restart-'));
   t.after(() => rm(root, { recursive: true, force: true }));

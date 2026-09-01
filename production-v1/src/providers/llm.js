@@ -183,6 +183,9 @@ function buildRequest(config, input) {
           maxOutputTokens,
           temperature: 0.2,
           responseMimeType: 'application/json',
+          ...(input.disableThinking === true
+            ? { thinkingConfig: { thinkingBudget: 0 } }
+            : {}),
         },
       },
     };

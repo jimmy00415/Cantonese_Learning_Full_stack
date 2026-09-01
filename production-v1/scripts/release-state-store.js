@@ -7,6 +7,7 @@ import { hostname, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, parse, relative, resolve } from 'node:path';
 
 import { containsForbiddenPersistedSecret } from './persisted-secret-contract.js';
+import { GCP_IDENTITY } from '../src/gcp-identity.js';
 
 const RELEASE_SHA = /^[0-9a-f]{40}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
@@ -45,11 +46,36 @@ const JOURNAL_MAX_BYTES = 1024 * 1024;
 const LOCK_MAX_BYTES = 16 * 1024;
 const STATE_ENTRY_LIMIT = 1024;
 const STATE_ENTRY_NAME_MAX_BYTES = 255;
+const FAILED_ACCEPTANCE_EXECUTION_STEPS = Object.freeze([
+  Object.freeze({ key: 'dependency-acceptance', job: GCP_IDENTITY.jobs.dependencies }),
+  Object.freeze({ key: 'llm-smoke', job: GCP_IDENTITY.jobs.llm }),
+  Object.freeze({ key: 'asr-smoke', job: GCP_IDENTITY.jobs.asr }),
+  Object.freeze({ key: 'tts-smoke', job: GCP_IDENTITY.jobs.tts }),
+]);
+const ACCEPTANCE_MUTATION_OPERATION_IDS = Object.freeze(
+  FAILED_ACCEPTANCE_EXECUTION_STEPS.flatMap(({ key }) => [
+    `${key}-deploy`, `${key}-execute`,
+  ]),
+);
 const COMMON_KEYS = [
   'attemptId', 'createdAt', 'generation', 'operationId', 'payload', 'phase',
   'phasePlanSha256', 'previousRecordSha256', 'receiptHeadSha256', 'recordSha256',
   'recordType', 'releaseIdentitySha256', 'releaseSha', 'schemaVersion',
 ];
+
+function failedAcceptanceExecutionContract(operationId) {
+  const executeIndex = ACCEPTANCE_MUTATION_OPERATION_IDS.indexOf(operationId);
+  if (executeIndex < 1 || executeIndex % 2 !== 1) return null;
+  const step = FAILED_ACCEPTANCE_EXECUTION_STEPS[(executeIndex - 1) / 2];
+  if (!step || operationId !== `${step.key}-execute`) return null;
+  return Object.freeze({
+    checkpointOperationIds: Object.freeze(
+      ACCEPTANCE_MUTATION_OPERATION_IDS.slice(0, executeIndex),
+    ),
+    deployOperationId: `${step.key}-deploy`,
+    job: step.job,
+  });
+}
 
 function fail(message = 'Release journal is invalid') {
   throw new Error(message);
@@ -375,6 +401,7 @@ export function validateJournalRecords(records, { allowOpenIntent = true } = {})
     let attempt = null;
     let openIntent = null;
     let checkpointCount = 0;
+    let checkpointOperationIds = [];
     let mutationOrdinal = 0;
     let lastCheckpoint = null;
     let requiredTerminal = null;
@@ -397,6 +424,7 @@ export function validateJournalRecords(records, { allowOpenIntent = true } = {})
           receiptHeadSha256: record.receiptHeadSha256,
         };
         checkpointCount = 0;
+        checkpointOperationIds = [];
         mutationOrdinal = 0;
         lastCheckpoint = null;
       }
@@ -415,6 +443,7 @@ export function validateJournalRecords(records, { allowOpenIntent = true } = {})
         if (record.payload.observationSha256 !== openIntent.payload.afterSha256) fail();
         openIntent = null;
         checkpointCount += 1;
+        checkpointOperationIds.push(record.operationId);
         lastCheckpoint = record;
       } else if (record.recordType === 'abort') {
         if (openIntent === null || record.operationId !== openIntent.operationId
@@ -427,14 +456,17 @@ export function validateJournalRecords(records, { allowOpenIntent = true } = {})
             || record.payload.evidence.operationAttemptId
               !== openIntent.payload.operationAttemptId)) fail();
         if (record.payload.reason === 'authoritative-cloud-run-execution-failed') {
+          const contract = failedAcceptanceExecutionContract(openIntent.operationId);
           if (record.phase !== 'acceptance'
             || openIntent.payload.reconcileKind !== 'cloud-run-job-execute'
-            || openIntent.operationId !== 'dependency-acceptance-execute'
+            || contract === null
             || record.payload.evidence.commandSha256 !== openIntent.payload.commandSha256
             || record.payload.evidence.operationAttemptId
               !== openIntent.payload.operationAttemptId
-            || record.payload.evidence.job !== 'hkbuddy-v1-dependency-acceptance'
-            || lastCheckpoint?.operationId !== 'dependency-acceptance-deploy') fail();
+            || record.payload.evidence.job !== contract.job
+            || lastCheckpoint?.operationId !== contract.deployOperationId
+            || canonicalJson(checkpointOperationIds)
+              !== canonicalJson(contract.checkpointOperationIds)) fail();
           requiredTerminal = {
             checkpointCount,
             checkpointRecordSha256: lastCheckpoint.recordSha256,

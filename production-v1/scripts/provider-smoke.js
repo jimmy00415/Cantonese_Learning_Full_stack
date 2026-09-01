@@ -215,7 +215,8 @@ export async function runProviderSmoke({
       messages: [{ role: 'user', content: 'Reply with exactly {"ok":true} and no other text.' }],
       evidenceSnapshot: [],
       actionSnapshot: [],
-      maxOutputTokens: 16,
+      disableThinking: true,
+      maxOutputTokens: 64,
     }, { retryLimit: 0, totalDeadlineMs: config.llm.timeoutMs });
   } catch (error) {
     providerFailure = error;
