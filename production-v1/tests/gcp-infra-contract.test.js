@@ -6865,6 +6865,51 @@ test('Cloud Asset accepts the live numeric Secret resource and display names exa
   assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
 });
 
+test('Cloud Asset accepts only exact enabled numeric versions beneath managed Secrets', async (t) => {
+  const contract = await contractFixture();
+  const secretId = GCP_IDENTITY.secrets.dbAppUrl;
+  const secretPath = `projects/${PROJECT_NUMBER}/secrets/${secretId}`;
+  const versionPath = `${secretPath}/versions/1`;
+  const exactVersion = cloudAsset({
+    name: `//secretmanager.googleapis.com/${versionPath}`,
+    assetType: 'secretmanager.googleapis.com/SecretVersion',
+    displayName: versionPath,
+    location: 'global',
+    parentFullResourceName: `//secretmanager.googleapis.com/${secretPath}`,
+    parentAssetType: 'secretmanager.googleapis.com/Secret',
+    state: 'ENABLED',
+  });
+  const accepted = assetAuditControlPlane({ contract, assets: [exactVersion] });
+  assert.equal(await accepted.plane.auditPreMutationState(), true);
+  assert.equal(accepted.gcloudCalls.some((args) => args.includes('create') || args.includes('enable')), false);
+  assert.equal(accepted.restCalls.some(({ method }) => method !== 'GET'), false);
+
+  for (const [name, version] of [
+    ['non-numeric version', { ...exactVersion, name: exactVersion.name.replace('/versions/1', '/versions/latest') }],
+    ['foreign managed secret', {
+      ...exactVersion,
+      name: exactVersion.name.replace(secretId, 'hkbuddy-v1-foreign'),
+      displayName: exactVersion.displayName.replace(secretId, 'hkbuddy-v1-foreign'),
+      parentFullResourceName: exactVersion.parentFullResourceName.replace(secretId, 'hkbuddy-v1-foreign'),
+    }],
+    ['wrong display', { ...exactVersion, displayName: `${versionPath}/extra` }],
+    ['wrong parent', { ...exactVersion, parentFullResourceName: `${exactVersion.parentFullResourceName}/extra` }],
+    ['wrong parent type', { ...exactVersion, parentAssetType: 'cloudresourcemanager.googleapis.com/Project' }],
+    ['disabled state', { ...exactVersion, state: 'DISABLED' }],
+    ['destroyed state', { ...exactVersion, state: 'DESTROYED' }],
+  ]) {
+    await t.test(name, async () => {
+      const fixture = assetAuditControlPlane({ contract, assets: [version] });
+      await assert.rejects(
+        () => fixture.plane.auditPreMutationState(),
+        (error) => error.code === 'RESOURCE_COLLISION',
+      );
+      assert.equal(fixture.gcloudCalls.some((args) => args.includes('create') || args.includes('enable')), false);
+      assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+    });
+  }
+});
+
 test('Cloud Asset rejects Secret project aliases malformed identities displays and duplicate rows', async (t) => {
   const contract = await contractFixture();
   const secretId = GCP_IDENTITY.secrets.dbAppUrl;

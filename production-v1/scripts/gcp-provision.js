@@ -2384,6 +2384,19 @@ function exactTopLevelManagedAsset(asset, projectNumber) {
 function exactManagedDescendantAsset(asset) {
   const repository = `//artifactregistry.googleapis.com/projects/${PROJECT}/locations/asia-east2/repositories/${GCP_IDENTITY.repository}`;
   const cloudSqlInstance = cloudSqlAssetInstanceName();
+  if (asset.assetType === 'secretmanager.googleapis.com/SecretVersion') {
+    return Object.values(GCP_IDENTITY.secrets).some((secretId) => {
+      const secretPath = `projects/${PROJECT_NUMBER}/secrets/${secretId}`;
+      const secret = `//secretmanager.googleapis.com/${secretPath}`;
+      const prefix = `${secret}/versions/`;
+      const version = asset.name.startsWith(prefix) ? asset.name.slice(prefix.length) : '';
+      return canonicalPositiveInt64(version)
+        && asset.displayName === `${secretPath}/versions/${version}`
+        && asset.location === 'global' && asset.state === 'ENABLED'
+        && asset.parentFullResourceName === secret
+        && asset.parentAssetType === 'secretmanager.googleapis.com/Secret';
+    });
+  }
   if (asset.assetType === 'iam.googleapis.com/ServiceAccountKey') {
     const keyMatch = new RegExp(
       `^//iam\\.googleapis\\.com/projects/${PROJECT}/serviceAccounts/([1-9]\\d{5,30})/keys/([0-9a-f]{40})$`,
