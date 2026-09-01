@@ -6,6 +6,8 @@
 > below. As of the 2026-09-01 handoff, the V1 infrastructure is only partially
 > provisioned and no stable Production V1 URL or QR code has been released.
 
+Agent-readable resume memory: [`production-v1/AGENT_HANDOFF.md`](production-v1/AGENT_HANDOFF.md).
+
 ## Continue Production V1 on another computer
 
 ```powershell
