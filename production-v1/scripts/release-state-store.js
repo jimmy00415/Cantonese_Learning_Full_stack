@@ -106,6 +106,17 @@ function assertSafeResult(value) {
       || !DIGEST.test(String(value.valueSha256 ?? ''))) fail();
     return;
   }
+  if (value.kind === 'cloud-run-job') {
+    if (!exactKeys(value, [
+      'generation', 'identitySha256', 'job', 'kind', 'uid', 'valueSha256',
+    ])
+      || !Number.isSafeInteger(value.generation) || value.generation < 1
+      || !DIGEST.test(String(value.identitySha256 ?? ''))
+      || !/^[a-z][a-z0-9-]{0,62}$/.test(String(value.job ?? ''))
+      || !UUID_V4.test(String(value.uid ?? ''))
+      || !DIGEST.test(String(value.valueSha256 ?? ''))) fail();
+    return;
+  }
   if (value.kind === 'build') {
     if (!exactKeys(value, ['buildId', 'kind', 'receiptSha256'])
       || !UUID_V4.test(String(value.buildId ?? ''))

@@ -56,6 +56,7 @@ import {
   validateRejectedCloudRunExecutionLog,
   validateReleaseReceiptChain,
   validateReleaseJobReadback,
+  validateReadyReleaseJobReadback,
   validateServiceIamReceipt,
   validateTrafficReceipt,
   validateTask8EvidenceArtifact,
@@ -836,7 +837,12 @@ function realV1JobReadback(expected) {
   return {
     apiVersion: 'run.googleapis.com/v1',
     kind: 'Job',
-    metadata: { name: expected.job, labels: structuredClone(expected.labels) },
+    metadata: {
+      name: expected.job,
+      labels: structuredClone(expected.labels),
+      uid: '123e4567-e89b-42d3-a456-426614174000',
+      generation: 1,
+    },
     spec: {
       template: {
         metadata: {
@@ -880,6 +886,10 @@ function realV1JobReadback(expected) {
           },
         },
       },
+    },
+    status: {
+      observedGeneration: 1,
+      conditions: [{ type: 'Ready', status: 'True' }],
     },
   };
 }
@@ -1466,6 +1476,24 @@ function secretVersionSafeResult(expected) {
     name: `projects/${PROJECT}/secrets/${expected.secret}`,
     objectSha256: expected.objectSha256,
     version: expected.secretVersion,
+  };
+}
+
+function cloudRunJobSafeResult(plan, operationId, job) {
+  const expected = operationId === 'migration-deploy' ? plan.expectedMigrationJob
+    : plan.expectedJobs[operationId.slice(0, -'-deploy'.length)];
+  return {
+    generation: job.metadata.generation,
+    identitySha256: releaseMutationPlanIdentity(
+      plan, plan.operations.find(({ id }) => id === operationId),
+    ).specSha256,
+    job: expected.job,
+    kind: 'cloud-run-job',
+    uid: job.metadata.uid,
+    valueSha256: createHash('sha256').update(JSON.stringify(canonicalFixture({
+      job: expected,
+      kind: 'cloud-run-job',
+    }))).digest('hex'),
   };
 }
 
@@ -2102,7 +2130,7 @@ test('acceptance execution reads back each exact Job identity before running it'
     input,
     execute: async (argv) => {
       calls.push(argv);
-      if (argv[2] === 'describe') return structuredClone(expectedByJob[argv[3]]);
+      if (argv[2] === 'describe') return realV1JobReadback(expectedByJob[argv[3]]);
       if (argv[2] === 'deploy') return { done: true };
       if (argv[2] === 'execute') return {
         apiVersion: 'run.googleapis.com/v1',
@@ -2163,6 +2191,47 @@ test('dependency acceptance accepts the real v1 directory mount plus secret item
     mutate(drift);
     assert.throws(() => validateReleaseJobReadback(drift, expected), /Job readback/i);
   }
+});
+
+test('authoritative Job readiness requires one stable UID, observed generation, and Ready=True', () => {
+  const plan = buildReleasePlan(
+    releaseInput({
+      acceptanceOutputs: null, evidence: null, previousRevision: null, previousImageDigest: null,
+    }),
+    { phase: 'acceptance' },
+  );
+  const expected = plan.expectedJobs['dependency-acceptance'];
+  const readback = realV1JobReadback(expected);
+  assert.deepEqual(validateReadyReleaseJobReadback(readback, expected), {
+    generation: 1,
+    job: expected.job,
+    uid: '123e4567-e89b-42d3-a456-426614174000',
+  });
+  for (const mutate of [
+    (value) => { delete value.metadata.uid; },
+    (value) => { value.metadata.uid = 'not-a-uid'; },
+    (value) => { value.metadata.uid = '123e4567-e89b-12d3-a456-426614174000'; },
+    (value) => { value.metadata.generation = 0; },
+    (value) => { value.metadata.generation = true; },
+    (value) => { value.metadata.generation = '01'; },
+    (value) => { value.status.observedGeneration = 2; },
+    (value) => { value.status.conditions = []; },
+    (value) => { value.status.conditions[0].status = 'False'; },
+    (value) => { value.status.conditions[0].status = 'Unknown'; },
+    (value) => { value.status.conditions[0].type = 'Completed'; },
+    (value) => { value.status.conditions.push({ type: 'Ready', status: 'True' }); },
+  ]) {
+    const drift = structuredClone(readback);
+    mutate(drift);
+    assert.throws(
+      () => validateReadyReleaseJobReadback(drift, expected),
+      /Job authority/i,
+    );
+  }
+  assert.throws(
+    () => validateReadyReleaseJobReadback(structuredClone(expected), expected),
+    /Job authority/i,
+  );
 });
 
 test('release contract separates numeric Secret versions from immutable evidence artifact digests', () => {
@@ -3506,17 +3575,7 @@ test('all-checkpoint migration restart reconstructs exact Job and execution outp
     mutationOrdinal: 1,
     reconcileKind: 'cloud-run-job-replace',
     plan,
-    safeResult: {
-      kind: 'resource',
-      state: 'present',
-      identitySha256: releaseMutationPlanIdentity(
-        plan, plan.operations.find(({ id }) => id === 'migration-deploy'),
-      ).specSha256,
-      valueSha256: createHash('sha256').update(JSON.stringify(canonicalFixture({
-        job: plan.expectedMigrationJob,
-        kind: 'cloud-run-job',
-      }))).digest('hex'),
-    },
+    safeResult: cloudRunJobSafeResult(plan, 'migration-deploy', job),
   });
   await appendTestMutationCheckpoint(store, {
     operationId: 'migration-execute',
@@ -3564,7 +3623,7 @@ test('migration receipt-write crash tolerates only server-managed Job status dri
     plan.expectedMigrationJob, 'hkbuddy-v1-migrate-release-001',
   );
   const initialJob = realV1JobReadback(plan.expectedMigrationJob);
-  initialJob.status = { executionCount: 0 };
+  initialJob.status = { ...initialJob.status, executionCount: 0 };
   const store = createTestStateStore();
   const first = await runGcpRelease({
     argv: ['--phase=migration', `--confirm-release=${RELEASE_SHA}`],
@@ -3594,6 +3653,7 @@ test('migration receipt-write crash tolerates only server-managed Job status dri
 
   const currentJob = realV1JobReadback(plan.expectedMigrationJob);
   currentJob.status = {
+    ...currentJob.status,
     executionCount: 1,
     latestCreatedExecution: {
       name: execution.metadata.name,
@@ -3646,18 +3706,7 @@ test('all-checkpoint acceptance restart reconstructs every exact Job execution w
       mutationOrdinal,
       reconcileKind: 'cloud-run-job-replace',
       plan,
-      safeResult: {
-        kind: 'resource',
-        state: 'present',
-        identitySha256: releaseMutationPlanIdentity(
-          plan, plan.operations.find(({ id }) => id === `${key}-deploy`),
-        ).specSha256,
-        valueSha256: createHash('sha256')
-          .update(JSON.stringify(canonicalFixture({
-            job: expected,
-            kind: 'cloud-run-job',
-          }))).digest('hex'),
-      },
+      safeResult: cloudRunJobSafeResult(plan, `${key}-deploy`, job),
     });
     mutationOrdinal += 1;
     await appendTestMutationCheckpoint(store, {
@@ -6024,6 +6073,192 @@ test('Job deploy restart blocks on a drifted first authoritative observation', a
   assert.equal(result.exitCode, 1);
   assert.equal(executeCount, 0);
   assert.equal(describeCount, 1);
+});
+
+test('Job deploy readback never checkpoints or executes while Ready is false', async () => {
+  const store = createTestStateStore();
+  const input = releaseInput({
+    evidence: null,
+    acceptanceOutputs: null,
+    previousRevision: null,
+    previousImageDigest: null,
+  });
+  const plan = buildReleasePlan(input, { phase: 'migration' });
+  const notReady = realV1JobReadback(plan.expectedMigrationJob);
+  notReady.status.conditions[0] = {
+    type: 'Ready', status: 'False', reason: 'SecretsAccessCheckFailed',
+  };
+  let executeCount = 0;
+  const result = await runGcpRelease({
+    argv: ['--phase=migration', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    openStateStore: async () => store,
+    execute: async (argv) => {
+      if (argv[2] === 'deploy') return { metadata: { name: plan.expectedMigrationJob.job } };
+      if (argv[2] === 'describe') return structuredClone(notReady);
+      if (argv[2] === 'execute') executeCount += 1;
+      throw new Error(`unexpected operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 1);
+  assert.equal(executeCount, 0);
+  assert.equal(store.records.filter(({ recordType }) => recordType === 'checkpoint').length, 0);
+  assert.equal(store.records.at(-1).recordType, 'intent');
+  assert.equal(store.records.at(-1).operationId, 'migration-deploy');
+});
+
+test('partial Job deploy checkpoints are revalidated before a resumed execute intent', async (t) => {
+  const cases = [
+    {
+      name: 'migration Ready=False',
+      phase: 'migration',
+      deployOperationId: 'migration-deploy',
+      executeOperationId: 'migration-execute',
+      mutate(value) { value.status.conditions[0].status = 'False'; },
+    },
+    {
+      name: 'migration UID drift',
+      phase: 'migration',
+      deployOperationId: 'migration-deploy',
+      executeOperationId: 'migration-execute',
+      mutate(value) { value.metadata.uid = '223e4567-e89b-42d3-a456-426614174000'; },
+    },
+    {
+      name: 'migration generation drift',
+      phase: 'migration',
+      deployOperationId: 'migration-deploy',
+      executeOperationId: 'migration-execute',
+      mutate(value) {
+        value.metadata.generation = 2;
+        value.status.observedGeneration = 2;
+      },
+    },
+    {
+      name: 'acceptance Ready=False',
+      phase: 'acceptance',
+      deployOperationId: 'dependency-acceptance-deploy',
+      executeOperationId: 'dependency-acceptance-execute',
+      mutate(value) { value.status.conditions[0].status = 'False'; },
+    },
+  ];
+
+  for (const current of cases) {
+    await t.test(current.name, async () => {
+      const input = releaseInput({
+        evidence: null,
+        acceptanceOutputs: null,
+        previousRevision: null,
+        previousImageDigest: null,
+      });
+      const plan = buildReleasePlan(input, { phase: current.phase });
+      const expectedJob = current.phase === 'migration' ? plan.expectedMigrationJob
+        : plan.expectedJobs['dependency-acceptance'];
+      const checkpointedJob = realV1JobReadback(expectedJob);
+      const store = createTestStateStore();
+      await appendTestMutationCheckpoint(store, {
+        operationId: current.deployOperationId,
+        mutationOrdinal: 1,
+        reconcileKind: 'cloud-run-job-replace',
+        plan,
+        safeResult: cloudRunJobSafeResult(
+          plan, current.deployOperationId, checkpointedJob,
+        ),
+      });
+      const liveJob = structuredClone(checkpointedJob);
+      current.mutate(liveJob);
+      let describeCount = 0;
+      let executeCount = 0;
+      const result = await runGcpRelease({
+        argv: [`--phase=${current.phase}`, `--confirm-release=${RELEASE_SHA}`],
+        input,
+        openStateStore: async () => store,
+        execute: async (argv) => {
+          if (argv[2] === 'describe') {
+            describeCount += 1;
+            return structuredClone(liveJob);
+          }
+          if (argv[2] === 'execute') executeCount += 1;
+          throw new Error(`unexpected operation: ${argv.join(' ')}`);
+        },
+        writeOutput: () => undefined,
+      });
+      assert.equal(result.exitCode, 1);
+      assert.equal(describeCount, 1, JSON.stringify({
+        publicReport: result.publicReport,
+        records: store.records,
+      }));
+      assert.equal(executeCount, 0);
+      assert.deepEqual(store.records.map(({ recordType }) => recordType), [
+        'intent', 'checkpoint',
+      ]);
+      assert.equal(store.records.some(({ operationId }) => (
+        operationId === current.executeOperationId
+      )), false);
+    });
+  }
+});
+
+test('an exact partial Job deploy checkpoint resumes execute only after fresh authority', async () => {
+  const input = releaseInput({
+    evidence: null,
+    acceptanceOutputs: null,
+    previousRevision: null,
+    previousImageDigest: null,
+  });
+  const plan = buildReleasePlan(input, { phase: 'migration' });
+  const liveJob = realV1JobReadback(plan.expectedMigrationJob);
+  const store = createTestStateStore();
+  await appendTestMutationCheckpoint(store, {
+    operationId: 'migration-deploy',
+    mutationOrdinal: 1,
+    reconcileKind: 'cloud-run-job-replace',
+    plan,
+    safeResult: cloudRunJobSafeResult(plan, 'migration-deploy', liveJob),
+  });
+  let describeCount = 0;
+  let executeCount = 0;
+  const execution = {
+    apiVersion: 'run.googleapis.com/v1',
+    kind: 'Execution',
+    metadata: {
+      name: 'hkbuddy-v1-migrate-release-001',
+      labels: { 'run.googleapis.com/job': 'hkbuddy-v1-migrate' },
+    },
+    spec: { taskCount: 1, parallelism: 1 },
+    status: {
+      conditions: [{ type: 'Completed', status: 'True' }],
+      completionTime: '2026-08-26T08:00:00.000Z',
+      succeededCount: 1,
+    },
+  };
+  const result = await runGcpRelease({
+    argv: ['--phase=migration', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    openStateStore: async () => store,
+    execute: async (argv) => {
+      if (argv[2] === 'describe') {
+        describeCount += 1;
+        return structuredClone(liveJob);
+      }
+      if (argv[2] === 'execute') {
+        executeCount += 1;
+        return structuredClone(execution);
+      }
+      if (argv[2] === 'executions') return structuredClone(execution);
+      throw new Error(`unexpected operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  assert.equal(describeCount, 1, JSON.stringify({
+    publicReport: result.publicReport,
+    records: store.records,
+  }));
+  assert.equal(executeCount, 1);
+  assert.equal(store.records.some(({ recordType, operationId }) => (
+    recordType === 'intent' && operationId === 'migration-execute'
+  )), true);
 });
 
 test('Job deploy restart adopts an exact readback without redeploying', async () => {

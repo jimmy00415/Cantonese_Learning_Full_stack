@@ -80,6 +80,7 @@ const NODE_BUILDER = 'node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be
 const DOCKER_BUILDER = 'gcr.io/cloud-builders/docker@sha256:2e8d40d8e48dc14fab4213d5e532d74f63fd403d9e8d7f6463096a75820286c3';
 const ACCEPTANCE_RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PHASES = Object.freeze([
   'build', 'migration', 'inventory', 'acceptance', 'collect', 'evidence', 'candidate',
   'readiness', 'workload', 'mobile', 'candidate-cleanup', 'promote', 'rollback',
@@ -2541,6 +2542,33 @@ export function validateReleaseJobReadback(value, expected) {
   return true;
 }
 
+function positiveCanonicalInteger(value) {
+  if (Number.isSafeInteger(value) && value > 0) return value;
+  if (typeof value !== 'string' || !/^[1-9][0-9]*$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && String(parsed) === value ? parsed : null;
+}
+
+export function validateReadyReleaseJobReadback(value, expected) {
+  validateReleaseJobReadback(value, expected);
+  const generation = positiveCanonicalInteger(value?.metadata?.generation);
+  const observedGeneration = positiveCanonicalInteger(value?.status?.observedGeneration);
+  const conditions = value?.status?.conditions;
+  const ready = Array.isArray(conditions) && conditions.length === 1 ? conditions[0] : null;
+  if (exact(value, expected) || value?.apiVersion !== 'run.googleapis.com/v1'
+    || value?.kind !== 'Job' || !UUID_V4.test(String(value?.metadata?.uid ?? ''))
+    || generation === null || observedGeneration !== generation
+    || !ready || typeof ready !== 'object' || Array.isArray(ready)
+    || ready.type !== 'Ready' || ready.status !== 'True') {
+    throw new Error('Cloud Run Job authority is invalid');
+  }
+  return Object.freeze({
+    generation,
+    job: expected.job,
+    uid: value.metadata.uid.toLowerCase(),
+  });
+}
+
 function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -4580,7 +4608,7 @@ function canonicalMutationAfterObservation(plan, operationId, observed) {
     // Safe-result identity intentionally excludes SDK-managed observation-only fields such as
     // metadata.resourceVersion, status.executionCount, and status.latestCreatedExecution. The
     // normalized Job recipe below still binds every image, identity, secret, network, and limit.
-    validateReleaseJobReadback(observed, job);
+    validateReadyReleaseJobReadback(observed, job);
     const actual = Object.freeze({
       job: exact(observed, job) ? observed : normalizeV1JobReadback(observed),
       kind: 'cloud-run-job',
@@ -4813,6 +4841,22 @@ function mutationSafeResult(plan, operationId, context) {
     if (!receipt?.name) throw new Error('Cloud Run execution safe result is unavailable');
     return Object.freeze({ kind: 'execution', name: receipt.name, status: 'SUCCEEDED' });
   }
+  if (operationId === 'migration-deploy'
+    || (operationId.endsWith('-deploy')
+      && !['candidate-deploy', 'promote-stable-deploy'].includes(operationId))) {
+    const expected = operationId === 'migration-deploy' ? plan.expectedMigrationJob
+      : plan.expectedJobs[operationId.slice(0, -'-deploy'.length)];
+    const authority = validateReadyReleaseJobReadback(context.observedAfter, expected);
+    const observation = canonicalMutationAfterObservation(plan, operationId, context.observedAfter);
+    return Object.freeze({
+      generation: authority.generation,
+      identitySha256: canonicalSha256(mutationSpec(plan, operationId)),
+      job: authority.job,
+      kind: 'cloud-run-job',
+      uid: authority.uid,
+      valueSha256: canonicalSha256(observation),
+    });
+  }
   if (operationId.startsWith('inventory-publish:')
     || operationId.startsWith('evidence-publish:')) {
     const key = operationId.slice(operationId.indexOf(':') + 1);
@@ -4903,6 +4947,23 @@ function validateResourceSafeResult(plan, member, safeResult, observed) {
   } catch {
     throw new Error('Checkpointed resource differs from its authoritative readback');
   }
+  if (member.id === 'migration-deploy'
+    || (member.id.endsWith('-deploy')
+      && !['candidate-deploy', 'promote-stable-deploy'].includes(member.id))) {
+    const expected = member.id === 'migration-deploy' ? plan.expectedMigrationJob
+      : plan.expectedJobs[member.id.slice(0, -'-deploy'.length)];
+    const authority = validateReadyReleaseJobReadback(observed, expected);
+    if (!exactKeys(safeResult, [
+      'generation', 'identitySha256', 'job', 'kind', 'uid', 'valueSha256',
+    ]) || safeResult.kind !== 'cloud-run-job'
+      || safeResult.identitySha256 !== identity.specSha256
+      || safeResult.valueSha256 !== canonicalSha256(canonicalObservation)
+      || safeResult.job !== authority.job || safeResult.uid !== authority.uid
+      || safeResult.generation !== authority.generation) {
+      throw new Error('Checkpointed Cloud Run Job differs from its authoritative readback');
+    }
+    return true;
+  }
   if (!exactKeys(safeResult, [
     'identitySha256', 'kind', 'state', 'valueSha256',
   ]) || safeResult.kind !== 'resource' || safeResult.state !== (absent ? 'absent' : 'present')
@@ -4979,9 +5040,8 @@ async function reconstructCheckpointedEvidenceVersion({
   return expected.secretVersion;
 }
 
-async function reconstructCheckpointedJobExecution({
-  executor, plan, records, attemptId, deployOperationId, executeOperationId,
-  expectedJob, validateExecution,
+async function revalidateCheckpointedJobDeployment({
+  executor, plan, records, attemptId, deployOperationId, expectedJob,
 }) {
   const deployMember = plan.operations.find(({ id }) => id === deployOperationId);
   if (!deployMember) throw new Error('Checkpointed Job deployment is unavailable');
@@ -4989,13 +5049,23 @@ async function reconstructCheckpointedJobExecution({
     'run', 'jobs', 'describe', expectedJob.job,
     `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
   ]);
-  validateReleaseJobReadback(rawJob, expectedJob);
+  validateReadyReleaseJobReadback(rawJob, expectedJob);
   validateResourceSafeResult(
     plan,
     deployMember,
     checkpointSafeResult(records, attemptId, deployOperationId),
     rawJob,
   );
+  return rawJob;
+}
+
+async function reconstructCheckpointedJobExecution({
+  executor, plan, records, attemptId, deployOperationId, executeOperationId,
+  expectedJob, validateExecution,
+}) {
+  await revalidateCheckpointedJobDeployment({
+    executor, plan, records, attemptId, deployOperationId, expectedJob,
+  });
   const executionSafeResult = checkpointSafeResult(records, attemptId, executeOperationId);
   validateExecutionSafeResult(executionSafeResult, expectedJob);
   const rawExecution = await executor([
@@ -7737,6 +7807,24 @@ export async function runGcpRelease({
       let mutationOrdinal = null;
       let finalPublicMutation = false;
       const restartingMutation = existingJournalIntent?.operationId === member.id;
+      const resumingCheckpointedJobExecution = hasOpenJournalAttempt
+        && !restartingMutation && resumeOperationId === member.id
+        && member.id.endsWith('-execute');
+      if (resumingCheckpointedJobExecution) {
+        const deployOperationId = member.id.replace(/-execute$/u, '-deploy');
+        const expectedJob = member.id === 'migration-execute' ? plan.expectedMigrationJob
+          : plan.expectedJobs[member.id.slice(0, -'-execute'.length)];
+        if (!expectedJob) throw new Error('Checkpointed Job execution has no deployment authority');
+        const rawJob = await revalidateCheckpointedJobDeployment({
+          executor,
+          plan,
+          records: openJournalRecords,
+          attemptId: stateStore.attemptId,
+          deployOperationId,
+          expectedJob,
+        });
+        mutationBeforeObservations.set(member.id, rawJob);
+      }
       if (member.id === 'candidate-privacy-publish'
         || member.id === 'promote-privacy-publish') {
         const mutationOrdinal = restartingMutation
@@ -8196,13 +8284,13 @@ export async function runGcpRelease({
           throw new Error('Build readback differs from submission');
         }
       } else if (restartingMutation && member.id === 'migration-deploy') {
-        validateReleaseJobReadback(receipt, plan.expectedMigrationJob);
+        validateReadyReleaseJobReadback(receipt, plan.expectedMigrationJob);
       } else if (restartingMutation && selection.phase === 'acceptance'
         && member.id.endsWith('-deploy')) {
         const key = member.id.slice(0, -'-deploy'.length);
-        validateReleaseJobReadback(receipt, plan.expectedJobs[key]);
+        validateReadyReleaseJobReadback(receipt, plan.expectedJobs[key]);
       } else if (member.id === 'migration-readback') {
-        validateReleaseJobReadback(receipt, plan.expectedMigrationJob);
+        validateReadyReleaseJobReadback(receipt, plan.expectedMigrationJob);
         mutationBeforeObservations.set('migration-execute', receipt);
       } else if (member.id === 'migration-execute') {
         migrationExecutionName = validateCloudRunExecutionIdentity(receipt, {
@@ -8444,7 +8532,7 @@ export async function runGcpRelease({
         validateCandidateCleanupService(receipt, plan);
       } else if (selection.phase === 'acceptance' && member.id.endsWith('-readback')) {
         const key = member.id.slice(0, -'-readback'.length);
-        validateReleaseJobReadback(receipt, plan.expectedJobs[key]);
+        validateReadyReleaseJobReadback(receipt, plan.expectedJobs[key]);
         mutationBeforeObservations.set(`${key}-execute`, receipt);
       } else if (member.id.startsWith('evidence-collect-describe:')) {
         const key = member.id.slice(member.id.indexOf(':') + 1);

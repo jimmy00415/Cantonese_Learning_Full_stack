@@ -912,6 +912,48 @@ test('Secret version checkpoints reject missing or invalid integrity digests', (
   })), /journal/i);
 });
 
+test('Cloud Run Job checkpoints persist exact UID and observed generation authority', () => {
+  const intent = finalizeJournalRecord(common({
+    phase: 'migration',
+    operationId: 'migration-deploy',
+    payload: { ...common().payload, reconcileKind: 'cloud-run-job-replace' },
+  }));
+  const safeResult = {
+    generation: 2,
+    identitySha256: '3'.repeat(64),
+    job: 'hkbuddy-v1-migrate',
+    kind: 'cloud-run-job',
+    uid: '123e4567-e89b-42d3-a456-426614174000',
+    valueSha256: '4'.repeat(64),
+  };
+  const checkpoint = (value) => common({
+    phase: 'migration',
+    operationId: 'migration-deploy',
+    recordType: 'checkpoint',
+    generation: 2,
+    previousRecordSha256: intent.recordSha256,
+    payload: {
+      intentRecordSha256: intent.recordSha256,
+      classification: 'after',
+      outcome: 'applied',
+      observationSha256: '2'.repeat(64),
+      safeResult: value,
+    },
+  });
+  assert.equal(finalizeJournalRecord(checkpoint(safeResult)).payload.safeResult.uid, safeResult.uid);
+  for (const mutate of [
+    (value) => { delete value.uid; },
+    (value) => { value.uid = 'invalid'; },
+    (value) => { value.generation = 0; },
+    (value) => { value.generation = '2'; },
+    (value) => { value.job = 'INVALID'; },
+  ]) {
+    const invalid = structuredClone(safeResult);
+    mutate(invalid);
+    assert.throws(() => finalizeJournalRecord(checkpoint(invalid)), /journal/i);
+  }
+});
+
 test('state store closes one unperformed intent with an abort and permits a new attempt', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'hkbuddy-state-abort-'));
   t.after(() => rm(root, { recursive: true, force: true }));
