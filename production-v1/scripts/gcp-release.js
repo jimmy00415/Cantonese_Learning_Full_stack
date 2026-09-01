@@ -2611,13 +2611,19 @@ export function validateReleaseJobExecutionReceipt(value, expected) {
   });
 }
 
-export function validateEvidenceVersionReceipt(value, { secret, secretVersion } = {}) {
+function normalizeEvidenceVersionReceipt(value, { secret, secretVersion } = {}) {
   const expectedName = `projects/${PROJECT}/secrets/${secret}/versions/${secretVersion}`;
+  const numberedName = `projects/${GCP_IDENTITY.projectNumber}/secrets/${secret}/versions/${secretVersion}`;
   if (typeof secret !== 'string' || !NUMERIC_VERSION.test(String(secretVersion ?? ''))
     || !value || typeof value !== 'object' || Array.isArray(value)
-    || value.name !== expectedName || value.state !== 'ENABLED') {
+    || ![expectedName, numberedName].includes(value.name) || value.state !== 'ENABLED') {
     throw new Error('Evidence version receipt is invalid');
   }
+  return Object.freeze({ name: expectedName, state: 'ENABLED' });
+}
+
+export function validateEvidenceVersionReceipt(value, expected) {
+  normalizeEvidenceVersionReceipt(value, expected);
   return true;
 }
 
@@ -4524,7 +4530,7 @@ function canonicalMutationAfterObservation(plan, operationId, observed) {
     || operationId.startsWith('evidence-publish:')) {
     const key = operationId.slice(operationId.indexOf(':') + 1);
     const version = plan.evidence[key];
-    validateEvidenceVersionReceipt(observed?.metadata, version);
+    const metadata = normalizeEvidenceVersionReceipt(observed?.metadata, version);
     const payload = observed?.payload;
     if (!exactKeys(payload, ['artifactSha256', 'byteLength', 'objectSha256'])
       || payload.artifactSha256 !== version.artifactSha256
@@ -4535,8 +4541,8 @@ function canonicalMutationAfterObservation(plan, operationId, observed) {
     }
     const actual = Object.freeze({
       artifactSha256: version.artifactSha256,
-      kind: 'secret-version', name: observed.metadata.name,
-      objectSha256: version.objectSha256, state: observed.metadata.state,
+      kind: 'secret-version', name: metadata.name,
+      objectSha256: version.objectSha256, state: metadata.state,
       version: version.secretVersion,
     });
     if (!exact(actual, expected)) throw new Error('Secret version after observation differs from plan');
@@ -8273,7 +8279,7 @@ export async function runGcpRelease({
       if (/^(?:inventory|evidence)-(?:publish|readback):/.test(member.id)) {
         const key = member.id.slice(member.id.indexOf(':') + 1);
         const expected = plan.evidence[key];
-        validateEvidenceVersionReceipt(receipt, expected);
+        receipt = normalizeEvidenceVersionReceipt(receipt, expected);
         if (member.id.includes('-publish:')) {
           evidenceSecretVersions[key] = expected.secretVersion;
         } else {

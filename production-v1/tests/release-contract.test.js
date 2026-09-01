@@ -2705,8 +2705,16 @@ test('evidence publication accepts and reads back only the planned numeric versi
     name: `projects/${PROJECT}/secrets/hkbuddy-v1-llm-smoke/versions/13`,
     state: 'ENABLED',
   }, { secret: 'hkbuddy-v1-llm-smoke', secretVersion: '13' }), true);
+  assert.equal(validateEvidenceVersionReceipt({
+    name: `projects/${PROJECT_NUMBER}/secrets/hkbuddy-v1-llm-smoke/versions/13`,
+    state: 'ENABLED',
+  }, { secret: 'hkbuddy-v1-llm-smoke', secretVersion: '13' }), true);
   assert.throws(() => validateEvidenceVersionReceipt({
     name: `projects/${PROJECT}/secrets/hkbuddy-v1-llm-smoke/versions/14`,
+    state: 'ENABLED',
+  }, { secret: 'hkbuddy-v1-llm-smoke', secretVersion: '13' }), /evidence version/i);
+  assert.throws(() => validateEvidenceVersionReceipt({
+    name: 'projects/999999999999/secrets/hkbuddy-v1-llm-smoke/versions/13',
     state: 'ENABLED',
   }, { secret: 'hkbuddy-v1-llm-smoke', secretVersion: '13' }), /evidence version/i);
 
@@ -2728,7 +2736,7 @@ test('evidence publication accepts and reads back only the planned numeric versi
     if (isPublish) publishedBySecret.set(secret, Buffer.from(stdin));
     if (argv[2] === 'access') return publishedBySecret.get(secret).toString('base64url');
     const version = isPublish ? versionsBySecret[secret] : argv[3];
-    return { name: `projects/${PROJECT}/secrets/${secret}/versions/${version}`, state: 'ENABLED' };
+    return { name: `projects/${PROJECT_NUMBER}/secrets/${secret}/versions/${version}`, state: 'ENABLED' };
   };
   const inventory = await runGcpRelease({
     argv: ['--phase=inventory', `--confirm-release=${RELEASE_SHA}`],
