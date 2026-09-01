@@ -59,6 +59,21 @@ function lease(workerId, token, nowMs, durationMs = 15_000) {
   return { workerId, leaseToken: token, now: new Date(nowMs), leaseUntil: new Date(nowMs + durationMs) };
 }
 
+async function settleWithin(promise, milliseconds, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((resolve, reject) => {
+        void resolve;
+        timer = setTimeout(() => reject(new Error(message)), milliseconds);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 test('turn api claims only the earliest nonterminal per conversation and fences every worker mutation', async (t) => {
   const { store } = await createStore(t);
   const firstOwner = await createOwnedConversation(store, 'first');
@@ -250,7 +265,7 @@ test('turn api one dispatcher progresses another conversation and stop aborts ev
   });
   dispatcher.start();
   t.after(async () => { releaseBlocked(); await dispatcher.stop(); });
-  await blockedStarted;
+  await settleWithin(blockedStarted, 500, 'blocked dispatcher lane did not start');
   const deadline = Date.now() + 500;
   let quickDelivered = false;
   while (Date.now() < deadline) {

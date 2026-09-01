@@ -880,7 +880,11 @@ test('Azure ASR maps every fixed, transient, malformed, and deadline outcome wit
       return new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
     },
   });
-  await assert.rejects(deadlineProvider.transcribe(canonicalWav(10)), (error) => (
+  await assert.rejects(settleWithin(
+    deadlineProvider.transcribe(canonicalWav(10)),
+    250,
+    'Azure ASR deadline did not settle',
+  ), (error) => (
     error.code === 'VOICE_PROVIDER_TIMEOUT' && error.httpStatus === 504 && error.retryable === true
   ));
   assert.equal(deadlineCalls, 1);
@@ -1019,7 +1023,11 @@ test('Azure and MiniMax TTS normalize auth, fixed, transient, malformed, and dea
       return new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
     },
   });
-  await assert.rejects(deadlineProvider.synthesize('逾時'), (error) => (
+  await assert.rejects(settleWithin(
+    deadlineProvider.synthesize('逾時'),
+    250,
+    'Azure TTS deadline did not settle',
+  ), (error) => (
     error.code === 'VOICE_PROVIDER_TIMEOUT' && error.httpStatus === 504 && error.retryable === true
   ));
   assert.equal(deadlineCalls, 1);
@@ -2425,7 +2433,11 @@ test('voice ingress idle and absolute deadlines release the source with the stab
       },
     };
     const bounded = withIngressDeadlines(source, limits);
-    await assert.rejects(readableBuffer(Readable.from(bounded)), (error) => (
+    await assert.rejects(settleWithin(
+      readableBuffer(Readable.from(bounded)),
+      250,
+      'voice ingress deadline did not settle',
+    ), (error) => (
       error.code === 'VOICE_UPLOAD_TIMEOUT' && error.status === 408 && error.retryable === true
     ));
     assert.equal(released, true);
@@ -2644,7 +2656,7 @@ test('voice media writes have an independent deadline and persist retryable 503 
     work,
     new Promise((resolve, reject) => {
       void resolve;
-      setTimeout(() => reject(new Error('media deadline was not enforced')), 200).unref?.();
+      setTimeout(() => reject(new Error('media deadline was not enforced')), 200);
     }),
   ]), (error) => error.code === 'VOICE_MEDIA_UNAVAILABLE' && error.status === 503 && error.retryable === true);
   assert.equal(mediaAborted, true);

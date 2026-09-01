@@ -347,6 +347,10 @@ test('private candidate authentication mints the exact audience-bound gcloud ID 
   const calls = [];
   const token = await mintGcloudIdentityToken({
     audience: CANDIDATE_ROOT,
+    environment: {
+      V1_GCP_PYTHON_EXECUTABLE: 'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\platform\\bundledpython\\python.exe',
+      V1_GCLOUD_PY_PATH: 'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\lib\\gcloud.py',
+    },
     executeFile: async (file, argv, options) => {
       calls.push({ file, argv, options });
       return { stdout: `${TEST_ID_TOKEN}\n`, stderr: '' };
@@ -374,6 +378,10 @@ test('Cloud Logging read uses the same real Windows bundled-Python launcher with
     candidateRevision: CANDIDATE_REVISION,
     occurredAt: NOW.toISOString(),
   }, {
+    environment: {
+      V1_GCP_PYTHON_EXECUTABLE: 'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\platform\\bundledpython\\python.exe',
+      V1_GCLOUD_PY_PATH: 'C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\lib\\gcloud.py',
+    },
     executeFile: async (file, argv, options) => {
       calls.push({ file, argv, options });
       return { stdout: '[]\n', stderr: '' };

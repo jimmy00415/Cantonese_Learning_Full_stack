@@ -4933,10 +4933,16 @@ test('Cloud SQL operation deadline aborts a poll that never resolves by itself',
     },
   });
 
-  await assert.rejects(
-    () => plane.create('cloud-sql-instance'),
-    (error) => error.code === 'SQL_OPERATION_TIMEOUT',
-  );
+  let watchdog;
+  const outcome = await Promise.race([
+    plane.create('cloud-sql-instance').then(
+      () => 'unexpected-success',
+      (error) => error.code,
+    ),
+    new Promise((resolve) => { watchdog = setTimeout(() => resolve('watchdog-expired'), 100); }),
+  ]);
+  clearTimeout(watchdog);
+  assert.equal(outcome, 'SQL_OPERATION_TIMEOUT');
 });
 
 test('database insert waits for a quiet exact Cloud SQL instance and polls its v1 operation', async () => {
@@ -5181,10 +5187,16 @@ test('database quiet deadline aborts hanging gcloud and REST reads', async (t) =
         },
       });
 
-      await assert.rejects(
-        () => plane.create('database'),
-        (error) => error.code === 'SQL_INSTANCE_NOT_QUIET',
-      );
+      let watchdog;
+      const outcome = await Promise.race([
+        plane.create('database').then(
+          () => 'unexpected-success',
+          (error) => error.code,
+        ),
+        new Promise((resolve) => { watchdog = setTimeout(() => resolve('watchdog-expired'), 100); }),
+      ]);
+      clearTimeout(watchdog);
+      assert.equal(outcome, 'SQL_INSTANCE_NOT_QUIET');
     });
   }
 });
@@ -8107,6 +8119,7 @@ test('preflight verifies an enabled target-project Monitoring channel and fails 
     const result = await runGcpPreflight({
       contract: await contractFixture(), gcloud: fixture.gcloud,
       getRestPrincipal: async () => 'admin@motionexp.com', writeOutput: () => undefined,
+      request: preflightReadRequest(),
     });
     assert.equal(result.exitCode, 1);
     assert.equal(result.publicReport.code, 'BUDGET_CURRENCY_MISMATCH');
@@ -8228,6 +8241,7 @@ test('preflight verifies an enabled target-project Monitoring channel and fails 
     const result = await runGcpPreflight({
       contract: await contractFixture(), gcloud: fixture.gcloud,
       getRestPrincipal: async () => 'admin@motionexp.com', writeOutput: () => undefined,
+      request: preflightReadRequest(),
     });
     assert.equal(result.exitCode, 1);
     assert.equal(result.publicReport.code, 'SHARED_PROJECT_BASELINE_INVALID');
@@ -8240,6 +8254,7 @@ test('preflight verifies an enabled target-project Monitoring channel and fails 
     const result = await runGcpPreflight({
       contract: await contractFixture(), gcloud: fixture.gcloud,
       getRestPrincipal: async () => 'different@example.test', writeOutput: () => undefined,
+      request: preflightReadRequest(),
     });
     assert.equal(result.exitCode, 1);
     assert.equal(result.publicReport.code, 'CONTROL_PLANE_IDENTITY_MISMATCH');
