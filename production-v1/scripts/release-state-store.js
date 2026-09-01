@@ -119,8 +119,12 @@ function assertSafeResult(value) {
     return;
   }
   if (value.kind === 'secret-version') {
-    if (!exactKeys(value, ['kind', 'name', 'version'])
+    if (!exactKeys(value, [
+      'artifactSha256', 'kind', 'name', 'objectSha256', 'version',
+    ])
       || typeof value.name !== 'string' || value.name.length < 1 || value.name.length > 255
+      || !DIGEST.test(String(value.artifactSha256 ?? ''))
+      || !DIGEST.test(String(value.objectSha256 ?? ''))
       || !/^[1-9][0-9]*$/.test(String(value.version ?? ''))) fail();
     return;
   }

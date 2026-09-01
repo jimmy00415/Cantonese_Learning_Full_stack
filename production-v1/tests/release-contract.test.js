@@ -2902,7 +2902,7 @@ test('secret-version restart adopts only the exact planned numeric version witho
       }
       assert.equal(argv[2], 'describe');
       return {
-        name: `projects/${PROJECT}/secrets/${EVIDENCE.legacyInventory.secret}/versions/${EVIDENCE.legacyInventory.secretVersion}`,
+        name: `projects/${PROJECT_NUMBER}/secrets/${EVIDENCE.legacyInventory.secret}/versions/${EVIDENCE.legacyInventory.secretVersion}`,
         state: 'ENABLED',
       };
     },
@@ -3739,7 +3739,7 @@ test('all-checkpoint inventory restart reconstructs the exact Secret version wit
       }
       assert.equal(argv[2], 'describe');
       return {
-        name: `projects/${PROJECT}/secrets/${expected.secret}/versions/${expected.secretVersion}`,
+        name: `projects/${PROJECT_NUMBER}/secrets/${expected.secret}/versions/${expected.secretVersion}`,
         state: 'ENABLED',
       };
     },

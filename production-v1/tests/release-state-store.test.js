@@ -844,6 +844,74 @@ test('state store appends one exact intent-checkpoint-terminal attempt', async (
   await store.close();
 });
 
+test('state store persists an integrity-bound Secret version checkpoint', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hkbuddy-state-secret-version-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const receiptDirectory = join(root, 'receipts');
+  await mkdir(receiptDirectory);
+  const store = await openReleaseStateStore({
+    receiptDirectory,
+    releaseSha: RELEASE_SHA,
+    releaseIdentitySha256: RELEASE_IDENTITY,
+    phase: 'inventory',
+    phasePlanSha256: PLAN_SHA,
+    attemptId: ATTEMPT_ID,
+    receiptHeadSha256: RECEIPT_HEAD,
+    now: () => new Date(CREATED_AT),
+    allowTemporaryState: true,
+  });
+  const intent = await store.appendIntent({
+    ...common().payload,
+    reconcileKind: 'secret-version-add',
+  }, { operationId: 'inventory-publish:legacyInventory' });
+  const checkpoint = await store.appendCheckpoint({
+    intentRecordSha256: intent.recordSha256,
+    classification: 'after',
+    outcome: 'adopted-restart',
+    observationSha256: '2'.repeat(64),
+    safeResult: {
+      artifactSha256: '3'.repeat(64),
+      kind: 'secret-version',
+      name: 'projects/example/secrets/hkbuddy-v1-legacy-inventory',
+      objectSha256: '4'.repeat(64),
+      version: '1',
+    },
+  });
+  assert.equal(checkpoint.payload.safeResult.artifactSha256, '3'.repeat(64));
+  assert.equal(checkpoint.payload.safeResult.objectSha256, '4'.repeat(64));
+  await store.close();
+});
+
+test('Secret version checkpoints reject missing or invalid integrity digests', () => {
+  const intent = finalizeJournalRecord(common());
+  const safeResult = {
+    artifactSha256: '3'.repeat(64),
+    kind: 'secret-version',
+    name: 'projects/example/secrets/hkbuddy-v1-legacy-inventory',
+    objectSha256: '4'.repeat(64),
+    version: '1',
+  };
+  const checkpoint = (value) => common({
+    recordType: 'checkpoint',
+    generation: 2,
+    previousRecordSha256: intent.recordSha256,
+    payload: {
+      intentRecordSha256: intent.recordSha256,
+      classification: 'after',
+      outcome: 'adopted-restart',
+      observationSha256: '2'.repeat(64),
+      safeResult: value,
+    },
+  });
+  const missingDigest = { ...safeResult };
+  delete missingDigest.artifactSha256;
+  assert.throws(() => finalizeJournalRecord(checkpoint(missingDigest)), /journal/i);
+  assert.throws(() => finalizeJournalRecord(checkpoint({
+    ...safeResult,
+    objectSha256: 'not-a-digest',
+  })), /journal/i);
+});
+
 test('state store closes one unperformed intent with an abort and permits a new attempt', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'hkbuddy-state-abort-'));
   t.after(() => rm(root, { recursive: true, force: true }));
