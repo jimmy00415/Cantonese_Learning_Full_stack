@@ -2541,6 +2541,84 @@ export function validateReleaseJobReadback(value, expected) {
   return true;
 }
 
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export function validateRejectedCloudRunExecutionLog(bytes, {
+  expectedLogSha256, intent, job, project, region,
+} = {}) {
+  if (!Buffer.isBuffer(bytes) || bytes.length < 1 || bytes.length > 128 * 1024
+    || !DIGEST.test(String(expectedLogSha256 ?? ''))
+    || createHash('sha256').update(bytes).digest('hex') !== expectedLogSha256
+    || intent?.payload?.reconcileKind !== 'cloud-run-job-execute'
+    || !intent?.operationId?.endsWith('-execute')
+    || !DIGEST.test(String(intent.payload.commandSha256 ?? ''))
+    || !/^[0-9a-f]{32}$/.test(String(intent.payload.operationAttemptId ?? ''))
+    || !/^[a-z][a-z0-9-]{0,62}$/.test(String(job ?? ''))
+    || !/^[a-z][a-z0-9-]{4,61}[a-z0-9]$/.test(String(project ?? ''))
+    || !/^[a-z]+-[a-z]+[0-9]$/.test(String(region ?? ''))) {
+    throw new Error('Cloud Run rejection evidence is invalid');
+  }
+  const text = bytes.toString('utf8');
+  if (Buffer.from(text, 'utf8').length !== bytes.length || text.includes('\u0000')) {
+    throw new Error('Cloud Run rejection evidence is invalid');
+  }
+  const runningLines = text.split(/\r?\n/u).filter((line) => (
+    line.includes('Running [gcloud.run.jobs.execute] with arguments:')
+  ));
+  const commandLine = runningLines[0] ?? '';
+  const postPattern = new RegExp([
+    '"POST /apis/run\\.googleapis\\.com/v1/namespaces/',
+    escapeRegex(project), '/jobs/', escapeRegex(job),
+    ':run\\?alt=json HTTP/1\\.1" 400(?:\\s|$)',
+  ].join(''), 'u');
+  const postMatches = text.match(new RegExp(postPattern.source, 'gu')) ?? [];
+  const message = `Job '${job}' cannot be run because is in an error state. Please check the job's Ready status condition.`;
+  const dateMatches = [...text.matchAll(/'date': '([^'\r\n]+)'/gu)];
+  const requestTime = dateMatches.length === 1 ? new Date(dateMatches[0][1]) : null;
+  const intentTime = new Date(intent.createdAt);
+  if (runningLines.length !== 1
+    || !commandLine.includes(`--project: "${project}"`)
+    || !commandLine.includes(`--region: "${region}"`)
+    || !commandLine.includes('--wait: "True"')
+    || !commandLine.includes('--format: "json"')
+    || !commandLine.includes(`JOB: "${job}"`)
+    || postMatches.length !== 1
+    || !text.includes('"code": 400')
+    || !text.includes(`"message": "${message}"`)
+    || !text.includes('"status": "FAILED_PRECONDITION"')
+    || !text.includes(`(gcloud.run.jobs.execute) FAILED_PRECONDITION: ${message}`)
+    || !Number.isFinite(requestTime?.getTime())
+    || !Number.isFinite(intentTime.getTime())
+    || requestTime.getTime() < intentTime.getTime()
+    || requestTime.getTime() - intentTime.getTime() > 5 * 60_000) {
+    throw new Error('Cloud Run rejection evidence is invalid');
+  }
+  return Object.freeze({
+    commandSha256: intent.payload.commandSha256,
+    httpStatus: 400,
+    logSha256: expectedLogSha256,
+    operationAttemptId: intent.payload.operationAttemptId,
+    rejectionMessageSha256: canonicalSha256(message),
+    requestObservedAt: requestTime.toISOString(),
+    rpcStatus: 'FAILED_PRECONDITION',
+  });
+}
+
+function validateFailedReleaseJobAuthority(value, expected) {
+  validateReleaseJobReadback(value, expected);
+  const generation = positiveOrZeroInteger(value?.metadata?.generation);
+  const observedGeneration = positiveOrZeroInteger(value?.status?.observedGeneration);
+  const ready = Array.isArray(value?.status?.conditions)
+    ? value.status.conditions.filter(({ type } = {}) => type === 'Ready') : [];
+  if (!UUID.test(String(value?.metadata?.uid ?? '')) || generation === null || generation < 1
+    || generation !== observedGeneration || ready.length !== 1 || ready[0]?.status !== 'False') {
+    throw new Error('Cloud Run rejected Job authority is invalid');
+  }
+  return Object.freeze({ generation, uid: value.metadata.uid.toLowerCase() });
+}
+
 export function validateMigrationExecutionReceipt(value, { releaseSha } = {}) {
   const name = value?.metadata?.name;
   const job = value?.metadata?.labels?.['run.googleapis.com/job'];
@@ -5216,6 +5294,84 @@ async function closePromotionAttemptForReproof(stateStore) {
   });
 }
 
+async function recoverRejectedAcceptanceExecute({
+  stateStore, plan, intent, executor, logPath, expectedLogSha256,
+}) {
+  if (!stateStore || typeof stateStore.appendAbort !== 'function'
+    || typeof stateStore.appendTerminal !== 'function'
+    || intent?.recordType !== 'intent' || intent?.payload?.reconcileKind !== 'cloud-run-job-execute'
+    || !intent.operationId.endsWith('-execute') || !isAbsoluteFile(logPath)) {
+    throw new Error('Cloud Run rejection recovery is invalid');
+  }
+  const key = intent.operationId.slice(0, -'-execute'.length);
+  const expectedJob = plan.expectedJobs[key];
+  if (!expectedJob || expectedJob.job !== DEPENDENCY_ACCEPTANCE_JOB) {
+    throw new Error('Cloud Run rejection recovery is invalid');
+  }
+  const metadata = await lstat(logPath);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size < 1
+    || metadata.size > 128 * 1024) {
+    throw new Error('Cloud Run rejection recovery is invalid');
+  }
+  const logBytes = await readBoundedOrdinaryFile(logPath, {
+    expectedByteLength: metadata.size, maximumBytes: 128 * 1024,
+  });
+  const rejection = validateRejectedCloudRunExecutionLog(logBytes, {
+    expectedLogSha256, intent, job: expectedJob.job, project: PROJECT, region: REGION,
+  });
+  const rawJob = await executor([
+    'run', 'jobs', 'describe', expectedJob.job,
+    `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+  ]);
+  const authority = validateFailedReleaseJobAuthority(rawJob, expectedJob);
+  const executions = await executor([
+    'run', 'jobs', 'executions', 'list', `--job=${expectedJob.job}`,
+    `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+  ]);
+  if (!Array.isArray(executions) || executions.length !== 0) {
+    throw new Error('Cloud Run rejection recovery observed an execution');
+  }
+  const evidence = Object.freeze({
+    ...rejection,
+    executionListSha256: canonicalSha256(executions),
+    job: expectedJob.job,
+    jobGeneration: authority.generation,
+    jobReadbackSha256: canonicalSha256(rawJob),
+    jobUid: authority.uid,
+    project: PROJECT,
+    region: REGION,
+  });
+  const currentAttempt = stateStore.attemptId;
+  const checkpoints = stateStore.records.filter((record) => (
+    record.attemptId === currentAttempt && record.recordType === 'checkpoint'
+  ));
+  const checkpoint = checkpoints.at(-1);
+  if (!checkpoint) throw new Error('Cloud Run rejection recovery checkpoint is unavailable');
+  await stateStore.appendAbort({
+    intentRecordSha256: intent.recordSha256,
+    reason: 'authoritative-cloud-run-failed-precondition',
+    evidence,
+  });
+  const terminalState = Object.freeze({
+    code: 'CLOUD_RUN_EXECUTION_REJECTED',
+    evidence,
+    mutationCount: checkpoints.length,
+    operationId: intent.operationId,
+    phase: 'acceptance',
+  });
+  await stateStore.appendTerminal({
+    status: 'phase-blocked',
+    checkpointRecordSha256: checkpoint.recordSha256,
+    receiptSha256: canonicalSha256(terminalState),
+    terminalState,
+    mutationCount: checkpoints.length,
+    responseLossOperationIds: checkpoints
+      .filter(({ payload }) => ['adopted-response-loss', 'adopted-restart'].includes(payload.outcome))
+      .map((record) => record.operationId),
+  });
+  return evidence;
+}
+
 function parseArguments(argv, releaseSha) {
   if (!Array.isArray(argv) || !RELEASE_SHA.test(String(releaseSha ?? ''))) return null;
   let phase = null;
@@ -7187,6 +7343,44 @@ export async function runGcpRelease({
       status: 'failed', code: 'CONTROL_PLANE_UNAVAILABLE', mutationPerformed: false,
       releaseSha: plan.releaseSha, phase: selection.phase,
     });
+  }
+  const rejectedExecutionLogPath = environment?.V1_REJECTED_EXECUTION_LOG_PATH;
+  const rejectedExecutionLogSha256 = environment?.V1_REJECTED_EXECUTION_LOG_SHA256;
+  if (rejectedExecutionLogPath !== undefined || rejectedExecutionLogSha256 !== undefined) {
+    try {
+      if (selection.phase !== 'acceptance' || !hasOpenJournalAttempt
+        || existingJournalIntent?.payload?.reconcileKind !== 'cloud-run-job-execute'
+        || typeof rejectedExecutionLogPath !== 'string'
+        || !DIGEST.test(String(rejectedExecutionLogSha256 ?? ''))) {
+        throw new Error('Cloud Run rejection recovery request is invalid');
+      }
+      const evidence = await recoverRejectedAcceptanceExecute({
+        stateStore,
+        plan,
+        intent: existingJournalIntent,
+        executor,
+        logPath: rejectedExecutionLogPath,
+        expectedLogSha256: rejectedExecutionLogSha256,
+      });
+      const recoveredOperationId = existingJournalIntent.operationId;
+      await stateStore.close();
+      return publish(writeOutput, 1, {
+        status: 'failed', code: 'CLOUD_RUN_EXECUTION_REJECTION_RECOVERED',
+        mutationPerformed: false, releaseSha: plan.releaseSha, phase: selection.phase,
+        completed: openJournalRecords
+          .filter(({ recordType }) => recordType === 'checkpoint')
+          .map(({ operationId }) => operationId),
+        recoveredOperationId,
+        evidence,
+      });
+    } catch {
+      await stateStore?.close().catch(() => undefined);
+      return publish(writeOutput, 1, {
+        status: 'failed', code: 'CLOUD_RUN_EXECUTION_REJECTION_EVIDENCE_INVALID',
+        mutationPerformed: false, releaseSha: plan.releaseSha, phase: selection.phase,
+        completed: [],
+      });
+    }
   }
   const completed = [];
   let evidencePublicationPayloads = Object.freeze({});

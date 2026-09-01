@@ -211,9 +211,33 @@ function assertCheckpointPayload(payload) {
 }
 
 function assertAbortPayload(payload) {
-  if (!exactKeys(payload, ['intentRecordSha256', 'reason'])
-    || !DIGEST.test(String(payload.intentRecordSha256 ?? ''))
-    || payload.reason !== 'expired-before-final-mutation') fail();
+  if (!isPlainObject(payload) || !DIGEST.test(String(payload.intentRecordSha256 ?? ''))) fail();
+  if (payload.reason === 'expired-before-final-mutation') {
+    if (!exactKeys(payload, ['intentRecordSha256', 'reason'])) fail();
+    return;
+  }
+  if (payload.reason !== 'authoritative-cloud-run-failed-precondition'
+    || !exactKeys(payload, ['evidence', 'intentRecordSha256', 'reason'])) fail();
+  const evidence = payload.evidence;
+  if (!exactKeys(evidence, [
+    'commandSha256', 'executionListSha256', 'httpStatus', 'job', 'jobGeneration',
+    'jobReadbackSha256', 'jobUid', 'logSha256', 'operationAttemptId', 'project',
+    'region', 'rejectionMessageSha256', 'requestObservedAt', 'rpcStatus',
+  ])
+    || !DIGEST.test(String(evidence.commandSha256 ?? ''))
+    || !DIGEST.test(String(evidence.executionListSha256 ?? ''))
+    || evidence.httpStatus !== 400
+    || !/^[a-z][a-z0-9-]{0,62}$/.test(String(evidence.job ?? ''))
+    || !Number.isSafeInteger(evidence.jobGeneration) || evidence.jobGeneration < 1
+    || !DIGEST.test(String(evidence.jobReadbackSha256 ?? ''))
+    || !UUID_V4.test(String(evidence.jobUid ?? ''))
+    || !DIGEST.test(String(evidence.logSha256 ?? ''))
+    || !OPERATION_ATTEMPT_ID.test(String(evidence.operationAttemptId ?? ''))
+    || !/^[a-z][a-z0-9-]{4,61}[a-z0-9]$/.test(String(evidence.project ?? ''))
+    || !/^[a-z]+-[a-z]+[0-9]$/.test(String(evidence.region ?? ''))
+    || !DIGEST.test(String(evidence.rejectionMessageSha256 ?? ''))
+    || !canonicalIso(evidence.requestObservedAt)
+    || evidence.rpcStatus !== 'FAILED_PRECONDITION') fail();
 }
 
 function assertTerminalState(value) {
@@ -341,6 +365,13 @@ export function validateJournalRecords(records, { allowOpenIntent = true } = {})
       } else if (record.recordType === 'abort') {
         if (openIntent === null || record.operationId !== openIntent.operationId
           || record.payload.intentRecordSha256 !== openIntent.recordSha256) fail();
+        if (record.payload.reason === 'authoritative-cloud-run-failed-precondition'
+          && (record.phase !== 'acceptance'
+            || openIntent.payload.reconcileKind !== 'cloud-run-job-execute'
+            || !openIntent.operationId.endsWith('-execute')
+            || record.payload.evidence.commandSha256 !== openIntent.payload.commandSha256
+            || record.payload.evidence.operationAttemptId
+              !== openIntent.payload.operationAttemptId)) fail();
         openIntent = null;
       } else {
         if (openIntent !== null || lastCheckpoint === null

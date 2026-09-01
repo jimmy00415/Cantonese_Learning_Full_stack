@@ -970,6 +970,109 @@ test('state store closes one unperformed intent with an abort and permits a new 
   await next.close();
 });
 
+test('state store accepts an authoritative acceptance execute rejection only for its paired intent', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hkbuddy-state-execute-rejection-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const receiptDirectory = join(root, 'receipts');
+  await mkdir(receiptDirectory);
+  const store = await openReleaseStateStore({
+    receiptDirectory,
+    releaseSha: RELEASE_SHA,
+    releaseIdentitySha256: RELEASE_IDENTITY,
+    phase: 'acceptance',
+    phasePlanSha256: PLAN_SHA,
+    attemptId: ATTEMPT_ID,
+    receiptHeadSha256: RECEIPT_HEAD,
+    now: () => new Date(CREATED_AT),
+    allowTemporaryState: true,
+  });
+  const deployIntent = await store.appendIntent({
+    ...common().payload,
+    reconcileKind: 'cloud-run-job-replace',
+  }, { operationId: 'dependency-acceptance-deploy' });
+  const deployCheckpoint = await store.appendCheckpoint({
+    intentRecordSha256: deployIntent.recordSha256,
+    classification: 'after', outcome: 'applied', observationSha256: '2'.repeat(64),
+    safeResult: { kind: 'resource', state: 'present', identitySha256: '3'.repeat(64), valueSha256: '4'.repeat(64) },
+  });
+  const executeIntent = await store.appendIntent({
+    ...common().payload,
+    mutationOrdinal: 2,
+    operationAttemptId: '5'.repeat(32),
+    commandSha256: '6'.repeat(64),
+    reconcileKind: 'cloud-run-job-execute',
+    beforeSha256: '7'.repeat(64),
+    afterSha256: '8'.repeat(64),
+  }, { operationId: 'dependency-acceptance-execute' });
+  const evidence = {
+    commandSha256: executeIntent.payload.commandSha256,
+    executionListSha256: '9'.repeat(64),
+    httpStatus: 400,
+    job: 'hkbuddy-v1-dependency-acceptance',
+    jobGeneration: 1,
+    jobReadbackSha256: 'a'.repeat(64),
+    jobUid: '12d057cc-bcf8-4192-95fa-bd7527627e46',
+    logSha256: 'b'.repeat(64),
+    operationAttemptId: executeIntent.payload.operationAttemptId,
+    project: 'motion-expert-hk-ltd-webpage',
+    region: 'asia-east2',
+    rejectionMessageSha256: 'c'.repeat(64),
+    requestObservedAt: '2026-09-01T06:42:27.000Z',
+    rpcStatus: 'FAILED_PRECONDITION',
+  };
+  await store.appendAbort({
+    intentRecordSha256: executeIntent.recordSha256,
+    reason: 'authoritative-cloud-run-failed-precondition',
+    evidence,
+  });
+  await store.appendTerminal({
+    status: 'phase-blocked', checkpointRecordSha256: deployCheckpoint.recordSha256,
+    receiptSha256: 'd'.repeat(64),
+    terminalState: { code: 'CLOUD_RUN_EXECUTION_REJECTED', mutationCount: 1, phase: 'acceptance' },
+    mutationCount: 1, responseLossOperationIds: [],
+  });
+  assert.equal(validateJournalRecords(store.records), true);
+  await store.close();
+
+  const invalidDirectory = join(root, 'invalid-receipts');
+  await mkdir(invalidDirectory);
+  const invalid = await openReleaseStateStore({
+    receiptDirectory: invalidDirectory,
+    releaseSha: RELEASE_SHA,
+    releaseIdentitySha256: RELEASE_IDENTITY,
+    phase: 'migration',
+    phasePlanSha256: PLAN_SHA,
+    attemptId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+    receiptHeadSha256: RECEIPT_HEAD,
+    now: () => new Date(CREATED_AT),
+    allowTemporaryState: true,
+  });
+  const invalidDeploy = await invalid.appendIntent({
+    ...common().payload,
+    reconcileKind: 'cloud-run-job-replace',
+  }, { operationId: 'migration-deploy' });
+  await invalid.appendCheckpoint({
+    intentRecordSha256: invalidDeploy.recordSha256,
+    classification: 'after', outcome: 'applied', observationSha256: '2'.repeat(64),
+    safeResult: { kind: 'resource', state: 'present', identitySha256: '3'.repeat(64), valueSha256: '4'.repeat(64) },
+  });
+  const invalidExecute = await invalid.appendIntent({
+    ...common().payload,
+    mutationOrdinal: 2,
+    operationAttemptId: evidence.operationAttemptId,
+    commandSha256: evidence.commandSha256,
+    reconcileKind: 'cloud-run-job-execute',
+    beforeSha256: '7'.repeat(64),
+    afterSha256: '8'.repeat(64),
+  }, { operationId: 'migration-execute' });
+  await assert.rejects(() => invalid.appendAbort({
+    intentRecordSha256: invalidExecute.recordSha256,
+    reason: 'authoritative-cloud-run-failed-precondition',
+    evidence,
+  }), /journal/i);
+  await invalid.close();
+});
+
 test('state store reopens one matching in-flight attempt and rejects plan drift', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'hkbuddy-state-restart-'));
   t.after(() => rm(root, { recursive: true, force: true }));

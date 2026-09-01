@@ -53,6 +53,7 @@ import {
   validateEvidenceArtifactFile,
   validateEvidenceVersionReceipt,
   validateMigrationExecutionReceipt,
+  validateRejectedCloudRunExecutionLog,
   validateReleaseReceiptChain,
   validateReleaseJobReadback,
   validateServiceIamReceipt,
@@ -6120,6 +6121,93 @@ test('Job execution restart without an exact execution identity never executes a
   assert.equal(store.records.at(-1).recordType, 'intent');
 });
 
+test('an exact Cloud Run FAILED_PRECONDITION log closes only the rejected acceptance execute intent', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'hkbuddy-execute-rejection-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const input = releaseInput();
+  const plan = buildReleasePlan(input, { phase: 'acceptance' });
+  const key = 'dependency-acceptance';
+  const job = plan.expectedJobs[key];
+  const store = createTestStateStore();
+  const deployIntent = await appendTestMutationIntent(store, {
+    operationId: `${key}-deploy`, mutationOrdinal: 1,
+    reconcileKind: 'cloud-run-job-replace', plan,
+  });
+  await store.appendCheckpoint({
+    intentRecordSha256: deployIntent.recordSha256,
+    classification: 'after', outcome: 'adopted-restart',
+    observationSha256: deployIntent.payload.afterSha256,
+    safeResult: { kind: 'resource', state: 'present', identitySha256: '1'.repeat(64), valueSha256: '2'.repeat(64) },
+  });
+  const executeIntent = await appendTestMutationIntent(store, {
+    operationId: `${key}-execute`, mutationOrdinal: 2,
+    reconcileKind: 'cloud-run-job-execute', plan,
+  });
+  executeIntent.createdAt = '2026-09-01T06:42:26.179Z';
+  const rejectionMessage = `Job '${job.job}' cannot be run because is in an error state. Please check the job's Ready status condition.`;
+  const log = [
+    `2026-09-01 14:42:27,212 DEBUG root Running [gcloud.run.jobs.execute] with arguments: [--format: "json", --project: "${PROJECT}", --quiet: "True", --region: "${REGION}", --wait: "True", JOB: "${job.job}"]`,
+    `2026-09-01 14:42:27,888 DEBUG urllib3.connectionpool https://${REGION}-run.googleapis.com:443 "POST /apis/run.googleapis.com/v1/namespaces/${PROJECT}/jobs/${job.job}:run?alt=json HTTP/1.1" 400 None`,
+    `response: <{'date': 'Tue, 01 Sep 2026 06:42:27 GMT', 'status': 400}>, content <{`,
+    '  "error": {',
+    '    "code": 400,',
+    `    "message": "${rejectionMessage}",`,
+    '    "status": "FAILED_PRECONDITION"',
+    '  }',
+    '}>',
+    `2026-09-01 14:42:27,978 ERROR root (gcloud.run.jobs.execute) FAILED_PRECONDITION: ${rejectionMessage}`,
+    '',
+  ].join('\n');
+  const logPath = join(directory, 'execute-rejection.log');
+  await writeFile(logPath, log);
+  const logSha256 = createHash('sha256').update(log).digest('hex');
+  const parsed = validateRejectedCloudRunExecutionLog(Buffer.from(log), {
+    expectedLogSha256: logSha256,
+    intent: executeIntent,
+    job: job.job,
+    project: PROJECT,
+    region: REGION,
+  });
+  assert.equal(parsed.httpStatus, 400);
+  assert.equal(parsed.rpcStatus, 'FAILED_PRECONDITION');
+  assert.equal(parsed.requestObservedAt, '2026-09-01T06:42:27.000Z');
+
+  const liveJob = realV1JobReadback(job);
+  liveJob.metadata.uid = '12d057cc-bcf8-4192-95fa-bd7527627e46';
+  liveJob.metadata.generation = 1;
+  liveJob.status = {
+    observedGeneration: 1,
+    conditions: [{ type: 'Ready', status: 'False', reason: 'SecretsAccessCheckFailed' }],
+  };
+  const calls = [];
+  const result = await runGcpRelease({
+    argv: ['--phase=acceptance', `--confirm-release=${RELEASE_SHA}`], input,
+    loadReceipts: async () => fixtureReceiptChain(plan, 'inventory'),
+    openStateStore: async () => store,
+    environment: {
+      V1_REJECTED_EXECUTION_LOG_PATH: logPath,
+      V1_REJECTED_EXECUTION_LOG_SHA256: logSha256,
+    },
+    execute: async (argv) => {
+      calls.push(argv);
+      if (argv[2] === 'describe') return structuredClone(liveJob);
+      if (argv[2] === 'executions' && argv[3] === 'list') return [];
+      throw new Error(`unexpected recovery operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.publicReport.code, 'CLOUD_RUN_EXECUTION_REJECTION_RECOVERED');
+  assert.equal(result.publicReport.mutationPerformed, false);
+  assert.deepEqual(calls.map((argv) => argv.slice(0, 4)), [
+    ['run', 'jobs', 'describe', job.job],
+    ['run', 'jobs', 'executions', 'list'],
+  ]);
+  assert.equal(store.records.at(-2).recordType, 'abort');
+  assert.equal(store.records.at(-2).payload.evidence.logSha256, logSha256);
+  assert.equal(store.records.at(-1).recordType, 'terminal');
+});
+
 test('migration phase persists the canonical short v1 execution identity with omitted zero counters', async () => {
   const input = releaseInput({
     evidence: null, acceptanceOutputs: null, previousRevision: null, previousImageDigest: null,
@@ -7540,6 +7628,7 @@ test('Cloud Build and infrastructure contracts pin the reviewed build identity a
     { scope: `secret:${GCP_IDENTITY.secrets.dbAppUrl}`, member: acceptance, role: 'roles/secretmanager.secretAccessor' },
     { scope: `secret:${GCP_IDENTITY.secrets.dbMigratorUrl}`, member: acceptance, role: 'roles/secretmanager.secretAccessor' },
     { scope: 'project', member: acceptance, role: 'roles/logging.logWriter' },
+    { scope: `secret:${GCP_IDENTITY.secrets.legacy}`, member: acceptance, role: 'roles/secretmanager.secretAccessor' },
   ]);
   assert.equal(contract.iam.bindings.some(({ scope, member, role }) => (
     scope === 'service-account:hkbuddy-v1-acceptance' && member === deployer
