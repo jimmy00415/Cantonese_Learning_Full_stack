@@ -45,8 +45,6 @@ const GCS_FORBIDDEN_PERMISSIONS = Object.freeze([
   'storage.buckets.getIamPolicy',
   'storage.buckets.setIamPolicy',
   'storage.buckets.update',
-  'storage.objects.getIamPolicy',
-  'storage.objects.setIamPolicy',
   'storage.objects.overrideUnlockedRetention',
   'storage.objects.setRetention',
 ]);
@@ -309,7 +307,9 @@ function createBoundedGcsClient(rawBucket, {
         'DEPENDENCY_GCS_RESOURCE_INVALID');
       const metadata = result?.[0];
       if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)
-        || metadata.name !== BUCKET_NAME || metadata.projectNumber !== PROJECT_NUMBER) {
+        || metadata.name !== BUCKET_NAME || metadata.projectNumber !== PROJECT_NUMBER
+        || metadata.iamConfiguration?.uniformBucketLevelAccess?.enabled !== true
+        || metadata.iamConfiguration?.publicAccessPrevention !== 'enforced') {
         throw gcsError('DEPENDENCY_GCS_RESOURCE_INVALID');
       }
     },

@@ -52,6 +52,18 @@ const REQUIRED_GCS_PERMISSIONS = Object.freeze([
   'storage.objects.list',
   'storage.objects.update',
 ]);
+const FORBIDDEN_BUCKET_TESTABLE_GCS_PERMISSIONS = Object.freeze([
+  'storage.buckets.delete',
+  'storage.buckets.getIamPolicy',
+  'storage.buckets.setIamPolicy',
+  'storage.buckets.update',
+  'storage.objects.overrideUnlockedRetention',
+  'storage.objects.setRetention',
+]);
+const INVALID_BUCKET_TEST_GCS_PERMISSIONS = Object.freeze([
+  'storage.objects.getIamPolicy',
+  'storage.objects.setIamPolicy',
+]);
 
 function legacyInventory(overrides = {}) {
   return finalizeReleaseEvidenceRecord({
@@ -219,6 +231,8 @@ function createFakeBucket({
   storageClientEmail = ACCEPTANCE_SERVICE_ACCOUNT,
   storageCredentialType = 'Compute',
   bucketProjectNumber = PROJECT_NUMBER,
+  bucketUniformBucketLevelAccess = true,
+  bucketPublicAccessPrevention = 'enforced',
   concurrentConditionalWrite = null,
   ambiguousConditionalConflict = false,
 } = {}) {
@@ -242,12 +256,25 @@ function createFakeBucket({
     name: BUCKET_NAME,
     async getMetadata() {
       calls.bucketMetadata.push(BUCKET_NAME);
-      return [{ name: BUCKET_NAME, projectNumber: bucketProjectNumber }];
+      return [{
+        name: BUCKET_NAME,
+        projectNumber: bucketProjectNumber,
+        iamConfiguration: {
+          uniformBucketLevelAccess: { enabled: bucketUniformBucketLevelAccess },
+          publicAccessPrevention: bucketPublicAccessPrevention,
+        },
+      }];
     },
     iam: {
       async testPermissions(requested) {
         calls.permissions.push([...requested]);
-        return [{ ...permissions }, { permissions: Object.entries(permissions)
+        if (requested.some((permission) => INVALID_BUCKET_TEST_GCS_PERMISSIONS.includes(permission))) {
+          throw providerError(400, 'permission is not valid for a bucket testIamPermissions request');
+        }
+        const permissionResponse = Object.fromEntries(requested.map((permission) => [
+          permission, permissions[permission] === true,
+        ]));
+        return [permissionResponse, { permissions: Object.entries(permissionResponse)
           .filter(([, allowed]) => allowed).map(([name]) => name) }];
       },
     },
@@ -1011,6 +1038,10 @@ test('storage ADC and bucket project ownership must match the dedicated producti
     }, 'DEPENDENCY_GCS_IDENTITY_INVALID', 'gcs-adc-identity'],
     ['cross-project bucket', { bucketProjectNumber: '1234567890' },
       'DEPENDENCY_GCS_RESOURCE_INVALID', 'gcs-bucket-project'],
+    ['bucket without uniform bucket-level access', { bucketUniformBucketLevelAccess: false },
+      'DEPENDENCY_GCS_RESOURCE_INVALID', 'gcs-bucket-project'],
+    ['bucket without enforced public access prevention', { bucketPublicAccessPrevention: 'inherited' },
+      'DEPENDENCY_GCS_RESOURCE_INVALID', 'gcs-bucket-project'],
   ];
   for (const [name, providerOptions, code, stage] of cases) {
     await t.test(name, async () => {
@@ -1101,10 +1132,10 @@ test('real runtime uses project-scoped attached ADC and proves intended GCS life
     ['credentials', ACCEPTANCE_SERVICE_ACCOUNT],
   ]);
   assert.deepEqual(fixture.provider.calls.bucketMetadata, [BUCKET_NAME]);
-  assert.deepEqual(
-    fixture.provider.calls.permissions[0].filter((name) => REQUIRED_GCS_PERMISSIONS.includes(name)),
-    REQUIRED_GCS_PERMISSIONS,
-  );
+  assert.deepEqual(fixture.provider.calls.permissions, [[
+    ...REQUIRED_GCS_PERMISSIONS,
+    ...FORBIDDEN_BUCKET_TESTABLE_GCS_PERMISSIONS,
+  ]]);
   assert.equal(fixture.provider.calls.signedUrls, 0);
   assert.equal(fixture.provider.calls.publicFetches.length, 1);
   assert.equal(Object.hasOwn(fixture.provider.calls.publicFetches[0].options.headers ?? {}, 'Authorization'), false);
@@ -1304,8 +1335,11 @@ test('failed evidence verification deletes the exact committed generation and pe
 
 test('hostile GCS permissions, public access, metadata, and list responses fail closed without provider detail', async (t) => {
   const cases = [
-    ['forbidden permission', createFakeBucket({ permissions: permissionMap({ 'storage.buckets.setIamPolicy': true }) }),
-      async (client) => client.assertIntendedAccess()],
+    ...FORBIDDEN_BUCKET_TESTABLE_GCS_PERMISSIONS.map((permission) => [
+      `forbidden permission ${permission}`,
+      createFakeBucket({ permissions: permissionMap({ [permission]: true }) }),
+      async (client) => client.assertIntendedAccess(),
+    ]),
     ['missing object permission', createFakeBucket({ permissions: permissionMap({ 'storage.objects.delete': false }) }),
       async (client) => client.assertIntendedAccess()],
     ['public object', createFakeBucket({ publicStatus: 200 }), async (client, prefix) => {
