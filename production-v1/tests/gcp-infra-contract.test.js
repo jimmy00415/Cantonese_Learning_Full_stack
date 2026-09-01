@@ -4066,7 +4066,7 @@ test('lost project IAM set response recovers only from exact readback and suppor
 function operatorRecoveryAuditFixture({
   contract, mediaPermissions = [], buildPermissions = [
     'storage.buckets.get', 'storage.buckets.getIamPolicy', 'storage.buckets.setIamPolicy',
-  ],
+  ], mediaPermissionResponse,
 }) {
   const assets = [GCP_IDENTITY.bucket, GCP_IDENTITY.buildSourceBucket].map((bucket) => cloudAsset({
     name: `//storage.googleapis.com/${bucket}`,
@@ -4084,8 +4084,9 @@ function operatorRecoveryAuditFixture({
     },
     restRows: {
       ':getIamPolicy': operatorProjectPolicy(contract),
-      [`/${GCP_IDENTITY.bucket}/iam/testPermissions`]: {
-        kind: 'storage#testIamPermissionsResponse', permissions: mediaPermissions,
+      [`/${GCP_IDENTITY.bucket}/iam/testPermissions`]: mediaPermissionResponse ?? {
+        kind: 'storage#testIamPermissionsResponse',
+        ...(mediaPermissions.length === 0 ? {} : { permissions: mediaPermissions }),
       },
       [`/${GCP_IDENTITY.buildSourceBucket}/iam/testPermissions`]: {
         kind: 'storage#testIamPermissionsResponse', permissions: buildPermissions,
@@ -4135,6 +4136,34 @@ test('operator recovery audit accepts only the exact locked-media and default-bu
       (error) => error.code === 'OPERATOR_BUCKET_IAM_PERMISSION_INVALID',
     );
     assert.equal(partial.restCalls.some(({ url }) => url.endsWith(':setIamPolicy')), false);
+  });
+
+  await t.test('a present null permissions field is malformed rather than canonical empty', async () => {
+    const malformed = operatorRecoveryAuditFixture({
+      contract,
+      mediaPermissionResponse: {
+        kind: 'storage#testIamPermissionsResponse', permissions: null,
+      },
+    });
+    await assert.rejects(
+      () => malformed.plane.auditOperatorBucketIamRecovery(),
+      (error) => error.code === 'OPERATOR_BUCKET_IAM_PERMISSION_INVALID',
+    );
+    assert.equal(malformed.restCalls.some(({ url }) => url.endsWith(':setIamPolicy')), false);
+  });
+
+  await t.test('a present undefined permissions field is malformed rather than absent', async () => {
+    const malformed = operatorRecoveryAuditFixture({
+      contract,
+      mediaPermissionResponse: {
+        kind: 'storage#testIamPermissionsResponse', permissions: undefined,
+      },
+    });
+    await assert.rejects(
+      () => malformed.plane.auditOperatorBucketIamRecovery(),
+      (error) => error.code === 'OPERATOR_BUCKET_IAM_PERMISSION_INVALID',
+    );
+    assert.equal(malformed.restCalls.some(({ url }) => url.endsWith(':setIamPolicy')), false);
   });
 });
 

@@ -3142,15 +3142,18 @@ export class GcpControlPlane {
       target.searchParams.append('permissions', permission);
     }
     const response = await this.#rest({ method: 'GET', url: target.href });
+    const responseKeys = plainComputeRow(response) ? Object.keys(response).sort() : [];
+    const hasPermissions = plainComputeRow(response) && Object.hasOwn(response, 'permissions');
+    const permissions = hasPermissions ? response.permissions : [];
     if (!plainComputeRow(response)
-      || !exact(Object.keys(response).sort(), ['kind', 'permissions'])
+      || (!exact(responseKeys, ['kind']) && !exact(responseKeys, ['kind', 'permissions']))
       || response.kind !== 'storage#testIamPermissionsResponse'
-      || !Array.isArray(response.permissions)
-      || response.permissions.some((permission) => typeof permission !== 'string')
-      || new Set(response.permissions).size !== response.permissions.length) {
+      || !Array.isArray(permissions)
+      || permissions.some((permission) => typeof permission !== 'string')
+      || new Set(permissions).size !== permissions.length) {
       throw commandError('OPERATOR_BUCKET_IAM_PERMISSION_INVALID');
     }
-    const returned = new Set(response.permissions);
+    const returned = new Set(permissions);
     if (returned.size === 0) return false;
     if (!sameStringSet(returned, new Set(OPERATOR_BUCKET_IAM_PERMISSIONS))) {
       throw commandError('OPERATOR_BUCKET_IAM_PERMISSION_INVALID');
