@@ -3385,6 +3385,104 @@ test('pre-mutation audit reads a secret version only when its exact container is
   });
 });
 
+test('pre-mutation audit carries exact database secret versions into the bootstrap receipt comparison', async () => {
+  const contract = await contractFixture();
+  const secretIds = [
+    GCP_IDENTITY.secrets.dbAppUrl,
+    GCP_IDENTITY.secrets.dbMigratorUrl,
+    GCP_IDENTITY.secrets.session,
+    GCP_IDENTITY.secrets.bootstrap,
+  ];
+  const fixture = dependencyAuditControlPlane({
+    contract,
+    enabledApis: ['iam.googleapis.com', 'serviceusage.googleapis.com', 'secretmanager.googleapis.com'],
+    secretStates: Object.fromEntries(secretIds.map((id) => [id, 'present'])),
+  });
+  const originalRead = fixture.plane.read.bind(fixture.plane);
+  const originalCompare = fixture.plane.compare.bind(fixture.plane);
+  fixture.plane.read = async (id, context) => {
+    if (id.startsWith('secret-version:') && secretIds.includes(id.slice('secret-version:'.length))) {
+      return { status: 'present', value: { version: '1', secretValue: 'fixture', exact: true } };
+    }
+    return originalRead(id, context);
+  };
+  fixture.plane.compare = (id, value, context) => {
+    if (id === `secret-version:${GCP_IDENTITY.secrets.bootstrap}`) {
+      return context.secretVersions?.[GCP_IDENTITY.secrets.dbAppUrl] === '1'
+        && context.secretVersions?.[GCP_IDENTITY.secrets.dbMigratorUrl] === '1';
+    }
+    if (id.startsWith('secret-version:') && secretIds.includes(id.slice('secret-version:'.length))) {
+      return true;
+    }
+    return originalCompare(id, value, context);
+  };
+
+  assert.equal(await fixture.plane.auditPreMutationState(), true);
+  assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+  assert.equal(fixture.gcloudCalls.some((args) => (
+    args.includes('create') || args.includes('enable') || args.includes('add-iam-policy-binding')
+  )), false);
+});
+
+test('pre-mutation audit rejects a bootstrap receipt when either database secret version is absent', async (t) => {
+  const contract = await contractFixture();
+  const appSecret = GCP_IDENTITY.secrets.dbAppUrl;
+  const migratorSecret = GCP_IDENTITY.secrets.dbMigratorUrl;
+  const bootstrapSecret = GCP_IDENTITY.secrets.bootstrap;
+  for (const missingSecret of [appSecret, migratorSecret]) {
+    await t.test(missingSecret, async () => {
+      const secretIds = [appSecret, migratorSecret, bootstrapSecret];
+      const fixture = dependencyAuditControlPlane({
+        contract,
+        enabledApis: ['iam.googleapis.com', 'serviceusage.googleapis.com', 'secretmanager.googleapis.com'],
+        secretStates: Object.fromEntries(secretIds.map((id) => [id, 'present'])),
+      });
+      const bootstrapReceipt = {
+        schemaVersion: 1,
+        projectId: PROJECT,
+        instance: GCP_IDENTITY.cloudSqlInstance,
+        database: GCP_IDENTITY.database,
+        appUser: 'hkbuddy_app',
+        ...(missingSecret === appSecret ? {} : { appSecretVersion: '1' }),
+        migratorUser: 'hkbuddy_migrator',
+        ...(missingSecret === migratorSecret ? {} : { migratorSecretVersion: '1' }),
+        appDatabaseRoles: ['pg_read_all_data', 'pg_write_all_data'],
+        migratorDatabaseRoles: ['cloudsqlsuperuser'],
+      };
+      const originalRead = fixture.plane.read.bind(fixture.plane);
+      const originalCompare = fixture.plane.compare.bind(fixture.plane);
+      fixture.plane.read = async (id, context) => {
+        if (id === `secret-version:${missingSecret}`) return { status: 'absent' };
+        if (id === `secret-version:${appSecret}` || id === `secret-version:${migratorSecret}`) {
+          return { status: 'present', value: { version: '1', secretValue: 'fixture', exact: true } };
+        }
+        if (id === `secret-version:${bootstrapSecret}`) {
+          return {
+            status: 'present',
+            value: { version: '1', secretValue: JSON.stringify(bootstrapReceipt), exact: true },
+          };
+        }
+        return originalRead(id, context);
+      };
+      fixture.plane.compare = (id, value, context) => {
+        if (id === `secret-version:${appSecret}` || id === `secret-version:${migratorSecret}`) {
+          return true;
+        }
+        return originalCompare(id, value, context);
+      };
+
+      await assert.rejects(
+        () => fixture.plane.auditPreMutationState(),
+        (error) => error.code === 'RESOURCE_COLLISION',
+      );
+      assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+      assert.equal(fixture.gcloudCalls.some((args) => (
+        args.includes('create') || args.includes('enable') || args.includes('add-iam-policy-binding')
+      )), false);
+    });
+  }
+});
+
 test('pre-mutation secret inventory accepts the live numeric project resource name without mutation', async () => {
   const contract = await contractFixture();
   const target = GCP_IDENTITY.secrets.dbAppUrl;

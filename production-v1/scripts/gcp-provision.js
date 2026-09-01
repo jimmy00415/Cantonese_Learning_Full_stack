@@ -3350,8 +3350,14 @@ export class GcpControlPlane {
       if (!['present', 'absent'].includes(current?.status)) {
         throw commandError('RESOURCE_STATE_UNKNOWN');
       }
-      if (current?.status === 'present' && !this.compare(id, current.value, context)) {
-        throw commandError('RESOURCE_COLLISION');
+      if (current?.status === 'present') {
+        if (!this.compare(id, current.value, context)) throw commandError('RESOURCE_COLLISION');
+        if (id.startsWith('secret-version:')) {
+          const secretId = id.slice('secret-version:'.length);
+          const version = secretVersionFromValue(current.value);
+          if (!version) throw commandError('SECRET_VERSION_INVALID');
+          context.secretVersions[secretId] = version;
+        }
       }
       auditStatuses.set(id, current.status);
     }
@@ -4157,12 +4163,16 @@ export class GcpControlPlane {
         && parsed.search === '?sslmode=require' && !parsed.hash;
     }
     if (secretId === GCP_IDENTITY.secrets.bootstrap) {
+      const appSecretVersion = context.secretVersions?.[GCP_IDENTITY.secrets.dbAppUrl];
+      const migratorSecretVersion = context.secretVersions?.[GCP_IDENTITY.secrets.dbMigratorUrl];
+      if (!NUMERIC_VERSION.test(String(appSecretVersion ?? ''))
+        || !NUMERIC_VERSION.test(String(migratorSecretVersion ?? ''))) return false;
       let receipt;
       try { receipt = JSON.parse(value.secretValue); } catch { return false; }
       return exact(receipt, {
         schemaVersion: 1, projectId: PROJECT, instance: GCP_IDENTITY.cloudSqlInstance, database: GCP_IDENTITY.database,
-        appUser: 'hkbuddy_app', appSecretVersion: context.secretVersions?.[GCP_IDENTITY.secrets.dbAppUrl],
-        migratorUser: 'hkbuddy_migrator', migratorSecretVersion: context.secretVersions?.[GCP_IDENTITY.secrets.dbMigratorUrl],
+        appUser: 'hkbuddy_app', appSecretVersion,
+        migratorUser: 'hkbuddy_migrator', migratorSecretVersion,
         appDatabaseRoles: ['pg_read_all_data', 'pg_write_all_data'],
         migratorDatabaseRoles: ['cloudsqlsuperuser'],
       });
