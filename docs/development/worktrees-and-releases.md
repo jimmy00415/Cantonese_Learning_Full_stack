@@ -96,3 +96,27 @@ SHA, acceptance run ID, and release-index record hash. Failed, abandoned, candid
 and unpromoted attempts receive no production tag. After promotion, update the tracked
 `ops/release-index.json`, create the annotated tag, verify that its target equals the
 deployed release SHA, and record the exact public Cloud Run URL and image digest.
+
+## Canonical release-index record hash
+
+Finalize every release-index record field before hashing, including setting the
+`productionTag` value before either the hash or annotated tag is created. Build a new
+object whose keys are exactly and in this order:
+
+```text
+releaseSha
+acceptanceRunId
+disposition
+resumable
+localArchiveRelativePath
+inventorySha256
+imageDigest
+productionTag
+publicUrl
+```
+
+Serialize that object as compact JSON with Node.js `JSON.stringify` semantics, encode
+the result as UTF-8 with no BOM and no trailing newline, and compute SHA-256 as lowercase
+hexadecimal. The hash is external to the release-index record: do not add it as another
+record field. Record the resulting hash in the annotated production tag only after all
+fields, including `productionTag`, have been finalized.

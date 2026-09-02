@@ -1,6 +1,6 @@
 # HK Buddy Workspace And Release Layout Design
 
-**Status:** Approved in chat on 2026-09-02; pending written-spec review before migration.
+**Status:** Implemented and independently verified on 2026-09-02; pending local branch integration.
 
 ## Goal
 
@@ -61,7 +61,8 @@ Each archived attempt receives an inventory stored outside the attempt payload t
 - schema version;
 - original and archived paths;
 - full release SHA and acceptance run ID;
-- observed journal state and archive disposition;
+- an `observedJournalState` object derived from the lexically last file in the attempt's receipt-state journal, with keys in this exact order: `lastRecordFile`, `recordType`, `phase`, `status`, `operationId`, `code`; `status` comes from terminal `payload.status` and is otherwise `null`, `operationId` comes from terminal `payload.terminalState.operationId` or the top-level non-terminal record and is otherwise `null`, and `code` comes from terminal `payload.terminalState.code` and is otherwise `null`;
+- archive disposition;
 - file count and total byte count;
 - one SHA-256 digest and byte count for every payload file, using normalized forward-slash relative paths;
 - a canonical SHA-256 digest of the ordered inventory entries;
