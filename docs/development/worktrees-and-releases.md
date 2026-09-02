@@ -46,6 +46,10 @@ move, so both its `.git` file and Git's common metadata remain valid:
 git worktree move D:\VS_Project\HK_Buddy-deploy D:\VS_Project\HK_Buddy\.worktrees\gcp-production-v1
 ```
 
+Before any move, resolve both source and destination to absolute paths and verify that
+the destination remains under `D:\VS_Project\HK_Buddy`; stop if the check fails. Do not
+use an unresolved variable, wildcard, or path outside this repository as the move target.
+
 Remove a worktree only after confirming its status is clean and its branch is integrated
 or deliberately retained:
 
@@ -68,6 +72,10 @@ D:\VS_Project\HK_Buddy\.release-evidence\attempts\<full-release-sha>\<acceptance
 The directory is never moved or renamed while active. Repeated attempts for one commit
 must use distinct acceptance run IDs. Archived attempts retain their final paths and are
 inventoried outside the attempt payload.
+
+Existing, abandoned, failed, candidate-only, and other archived attempts are
+non-resumable. Any retry must use a new acceptance run ID and a new attempt directory at
+the corresponding final path; never reopen or overwrite the archived attempt directory.
 
 `.release-evidence` is a local cache, not the authority for deployment state. SHA-256
 inventories detect later drift in cached evidence; GCP Artifact Registry, Cloud Storage,
