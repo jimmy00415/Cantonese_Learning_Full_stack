@@ -337,10 +337,12 @@ release; a cheaper zonal database may be used only for a clearly labeled staging
 candidate.
 
 The media bucket has uniform bucket-level access, public-access prevention,
-seven-day lifecycle deletion, no public URL, and bucket-level object permissions
-only for the runtime service account. The GCS adapter preserves the existing
-opaque object key, bounded range read, write, delete, orphan cleanup, and durable
-outbox contracts.
+seven-day lifecycle deletion, and no public URL. Its bucket policy grants the
+reviewed object roles only to the runtime and acceptance service accounts. The
+human release operator's distinct project binding permits listing only this
+bucket and get/delete only below `release-evidence/`; it grants no runtime media
+content access. The GCS adapter preserves the existing opaque object key,
+bounded range read, write, delete, orphan cleanup, and durable outbox contracts.
 
 Cloud Run and Firestore both support Hong Kong `asia-east2`; this design uses
 Cloud SQL to preserve tested semantics. Cloud Run region authority:

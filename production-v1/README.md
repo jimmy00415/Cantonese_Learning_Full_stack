@@ -27,8 +27,10 @@ committed SHA and must not use an older local checkout.
 - The V1 budget and alert policies, Artifact Registry repository, five service
   accounts, acceptance metadata-reader custom role, VPC/subnet/PSA connection,
   private HA PostgreSQL 16 instance and `hkbuddy_v1` database, both V1 buckets,
-  and all ten empty Secret containers were created and read back in earlier
-  guarded runs.
+  and all ten Secret containers were created and read back in earlier guarded
+  runs. The four base secrets have numeric version 1 and the superseded legacy
+  inventory reached version 6; the dependency, provider, and iOS evidence
+  containers have not yet received an accepted release version.
 - A later release attempt on source `0ce6399791b393500cd393e41c1d340d8232518c`
   passed build, migration, inventory, and all four acceptance Jobs, then stopped
   at `collect`: the fixed operator could read bucket metadata but lacked object
@@ -43,21 +45,21 @@ committed SHA and must not use an older local checkout.
   `release-evidence/` prefix. It does not extend the bucket-policy operator or
   the build-source creator-only grant. **This new recovery has not yet been
   executed live.**
-- No V1 Cloud Run Job, private candidate service, stable service, public V1 URL,
-  or production QR code exists. The legacy Azure app
+- The migration and four acceptance Cloud Run Jobs from the superseded attempt
+  exist, but no private candidate service, stable service, public V1 URL, or
+  production QR code exists. The legacy Azure app
   `hkbuddy-pilot-0630` was not modified.
-- The original workstation's gcloud refresh token required reauthentication
-  before this handoff could take a final fresh inventory. Treat the bullets
-  above as the last confirmed snapshot and re-run the read-only preflight on the
-  new computer before accepting them as current.
+- The active CLI identity was reverified as `admin@motionexp.com` in the fixed
+  existing project with no impersonation or credential-file override. Re-run
+  the read-only preflight before accepting this snapshot as current.
 
 ### Resume on the new computer
 
 From a fresh clone:
 
 ```powershell
-git switch feat/production-v1-ai-senior
-git pull --ff-only
+git fetch origin
+git switch --track origin/codex/gcp-production-v1-launch
 cd production-v1
 npm ci
 $controlledBrowserRoot = 'D:\VS_PROJECT\Testing\HongKong_Buddy\.codex-task-5g-temp\playwright'
