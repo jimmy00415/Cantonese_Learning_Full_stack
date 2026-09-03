@@ -51,6 +51,15 @@ The release is accepted only when the deployed candidate proves all of these:
 - measured production latency satisfies the release SLOs in this document;
 - the legacy product and its cloud resources are untouched.
 
+For this release only, the product owner may defer the physical iPhone/Safari
+test through the exact, final-release-SHA-bound seven-day waiver owned by
+`admin@motionexp.com`. That waiver is an alternative only to schema-v4 real
+iPhone evidence in the current `iosVoiceAcceptance` publication slot; it does
+not certify real iPhone behavior. The public runtime must report
+`iosVoiceCertified=false` and `iosVoiceAcceptanceVersion=null`. Controlled
+Playwright `390x844` mobile, real Google LLM/ASR/TTS smoke, privacy, readiness,
+latency/workload, trace, candidate, and promotion gates remain mandatory.
+
 ## Evidence from the current product
 
 Fresh baseline verification on 2026-08-26 established:
@@ -522,3 +531,17 @@ opt-in: recovery resumes an existing retryable generation but does not enqueue
 untouched text answers. It does not claim real-iOS Safari. All live GCP, provider,
 real-iOS, promotion, public-IAM, runtime-health, URL, and QR gates remain
 unexecuted.
+
+## Real-iPhone waiver amendment (2026-09-03)
+
+The product owner has explicitly authorized public launch without physical
+iPhone/Safari certification for this release. The release controller may accept
+either unchanged schema-v4 real-iPhone evidence or the exact schema-v1
+`real-iphone-safari` waiver described above. The waiver must be generated
+locally after the final commit is known, be canonical and self-hash-valid, bind
+that exact lowercase 40-hex commit, identify `admin@motionexp.com`, carry only
+the `not-real-ios-tested` limitation, and expire exactly seven days after its
+canonical approval instant. It is never valid in the runtime certification
+validator. Expiry, future skew beyond five minutes, interval drift, wrong
+owner/SHA/scope/reason/result/limitations, extra keys, or digest tampering block
+the release before Secret Manager access. No other launch gate is waived.

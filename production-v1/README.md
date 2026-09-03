@@ -119,9 +119,11 @@ before retrying.
 
 After `GCP_PROVISION_COMPLETE`, continue the guarded release phases documented
 in `infra/gcp/README.md`. The remaining external gates are still explicit:
-owner confirmation of the legacy-resource inventory, a real iPhone Safari voice
-evidence bundle, a 30-file multilingual canonical-WAV latency manifest, private
-candidate acceptance, and final stable promotion. Generate and deliver a QR
+owner confirmation of the legacy-resource inventory, either a real iPhone
+Safari voice evidence bundle or this release's exact owner waiver, a 30-file
+multilingual canonical-WAV latency manifest, private candidate acceptance, and
+final stable promotion. A waiver release is public but not real-iPhone
+certified. Generate and deliver a QR
 only after the stable URL passes live text, voice, readiness, privacy, and mobile
 acceptance.
 
@@ -337,8 +339,10 @@ must equal that clean `HEAD` before and after every acceptance run.
    Application startup never runs migrations and refuses a database without
    every expected migration version.
 
-4. Run the separately guarded LLM, ASR, TTS, and real-iPhone acceptance against
-   the frozen candidate. A configured provider is not a verified capability.
+4. Run the separately guarded LLM, ASR, and TTS acceptance against the frozen
+   candidate. Supply either genuine schema-v4 real-iPhone acceptance or, for
+   this release only, the exact product-owner waiver. A configured provider is
+   not a verified capability.
    The LLM smoke requires strict V1 provider settings, a lowercase frozen commit
    SHA, and the exact real-provider confirmation:
 
@@ -354,6 +358,22 @@ must equal that clean `HEAD` before and after every acceptance run.
    provider request. The evidence expires after seven days and permits at most
    five minutes of future clock skew. It is a release attestation, not a claim
    that the upstream provider is live at every later instant.
+
+   If using the authorized physical-device deferral, wait until the final
+   release commit exists and write the create-only artifact to a new absolute
+   JSON path:
+
+   ```powershell
+   npm.cmd run acceptance:ios-waiver -- --release-sha=<final-lowercase-40-hex-sha> --destination=<absolute-new-json-path> --confirm-owner=admin@motionexp.com
+   ```
+
+   The artifact is valid for exactly seven days and replaces only physical
+   iPhone/Safari evidence in the current release publication. It does not waive
+   controlled Playwright `390x844` mobile, real Google LLM/ASR/TTS smoke,
+   privacy, readiness, latency/workload, trace, candidate, or promotion gates.
+   Runtime intentionally keeps `iosVoiceCertified=false` and
+   `iosVoiceAcceptanceVersion=null`; all user-facing release descriptions must
+   say the product is not real-iPhone certified.
 
 5. With an explicitly approved new candidate and non-sensitive canonical WAV
    manifest:
@@ -446,7 +466,8 @@ Existing stable services require an exact paired `previousRevision` and
 `previousImageDigest`. Empty-host promotion requires both fields to be null and
 the exact stable-service describe to return `CLOUD_RUN_SERVICE_NOT_FOUND`.
 Permission errors, generic not-found text, and any command/resource mismatch
-fail closed. Promote only after privacy, real provider, iOS voice, dependency,
+fail closed. Promote only after privacy, real provider, iOS voice evidence or
+the exact release-scoped owner waiver, dependency,
 retention, readiness, mobile, latency, production-trace, and receipt gates all
 pass for the same frozen commit. A later promotion creates the accepted
 `hkbuddy-v1-api-<sha12>` revision untagged at 0% while the evidenced prior stable

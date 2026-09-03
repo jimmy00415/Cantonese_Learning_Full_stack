@@ -63,6 +63,22 @@ const IOS_V4_EVIDENCE_KEYS = Object.freeze([
   'normalizationBindingSha256', 'verifiedStepIds', 'occurredAt', 'result',
   'artifactSha256',
 ]);
+const IOS_VOICE_WAIVER_KEYS = Object.freeze([
+  'schemaVersion', 'commitSha', 'capability', 'decision', 'scope', 'approvedBy',
+  'approvedAt', 'expiresAt', 'reasonCode', 'limitations', 'result', 'artifactSha256',
+]);
+
+export const iosVoiceWaiverContract = Object.freeze({
+  schemaVersion: 1,
+  capability: 'ios-voice',
+  decision: 'waived',
+  scope: 'real-iphone-safari',
+  approvedBy: 'admin@motionexp.com',
+  durationMs: 7 * DAY_MS,
+  reasonCode: 'product-owner-deferred-device-test',
+  limitations: Object.freeze(['not-real-ios-tested']),
+  result: 'waived',
+});
 
 export const iosVoiceEvidenceContract = Object.freeze({
   schemaVersion: 4,
@@ -421,6 +437,42 @@ export function validateIosVoiceEvidence(record, {
     && timeValid(record, now, 90 * DAY_MS)
     && timeValid({ occurredAt: record.deviceObservedAt }, now, 90 * DAY_MS),
   );
+}
+
+function canonicalInstant(value) {
+  if (typeof value !== 'string') return null;
+  const instant = Date.parse(value);
+  return Number.isFinite(instant) && new Date(instant).toISOString() === value ? instant : null;
+}
+
+function validateIosVoiceWaiver(record, { expectedVersion, commitSha, now }) {
+  const nowMs = new Date(now).getTime();
+  const approvedAt = canonicalInstant(record?.approvedAt);
+  const expiresAt = canonicalInstant(record?.expiresAt);
+  return Boolean(
+    hasExactOwnKeys(record, IOS_VOICE_WAIVER_KEYS)
+    && /^[0-9a-f]{40}$/.test(String(commitSha ?? ''))
+    && artifactValid(record, expectedVersion)
+    && record.schemaVersion === iosVoiceWaiverContract.schemaVersion
+    && record.commitSha === commitSha
+    && record.capability === iosVoiceWaiverContract.capability
+    && record.decision === iosVoiceWaiverContract.decision
+    && record.scope === iosVoiceWaiverContract.scope
+    && record.approvedBy === iosVoiceWaiverContract.approvedBy
+    && record.reasonCode === iosVoiceWaiverContract.reasonCode
+    && JSON.stringify(record.limitations) === JSON.stringify(iosVoiceWaiverContract.limitations)
+    && record.result === iosVoiceWaiverContract.result
+    && Number.isFinite(nowMs)
+    && approvedAt !== null
+    && expiresAt !== null
+    && approvedAt <= nowMs + FUTURE_SKEW_MS
+    && expiresAt > nowMs
+    && expiresAt - approvedAt === iosVoiceWaiverContract.durationMs,
+  );
+}
+
+export function validateIosVoiceReleaseEvidence(record, options) {
+  return validateIosVoiceEvidence(record, options) || validateIosVoiceWaiver(record, options);
 }
 
 export const voiceEvidenceContracts = Object.freeze({

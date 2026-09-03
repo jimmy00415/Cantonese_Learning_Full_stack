@@ -13,6 +13,10 @@ import {
   llmProviderConfigDigest,
   postgresIdentitySha256,
 } from '../src/services/release-evidence.js';
+import {
+  finalizeEvidenceRecord,
+  providerConfigDigest,
+} from '../src/services/voice-evidence.js';
 import { createLogger } from '../src/telemetry/logger.js';
 
 const TEST_RELEASE_COMMIT = 'a'.repeat(40);
@@ -757,6 +761,95 @@ test('config public status contains capability booleans rather than secret value
     normalizerContractVersion: 'canonical-wav-v1',
   });
   assert.equal(JSON.stringify(config.publicStatus).includes('very-secret-value'), false);
+});
+
+test('owner waiver never certifies real iPhone while provider-backed voice remains independently available', () => {
+  const now = new Date('2026-09-03T08:00:00.000Z');
+  const asrConfig = {
+    provider: 'google-stt-v2',
+    settings: {
+      projectId: TEST_GCS_PROJECT,
+      location: 'asia-southeast1',
+      model: 'chirp_2',
+      recognizer: '_',
+      languageCodes: ['yue-Hant-HK', 'en-US', 'cmn-Hans-CN'],
+      credentialVersion: 'runtime-sa-rotation-v1',
+    },
+  };
+  const ttsConfig = {
+    provider: 'google-tts',
+    settings: {
+      projectId: TEST_GCS_PROJECT,
+      location: 'asia-southeast1',
+      voices: {
+        en: { languageCode: 'en-US', name: 'en-US-Chirp3-HD-Achernar' },
+        yueHant: { languageCode: 'yue-HK', name: 'yue-HK-Chirp3-HD-Achernar' },
+        zhHans: { languageCode: 'cmn-CN', name: 'cmn-CN-Chirp3-HD-Achernar' },
+      },
+      credentialVersion: 'runtime-sa-rotation-v1',
+    },
+  };
+  const asrRecord = finalizeEvidenceRecord({
+    schemaVersion: 1,
+    commitSha: TEST_RELEASE_COMMIT,
+    capability: 'asr',
+    provider: asrConfig.provider,
+    contractVersion: 'google-stt-v2-v3',
+    providerConfigDigest: providerConfigDigest(asrConfig, 'asr'),
+    occurredAt: now.toISOString(),
+    result: 'pass',
+    latencyMs: 1,
+    fixtureSha256: '1'.repeat(64),
+    fixtureDurationMs: 1_000,
+  });
+  const ttsRecord = finalizeEvidenceRecord({
+    schemaVersion: 1,
+    commitSha: TEST_RELEASE_COMMIT,
+    capability: 'tts',
+    provider: ttsConfig.provider,
+    contractVersion: 'google-tts-v3',
+    providerConfigDigest: providerConfigDigest(ttsConfig, 'tts'),
+    occurredAt: now.toISOString(),
+    result: 'pass',
+    latencyMs: 1,
+  });
+  const waiverRecord = finalizeEvidenceRecord({
+    schemaVersion: 1,
+    commitSha: TEST_RELEASE_COMMIT,
+    capability: 'ios-voice',
+    decision: 'waived',
+    scope: 'real-iphone-safari',
+    approvedBy: 'admin@motionexp.com',
+    approvedAt: now.toISOString(),
+    expiresAt: '2026-09-10T08:00:00.000Z',
+    reasonCode: 'product-owner-deferred-device-test',
+    limitations: ['not-real-ios-tested'],
+    result: 'waived',
+  });
+  const files = {
+    asr: join(evidenceDirectory, 'waiver-asr.json'),
+    tts: join(evidenceDirectory, 'waiver-tts.json'),
+    ios: join(evidenceDirectory, 'ios-owner-waiver.json'),
+  };
+  writeFileSync(files.asr, JSON.stringify(asrRecord));
+  writeFileSync(files.tts, JSON.stringify(ttsRecord));
+  writeFileSync(files.ios, JSON.stringify(waiverRecord));
+
+  const config = loadConfig(productionEnvironment({
+    V1_ASR_SMOKE_EVIDENCE_FILE: files.asr,
+    V1_ASR_SMOKE_EVIDENCE_VERSION: asrRecord.artifactSha256,
+    V1_TTS_SMOKE_EVIDENCE_FILE: files.tts,
+    V1_TTS_SMOKE_EVIDENCE_VERSION: ttsRecord.artifactSha256,
+    V1_IOS_VOICE_ACCEPTANCE_FILE: files.ios,
+    V1_IOS_VOICE_ACCEPTANCE_VERSION: waiverRecord.artifactSha256,
+  }), { now: () => now });
+
+  assert.equal(config.publicStatus.voiceInput, true);
+  assert.equal(config.publicStatus.voiceOutput, true);
+  assert.equal(config.publicStatus.asrEvidenceVersion, asrRecord.artifactSha256);
+  assert.equal(config.publicStatus.ttsEvidenceVersion, ttsRecord.artifactSha256);
+  assert.equal(config.publicStatus.iosVoiceCertified, false);
+  assert.equal(config.publicStatus.iosVoiceAcceptanceVersion, null);
 });
 
 test('config logger retains operational fields and drops user content and secrets', () => {

@@ -335,10 +335,16 @@ its local absolute JSON path, semantic artifact SHA-256, exact object-byte
 SHA-256, fixed Secret ID, and expected numeric Secret version. The release
 runner verifies the file bytes, embedded commit/artifact binding, size, and
 basic secret-safety before its first Secret Manager mutation. In the confirmed
-`evidence` phase it additionally validates the iOS artifact as the complete
-current v4 contract: exact release SHA and semantic artifact hash, canonical-WAV
-normalizer contract, pinned normalizer identity/result, and both device/evidence
-clocks. A merely self-hashed JSON object cannot be published. Receipt-bound
+`evidence` phase it additionally validates the iOS artifact as either the
+complete current v4 contract or the exact current owner waiver. The unchanged
+v4 branch requires the exact release SHA and semantic artifact hash,
+canonical-WAV normalizer contract, pinned normalizer identity/result, and both
+device/evidence clocks. The waiver branch requires the final lowercase 40-hex
+release SHA, `admin@motionexp.com`, `real-iphone-safari`, the exact reason and
+single limitation, canonical approval/expiry instants exactly seven days apart,
+no more than five minutes of future skew, and an unexpired self-hash-valid
+record with no extra keys. A merely self-hashed JSON object cannot be published.
+Receipt-bound
 cleanup and rollback later verify the immutable historical bytes and hashes
 without pretending that the original acceptance is still fresh. Every
 inventory/evidence payload is frozen from those validated bytes before any
@@ -348,6 +354,22 @@ exact numeric-version metadata readback, private payload readback, and durable
 safe result bind both the semantic artifact SHA-256 and exact object SHA-256.
 Payload readback uses the CLI's checksum-verified Secret access response and is
 never copied into a receipt or public report. Evidence must not contain credentials.
+
+Create the waiver only when exercising the product owner's explicit deferral
+for this release, only after the final commit SHA is known, and only at a new
+absolute JSON path outside tracked source:
+
+```text
+npm run acceptance:ios-waiver -- --release-sha=FINAL_40_HEX_SHA --destination=ABSOLUTE_NEW_JSON_PATH --confirm-owner=admin@motionexp.com
+```
+
+This substitutes only for physical iPhone/Safari evidence. It does not alter
+the manifest/evidence/receipt chain or numeric Secret version binding, and it
+does not waive controlled Playwright `390x844` mobile, real Google LLM/ASR/TTS,
+privacy, readiness, latency/workload, trace, candidate, or promotion gates. A
+release using it must be described as not real-iPhone certified; runtime must
+continue to expose `iosVoiceCertified=false` and
+`iosVoiceAcceptanceVersion=null`.
 `previousRevision` and `previousImageDigest` are one
 fail-closed pair: both are `null` only for an evidenced empty-host first
 release; every later release supplies the exact controller revision

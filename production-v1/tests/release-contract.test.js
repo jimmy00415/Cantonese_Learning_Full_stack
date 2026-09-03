@@ -283,12 +283,30 @@ function validIosVoiceAcceptancePayload(occurredAt = '2026-08-29T08:00:00.000Z')
   return payload;
 }
 
-async function materializedReleaseEvidenceInput(t, { mutateIos } = {}) {
+function validIosVoiceWaiverPayload(approvedAt = '2026-08-29T08:00:00.000Z') {
+  return {
+    schemaVersion: 1,
+    commitSha: RELEASE_SHA,
+    capability: 'ios-voice',
+    decision: 'waived',
+    scope: 'real-iphone-safari',
+    approvedBy: 'admin@motionexp.com',
+    approvedAt,
+    expiresAt: new Date(Date.parse(approvedAt) + (7 * 24 * 60 * 60 * 1_000)).toISOString(),
+    reasonCode: 'product-owner-deferred-device-test',
+    limitations: ['not-real-ios-tested'],
+    result: 'waived',
+  };
+}
+
+async function materializedReleaseEvidenceInput(t, { mutateIos, iosPayload: selectedIosPayload } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'hkbuddy-release-semantic-evidence-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const iosPayload = validIosVoiceAcceptancePayload();
+  const iosPayload = selectedIosPayload ?? validIosVoiceAcceptancePayload();
   mutateIos?.(iosPayload);
-  iosPayload.normalizationBindingSha256 = iosVoiceNormalizationBinding(iosPayload);
+  if (iosPayload.schemaVersion === iosVoiceEvidenceContract.schemaVersion) {
+    iosPayload.normalizationBindingSha256 = iosVoiceNormalizationBinding(iosPayload);
+  }
   const records = {
     legacyInventory: finalizeReleaseEvidenceRecord({
       schemaVersion: 1, commitSha: RELEASE_SHA, result: true,
@@ -2443,6 +2461,44 @@ test('evidence phase accepts one current iOS voice v4 artifact and publishes pla
   assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
   assert.equal(calls.some((argv) => argv[0] === 'secrets'
     && argv[1] === 'versions' && argv[2] === 'add'), true);
+});
+
+test('evidence phase accepts the exact current iOS owner waiver before publishing planned versions', async (t) => {
+  const input = await materializedReleaseEvidenceInput(t, {
+    iosPayload: validIosVoiceWaiverPayload(),
+  });
+  const versionsBySecret = Object.fromEntries(Object.values(input.evidence).map((value) => (
+    [value.secret, value.secretVersion]
+  )));
+  const calls = [];
+  const publishedBySecret = new Map();
+  const result = await runGcpRelease({
+    argv: ['--phase=evidence', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    verifyEvidence: undefined,
+    execute: async (argv, { stdin } = {}) => {
+      calls.push(argv);
+      if (argv[0] === 'storage') {
+        return argv[1] === 'objects' && argv[2] === 'list' ? [] : { done: true };
+      }
+      const isPublish = argv[0] === 'secrets' && argv[1] === 'versions' && argv[2] === 'add';
+      const secret = isPublish
+        ? argv[3]
+        : argv.find((value) => value.startsWith('--secret=')).slice('--secret='.length);
+      if (isPublish) publishedBySecret.set(secret, Buffer.from(stdin));
+      if (argv[2] === 'access') return publishedBySecret.get(secret).toString('base64url');
+      const version = isPublish ? versionsBySecret[secret] : argv[3];
+      return { name: `projects/${PROJECT}/secrets/${secret}/versions/${version}`, state: 'ENABLED' };
+    },
+    now: () => new Date('2026-08-29T08:00:00.000Z'),
+    writeOutput: () => undefined,
+  });
+
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  const firstPublication = calls.findIndex((argv) => argv[0] === 'secrets'
+    && argv[1] === 'versions' && argv[2] === 'add');
+  assert.notEqual(firstPublication, -1);
+  assert.equal(calls.slice(0, firstPublication).some((argv) => argv[0] === 'secrets'), false);
 });
 
 test('evidence publication streams the verified bytes after the source path is replaced', async (t) => {

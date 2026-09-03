@@ -30,7 +30,7 @@ import { CANONICAL_WAV } from '../src/media/canonical-wav.js';
 import { finalizeReleaseEvidenceRecord } from '../src/services/release-evidence.js';
 import {
   finalizeEvidenceRecord,
-  validateIosVoiceEvidence,
+  validateIosVoiceReleaseEvidence,
 } from '../src/services/voice-evidence.js';
 import {
   LATENCY_ACCEPTANCE_CONTRACT,
@@ -3036,7 +3036,7 @@ export async function validateEvidenceArtifactFile(value, {
     }
     if (iosVoiceMode === 'current') {
       const currentTime = new Date(iosVoiceNow).getTime();
-      if (!Number.isFinite(currentTime) || !validateIosVoiceEvidence(record, {
+      if (!Number.isFinite(currentTime) || !validateIosVoiceReleaseEvidence(record, {
         expectedVersion: value.artifactSha256,
         commitSha: releaseSha,
         normalizerContractVersion: CANONICAL_WAV.contractVersion,

@@ -19,7 +19,7 @@
 - Treat billing, quota, required API enablement, audit logs, and project IAM as shared. Treat the default VPC/subnets, protected baseline IAM, existing data, and unrelated services as immutable inventory.
 - Never print, commit, or persist access tokens, database passwords, session secrets, prompts, transcripts, audio, or raw provider bodies.
 - Use Application Default Credentials from the attached Cloud Run service account. Do not create service-account keys or accept `GOOGLE_API_KEY`.
-- Preserve fail-closed readiness. A missing or stale provider, storage, iOS voice, latency, or frozen-SHA evidence gate stays visibly red.
+- Preserve fail-closed readiness. A missing or stale provider, storage, latency, or frozen-SHA evidence gate stays visibly red. For this release only, current iOS publication accepts either genuine schema-v4 evidence or the exact seven-day `admin@motionexp.com` real-iPhone/Safari waiver; the waiver leaves runtime iOS certification false.
 - Text delivery is canonical. TTS failure never delays, removes, or mutates the grounded text answer. Audio never autoplays.
 - Reply settings are immutable per accepted message and part of its idempotency hash.
 - Implement behavior through red-green-refactor and commit each coherent green task.
@@ -324,6 +324,14 @@ Wire enums are exactly `en | yue-Hant-HK | cmn-Hans-CN` and `text | voice`.
   candidate, stable, IAM, and authority rereads form a canonical barrier digest
   bound to final intent. Expired unperformed paths abort/re-proof safely;
   mixed/ambiguous paths block. No cloud mutation follows the terminal mutation.
-- [ ] Run live candidate, provider, GCP, real-iOS, promotion, public-IAM, runtime,
-  rollback-drill, URL, and QR gates. This local checkpoint authorizes none of
-  those operations and makes no deployed-production claim.
+- [ ] After the final commit is known, generate either genuine schema-v4
+  real-iPhone evidence or the create-only exact owner waiver with
+  `npm.cmd run acceptance:ios-waiver -- --release-sha=<final-lowercase-40-hex-sha> --destination=<absolute-new-json-path> --confirm-owner=admin@motionexp.com`.
+  A waiver authorizes only deferred physical iPhone/Safari testing, expires
+  after exactly seven days, and requires the public product to be described as
+  not real-iPhone certified.
+- [ ] Run live candidate, provider, GCP, promotion, public-IAM, runtime,
+  rollback-drill, URL, and QR gates, plus every privacy, readiness,
+  latency/workload, controlled `390x844` mobile, trace, ASR, and TTS gate. This
+  local checkpoint authorizes none of those operations and makes no
+  deployed-production claim; the owner waiver skips none of them.
