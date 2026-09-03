@@ -61,6 +61,20 @@ function common(overrides = {}) {
   };
 }
 
+function executionBaseline(job, overrides = {}) {
+  return {
+    executionCount: 0,
+    executionSetSha256: '9'.repeat(64),
+    job,
+    jobGeneration: 1,
+    jobUid: '12d057cc-bcf8-4192-95fa-bd7527627e46',
+    project: 'motion-expert-hk-ltd-webpage',
+    projectNumber: '582852715831',
+    region: 'asia-east2',
+    ...overrides,
+  };
+}
+
 function threeRecordJournal() {
   const intent = finalizeJournalRecord(common());
   const checkpoint = finalizeJournalRecord(common({
@@ -1038,6 +1052,16 @@ test('state store accepts an authoritative acceptance execute rejection only for
     classification: 'after', outcome: 'applied', observationSha256: '2'.repeat(64),
     safeResult: { kind: 'resource', state: 'present', identitySha256: '3'.repeat(64), valueSha256: '4'.repeat(64) },
   });
+  const executionBaseline = {
+    executionCount: 1,
+    executionSetSha256: '9'.repeat(64),
+    job: 'hkbuddy-v1-dependency-acceptance',
+    jobGeneration: 1,
+    jobUid: '12d057cc-bcf8-4192-95fa-bd7527627e46',
+    project: 'motion-expert-hk-ltd-webpage',
+    projectNumber: '582852715831',
+    region: 'asia-east2',
+  };
   const executeIntent = await store.appendIntent({
     ...common().payload,
     mutationOrdinal: 2,
@@ -1046,10 +1070,11 @@ test('state store accepts an authoritative acceptance execute rejection only for
     reconcileKind: 'cloud-run-job-execute',
     beforeSha256: '7'.repeat(64),
     afterSha256: '8'.repeat(64),
+    executionBaseline,
   }, { operationId: 'dependency-acceptance-execute' });
   const evidence = {
     commandSha256: executeIntent.payload.commandSha256,
-    executionListSha256: '9'.repeat(64),
+    executionListSha256: executionBaseline.executionSetSha256,
     httpStatus: 400,
     job: 'hkbuddy-v1-dependency-acceptance',
     jobGeneration: 1,
@@ -1107,6 +1132,10 @@ test('state store accepts an authoritative acceptance execute rejection only for
     reconcileKind: 'cloud-run-job-execute',
     beforeSha256: '7'.repeat(64),
     afterSha256: '8'.repeat(64),
+    executionBaseline: {
+      ...executionBaseline,
+      job: 'hkbuddy-v1-migrate',
+    },
   }, { operationId: 'migration-execute' });
   await assert.rejects(() => invalid.appendAbort({
     intentRecordSha256: invalidExecute.recordSha256,
@@ -1114,6 +1143,41 @@ test('state store accepts an authoritative acceptance execute rejection only for
     evidence,
   }), /journal/i);
   await invalid.close();
+});
+
+test('Cloud Run execute intents require an exact scoped execution baseline', () => {
+  const valid = () => common({
+    phase: 'migration',
+    operationId: 'migration-execute',
+    payload: {
+      ...common().payload,
+      reconcileKind: 'cloud-run-job-execute',
+      executionBaseline: executionBaseline('hkbuddy-v1-migrate'),
+    },
+  });
+  assert.equal(validateJournalRecords([finalizeJournalRecord(valid())]), true);
+  const cases = [
+    ['missing baseline', (value) => { delete value.payload.executionBaseline; }],
+    ['extra baseline field', (value) => { value.payload.executionBaseline.extra = true; }],
+    ['negative execution count', (value) => { value.payload.executionBaseline.executionCount = -1; }],
+    ['oversized execution count', (value) => { value.payload.executionBaseline.executionCount = 10_001; }],
+    ['malformed set digest', (value) => { value.payload.executionBaseline.executionSetSha256 = 'A'.repeat(64); }],
+    ['wrong Job', (value) => { value.payload.executionBaseline.job = 'hkbuddy-v1-llm-smoke'; }],
+    ['zero Job generation', (value) => { value.payload.executionBaseline.jobGeneration = 0; }],
+    ['malformed Job UID', (value) => { value.payload.executionBaseline.jobUid = 'not-a-uuid'; }],
+    ['foreign project', (value) => { value.payload.executionBaseline.project = 'foreign-project'; }],
+    ['foreign project number', (value) => { value.payload.executionBaseline.projectNumber = '999999999999'; }],
+    ['foreign region', (value) => { value.payload.executionBaseline.region = 'us-central1'; }],
+  ];
+  for (const [name, mutate] of cases) {
+    const value = valid();
+    mutate(value);
+    assert.throws(
+      () => validateJournalRecords([finalizeJournalRecord(value)]),
+      /journal/i,
+      name,
+    );
+  }
 });
 
 test('an authoritative failed Cloud Run execution must terminalize and tombstones the same phase plan', async (t) => {
@@ -1149,6 +1213,9 @@ test('an authoritative failed Cloud Run execution must terminalize and tombstone
     reconcileKind: 'cloud-run-job-execute',
     beforeSha256: '7'.repeat(64),
     afterSha256: '8'.repeat(64),
+    executionBaseline: executionBaseline('hkbuddy-v1-dependency-acceptance', {
+      jobGeneration: 2,
+    }),
   }, { operationId: 'dependency-acceptance-execute' });
   const evidence = {
     auditLogSha256: '9'.repeat(64),
@@ -1237,6 +1304,9 @@ test('state store binds a failed LLM execution to its paired deploy and full mut
       reconcileKind,
       beforeSha256: `${digit}a`.repeat(32),
       afterSha256: `${digit}b`.repeat(32),
+      ...(reconcileKind === 'cloud-run-job-execute' ? {
+        executionBaseline: executionBaseline('hkbuddy-v1-dependency-acceptance'),
+      } : {}),
     }, { operationId });
     const checkpoint = await store.appendCheckpoint({
       intentRecordSha256: intent.recordSha256,
@@ -1269,6 +1339,7 @@ test('state store binds a failed LLM execution to its paired deploy and full mut
     reconcileKind: 'cloud-run-job-execute',
     beforeSha256: '4a'.repeat(32),
     afterSha256: '4b'.repeat(32),
+    executionBaseline: executionBaseline('hkbuddy-v1-llm-smoke'),
   }, { operationId: 'llm-smoke-execute' });
   const evidence = {
     auditLogSha256: '9'.repeat(64),

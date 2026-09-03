@@ -1498,6 +1498,45 @@ function secretVersionSafeResult(expected) {
   };
 }
 
+function cloudRunExecutionListMember(expected, {
+  name = `${expected.job}-abc12`,
+  uid = '223e4567-e89b-42d3-a456-426614174000',
+} = {}) {
+  return {
+    apiVersion: 'run.googleapis.com/v1',
+    kind: 'Execution',
+    metadata: {
+      labels: {
+        'cloud.googleapis.com/location': REGION,
+        'run.googleapis.com/job': expected.job,
+      },
+      name,
+      namespace: PROJECT_NUMBER,
+      uid,
+    },
+  };
+}
+
+function cloudRunExecutionBaseline(expected, executions, {
+  jobGeneration = 1,
+  jobUid = '123e4567-e89b-42d3-a456-426614174000',
+} = {}) {
+  const identities = executions.map(({ metadata }) => ({
+    name: metadata.name,
+    uid: metadata.uid.toLowerCase(),
+  })).sort((left, right) => left.name.localeCompare(right.name));
+  return {
+    executionCount: identities.length,
+    executionSetSha256: createHash('sha256').update(JSON.stringify(identities)).digest('hex'),
+    job: expected.job,
+    jobGeneration,
+    jobUid,
+    project: PROJECT,
+    projectNumber: PROJECT_NUMBER,
+    region: REGION,
+  };
+}
+
 function cloudRunJobSafeResult(plan, operationId, job) {
   const expected = operationId === 'migration-deploy' ? plan.expectedMigrationJob
     : plan.expectedJobs[operationId.slice(0, -'-deploy'.length)];
@@ -1518,6 +1557,7 @@ function cloudRunJobSafeResult(plan, operationId, job) {
 
 async function appendTestMutationIntent(store, {
   operationId, mutationOrdinal, reconcileKind, plan = buildReleasePlan(releaseInput()),
+  executionBaseline,
 }) {
   const digit = String((mutationOrdinal % 9) + 1);
   const member = plan.operations.find(({ id }) => id === operationId)
@@ -1533,7 +1573,67 @@ async function appendTestMutationIntent(store, {
     reconcileKind,
     beforeSha256: stateSha256(identity.expectedBefore),
     afterSha256: stateSha256(identity.expectedAfter),
+    ...(executionBaseline === undefined ? {} : { executionBaseline }),
   }, { operationId });
+}
+
+async function rejectedExecutionRecoveryFixture(t) {
+  const directory = await mkdtemp(join(tmpdir(), 'hkbuddy-execute-rejection-matrix-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const input = releaseInput();
+  const plan = buildReleasePlan(input, { phase: 'acceptance' });
+  const key = 'dependency-acceptance';
+  const job = plan.expectedJobs[key];
+  const jobUid = '12d057cc-bcf8-4192-95fa-bd7527627e46';
+  const historicalExecutions = [cloudRunExecutionListMember(job)];
+  const store = createTestStateStore();
+  const deployIntent = await appendTestMutationIntent(store, {
+    operationId: `${key}-deploy`, mutationOrdinal: 1,
+    reconcileKind: 'cloud-run-job-replace', plan,
+  });
+  await store.appendCheckpoint({
+    intentRecordSha256: deployIntent.recordSha256,
+    classification: 'after', outcome: 'applied',
+    observationSha256: deployIntent.payload.afterSha256,
+    safeResult: {
+      kind: 'resource', state: 'present',
+      identitySha256: '1'.repeat(64), valueSha256: '2'.repeat(64),
+    },
+  });
+  const executeIntent = await appendTestMutationIntent(store, {
+    operationId: `${key}-execute`, mutationOrdinal: 2,
+    reconcileKind: 'cloud-run-job-execute', plan,
+    executionBaseline: cloudRunExecutionBaseline(job, historicalExecutions, { jobUid }),
+  });
+  executeIntent.createdAt = '2026-09-01T06:42:26.179Z';
+  const rejectionMessage = `Job '${job.job}' cannot be run because is in an error state. Please check the job's Ready status condition.`;
+  const log = [
+    `2026-09-01 14:42:27,212 DEBUG root Running [gcloud.run.jobs.execute] with arguments: [--format: "json", --project: "${PROJECT}", --quiet: "True", --region: "${REGION}", --wait: "True", JOB: "${job.job}"]`,
+    `2026-09-01 14:42:27,888 DEBUG urllib3.connectionpool https://${REGION}-run.googleapis.com:443 "POST /apis/run.googleapis.com/v1/namespaces/${PROJECT}/jobs/${job.job}:run?alt=json HTTP/1.1" 400 None`,
+    `response: <{'date': 'Tue, 01 Sep 2026 06:42:27 GMT', 'status': 400}>, content <{`,
+    '  "error": {',
+    '    "code": 400,',
+    `    "message": "${rejectionMessage}",`,
+    '    "status": "FAILED_PRECONDITION"',
+    '  }',
+    '}>',
+    `2026-09-01 14:42:27,978 ERROR root (gcloud.run.jobs.execute) FAILED_PRECONDITION: ${rejectionMessage}`,
+    '',
+  ].join('\n');
+  const logPath = join(directory, 'execute-rejection.log');
+  await writeFile(logPath, log);
+  const logSha256 = createHash('sha256').update(log).digest('hex');
+  const liveJob = realV1JobReadback(job);
+  liveJob.metadata.uid = jobUid;
+  liveJob.metadata.generation = 1;
+  liveJob.status = {
+    observedGeneration: 1,
+    conditions: [{ type: 'Ready', status: 'False', reason: 'SecretsAccessCheckFailed' }],
+  };
+  return {
+    executeIntent, historicalExecutions, input, job, liveJob,
+    logPath, logSha256, plan, store,
+  };
 }
 
 async function appendTestPrivacyCheckpoint(store, {
@@ -2143,22 +2243,43 @@ test('acceptance execution reads back each exact Job identity before running it'
   const expectedByJob = Object.fromEntries(Object.values(plan.expectedJobs).map((value) => (
     [value.job, value]
   )));
+  const historicalByJob = Object.fromEntries(Object.values(plan.expectedJobs).map((value, index) => (
+    [value.job, [cloudRunExecutionListMember(value, {
+      uid: `223e4567-e89b-42d3-a456-42661417400${index}`,
+    })]]
+  )));
+  const store = createTestStateStore();
+  const events = [];
+  const appendIntent = store.appendIntent;
+  store.appendIntent = async (payload, options) => {
+    events.push(`intent:${payload.executionBaseline?.job ?? options.operationId}`);
+    return appendIntent(payload, options);
+  };
   const calls = [];
   const result = await runGcpRelease({
     argv: ['--phase=acceptance', `--confirm-release=${RELEASE_SHA}`],
     input,
+    openStateStore: async () => store,
     execute: async (argv) => {
       calls.push(argv);
       if (argv[2] === 'describe') return realV1JobReadback(expectedByJob[argv[3]]);
       if (argv[2] === 'deploy') return { done: true };
-      if (argv[2] === 'execute') return {
-        apiVersion: 'run.googleapis.com/v1',
-        kind: 'Execution',
-        metadata: {
-          name: `${argv[3]}-release-001`,
-          labels: { 'run.googleapis.com/job': argv[3] },
-        },
-      };
+      if (argv[2] === 'executions' && argv[3] === 'list') {
+        const job = argv.find((value) => value.startsWith('--job='))?.slice('--job='.length);
+        events.push(`list:${job}`);
+        return structuredClone(historicalByJob[job]);
+      }
+      if (argv[2] === 'execute') {
+        events.push(`execute:${argv[3]}`);
+        return {
+          apiVersion: 'run.googleapis.com/v1',
+          kind: 'Execution',
+          metadata: {
+            name: `${argv[3]}-release-001`,
+            labels: { 'run.googleapis.com/job': argv[3] },
+          },
+        };
+      }
       if (argv[2] === 'executions' && argv[3] === 'describe') {
         const name = argv[4];
         const job = name.slice(0, -'-release-001'.length);
@@ -2180,12 +2301,29 @@ test('acceptance execution reads back each exact Job identity before running it'
     writeOutput: () => undefined,
   });
   assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
-  assert.equal(calls.length, 16);
-  for (const expected of Object.values(plan.expectedJobs)) {
+  assert.equal(calls.length, 20);
+  for (const [key, expected] of Object.entries(plan.expectedJobs)) {
     assert.equal(validateReleaseJobReadback(structuredClone(expected), expected), true);
     const mismatched = structuredClone(expected);
     mismatched.serviceAccount = 'hkbuddy-deployer@example.invalid';
     assert.throws(() => validateReleaseJobReadback(mismatched, expected), /Job readback/i);
+    const listIndex = calls.findIndex((argv) => (
+      argv[2] === 'executions' && argv[3] === 'list'
+      && argv.includes(`--job=${expected.job}`)
+    ));
+    const executeIndex = calls.findIndex((argv) => (
+      argv[2] === 'execute' && argv[3] === expected.job
+    ));
+    assert.notEqual(listIndex, -1, expected.job);
+    assert.equal(listIndex < executeIndex, true, expected.job);
+    const executeIntent = store.records.find(({ recordType, operationId }) => (
+      recordType === 'intent' && operationId === `${key}-execute`
+    ));
+    assert.deepEqual(executeIntent.payload.executionBaseline,
+      cloudRunExecutionBaseline(expected, historicalByJob[expected.job]));
+    assert.deepEqual(events.filter((value) => value.endsWith(`:${expected.job}`)), [
+      `list:${expected.job}`, `intent:${expected.job}`, `execute:${expected.job}`,
+    ]);
   }
 });
 
@@ -3485,6 +3623,7 @@ test('one immutable build identity validly precedes resolved migration while mig
     execute: async (argv) => {
       if (argv[2] === 'deploy') return { metadata: { name: 'hkbuddy-v1-migrate' } };
       if (argv[2] === 'describe') return realV1JobReadback(migrationPlan.expectedMigrationJob);
+      if (argv[2] === 'executions' && argv[3] === 'list') return [];
       if (argv[2] === 'execute') return realV1ExecutionReadback(migrationPlan.expectedMigrationJob);
       if (argv[2] === 'executions' && argv[3] === 'describe') {
         return realV1ExecutionReadback(migrationPlan.expectedMigrationJob);
@@ -3695,6 +3834,7 @@ test('migration receipt-write crash tolerates only server-managed Job status dri
       if (argv[1] === 'jobs' && argv[2] === 'describe') {
         return structuredClone(initialJob);
       }
+      if (argv[2] === 'executions' && argv[3] === 'list') return [];
       if (argv[1] === 'jobs' && argv[2] === 'execute') return structuredClone(execution);
       if (argv[2] === 'executions' && argv[3] === 'describe') {
         return structuredClone(execution);
@@ -6275,6 +6415,7 @@ test('an exact partial Job deploy checkpoint resumes execute only after fresh au
   });
   let describeCount = 0;
   let executeCount = 0;
+  let listCount = 0;
   const execution = {
     apiVersion: 'run.googleapis.com/v1',
     kind: 'Execution',
@@ -6298,6 +6439,10 @@ test('an exact partial Job deploy checkpoint resumes execute only after fresh au
         describeCount += 1;
         return structuredClone(liveJob);
       }
+      if (argv[2] === 'executions' && argv[3] === 'list') {
+        listCount += 1;
+        return [];
+      }
       if (argv[2] === 'execute') {
         executeCount += 1;
         return structuredClone(execution);
@@ -6312,10 +6457,56 @@ test('an exact partial Job deploy checkpoint resumes execute only after fresh au
     publicReport: result.publicReport,
     records: store.records,
   }));
+  assert.equal(listCount, 1);
   assert.equal(executeCount, 1);
-  assert.equal(store.records.some(({ recordType, operationId }) => (
+  const executeIntent = store.records.find(({ recordType, operationId }) => (
     recordType === 'intent' && operationId === 'migration-execute'
-  )), true);
+  ));
+  assert.deepEqual(executeIntent.payload.executionBaseline,
+    cloudRunExecutionBaseline(plan.expectedMigrationJob, []));
+});
+
+test('an ambiguous pre-execution snapshot blocks before the execute intent and request', async (t) => {
+  for (const current of ['foreign execution scope', 'list read failure']) {
+    await t.test(current, async () => {
+      const input = releaseInput({
+        evidence: null, acceptanceOutputs: null,
+        previousRevision: null, previousImageDigest: null,
+      });
+      const plan = buildReleasePlan(input, { phase: 'migration' });
+      const liveJob = realV1JobReadback(plan.expectedMigrationJob);
+      const store = createTestStateStore();
+      await appendTestMutationCheckpoint(store, {
+        operationId: 'migration-deploy', mutationOrdinal: 1,
+        reconcileKind: 'cloud-run-job-replace', plan,
+        safeResult: cloudRunJobSafeResult(plan, 'migration-deploy', liveJob),
+      });
+      let executeCount = 0;
+      const result = await runGcpRelease({
+        argv: ['--phase=migration', `--confirm-release=${RELEASE_SHA}`],
+        input,
+        openStateStore: async () => store,
+        execute: async (argv) => {
+          if (argv[2] === 'describe') return structuredClone(liveJob);
+          if (argv[2] === 'executions' && argv[3] === 'list') {
+            if (current === 'list read failure') throw new Error('ambiguous list read');
+            const row = cloudRunExecutionListMember(plan.expectedMigrationJob);
+            row.metadata.namespace = '999999999999';
+            return [row];
+          }
+          if (argv[2] === 'execute') executeCount += 1;
+          throw new Error(`unexpected operation: ${argv.join(' ')}`);
+        },
+        writeOutput: () => undefined,
+      });
+      assert.equal(result.exitCode, 1);
+      assert.equal(result.publicReport.mutationPerformed, false);
+      assert.equal(executeCount, 0);
+      assert.equal(store.records.some(({ recordType, operationId }) => (
+        recordType === 'intent' && operationId === 'migration-execute'
+      )), false);
+    });
+  }
 });
 
 test('Job deploy restart adopts an exact readback without redeploying', async () => {
@@ -6347,6 +6538,7 @@ test('Job deploy restart adopts an exact readback without redeploying', async ()
       calls.push(argv);
       if (argv[2] === 'deploy') throw new Error('restart must not redeploy the Job');
       if (argv[2] === 'describe') return realV1JobReadback(plan.expectedMigrationJob);
+      if (argv[2] === 'executions' && argv[3] === 'list') return [];
       if (argv[2] === 'execute' || argv[2] === 'executions') return {
         apiVersion: 'run.googleapis.com/v1',
         kind: 'Execution',
@@ -6413,7 +6605,7 @@ test('Job execution restart without an exact execution identity never executes a
   assert.equal(store.records.at(-1).recordType, 'intent');
 });
 
-test('an exact Cloud Run FAILED_PRECONDITION log closes only the rejected acceptance execute intent', async (t) => {
+test('an exact Cloud Run FAILED_PRECONDITION accepts an unchanged non-empty execution baseline', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'hkbuddy-execute-rejection-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const input = releaseInput();
@@ -6431,9 +6623,17 @@ test('an exact Cloud Run FAILED_PRECONDITION log closes only the rejected accept
     observationSha256: deployIntent.payload.afterSha256,
     safeResult: { kind: 'resource', state: 'present', identitySha256: '1'.repeat(64), valueSha256: '2'.repeat(64) },
   });
+  const historicalExecutions = [
+    cloudRunExecutionListMember(job),
+    cloudRunExecutionListMember(job, {
+      name: `${job.job}-def34`, uid: '323e4567-e89b-42d3-a456-426614174001',
+    }),
+  ];
+  const jobUid = '12d057cc-bcf8-4192-95fa-bd7527627e46';
   const executeIntent = await appendTestMutationIntent(store, {
     operationId: `${key}-execute`, mutationOrdinal: 2,
     reconcileKind: 'cloud-run-job-execute', plan,
+    executionBaseline: cloudRunExecutionBaseline(job, historicalExecutions, { jobUid }),
   });
   executeIntent.createdAt = '2026-09-01T06:42:26.179Z';
   const rejectionMessage = `Job '${job.job}' cannot be run because is in an error state. Please check the job's Ready status condition.`;
@@ -6465,7 +6665,7 @@ test('an exact Cloud Run FAILED_PRECONDITION log closes only the rejected accept
   assert.equal(parsed.requestObservedAt, '2026-09-01T06:42:27.000Z');
 
   const liveJob = realV1JobReadback(job);
-  liveJob.metadata.uid = '12d057cc-bcf8-4192-95fa-bd7527627e46';
+  liveJob.metadata.uid = jobUid;
   liveJob.metadata.generation = 1;
   liveJob.status = {
     observedGeneration: 1,
@@ -6483,7 +6683,9 @@ test('an exact Cloud Run FAILED_PRECONDITION log closes only the rejected accept
     execute: async (argv) => {
       calls.push(argv);
       if (argv[2] === 'describe') return structuredClone(liveJob);
-      if (argv[2] === 'executions' && argv[3] === 'list') return [];
+      if (argv[2] === 'executions' && argv[3] === 'list') {
+        return structuredClone([...historicalExecutions].reverse());
+      }
       throw new Error(`unexpected recovery operation: ${argv.join(' ')}`);
     },
     writeOutput: () => undefined,
@@ -6497,7 +6699,135 @@ test('an exact Cloud Run FAILED_PRECONDITION log closes only the rejected accept
   ]);
   assert.equal(store.records.at(-2).recordType, 'abort');
   assert.equal(store.records.at(-2).payload.evidence.logSha256, logSha256);
+  assert.equal(store.records.at(-2).payload.evidence.executionListSha256,
+    executeIntent.payload.executionBaseline.executionSetSha256);
   assert.equal(store.records.at(-1).recordType, 'terminal');
+});
+
+test('Cloud Run rejected-command recovery fails closed on every execution-set ambiguity', async (t) => {
+  const cases = [
+    {
+      name: 'added execution',
+      current({ historicalExecutions, job }) {
+        return [...historicalExecutions, cloudRunExecutionListMember(job, {
+          name: `${job.job}-def34`, uid: '323e4567-e89b-42d3-a456-426614174001',
+        })];
+      },
+    },
+    {
+      name: 'removed execution',
+      current() { return []; },
+    },
+    {
+      name: 'duplicate execution',
+      current({ historicalExecutions }) {
+        return [historicalExecutions[0], structuredClone(historicalExecutions[0])];
+      },
+    },
+    {
+      name: 'malformed execution metadata',
+      current({ historicalExecutions }) {
+        const rows = structuredClone(historicalExecutions);
+        delete rows[0].metadata.namespace;
+        return rows;
+      },
+    },
+    {
+      name: 'foreign project execution',
+      current({ historicalExecutions }) {
+        const rows = structuredClone(historicalExecutions);
+        rows[0].metadata.namespace = '999999999999';
+        return rows;
+      },
+    },
+    {
+      name: 'foreign region execution',
+      current({ historicalExecutions }) {
+        const rows = structuredClone(historicalExecutions);
+        rows[0].metadata.labels['cloud.googleapis.com/location'] = 'us-central1';
+        return rows;
+      },
+    },
+    {
+      name: 'wrong Job execution',
+      current({ historicalExecutions }) {
+        const rows = structuredClone(historicalExecutions);
+        rows[0].metadata.name = 'hkbuddy-v1-llm-smoke-abc12';
+        rows[0].metadata.labels['run.googleapis.com/job'] = 'hkbuddy-v1-llm-smoke';
+        return rows;
+      },
+    },
+    {
+      name: 'current-attempt execution',
+      current({ historicalExecutions, job }) {
+        return [...historicalExecutions, cloudRunExecutionListMember(job, {
+          name: `${job.job}-ghi56`, uid: '423e4567-e89b-42d3-a456-426614174002',
+        })];
+      },
+    },
+    {
+      name: 'execution list read failure',
+      failureAt: 'list',
+    },
+    {
+      name: 'Job authority read failure',
+      failureAt: 'describe',
+    },
+    {
+      name: 'Job generation drift',
+      prepare({ liveJob }) {
+        liveJob.metadata.generation = 2;
+        liveJob.status.observedGeneration = 2;
+      },
+    },
+    {
+      name: 'Job UID drift',
+      prepare({ liveJob }) {
+        liveJob.metadata.uid = '523e4567-e89b-42d3-a456-426614174003';
+      },
+    },
+    {
+      name: 'non-array execution list',
+      current() { return {}; },
+    },
+  ];
+
+  for (const current of cases) {
+    await t.test(current.name, async (subtest) => {
+      const fixture = await rejectedExecutionRecoveryFixture(subtest);
+      current.prepare?.(fixture);
+      const recordCount = fixture.store.records.length;
+      const calls = [];
+      const result = await runGcpRelease({
+        argv: ['--phase=acceptance', `--confirm-release=${RELEASE_SHA}`],
+        input: fixture.input,
+        loadReceipts: async () => fixtureReceiptChain(fixture.plan, 'inventory'),
+        openStateStore: async () => fixture.store,
+        environment: {
+          V1_REJECTED_EXECUTION_LOG_PATH: fixture.logPath,
+          V1_REJECTED_EXECUTION_LOG_SHA256: fixture.logSha256,
+        },
+        execute: async (argv) => {
+          calls.push(argv);
+          if (argv[2] === 'describe') {
+            if (current.failureAt === 'describe') throw new Error('ambiguous Job read failure');
+            return structuredClone(fixture.liveJob);
+          }
+          if (argv[2] === 'executions' && argv[3] === 'list') {
+            if (current.failureAt === 'list') throw new Error('ambiguous execution list failure');
+            return structuredClone(current.current?.(fixture) ?? fixture.historicalExecutions);
+          }
+          throw new Error(`restart must never re-execute the Job: ${argv.join(' ')}`);
+        },
+        writeOutput: () => undefined,
+      });
+      assert.equal(result.exitCode, 1);
+      assert.equal(result.publicReport.code, 'CLOUD_RUN_EXECUTION_REJECTION_EVIDENCE_INVALID');
+      assert.equal(result.publicReport.mutationPerformed, false);
+      assert.equal(fixture.store.records.length, recordCount);
+      assert.equal(calls.some((argv) => argv[2] === 'execute'), false);
+    });
+  }
 });
 
 test('an exact accepted but failed Cloud Run execution is terminalized once and never executed again', async (t) => {
@@ -6905,6 +7235,7 @@ test('migration phase persists the canonical short v1 execution identity with om
       calls.push(argv);
       if (argv[2] === 'deploy') return { metadata: { name: 'hkbuddy-v1-migrate' } };
       if (argv[2] === 'describe') return realV1JobReadback(plan.expectedMigrationJob);
+      if (argv[2] === 'executions' && argv[3] === 'list') return [];
       if (argv[2] === 'execute') return {
         apiVersion: 'run.googleapis.com/v1',
         kind: 'Execution',
@@ -8020,6 +8351,7 @@ test('real-shape migration, authenticated workload, and tag-free promotion share
     execute: async (argv) => {
       if (argv[2] === 'deploy') return { metadata: { name: 'hkbuddy-v1-migrate' } };
       if (argv[2] === 'describe') return realV1JobReadback(plan.expectedMigrationJob);
+      if (argv[2] === 'executions' && argv[3] === 'list') return [];
       if (argv[2] === 'execute' || argv[2] === 'executions') return {
         apiVersion: 'run.googleapis.com/v1', kind: 'Execution',
         metadata: {

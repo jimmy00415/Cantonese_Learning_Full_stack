@@ -2919,6 +2919,59 @@ export function validateCloudRunExecutionIdentity(value, { job } = {}) {
   return name;
 }
 
+function canonicalCloudRunExecutionBaseline(executions, {
+  expectedJob, jobGeneration, jobUid,
+} = {}) {
+  if (!Array.isArray(executions) || executions.length > 10_000
+    || !expectedJob || positiveCanonicalInteger(jobGeneration) === null
+    || !UUID_V4.test(String(jobUid ?? ''))) {
+    throw new Error('Cloud Run execution baseline is invalid');
+  }
+  const identities = executions.map((value) => {
+    const name = validateCloudRunExecutionIdentity(value, { job: expectedJob.job });
+    const metadata = value?.metadata;
+    const labels = metadata?.labels;
+    const uid = String(metadata?.uid ?? '').toLowerCase();
+    const expectedSelfLink = `/apis/run.googleapis.com/v1/namespaces/${GCP_IDENTITY.projectNumber}/executions/${name}`;
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)
+      || metadata.namespace !== GCP_IDENTITY.projectNumber
+      || !labels || typeof labels !== 'object' || Array.isArray(labels)
+      || labels['cloud.googleapis.com/location'] !== REGION
+      || !UUID_V4.test(uid)
+      || (metadata.selfLink !== undefined && metadata.selfLink !== expectedSelfLink)) {
+      throw new Error('Cloud Run execution baseline is invalid');
+    }
+    return Object.freeze({ name, uid });
+  }).sort((left, right) => left.name.localeCompare(right.name));
+  if (new Set(identities.map(({ name }) => name)).size !== identities.length
+    || new Set(identities.map(({ uid }) => uid)).size !== identities.length) {
+    throw new Error('Cloud Run execution baseline is invalid');
+  }
+  return Object.freeze({
+    executionCount: identities.length,
+    executionSetSha256: canonicalSha256(identities),
+    job: expectedJob.job,
+    jobGeneration,
+    jobUid: String(jobUid).toLowerCase(),
+    project: PROJECT,
+    projectNumber: GCP_IDENTITY.projectNumber,
+    region: REGION,
+  });
+}
+
+async function readCloudRunExecutionBaseline(executor, expectedJob, rawJob) {
+  const authority = validateReadyReleaseJobReadback(rawJob, expectedJob);
+  const executions = await executor([
+    'run', 'jobs', 'executions', 'list', `--job=${expectedJob.job}`,
+    `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+  ]);
+  return canonicalCloudRunExecutionBaseline(executions, {
+    expectedJob,
+    jobGeneration: authority.generation,
+    jobUid: authority.uid,
+  });
+}
+
 export function validateReleaseJobExecutionReceipt(value, expected) {
   const name = validateCloudRunExecutionIdentity(value, { job: expected?.job });
   const taskCount = nonnegativeInteger(value?.spec?.taskCount);
@@ -5897,12 +5950,17 @@ async function recoverRejectedAcceptanceExecute({
     'run', 'jobs', 'executions', 'list', `--job=${expectedJob.job}`,
     `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
   ]);
-  if (!Array.isArray(executions) || executions.length !== 0) {
-    throw new Error('Cloud Run rejection recovery observed an execution');
+  const executionBaseline = canonicalCloudRunExecutionBaseline(executions, {
+    expectedJob,
+    jobGeneration: authority.generation,
+    jobUid: authority.uid,
+  });
+  if (!exact(executionBaseline, intent.payload.executionBaseline)) {
+    throw new Error('Cloud Run rejection recovery execution baseline changed');
   }
   const evidence = Object.freeze({
     ...rejection,
-    executionListSha256: canonicalSha256(executions),
+    executionListSha256: executionBaseline.executionSetSha256,
     job: expectedJob.job,
     jobGeneration: authority.generation,
     jobReadbackSha256: canonicalSha256(rawJob),
@@ -8391,6 +8449,7 @@ export async function runGcpRelease({
       let journalAfterSha256 = null;
       let mutationAdapter = null;
       let mutationOrdinal = null;
+      let executionBaseline = null;
       let finalPublicMutation = false;
       const restartingMutation = existingJournalIntent?.operationId === member.id;
       const resumingCheckpointedJobExecution = hasOpenJournalAttempt
@@ -8607,6 +8666,14 @@ export async function runGcpRelease({
           migrationExecutionReceipt,
           promotionStableReadbacks,
         }));
+        if (!restartingMutation && member.id.endsWith('-execute')) {
+          const expectedJob = member.id === 'migration-execute' ? plan.expectedMigrationJob
+            : plan.expectedJobs[member.id.slice(0, -'-execute'.length)];
+          if (!expectedJob) throw new Error('Cloud Run execution baseline Job is unavailable');
+          executionBaseline = await readCloudRunExecutionBaseline(
+            executor, expectedJob, mutationBeforeObservations.get(member.id),
+          );
+        }
         const beforeState = mutationAdapter.canonicalState(
           'before', mutationBeforeObservations.get(member.id),
         );
@@ -8631,6 +8698,7 @@ export async function runGcpRelease({
               reconcileKind: journalReconcileKind(member.id),
               beforeSha256: canonicalSha256(beforeState),
               afterSha256: journalAfterSha256,
+              ...(executionBaseline === null ? {} : { executionBaseline }),
             }, { operationId: member.id });
             if (mutationAdapter.finalPublicMutation) {
               finalMutationGuard?.afterOperation(member.id);

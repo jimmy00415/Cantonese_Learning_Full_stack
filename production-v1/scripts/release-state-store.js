@@ -226,13 +226,32 @@ function assertPublication(value) {
     || sha256(canonicalJson(value.artifacts)) !== value.bundleSha256) fail();
 }
 
+function assertExecutionBaseline(value) {
+  if (!exactKeys(value, [
+    'executionCount', 'executionSetSha256', 'job', 'jobGeneration', 'jobUid',
+    'project', 'projectNumber', 'region',
+  ])
+    || !Number.isSafeInteger(value.executionCount) || value.executionCount < 0
+    || value.executionCount > 10_000
+    || !DIGEST.test(String(value.executionSetSha256 ?? ''))
+    || !Object.values(GCP_IDENTITY.jobs).includes(value.job)
+    || !Number.isSafeInteger(value.jobGeneration) || value.jobGeneration < 1
+    || !UUID_V4.test(String(value.jobUid ?? ''))
+    || value.project !== GCP_IDENTITY.projectId
+    || value.projectNumber !== GCP_IDENTITY.projectNumber
+    || value.region !== GCP_IDENTITY.region) fail();
+}
+
 function assertIntentPayload(payload) {
   const expectedKeys = [
     'afterSha256', 'beforeSha256', 'commandSha256', 'mutationOrdinal',
     'operationAttemptId', 'reconcileKind',
   ];
   const localPublication = payload?.reconcileKind === 'local-artifact-create';
-  if (!exactKeys(payload, localPublication ? [...expectedKeys, 'publication'] : expectedKeys)
+  const jobExecution = payload?.reconcileKind === 'cloud-run-job-execute';
+  const keys = localPublication ? [...expectedKeys, 'publication']
+    : (jobExecution ? [...expectedKeys, 'executionBaseline'] : expectedKeys);
+  if (!exactKeys(payload, keys)
     || !Number.isSafeInteger(payload.mutationOrdinal) || payload.mutationOrdinal < 1
     || !OPERATION_ATTEMPT_ID.test(String(payload.operationAttemptId ?? ''))
     || !DIGEST.test(String(payload.commandSha256 ?? ''))
@@ -240,6 +259,7 @@ function assertIntentPayload(payload) {
     || !DIGEST.test(String(payload.beforeSha256 ?? ''))
     || !DIGEST.test(String(payload.afterSha256 ?? ''))) fail();
   if (localPublication) assertPublication(payload.publication);
+  if (jobExecution) assertExecutionBaseline(payload.executionBaseline);
 }
 
 function assertCheckpointPayload(payload) {
@@ -434,6 +454,14 @@ export function validateJournalRecords(records, { allowOpenIntent = true } = {})
 
       if (record.recordType === 'intent') {
         if (openIntent !== null || record.payload.mutationOrdinal !== mutationOrdinal + 1) fail();
+        if (record.payload.reconcileKind === 'cloud-run-job-execute') {
+          const contract = record.phase === 'acceptance'
+            ? failedAcceptanceExecutionContract(record.operationId) : null;
+          const expectedJob = record.phase === 'migration'
+            && record.operationId === 'migration-execute'
+            ? GCP_IDENTITY.jobs.migration : contract?.job;
+          if (!expectedJob || record.payload.executionBaseline.job !== expectedJob) fail();
+        }
         openIntent = record;
         mutationOrdinal = record.payload.mutationOrdinal;
       } else if (record.recordType === 'checkpoint') {
@@ -454,7 +482,15 @@ export function validateJournalRecords(records, { allowOpenIntent = true } = {})
             || !openIntent.operationId.endsWith('-execute')
             || record.payload.evidence.commandSha256 !== openIntent.payload.commandSha256
             || record.payload.evidence.operationAttemptId
-              !== openIntent.payload.operationAttemptId)) fail();
+              !== openIntent.payload.operationAttemptId
+            || record.payload.evidence.executionListSha256
+              !== openIntent.payload.executionBaseline.executionSetSha256
+            || record.payload.evidence.job !== openIntent.payload.executionBaseline.job
+            || record.payload.evidence.jobGeneration
+              !== openIntent.payload.executionBaseline.jobGeneration
+            || record.payload.evidence.jobUid !== openIntent.payload.executionBaseline.jobUid
+            || record.payload.evidence.project !== openIntent.payload.executionBaseline.project
+            || record.payload.evidence.region !== openIntent.payload.executionBaseline.region)) fail();
         if (record.payload.reason === 'authoritative-cloud-run-execution-failed') {
           const contract = failedAcceptanceExecutionContract(openIntent.operationId);
           if (record.phase !== 'acceptance'

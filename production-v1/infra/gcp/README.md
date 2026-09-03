@@ -719,6 +719,16 @@ node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=pr
 node scripts/gcp-release.js --manifest=ABSOLUTE_RELEASE_MANIFEST.json --phase=rollback --confirm-release=40_HEX_SHA
 ```
 
+Immediately before every guarded Cloud Run Job execution, the release command
+reads the exact Job's complete execution history and journals a canonical
+name/UID set digest with the Job generation, Job UID, project, and region. When
+an operator supplies immutable `FAILED_PRECONDITION` command-log evidence to
+recover an open acceptance execute intent, an unchanged non-empty historical
+set is valid proof that the rejected request created no execution. Any added,
+removed, duplicate, malformed, wrong-Job, foreign-project, or foreign-region
+execution—or an ambiguous Job/list read—fails closed and leaves the intent open;
+restart recovery never executes the Job again.
+
 Promotion freshly validates candidate service/revision/private IAM/image,
 immutable readiness/workload/mobile artifacts, the complete receipt chain, and
 200 candidate-service production traces before stable mutation. Every lost
