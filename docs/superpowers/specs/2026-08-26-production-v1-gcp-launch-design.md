@@ -327,6 +327,16 @@ timeout. This removes cold starts and preserves the current in-process SSE
 acceleration contract. A later multi-instance release must replace in-process
 event hints with a shared fan-out design and pass a new load gate.
 
+Direct VPC may create a Google-managed regional INTERNAL IPv4 Address with
+`purpose=SERVERLESS` inside the selected subnet. The project-wide audit accepts
+that reservation only with an exact host-project Address self link, one
+canonical same-region enumerated subnetwork selector on a known network, no
+network selector, and a canonical `/8` through `/30` range fully contained by
+the subnet's primary CIDR. The nested range is not a collision with its exact
+owning V1 subnet, but remains part of every other overlap calculation. It is
+operator-immutable while owned by Cloud Run and is never a repair or deletion
+target.
+
 Cloud SQL uses encrypted PostgreSQL 16, automatic backups, point-in-time
 recovery, deletion protection, and the Cloud SQL connector. The application
 uses a bounded pool and Unix-socket connection; the database password and

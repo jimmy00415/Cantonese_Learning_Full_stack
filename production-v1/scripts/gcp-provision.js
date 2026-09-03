@@ -1911,7 +1911,16 @@ function internalAddressCidr(item, networkLinks, subnetsByLink) {
       throw commandError('CIDR_AUDIT_INVALID');
     }
   } else if (regionalSelectorFreeRange) {
-    if (hasNetwork || hasSubnetwork) throw commandError('CIDR_AUDIT_INVALID');
+    if (hasNetwork || (hasSubnetwork && !exactSubnetworkRegion(item))) {
+      throw commandError('CIDR_AUDIT_INVALID');
+    }
+    if (hasSubnetwork) {
+      const subnet = subnetsByLink.get(item.subnetwork);
+      if (!subnet || subnet.region !== item.region || !networkLinks.has(subnet.network)
+        || !cidrContainedBy(`${item.address}/${prefixLength}`, subnet.ipCidrRange)) {
+        throw commandError('CIDR_AUDIT_INVALID');
+      }
+    }
   } else if (!hasNetwork || hasSubnetwork || !networkLinks.has(item.network)) {
     throw commandError('CIDR_AUDIT_INVALID');
   }
@@ -2230,6 +2239,7 @@ function assertProjectWideCidrAvailability({
   const exactSubnets = inventory.subnets.filter(exactManagedSubnet);
   const exactSubnetRoutes = inventory.routes.filter(exactManagedSubnetLocalRoute);
   const exactSubnetPair = exactSubnets.length === 1 && exactSubnetRoutes.length === 1;
+  const exactSubnet = exactSubnetPair ? exactSubnets[0] : null;
   const exactSubnetRoute = exactSubnetPair ? exactSubnetRoutes[0] : null;
   const exactPsaAddresses = inventory.addresses.filter(exactManagedPsaAddress);
   const privateIp = exactManagedCloudSqlPrivateIp(cloudSql);
@@ -2251,8 +2261,14 @@ function assertProjectWideCidrAvailability({
       ? inventory.addresses.filter((item) => item !== exactPsaAddresses[0])
       : inventory.addresses,
   };
+  const subnetCollisionInventory = exactSubnet === null ? unmanagedInventory : {
+    ...unmanagedInventory,
+    addresses: unmanagedInventory.addresses.filter((item) => !(
+      item.purpose === 'SERVERLESS' && item.subnetwork === exactSubnet.selfLink
+    )),
+  };
   for (const network of allNetworks) {
-    assertCidrNoOverlap({ desired: '10.24.0.0/26', network, ...unmanagedInventory });
+    assertCidrNoOverlap({ desired: '10.24.0.0/26', network, ...subnetCollisionInventory });
     assertCidrNoOverlap({ desired: '10.25.0.0/16', network, ...unmanagedInventory });
   }
   return { managedPsaRoute: exactPsaRoute === null ? null : { ...exactPsaRoute } };

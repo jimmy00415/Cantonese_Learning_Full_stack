@@ -19,6 +19,7 @@ import {
   loadResourceContract,
   monitoringGroupByField,
   runGcpProvision,
+  validateComputeAddressInventory,
 } from '../scripts/gcp-provision.js';
 import { runGcpPreflight } from '../scripts/gcp-preflight.js';
 import {
@@ -8450,6 +8451,188 @@ test('live default-IPv4 PSA readback and exact managed CIDRs remain preflight-id
   );
   assert.equal(foreignOverlap.gcloudCalls.some((args) => args.includes('create') || args.includes('enable')), false);
   assert.equal(foreignOverlap.restCalls.some(({ method }) => method !== 'GET'), false);
+});
+
+test('Cloud Run Direct VPC SERVERLESS reservations require an exact contained subnet topology', async (t) => {
+  const contract = await contractFixture();
+  const network = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/networks/${GCP_IDENTITY.network}`;
+  const region = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/regions/asia-east2`;
+  const subnetwork = `${region}/subnetworks/${GCP_IDENTITY.subnet}`;
+  const liveSubnet = {
+    allowSubnetCidrRoutesOverlap: false,
+    gatewayAddress: '10.24.0.1',
+    ipCidrRange: '10.24.0.0/26',
+    kind: 'compute#subnetwork',
+    name: GCP_IDENTITY.subnet,
+    network,
+    privateIpGoogleAccess: true,
+    privateIpv6GoogleAccess: 'DISABLE_GOOGLE_ACCESS',
+    purpose: 'PRIVATE',
+    region,
+    selfLink: subnetwork,
+    stackType: 'IPV4_ONLY',
+  };
+  const localRoute = {
+    name: 'default-route-r-41fc9f2f5f7a6a3d',
+    description: 'Default local route to the subnetwork 10.24.0.0/26.',
+    destRange: '10.24.0.0/26',
+    kind: 'compute#route',
+    network,
+    nextHopNetwork: network,
+    priority: 0,
+    selfLink: `https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/routes/default-route-r-41fc9f2f5f7a6a3d`,
+  };
+  const liveAddress = {
+    name: 'serverless-ipv4-1788403662596331761',
+    address: '10.24.0.16',
+    addressType: 'INTERNAL',
+    ipVersion: 'IPV4',
+    networkTier: 'PREMIUM',
+    prefixLength: 28,
+    purpose: 'SERVERLESS',
+    region,
+    selfLink: `${region}/addresses/serverless-ipv4-1788403662596331761`,
+    status: 'RESERVED',
+    subnetwork,
+  };
+  const networks = [{
+    name: GCP_IDENTITY.network,
+    selfLink: network,
+    autoCreateSubnetworks: false,
+  }];
+  const exactInventory = {
+    'compute networks list': networks,
+    'compute networks subnets': [liveSubnet],
+    'compute routes list': [localRoute],
+    'compute addresses list': [liveAddress],
+  };
+
+  await t.test('the exact safe live reservation is preflight-idempotent', async () => {
+    const fixture = assetAuditControlPlane({
+      contract,
+      assets: [],
+      enabledApis: ['iam.googleapis.com', 'serviceusage.googleapis.com', 'compute.googleapis.com'],
+      gcloudRows: exactInventory,
+    });
+    assert.equal(await fixture.plane.auditPreMutationState(), true);
+    const mutatingVerbs = new Set([
+      'add-iam-policy-binding', 'create', 'delete', 'deploy', 'enable', 'execute',
+      'patch', 'remove-iam-policy-binding', 'replace', 'set-iam-policy', 'update',
+    ]);
+    assert.equal(
+      fixture.gcloudCalls.some((args) => args.some((arg) => mutatingVerbs.has(arg))),
+      false,
+    );
+    assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+  });
+
+  const without = (value, key) => {
+    const result = { ...value };
+    delete result[key];
+    return result;
+  };
+  const otherRegion = `https://www.googleapis.com/compute/v1/projects/${PROJECT}/regions/asia-east1`;
+  const invalidCases = [
+    ['foreign subnet project', {
+      address: { ...liveAddress, subnetwork: subnetwork.replace(PROJECT, 'foreign-project') },
+    }],
+    ['missing enumerated subnet', {
+      address: { ...liveAddress, subnetwork: `${region}/subnetworks/missing-subnet` },
+    }],
+    ['subnet and address region mismatch', {
+      address: {
+        ...liveAddress,
+        region: otherRegion,
+        selfLink: `${otherRegion}/addresses/${liveAddress.name}`,
+      },
+    }],
+    ['network selector instead of subnetwork', {
+      address: { ...without(liveAddress, 'subnetwork'), network },
+    }],
+    ['both network and subnetwork selectors', {
+      address: { ...liveAddress, network },
+    }],
+    ['range outside subnet', {
+      address: { ...liveAddress, address: '10.24.0.64' },
+    }],
+    ['range starts inside but extends beyond subnet', {
+      address: { ...liveAddress, address: '10.24.0.0', prefixLength: 25 },
+    }],
+    ['host-bit address', {
+      address: { ...liveAddress, address: '10.24.0.17' },
+    }],
+    ['wrong network tier', {
+      address: { ...liveAddress, networkTier: 'STANDARD' },
+    }],
+    ['wrong address type', {
+      address: { ...liveAddress, addressType: 'EXTERNAL' },
+    }],
+    ['wrong IP version', {
+      address: { ...liveAddress, ipVersion: 'IPV6' },
+    }],
+    ['wrong purpose', {
+      address: { ...liveAddress, purpose: 'PRIVATE_NAT' },
+    }],
+    ['transient status', {
+      address: { ...liveAddress, status: 'RESERVING' },
+    }],
+    ['string prefix length', {
+      address: { ...liveAddress, prefixLength: '28' },
+    }],
+    ['malformed self link', {
+      address: { ...liveAddress, selfLink: `${region}/addresses/${liveAddress.name}/extra` },
+    }],
+    ['subnet belongs to an unenumerated network', {
+      address: liveAddress,
+      subnets: [{ ...liveSubnet, network: `${network}-missing` }],
+    }],
+  ];
+  for (const [name, candidate] of invalidCases) {
+    await t.test(name, () => assert.throws(
+      () => validateComputeAddressInventory({
+        addresses: [candidate.address],
+        networks,
+        subnets: candidate.subnets ?? [liveSubnet],
+      }),
+      (error) => error.code === 'CIDR_AUDIT_INVALID',
+    ));
+  }
+
+  await t.test('canonical selector-free SERVERLESS remains a supported inventory form', () => {
+    assert.equal(validateComputeAddressInventory({
+      addresses: [without(liveAddress, 'subnetwork')],
+      networks,
+      subnets: [liveSubnet],
+    }), true);
+  });
+
+  await t.test('non-plain address inventory remains invalid', () => {
+    const inheritedAddress = Object.assign(Object.create({ inherited: true }), liveAddress);
+    assert.throws(
+      () => validateComputeAddressInventory({
+        addresses: [inheritedAddress], networks, subnets: [liveSubnet],
+      }),
+      (error) => error.code === 'CIDR_AUDIT_INVALID',
+    );
+  });
+
+  await t.test('the managed range still participates in unrelated-network overlap checks', () => {
+    const otherNetwork = `${network}-other`;
+    assert.throws(
+      () => assertCidrAvailable({
+        desired: '10.24.0.16/28',
+        network: otherNetwork,
+        networks: [
+          ...networks,
+          { name: `${GCP_IDENTITY.network}-other`, selfLink: otherNetwork },
+        ],
+        subnets: [liveSubnet],
+        routes: [],
+        addresses: [liveAddress],
+      }),
+      (error) => error.code === 'CIDR_OVERLAP',
+    );
+  });
 });
 
 test('post-Cloud-SQL PSA route is exempt only by exact address, connection, instance, and route provenance', async (t) => {

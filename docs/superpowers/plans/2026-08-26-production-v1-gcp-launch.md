@@ -343,6 +343,11 @@ Wire enums are exactly `en | yue-Hant-HK | cmn-Hans-CN` and `text | voice`.
   repeats the full audit before ordinary mutations. Release planning rejects
   every collect/delete/list target outside the exact
   `release-evidence/<release-sha>/` boundary before command execution.
+- [x] Task 8E accepts the exact Google-managed Direct VPC `SERVERLESS`
+  reservation shape only when its canonical IPv4 range is fully contained by
+  one enumerated same-region subnet on a known network. The owned child range
+  is exempt only from collision with its exact V1 parent subnet, remains in all
+  other overlap calculations, and is never an operator mutation target.
 - [ ] Run the Task 8D preflight/provision repair in the existing billed project,
   then start a completely fresh frozen-SHA build and evidence chain. The
   superseded `0ce6399791b393500cd393e41c1d340d8232518c` attempt and its outputs

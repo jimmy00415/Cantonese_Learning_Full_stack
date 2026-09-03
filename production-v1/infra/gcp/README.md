@@ -128,7 +128,7 @@ from the installed Cloud SDK 553 Compute v1 schema:
 | `SHARED_LOADBALANCER_VIP` | regional | exact project/region subnetwork selfLink | one host address |
 | `IPSEC_INTERCONNECT` | regional | exact project network selfLink | IPv4 range |
 | `PRIVATE_SERVICE_CONNECT` | global | exact project network selfLink | one host address |
-| `SERVERLESS` | regional | no network or subnetwork selector | IPv4 range |
+| `SERVERLESS` | regional | no selector, or one exact enumerated same-region subnetwork selfLink | IPv4 range |
 | `VPC_PEERING` | global | exact project network selfLink | IPv4 range |
 
 Every Address also requires its exact host-project, name-matching Address
@@ -137,6 +137,15 @@ regional purposes use an exact regional Address path whose region agrees with
 `item.region`. A subnetwork selector must be in that same region. This applies
 even to selector-free `SERVERLESS`; it does not falsely require every unrelated
 regional row in the host project to be `asia-east2`.
+
+Cloud Run Direct VPC egress can create a Google-managed `SERVERLESS` Address
+reservation inside the selected subnet. The audit accepts that form only when
+it has no network selector, names one enumerated same-region subnetwork on a
+known enumerated network, and its canonical `/8` through `/30` IPv4 range is
+fully contained in that subnet's primary CIDR. A reservation contained in the
+exact managed V1 subnet is an owned child allocation rather than a collision
+with its parent `/26`; it remains present for every other overlap calculation.
+The operator does not delete or alter this Google-managed reservation.
 
 Single-address INTERNAL rows must omit `prefixLength`; they are normalized to
 `/32` only for overlap calculation. Range rows require a canonical network-base
