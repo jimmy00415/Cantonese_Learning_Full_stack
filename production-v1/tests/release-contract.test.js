@@ -98,6 +98,17 @@ const IMAGE_SCRIPTS = Object.freeze([
   'scripts/voice-provider-smoke.js',
 ]);
 
+function artifactReadback(image) {
+  const separator = image.lastIndexOf('@');
+  assert.notEqual(separator, -1, 'test artifact image must be digest-qualified');
+  return {
+    image_summary: {
+      digest: image.slice(separator + 1),
+      fully_qualified_digest: image,
+    },
+  };
+}
+
 const EVIDENCE = Object.freeze({
   legacyInventory: Object.freeze({
     secret: 'hkbuddy-v1-legacy-inventory', secretVersion: '11',
@@ -1963,6 +1974,18 @@ test('release plan is archive-bound, digest-pinned, evidence-first, probe-exact,
   assert.equal(ids.indexOf('promote-traffic') < ids.indexOf('promote-public-iam-readback'), true);
   assert.equal(ids.indexOf('promote-traffic') < ids.indexOf('rollback-traffic'), true);
 
+  const artifactDescribeOperations = plan.operations.filter(({ argv }) => (
+    argv.slice(0, 4).join(' ') === 'artifacts docker images describe'
+  ));
+  assert.equal(artifactDescribeOperations.length > 0, true);
+  for (const { argv } of artifactDescribeOperations) {
+    assert.equal(argv.some((member) => member.startsWith('--location=')), false);
+    assert.deepEqual(argv.slice(-2), [
+      `--project=${PROJECT}`,
+      '--format=json(image_summary.digest,image_summary.fully_qualified_digest)',
+    ]);
+  }
+
   const build = plan.operations.find(({ id }) => id === 'build-submit');
   assert.equal(build.argv.at(-1), 'C:\\release\\source.tar.gz');
   assert.equal(build.argv.includes(`--config=${BUILD_CONFIG}`), true);
@@ -2202,7 +2225,7 @@ test('candidate phase feeds raw Service JSON through gcloud 553-compatible secre
           etag: 'candidate-private-granted', version: 1,
         };
       }
-      if (argv[0] === 'artifacts') return { image: plan.expectedCandidate.image };
+      if (argv[0] === 'artifacts') return artifactReadback(plan.expectedCandidate.image);
       throw new Error(`unexpected operation: ${argv.join(' ')}`);
     },
     writeOutput: () => undefined,
@@ -2214,7 +2237,7 @@ test('candidate phase feeds raw Service JSON through gcloud 553-compatible secre
       traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 100 }],
     },
     revision: structuredClone(plan.expectedCandidate),
-    artifact: { image: plan.expectedCandidate.image },
+    artifact: artifactReadback(plan.expectedCandidate.image),
     iam: {
       bindings: [{
         role: 'roles/run.servicesInvoker',
@@ -4745,7 +4768,7 @@ test('all-checkpoint candidate restart reconstructs exact private Service and IA
         return structuredClone(plan.expectedCandidate);
       }
       if (argv.includes('get-iam-policy')) return structuredClone(iam);
-      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv[0] === 'artifacts') return artifactReadback(plan.image);
       throw new Error(`unexpected recovery read: ${argv.join(' ')}`);
     },
     writeOutput: () => undefined,
@@ -4846,7 +4869,7 @@ test('all-checkpoint first-release candidate restart still rejects a live stable
         return structuredClone(plan.expectedCandidate);
       }
       if (argv.includes('get-iam-policy')) return structuredClone(iam);
-      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv[0] === 'artifacts') return artifactReadback(plan.image);
       throw new Error(`recovery continued past live stable precheck: ${argv.join(' ')}`);
     },
     writeOutput: () => undefined,
@@ -4865,23 +4888,31 @@ test('all-checkpoint first-release candidate restart still rejects a live stable
 test('candidate receipt-write crash hashes authoritative readbacks and ignores only Service resourceVersion drift', async () => {
   const input = releaseInput();
   const plan = buildReleasePlan(input, { phase: 'candidate' });
+  const opaqueRoot = 'https://provider-opaque-restart-identifier.run.app';
   const service = (resourceVersion) => ({
     apiVersion: 'serving.knative.dev/v1',
     kind: 'Service',
     metadata: {
       name: CANDIDATE_SERVICE,
       resourceVersion,
-      annotations: { 'run.googleapis.com/invoker-iam-disabled': 'false' },
+      annotations: {
+        'run.googleapis.com/invoker-iam-disabled': 'false',
+        'run.googleapis.com/urls': JSON.stringify([CANDIDATE_ROOT, opaqueRoot]),
+      },
     },
-    status: { traffic: [{
-      revisionName: plan.candidateRevision,
-      tag: plan.candidateTag,
-      url: plan.candidateOrigin,
-      percent: 100,
-    }] },
+    status: {
+      address: { url: opaqueRoot },
+      url: opaqueRoot,
+      traffic: [{
+        revisionName: plan.candidateRevision,
+        tag: plan.candidateTag,
+        url: `https://${plan.candidateTag}---provider-opaque-restart-identifier.run.app`,
+        percent: 100,
+      }],
+    },
   });
   const revision = structuredClone(plan.expectedCandidate);
-  const artifact = { image: plan.image };
+  const artifact = artifactReadback(plan.image);
   const privateIam = candidatePrivateIam('candidate-private-final');
   const store = createTestStateStore();
   let deployed = false;
@@ -5061,9 +5092,14 @@ test('confirmed candidate fails closed unless every control-plane readback match
       etag: 'Bw-candidate=',
       version: 1,
     },
-    artifact: { image: plan.expectedCandidate.image },
+    artifact: artifactReadback(plan.expectedCandidate.image),
   };
   assert.equal(validateCandidateControlPlaneReadbacks(structuredClone(readbacks), plan), true);
+  const contradictoryArtifact = structuredClone(readbacks);
+  contradictoryArtifact.artifact.image_summary.fully_qualified_digest
+    = `asia-east2-docker.pkg.dev/${PROJECT}/hkbuddy-v1/foreign@${IMAGE_DIGEST}`;
+  assert.throws(() => validateCandidateControlPlaneReadbacks(contradictoryArtifact, plan),
+    /Artifact Registry image readback is invalid/);
   const publicDrift = structuredClone(readbacks);
   publicDrift.iam.bindings[0].members.push('allUsers');
   assert.throws(() => validateCandidateControlPlaneReadbacks(publicDrift, plan), /IAM readback/i);
@@ -5076,7 +5112,7 @@ test('confirmed candidate fails closed unless every control-plane readback match
     let iamGranted = false;
     return async (argv) => {
     if (argv[0] === 'artifacts') return argv.includes(plan.previousImage)
-      ? { image: plan.previousImage } : structuredClone(artifact);
+      ? artifactReadback(plan.previousImage) : structuredClone(artifact);
     if (argv.includes('--dry-run')) return structuredClone(plan.candidateServiceSpec);
     if (argv.includes('get-iam-policy')) return iamGranted
       ? structuredClone(readbacks.iam)
@@ -5158,7 +5194,7 @@ test('candidate IAM restart reconstructs exact candidate readbacks and never rep
       if (argv[1] === 'revisions' && argv[2] === 'describe') {
         return structuredClone(plan.expectedCandidate);
       }
-      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv[0] === 'artifacts') return artifactReadback(plan.image);
       if (argv.includes('get-iam-policy')) return candidatePrivateIam();
       throw new Error(`unexpected operation: ${argv.join(' ')}`);
     },
@@ -5209,7 +5245,7 @@ test('candidate deploy restart adopts exact service state before the one untouch
         return candidateServiceReadback(plan);
       }
       if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
-      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv[0] === 'artifacts') return artifactReadback(plan.image);
       if (argv.includes('get-iam-policy')) {
         return iamGranted ? candidatePrivateIam('candidate-granted') : stablePrivateIam();
       }
@@ -5248,9 +5284,9 @@ test('release orchestrator is dry-run first and executes only one exactly confir
       if (argv[1] === 'revisions') return argv[3] === input.previousRevision
         ? { revision: input.previousRevision, image: plan.previousImage }
         : structuredClone(plan.expectedStable);
-      if (argv[0] === 'artifacts') return {
-        image: argv.includes(plan.previousImage) ? plan.previousImage : plan.image,
-      };
+      if (argv[0] === 'artifacts') {
+        return artifactReadback(argv.includes(plan.previousImage) ? plan.previousImage : plan.image);
+      }
       if (argv.includes('update-traffic')) {
         rolledBack = true;
         return trafficTargetAcknowledgement(input.previousRevision);
@@ -5380,9 +5416,9 @@ test('later promotion rejects every stable-service tag before its first stable m
     execute: async (argv) => {
       calls.push(argv);
       if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
-      if (argv[0] === 'artifacts') return {
-        image: argv.includes(plan.previousImage) ? plan.previousImage : plan.image,
-      };
+      if (argv[0] === 'artifacts') {
+        return artifactReadback(argv.includes(plan.previousImage) ? plan.previousImage : plan.image);
+      }
       if (argv.includes('get-iam-policy')) return argv[3] === CANDIDATE_SERVICE
         ? candidatePrivateIam() : stablePublicIam();
       if (argv[1] === 'revisions') {
@@ -5419,7 +5455,7 @@ test('later promotion performs no cloud mutation after the final traffic mutatio
   const plan = buildReleasePlan(input);
   const publicPolicy = stablePublicIam('public-baseline');
   const priorRevision = { revision: plan.previousRevision, image: plan.previousImage };
-  const priorArtifact = { image: plan.previousImage };
+  const priorArtifact = artifactReadback(plan.previousImage);
   const calls = [];
   let stableState = stablePriorReadback(plan);
   let trafficAttempted = false;
@@ -5443,7 +5479,7 @@ test('later promotion performs no cloud mutation after the final traffic mutatio
       calls.push(argv);
       if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
       if (argv[0] === 'artifacts') return structuredClone(
-        argv.includes(plan.previousImage) ? priorArtifact : { image: plan.image },
+        argv.includes(plan.previousImage) ? priorArtifact : artifactReadback(plan.image),
       );
       if (argv.includes('get-iam-policy')) return argv[3] === CANDIDATE_SERVICE
         ? candidatePrivateIam() : structuredClone(publicPolicy);
@@ -5522,9 +5558,9 @@ test('promotion drift during privacy production blocks the final intent and publ
     },
     execute: async (argv) => {
       if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
-      if (argv[0] === 'artifacts') return {
-        image: argv.includes(plan.previousImage) ? plan.previousImage : plan.image,
-      };
+      if (argv[0] === 'artifacts') {
+        return artifactReadback(argv.includes(plan.previousImage) ? plan.previousImage : plan.image);
+      }
       if (argv.includes('get-iam-policy')) return argv[3] === CANDIDATE_SERVICE
         ? candidatePrivateIam() : stablePublicIam();
       if (argv[1] === 'revisions') {
@@ -5607,9 +5643,9 @@ async function runPromotionExpiryCrossing({ firstRelease, crossing }) {
     },
     execute: async (argv) => {
       if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
-      if (argv[0] === 'artifacts') return {
-        image: argv.includes(plan.previousImage) ? plan.previousImage : plan.image,
-      };
+      if (argv[0] === 'artifacts') {
+        return artifactReadback(argv.includes(plan.previousImage) ? plan.previousImage : plan.image);
+      }
       if (argv.includes('get-iam-policy')) {
         if (argv[3] === CANDIDATE_SERVICE) return candidatePrivateIam();
         if (crossing === 'read' && proofProduced) {
@@ -5731,9 +5767,9 @@ test('promotion proof expires at the exact boundary before the final intent', as
     writeStableSpec: async () => true,
     execute: async (argv) => {
       if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
-      if (argv[0] === 'artifacts') return {
-        image: argv.includes(plan.previousImage) ? plan.previousImage : plan.image,
-      };
+      if (argv[0] === 'artifacts') {
+        return artifactReadback(argv.includes(plan.previousImage) ? plan.previousImage : plan.image);
+      }
       if (argv.includes('get-iam-policy')) return argv[3] === CANDIDATE_SERVICE
         ? candidatePrivateIam() : stablePublicIam();
       if (argv[1] === 'revisions') {
@@ -5788,7 +5824,7 @@ test('expired open promotion-proof intent is adopted as audit evidence then clos
     now: () => new Date('2026-08-27T08:05:00.000Z'),
     writeReleasePrivacyArtifact: async () => { writes += 1; return true; },
     execute: async (argv) => {
-      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv[0] === 'artifacts') return artifactReadback(plan.image);
       if (argv.includes('get-iam-policy')) return argv[3] === CANDIDATE_SERVICE
         ? candidatePrivateIam() : stablePublicIam();
       if (argv[1] === 'revisions') {
@@ -5878,9 +5914,9 @@ test('expired unperformed final intent is aborted without replay and permits a n
     writeStableSpec: async () => true,
     execute: async (argv) => {
       if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
-      if (argv[0] === 'artifacts') return {
-        image: argv.includes(plan.previousImage) ? plan.previousImage : plan.image,
-      };
+      if (argv[0] === 'artifacts') {
+        return artifactReadback(argv.includes(plan.previousImage) ? plan.previousImage : plan.image);
+      }
       if (argv.includes('get-iam-policy')) return argv[3] === CANDIDATE_SERVICE
         ? candidatePrivateIam() : stablePublicIam();
       if (argv[1] === 'revisions') {
@@ -6005,7 +6041,7 @@ test('stable deploy restart adopts exact staged state and preserves one bounded 
         return { revision: plan.previousRevision, image: plan.previousImage };
       }
       if (argv[0] === 'artifacts') {
-        return { image: argv.includes(plan.previousImage) ? plan.previousImage : plan.image };
+        return artifactReadback(argv.includes(plan.previousImage) ? plan.previousImage : plan.image);
       }
       if (argv.includes('get-iam-policy')) {
         return argv.includes(CANDIDATE_SERVICE) ? candidatePrivateIam() : stablePublicIam();
@@ -6040,9 +6076,9 @@ test('later promotion never issues restore traffic when post-mutation read fails
     execute: async (argv) => {
       calls.push(argv);
       if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
-      if (argv[0] === 'artifacts') return {
-        image: argv.includes(plan.previousImage) ? plan.previousImage : plan.image,
-      };
+      if (argv[0] === 'artifacts') {
+        return artifactReadback(argv.includes(plan.previousImage) ? plan.previousImage : plan.image);
+      }
       if (argv.includes('get-iam-policy')) return argv[3] === CANDIDATE_SERVICE
         ? candidatePrivateIam() : stablePublicIam();
       if (argv[1] === 'revisions') {
@@ -6100,9 +6136,9 @@ test('later promotion blocks on staged drift without a recovery mutation', async
     writeStableSpec: async () => true,
     execute: async (argv) => {
       if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
-      if (argv[0] === 'artifacts') return {
-        image: argv.includes(plan.previousImage) ? plan.previousImage : plan.image,
-      };
+      if (argv[0] === 'artifacts') {
+        return artifactReadback(argv.includes(plan.previousImage) ? plan.previousImage : plan.image);
+      }
       if (argv.includes('get-iam-policy')) return argv[3] === CANDIDATE_SERVICE
         ? candidatePrivateIam() : stablePublicIam();
       if (argv[1] === 'revisions') {
@@ -6169,7 +6205,7 @@ test('first promotion IAM response loss never triggers an automatic restore muta
     execute: async (argv) => {
       calls.push(argv);
       if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
-      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv[0] === 'artifacts') return artifactReadback(plan.image);
       if (argv[1] === 'revisions') return argv[3] === plan.candidateRevision
         ? structuredClone(plan.expectedCandidate) : structuredClone(plan.expectedStable);
       if (argv.includes('get-iam-policy')) {
@@ -6284,7 +6320,7 @@ test('first public-IAM restart rereads exact staged service state without repeat
         return argv[3] === plan.candidateRevision
           ? structuredClone(plan.expectedCandidate) : structuredClone(plan.expectedStable);
       }
-      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv[0] === 'artifacts') return artifactReadback(plan.image);
       if (argv.includes('get-iam-policy')) {
         return argv.includes(CANDIDATE_SERVICE) ? candidatePrivateIam() : stablePublicIam();
       }
@@ -6314,7 +6350,7 @@ test('first public-IAM restart retries an unperformed grant and completes the or
   const execute = async (argv) => {
     calls.push(argv);
     if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
-    if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv[0] === 'artifacts') return artifactReadback(plan.image);
     if (argv[1] === 'revisions') return argv[3] === plan.candidateRevision
       ? structuredClone(plan.expectedCandidate) : structuredClone(plan.expectedStable);
     if (argv.includes('get-iam-policy')) return argv[3] === CANDIDATE_SERVICE
@@ -6488,7 +6524,7 @@ test('first promotion adopts landed candidate deletion and completes without rep
     execute: async (argv) => {
       calls.push(argv);
       if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
-      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv[0] === 'artifacts') return artifactReadback(plan.image);
       if (argv[1] === 'revisions') return structuredClone(plan.expectedStable);
       if (argv.includes('get-iam-policy')) return structuredClone(stablePolicy);
       if (argv[1] === 'services' && argv[2] === 'delete') {
@@ -6541,7 +6577,7 @@ test('first promotion retries an unperformed journaled candidate deletion exactl
     writeStableSpec: async () => true,
     execute: async (argv) => {
       if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
-      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv[0] === 'artifacts') return artifactReadback(plan.image);
       if (argv[1] === 'revisions') return argv[3] === plan.candidateRevision
         ? structuredClone(plan.expectedCandidate) : structuredClone(plan.expectedStable);
       if (argv.includes('get-iam-policy')) return argv[3] === CANDIDATE_SERVICE
@@ -6615,7 +6651,7 @@ test('first promotion adopts a landed stable deployment without replacing it', a
     execute: async (argv) => {
       calls.push(argv);
       if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
-      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv[0] === 'artifacts') return artifactReadback(plan.image);
       if (argv[1] === 'revisions') return structuredClone(plan.expectedStable);
       if (argv.includes('get-iam-policy')) return structuredClone(stablePolicy);
       if (argv[1] === 'services' && argv[2] === 'replace') {
@@ -6674,7 +6710,7 @@ test('first promotion retries an unperformed journaled stable deployment exactly
     writeStableSpec: async () => true,
     execute: async (argv) => {
       if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
-      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv[0] === 'artifacts') return artifactReadback(plan.image);
       if (argv[1] === 'revisions') return structuredClone(plan.expectedStable);
       if (argv.includes('get-iam-policy')) return structuredClone(stablePolicy);
       if (argv[1] === 'services' && argv[2] === 'replace') {
@@ -6741,7 +6777,7 @@ test('first-promotion retries reject a durable before-state mismatch before dele
         }
         if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
         if (argv.includes('get-iam-policy')) return candidatePrivateIam();
-        if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv[0] === 'artifacts') return artifactReadback(plan.image);
         throw new Error(`unexpected operation: ${argv.join(' ')}`);
       },
       writeOutput: () => undefined,
@@ -6833,7 +6869,7 @@ test('expired first-promotion proof checkpoint closes for re-proof before candid
         return candidateServiceReadback(plan);
       }
       if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
-      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv[0] === 'artifacts') return artifactReadback(plan.image);
       if (argv.includes('get-iam-policy')) return candidatePrivateIam();
       throw new Error(`unexpected operation: ${argv.join(' ')}`);
     },
@@ -6876,7 +6912,7 @@ test('first promotion resumes after durable candidate absence without recreating
     execute: async (argv) => {
       calls.push(argv);
       if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
-      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv[0] === 'artifacts') return artifactReadback(plan.image);
       if (argv[1] === 'revisions') return structuredClone(plan.expectedStable);
       if (argv.includes('get-iam-policy')) return structuredClone(stablePolicy);
       if (argv[1] === 'services' && argv[2] === 'describe') {
@@ -6912,7 +6948,7 @@ test('first promotion blocks on foreign staged state without compensation', asyn
     writeStableSpec: async () => true,
     execute: async (argv) => {
       if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
-      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv[0] === 'artifacts') return artifactReadback(plan.image);
       if (argv.includes('get-iam-policy')) return argv[3] === CANDIDATE_SERVICE
         ? candidatePrivateIam() : stablePrivateIam();
       if (argv[1] === 'revisions') return argv[3] === plan.candidateRevision
@@ -6951,7 +6987,7 @@ test('candidate cleanup is receipt-bound and recovers a lost delete response wit
     input,
     execute: async (argv) => {
       calls.push(argv);
-      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv[0] === 'artifacts') return artifactReadback(plan.image);
       if (argv.includes('get-iam-policy')) return candidatePrivateIam();
       if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
       if (argv[1] === 'services' && argv[2] === 'delete') {
@@ -7125,7 +7161,7 @@ test('empty-host bootstrap is allowed only on canonical NOT_FOUND and creates a 
         iamGranted = true;
         return candidatePrivateIam('candidate-private-granted');
       }
-      if (argv[0] === 'artifacts') return { image: plan.expectedCandidate.image };
+      if (argv[0] === 'artifacts') return artifactReadback(plan.expectedCandidate.image);
       throw new Error(`unexpected operation: ${argv.join(' ')}`);
     },
     writeOutput: () => undefined,
@@ -7157,45 +7193,52 @@ test('empty-host bootstrap is allowed only on canonical NOT_FOUND and creates a 
 
 test('first-release Service API traffic requires explicit percent and an exact tag URL', () => {
   const plan = buildReleasePlan(releaseInput({ previousRevision: null, previousImageDigest: null }));
+  const opaqueRoot = 'https://provider-opaque-identifier.run.app';
+  const opaqueTagUrl = `https://${CANDIDATE_TAG}---provider-opaque-identifier.run.app`;
+  const serviceReadback = () => ({
+    apiVersion: 'serving.knative.dev/v1',
+    kind: 'Service',
+    metadata: {
+      name: CANDIDATE_SERVICE,
+      annotations: {
+        'run.googleapis.com/urls': JSON.stringify([CANDIDATE_ROOT, opaqueRoot]),
+      },
+    },
+    status: {
+      address: { url: opaqueRoot },
+      url: opaqueRoot,
+      traffic: [{
+        revisionName: REVISION, tag: CANDIDATE_TAG, url: opaqueTagUrl, percent: 100,
+      }],
+    },
+  });
   assert.doesNotThrow(() => validateCandidateControlPlaneReadbacks({
-    service: {
-      apiVersion: 'serving.knative.dev/v1',
-      kind: 'Service',
-      metadata: { name: CANDIDATE_SERVICE },
-      status: { traffic: [{
-        revisionName: REVISION, tag: CANDIDATE_TAG, url: CANDIDATE_ORIGIN, percent: 100,
-      }] },
-    },
+    service: serviceReadback(),
     revision: structuredClone(plan.expectedCandidate),
     iam: candidatePrivateIam(),
-    artifact: { image: plan.expectedCandidate.image },
+    artifact: artifactReadback(plan.expectedCandidate.image),
   }, plan));
-  assert.throws(() => validateCandidateControlPlaneReadbacks({
-    service: {
-      apiVersion: 'serving.knative.dev/v1',
-      kind: 'Service',
-      metadata: { name: CANDIDATE_SERVICE },
-      status: { traffic: [{
-        revisionName: REVISION, tag: CANDIDATE_TAG, url: CANDIDATE_ORIGIN, percent: 0,
-      }] },
+  const rejects = [
+    (service) => { service.status.traffic[0].percent = 0; },
+    (service) => { delete service.status.traffic[0].percent; },
+    (service) => {
+      service.metadata.annotations['run.googleapis.com/urls'] = JSON.stringify([opaqueRoot]);
     },
-    revision: structuredClone(plan.expectedCandidate),
-    iam: candidatePrivateIam(),
-    artifact: { image: plan.expectedCandidate.image },
-  }, plan), /candidate service readback/i);
-  assert.throws(() => validateCandidateControlPlaneReadbacks({
-    service: {
-      apiVersion: 'serving.knative.dev/v1',
-      kind: 'Service',
-      metadata: { name: CANDIDATE_SERVICE },
-      status: { traffic: [{
-        revisionName: REVISION, tag: CANDIDATE_TAG, url: CANDIDATE_ORIGIN,
-      }] },
+    (service) => { service.status.address.url = CANDIDATE_ROOT; },
+    (service) => {
+      service.status.traffic[0].url = `https://${CANDIDATE_TAG}---undeclared.run.app`;
     },
-    revision: structuredClone(plan.expectedCandidate),
-    iam: candidatePrivateIam(),
-    artifact: { image: plan.expectedCandidate.image },
-  }, plan), /candidate service readback/i);
+  ];
+  for (const mutate of rejects) {
+    const service = serviceReadback();
+    mutate(service);
+    assert.throws(() => validateCandidateControlPlaneReadbacks({
+      service,
+      revision: structuredClone(plan.expectedCandidate),
+      iam: candidatePrivateIam(),
+    artifact: artifactReadback(plan.expectedCandidate.image),
+    }, plan), /candidate service readback/i);
+  }
 });
 
 test('later rollback validates immutable receipts and fresh revision/image/service/evidence before traffic mutation', async () => {
@@ -7226,7 +7269,7 @@ test('later rollback validates immutable receipts and fresh revision/image/servi
       if (argv[1] === 'revisions' && argv[3] === REVISION) {
         return structuredClone(plan.expectedCandidate);
       }
-      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv[0] === 'artifacts') return artifactReadback(plan.image);
       if (argv[1] === 'revisions' && argv[3] === input.previousRevision) {
         return { revision: 'hkbuddy-v1-api-222222222222', image: plan.previousImage };
       }
@@ -7250,8 +7293,8 @@ test('later rollback validates immutable receipts and fresh revision/image/servi
         ? { revision: input.previousRevision, image: plan.previousImage }
         : structuredClone(plan.expectedCandidate);
       if (argv[0] === 'artifacts') return argv.includes(plan.previousImage)
-        ? { image: `${plan.previousImage.slice(0, -64)}${'f'.repeat(64)}` }
-        : { image: plan.image };
+        ? artifactReadback(`${plan.previousImage.slice(0, -64)}${'f'.repeat(64)}`)
+        : artifactReadback(plan.image);
       throw new Error(`unexpected operation: ${argv.join(' ')}`);
     },
     writeOutput: () => undefined,
@@ -9840,10 +9883,10 @@ test('real-shape migration, authenticated workload, and tag-free promotion share
     execute: async (argv) => {
       if (argv[0] === 'logging') return controlPlaneLogEntries(workloadRecord);
       if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
-      if (argv[0] === 'artifacts') return {
-        image: argv.includes(refreshedPlan.previousImage)
-          ? refreshedPlan.previousImage : refreshedPlan.image,
-      };
+      if (argv[0] === 'artifacts') {
+        return artifactReadback(argv.includes(refreshedPlan.previousImage)
+          ? refreshedPlan.previousImage : refreshedPlan.image);
+      }
       if (argv[1] === 'revisions') {
         if (argv[3] === refreshedPlan.candidateRevision) {
           return structuredClone(refreshedPlan.expectedCandidate);

@@ -19,6 +19,8 @@ const PRIOR_REVISION = `${GCP_IDENTITY.service}-${'b'.repeat(12)}`;
 const CANDIDATE_REVISION = `${GCP_IDENTITY.candidateService}-${'c'.repeat(12)}`;
 const CANDIDATE_TAG = `candidate-${'c'.repeat(12)}`;
 const CANDIDATE_TAG_URL = `https://${CANDIDATE_TAG}---${GCP_IDENTITY.candidateService}-${PROJECT_NUMBER}.${REGION}.run.app`;
+const CANDIDATE_CANONICAL_URL = `https://${GCP_IDENTITY.candidateService}-c7dkesvlda-df.a.run.app`;
+const CANDIDATE_CANONICAL_TAG_URL = `https://${CANDIDATE_TAG}---${GCP_IDENTITY.candidateService}-c7dkesvlda-df.a.run.app`;
 const STABLE_URL = `https://${GCP_IDENTITY.service}-${PROJECT_NUMBER}.${REGION}.run.app`;
 const RELEASE_SHA = 'a'.repeat(40);
 const IMAGE_DIGEST = `sha256:${'d'.repeat(64)}`;
@@ -153,11 +155,33 @@ test('traffic row representations validate before exact phase comparison', async
     },
   ], { service: GCP_IDENTITY.candidateService }), candidate);
   assert.deepEqual(normalizeCloudRunV1Traffic([
+    {
+      revisionName: CANDIDATE_REVISION,
+      tag: CANDIDATE_TAG,
+      url: CANDIDATE_CANONICAL_TAG_URL,
+      percent: 100,
+    },
+  ], {
+    service: GCP_IDENTITY.candidateService,
+    serviceUrls: [CANDIDATE_TAG_URL.replace(`${CANDIDATE_TAG}---`, ''), CANDIDATE_CANONICAL_URL],
+  }), candidate);
+  assert.deepEqual(normalizeCloudRunV1Traffic([
     { revisionName: PRIOR_REVISION, percent: 100 },
     { revisionName: STABLE_REVISION, percent: 0 },
   ], { service: GCP_IDENTITY.service }), staged);
   assert.equal(assertExactTraffic(promoted, {
     kind: 'internal', service: GCP_IDENTITY.service, expected: promoted,
+  }), true);
+  assert.equal(assertExactTraffic([{
+    revisionName: CANDIDATE_REVISION,
+    tag: CANDIDATE_TAG,
+    url: CANDIDATE_CANONICAL_TAG_URL,
+    percent: 100,
+  }], {
+    kind: 'raw-v1',
+    service: GCP_IDENTITY.candidateService,
+    serviceUrls: [CANDIDATE_TAG_URL.replace(`${CANDIDATE_TAG}---`, ''), CANDIDATE_CANONICAL_URL],
+    expected: candidate,
   }), true);
 
   const malformedPercent = [
@@ -737,6 +761,10 @@ function privacyServiceReadback(binding) {
         'run.googleapis.com/ingress': 'all',
         'run.googleapis.com/ingress-status': 'all',
         'run.googleapis.com/invoker-iam-disabled': 'false',
+        'run.googleapis.com/urls': JSON.stringify([
+          binding.candidateAudience,
+          CANDIDATE_CANONICAL_URL,
+        ]),
       },
     },
     spec: {
@@ -747,7 +775,7 @@ function privacyServiceReadback(binding) {
       traffic: [{ revisionName: binding.candidateRevision, percent: 100, tag: binding.candidateTag }],
     },
     status: {
-      address: { url: binding.candidateAudience },
+      address: { url: CANDIDATE_CANONICAL_URL },
       conditions: [{ type: 'Ready', status: 'True' }],
       latestCreatedRevisionName: binding.candidateRevision,
       latestReadyRevisionName: binding.candidateRevision,
@@ -756,9 +784,9 @@ function privacyServiceReadback(binding) {
         revisionName: binding.candidateRevision,
         percent: 100,
         tag: binding.candidateTag,
-        url: binding.candidateOrigin,
+        url: `https://${binding.candidateTag}---${GCP_IDENTITY.candidateService}-c7dkesvlda-df.a.run.app`,
       }],
-      url: binding.candidateAudience,
+      url: CANDIDATE_CANONICAL_URL,
     },
   };
 }
@@ -795,8 +823,6 @@ function privacyArtifactReadback(binding) {
     image_summary: {
       digest: binding.imageDigest,
       fully_qualified_digest: binding.image,
-      registry: `${binding.region}-docker.pkg.dev`,
-      repository: `${binding.region}-docker.pkg.dev/${binding.projectId}/${GCP_IDENTITY.repository}`,
     },
   };
 }
@@ -1036,6 +1062,7 @@ function createPrivacyHarness({ mutate = () => undefined } = {}) {
       return structuredClone(fixtures.revision);
     }
     if (command.startsWith(`artifacts docker images describe ${binding.image}`)) {
+      assert.equal(argv.some((member) => member.startsWith('--location=')), false);
       return structuredClone(fixtures.artifact);
     }
     if (command.startsWith('auth print-identity-token ')) {
@@ -1191,7 +1218,8 @@ test('privacy command plan is read-only and hard-gates exact live prerequisites'
     ],
     artifact: [
       'artifacts', 'docker', 'images', 'describe', binding.image,
-      `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
+      `--project=${PROJECT}`,
+      '--format=json(image_summary.digest,image_summary.fully_qualified_digest)',
     ],
   });
   assert.deepEqual(plan.hierarchy.organizationDescribe, [
@@ -1669,6 +1697,71 @@ test('privacy producer fails closed on incomplete effective policy, inherited pu
     }],
     ['candidate service address drift', (fixtures) => {
       fixtures.service.status.address.url = 'https://foreign.example';
+    }],
+    ['candidate service URL annotation missing', (fixtures) => {
+      delete fixtures.service.metadata.annotations['run.googleapis.com/urls'];
+    }],
+    ['candidate service primary URL missing', (fixtures) => {
+      delete fixtures.service.status.url;
+    }],
+    ['candidate service address missing', (fixtures) => {
+      delete fixtures.service.status.address;
+    }],
+    ['candidate service address has an unknown field', (fixtures) => {
+      fixtures.service.status.address.unexpected = 'drift';
+    }],
+    ['candidate service deterministic URL anchor missing', (fixtures) => {
+      fixtures.service.metadata.annotations['run.googleapis.com/urls'] = JSON.stringify([
+        CANDIDATE_CANONICAL_URL,
+      ]);
+    }],
+    ['candidate service duplicate URL alias', (fixtures, binding) => {
+      fixtures.service.metadata.annotations['run.googleapis.com/urls'] = JSON.stringify([
+        binding.candidateAudience,
+        binding.candidateAudience,
+      ]);
+      fixtures.service.status.url = binding.candidateAudience;
+      fixtures.service.status.address.url = binding.candidateAudience;
+    }],
+    ['candidate service third URL alias', (fixtures, binding) => {
+      fixtures.service.metadata.annotations['run.googleapis.com/urls'] = JSON.stringify([
+        binding.candidateAudience,
+        CANDIDATE_CANONICAL_URL,
+        'https://another-provider-declared-identifier.run.app',
+      ]);
+    }],
+    ['candidate service unsafe URL alias', (fixtures, binding) => {
+      fixtures.service.metadata.annotations['run.googleapis.com/urls'] = JSON.stringify([
+        binding.candidateAudience,
+        'https://opaque-provider-identifier.run.app/path',
+      ]);
+    }],
+    ['candidate service tagged traffic URL is undeclared', (fixtures, binding) => {
+      fixtures.service.status.traffic[0].url = `https://${binding.candidateTag}---undeclared.run.app`;
+    }],
+    ['candidate service secondary URL alias drifts between reads', (fixtures, binding) => {
+      fixtures.service.status.url = binding.candidateAudience;
+      fixtures.service.status.address.url = binding.candidateAudience;
+      fixtures.service.status.traffic[0].url = binding.candidateOrigin;
+      let reads = 0;
+      Object.defineProperty(fixtures.service.metadata.annotations, 'run.googleapis.com/urls', {
+        enumerable: true,
+        get: () => JSON.stringify([
+          binding.candidateAudience,
+          reads++ === 0
+            ? CANDIDATE_CANONICAL_URL
+            : 'https://changed-provider-identifier.run.app',
+        ]),
+      });
+    }],
+    ['candidate tagged traffic alias drifts between reads', (fixtures, binding) => {
+      let reads = 0;
+      Object.defineProperty(fixtures.service.status.traffic[0], 'url', {
+        enumerable: true,
+        get: () => reads++ === 0
+          ? binding.candidateOrigin
+          : `https://${binding.candidateTag}---${new URL(CANDIDATE_CANONICAL_URL).hostname}`,
+      });
     }],
     ['candidate revision observed-generation drift', (fixtures) => {
       fixtures.revision.status.observedGeneration = 10;

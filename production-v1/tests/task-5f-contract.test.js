@@ -29,6 +29,15 @@ const PREVIOUS_REVISION = `${STABLE_SERVICE}-111111111111`;
 const ACCEPTANCE_RUN_ID = '123e4567-e89b-42d3-a456-426614174000';
 const INVOKER_IAM_DISABLED = 'run.googleapis.com/invoker-iam-disabled';
 
+function artifactReadback(image) {
+  return {
+    image_summary: {
+      digest: image.slice(image.lastIndexOf('@') + 1),
+      fully_qualified_digest: image,
+    },
+  };
+}
+
 const EVIDENCE = Object.freeze({
   legacyInventory: Object.freeze({
     secret: GCP_IDENTITY.secrets.legacy, secretVersion: '11',
@@ -329,6 +338,7 @@ function canonicalAbsence(message = 'not found') {
 }
 
 function rawService({ service, traffic, annotation = 'false' }) {
+  const serviceUrl = `https://${service}-${PROJECT_NUMBER}.${REGION}.run.app`;
   return {
     apiVersion: 'serving.knative.dev/v1',
     kind: 'Service',
@@ -336,10 +346,13 @@ function rawService({ service, traffic, annotation = 'false' }) {
       name: service,
       annotations: {
         'run.googleapis.com/ingress': 'all',
+        'run.googleapis.com/urls': JSON.stringify([serviceUrl]),
         ...(annotation === undefined ? {} : { [INVOKER_IAM_DISABLED]: annotation }),
       },
     },
     status: {
+      address: { url: serviceUrl },
+      url: serviceUrl,
       traffic: traffic.map(({ revision, tag = null, percent }) => ({
         revisionName: revision,
         ...(tag === null ? {} : {
@@ -423,7 +436,7 @@ test('Cloud Run private truth binds the explicit Invoker IAM annotation before d
     const base = {
       revision: structuredClone(plan.expectedCandidate),
       iam: privateCandidateIam(),
-      artifact: { image: plan.image },
+      artifact: artifactReadback(plan.image),
     };
     for (const annotation of [undefined, 'false', 'False']) {
       assert.doesNotThrow(() => validateCandidateControlPlaneReadbacks({
@@ -432,9 +445,9 @@ test('Cloud Run private truth binds the explicit Invoker IAM annotation before d
     }
     const noAnnotations = candidateService(plan);
     delete noAnnotations.metadata.annotations;
-    assert.doesNotThrow(() => validateCandidateControlPlaneReadbacks({
+    assert.throws(() => validateCandidateControlPlaneReadbacks({
       ...base, service: noAnnotations,
-    }, plan));
+    }, plan), /readback/i);
     assert.doesNotThrow(() => validateCandidateControlPlaneReadbacks({
       ...base,
       service: {
@@ -501,7 +514,7 @@ test('Cloud Run private truth binds the explicit Invoker IAM annotation before d
             ? structuredClone(plan.candidateServiceSpec) : candidateService(plan, 'true');
         }
         if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
-        if (argv[0] === 'artifacts') return { image: plan.image };
+        if (argv[0] === 'artifacts') return artifactReadback(plan.image);
         if (argv.includes('get-iam-policy')) return { bindings: [], etag: 'private', version: 1 };
         if (argv.includes('add-iam-policy-binding')) {
           iamGrantMutations += 1;
@@ -524,7 +537,9 @@ test('Cloud Run private truth binds the explicit Invoker IAM annotation before d
       writeStableSpec: async () => true,
       execute: async (argv) => {
         if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
-        if (argv[0] === 'artifacts') return { image: argv.includes(plan.previousImage) ? plan.previousImage : plan.image };
+        if (argv[0] === 'artifacts') {
+          return artifactReadback(argv.includes(plan.previousImage) ? plan.previousImage : plan.image);
+        }
         if (argv.includes('get-iam-policy')) return argv[3] === CANDIDATE_SERVICE
           ? privateCandidateIam() : publicStableIam();
         if (argv[1] === 'revisions') {
@@ -586,7 +601,7 @@ async function runCleanup({
         return candidateService(plan);
       }
       if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
-      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv[0] === 'artifacts') return artifactReadback(plan.image);
       if (argv.includes('get-iam-policy')) return privateCandidateIam();
       if (argv[1] === 'services' && argv[2] === 'delete') {
         if (deleteBehavior === 'null-present') return null;

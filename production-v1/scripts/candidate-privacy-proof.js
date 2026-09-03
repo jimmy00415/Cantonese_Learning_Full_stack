@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 
 import { GCP_IDENTITY } from '../src/gcp-identity.js';
+import { cloudRunTaggedUrl, normalizeCloudRunV1ServiceUrls } from '../src/cloud-run-urls.js';
 import { containsForbiddenPersistedSecret } from './persisted-secret-contract.js';
 
 const SCHEMA_VERSION = 3;
@@ -227,7 +228,8 @@ export function createCandidatePrivacyCommandPlan(rawBinding) {
       ),
       artifact: frozenArgv(
         'artifacts', 'docker', 'images', 'describe', binding.image,
-        `--project=${binding.projectId}`, `--location=${binding.region}`, '--format=json',
+        `--project=${binding.projectId}`,
+        '--format=json(image_summary.digest,image_summary.fully_qualified_digest)',
       ),
     },
     tokenPrerequisite: frozenArgv(
@@ -1164,30 +1166,38 @@ function validateServiceReadback(value, binding) {
     'observedGeneration', 'traffic', 'url',
   ]);
   if (!safeObject(value.status) || Object.keys(value.status).some((key) => !statusKeys.has(key))) fail();
+  let serviceUrls;
+  try {
+    serviceUrls = normalizeCloudRunV1ServiceUrls(value, {
+      service: binding.candidateService,
+      projectNumber: binding.projectNumber,
+      region: binding.region,
+    });
+  } catch { fail(); }
   validateReadyConditions(value.status.conditions);
   const observedGeneration = normalizedInteger(value.status.observedGeneration, { minimum: 1 });
   if (observedGeneration !== generation
-    || !exact(value.status.address, { url: binding.candidateAudience })
     || value.status.latestCreatedRevisionName !== binding.candidateRevision
     || value.status.latestReadyRevisionName !== binding.candidateRevision
-    || value.status.url !== binding.candidateAudience
     || !Array.isArray(value.status.traffic) || value.status.traffic.length !== 1
-    || !exact(value.status.traffic[0], {
-      revisionName: binding.candidateRevision,
-      percent: 100,
-      tag: binding.candidateTag,
-      url: binding.candidateOrigin,
-    })) fail();
+    || !exactKeys(value.status.traffic[0], ['percent', 'revisionName', 'tag', 'url'])
+    || value.status.traffic[0].revisionName !== binding.candidateRevision
+    || value.status.traffic[0].percent !== 100
+    || value.status.traffic[0].tag !== binding.candidateTag
+    || !serviceUrls.aliases.map((url) => cloudRunTaggedUrl(binding.candidateTag, url))
+      .includes(value.status.traffic[0].url)) fail();
   return deepFreeze({
     project: binding.projectId,
     region: binding.region,
     service: binding.candidateService,
     generation,
-    address: binding.candidateAudience,
+    address: serviceUrls.primary,
+    urls: serviceUrls.aliases,
     invokerIamDisabled: false,
     ingress: 'all',
     revision: binding.candidateRevision,
     tag: binding.candidateTag,
+    taggedUrl: value.status.traffic[0].url,
     traffic: binding.expectedCandidate.traffic,
     ready: true,
     runtime,
@@ -1238,20 +1248,10 @@ function validateRevisionReadback(value, binding) {
 }
 
 function validateArtifactReadback(value, binding) {
-  const allowedKeys = new Set([
-    'buildTime', 'createTime', 'digest', 'image', 'image_summary', 'imageSummary',
-    'mediaType', 'name', 'package', 'tags', 'updateTime', 'uploadTime',
-  ]);
-  if (!safeObject(value) || Object.keys(value).some((key) => !allowedKeys.has(key))) fail();
-  const summary = value.image_summary ?? value.imageSummary;
-  if (summary !== undefined) {
-    const summaryKeys = new Set([
-      'digest', 'fully_qualified_digest', 'fullyQualifiedDigest', 'registry', 'repository', 'tags',
-    ]);
-    if (!safeObject(summary) || Object.keys(summary).some((key) => !summaryKeys.has(key))) fail();
-  }
-  const image = value.image ?? summary?.fully_qualified_digest ?? summary?.fullyQualifiedDigest;
-  const digest = value.digest ?? summary?.digest;
+  if (!exactKeys(value, ['image_summary'])
+    || !exactKeys(value.image_summary, ['digest', 'fully_qualified_digest'])) fail();
+  const image = value.image_summary.fully_qualified_digest;
+  const digest = value.image_summary.digest;
   if (image !== binding.image || digest !== binding.imageDigest) fail();
   return deepFreeze({ image: binding.image, imageDigest: binding.imageDigest });
 }

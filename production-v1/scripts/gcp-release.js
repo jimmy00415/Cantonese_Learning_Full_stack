@@ -26,6 +26,11 @@ import {
   writeAtomicCreateOnly,
 } from './release-state-store.js';
 import { GCP_IDENTITY } from '../src/gcp-identity.js';
+import {
+  cloudRunTaggedUrl,
+  normalizeCloudRunServiceUrlAliases,
+  normalizeCloudRunV1ServiceUrls,
+} from '../src/cloud-run-urls.js';
 import { CANONICAL_WAV } from '../src/media/canonical-wav.js';
 import { finalizeReleaseEvidenceRecord } from '../src/services/release-evidence.js';
 import {
@@ -246,31 +251,41 @@ export function normalizeInternalTraffic(value, { service } = {}) {
   return finalizeTrafficRows(rows);
 }
 
-export function normalizeCloudRunV1Traffic(value, { service } = {}) {
+export function normalizeCloudRunV1Traffic(value, { service, serviceUrls } = {}) {
   exactTrafficService(service);
   if (!Array.isArray(value)) throw trafficContractError();
+  let serviceUrlAliases;
+  try {
+    serviceUrlAliases = normalizeCloudRunServiceUrlAliases(serviceUrls, {
+      service, projectNumber: GCP_IDENTITY.projectNumber, region: REGION,
+    });
+  } catch { throw trafficContractError(); }
   const rows = value.map((row) => {
     const tagged = exactKeys(row, ['percent', 'revisionName', 'tag', 'url']);
     if (!tagged && !exactKeys(row, ['percent', 'revisionName'])) throw trafficContractError();
     const revision = exactTrafficRevision(row.revisionName, service);
     const tag = tagged ? exactCandidateTag(row.tag, revision, service) : null;
     if (tagged) {
-      const expectedUrl = `https://${tag}---${service}-${GCP_IDENTITY.projectNumber}.${REGION}.run.app`;
-      if (row.url !== expectedUrl) throw trafficContractError();
+      const allowedTaggedUrls = new Set(
+        serviceUrlAliases.map((url) => cloudRunTaggedUrl(tag, url)),
+      );
+      if (!allowedTaggedUrls.has(row.url)) throw trafficContractError();
     }
     return { revision, tag, percent: exactTrafficPercent(row.percent) };
   });
   return finalizeTrafficRows(rows);
 }
 
-export function assertExactTraffic(value, { kind, service, expected } = {}) {
+export function assertExactTraffic(value, {
+  kind, service, serviceUrls, expected,
+} = {}) {
   const normalize = {
     controlled: normalizeControlledTraffic,
     internal: normalizeInternalTraffic,
     'raw-v1': normalizeCloudRunV1Traffic,
   }[kind];
   if (!normalize) throw trafficContractError();
-  const actualRows = normalize(value, { service });
+  const actualRows = normalize(value, { service, serviceUrls });
   const expectedRows = normalizeInternalTraffic(expected, { service });
   if (!exact(actualRows, expectedRows)) throw trafficContractError();
   return true;
@@ -919,6 +934,14 @@ function promotionAttemptPrivacyProofPath(plan, attemptId) {
   );
 }
 
+function artifactDescribeArgv(image) {
+  return [
+    'artifacts', 'docker', 'images', 'describe', image,
+    `--project=${PROJECT}`,
+    '--format=json(image_summary.digest,image_summary.fully_qualified_digest)',
+  ];
+}
+
 function promotionPrivacyReferenceFromJournal(plan, records, attemptId, {
   now,
   validatePrivacyProof,
@@ -1433,10 +1456,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       'run', 'revisions', 'describe', candidateRevision,
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
-    operation('candidate', 'candidate-artifact-readback', [
-      'artifacts', 'docker', 'images', 'describe', image,
-      `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
-    ]),
+    operation('candidate', 'candidate-artifact-readback', artifactDescribeArgv(image)),
     operation('candidate', 'candidate-private-iam-baseline-readback', [
       'run', 'services', 'get-iam-policy', CANDIDATE_SERVICE,
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
@@ -1462,10 +1482,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       'run', 'revisions', 'describe', candidateRevision,
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
-    operation('candidate-cleanup', 'candidate-cleanup-artifact-readback', [
-      'artifacts', 'docker', 'images', 'describe', image,
-      `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
-    ]),
+    operation('candidate-cleanup', 'candidate-cleanup-artifact-readback', artifactDescribeArgv(image)),
     operation('candidate-cleanup', 'candidate-cleanup-private-iam-readback', [
       'run', 'services', 'get-iam-policy', CANDIDATE_SERVICE,
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
@@ -1495,10 +1512,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       'run', 'services', 'get-iam-policy', CANDIDATE_SERVICE,
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
-    operation('promote', 'promote-candidate-artifact-readback', [
-      'artifacts', 'docker', 'images', 'describe', image,
-      `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
-    ]),
+    operation('promote', 'promote-candidate-artifact-readback', artifactDescribeArgv(image)),
     operation('promote', 'promote-stable-service-precheck', [
       'run', 'services', 'describe', STABLE_SERVICE,
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
@@ -1512,10 +1526,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
         'run', 'revisions', 'describe', previousRevision,
         `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
       ]),
-      operation('promote', 'promote-prior-artifact-readback', [
-        'artifacts', 'docker', 'images', 'describe', previousImage,
-        `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
-      ]),
+      operation('promote', 'promote-prior-artifact-readback', artifactDescribeArgv(previousImage)),
     ]),
     operation('promote', 'promote-stable-spec-dry-run', [
       'run', 'services', 'replace', stableServiceSpecPath,
@@ -1548,10 +1559,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       'run', 'revisions', 'describe', stableRevision,
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
-    operation('promote', 'promote-stable-artifact-readback', [
-      'artifacts', 'docker', 'images', 'describe', image,
-      `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
-    ]),
+    operation('promote', 'promote-stable-artifact-readback', artifactDescribeArgv(image)),
     ...(previousRevision === null ? [
       operation('promote', 'promote-stable-private-iam-readback', [
         'run', 'services', 'get-iam-policy', STABLE_SERVICE,
@@ -1597,18 +1605,12 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       'run', 'revisions', 'describe', stableRevision,
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
-    operation('rollback', 'rollback-current-artifact-readback', [
-      'artifacts', 'docker', 'images', 'describe', image,
-      `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
-    ]),
+    operation('rollback', 'rollback-current-artifact-readback', artifactDescribeArgv(image)),
     operation('rollback', 'rollback-prior-revision-readback', [
       'run', 'revisions', 'describe', previousRevision,
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]),
-    operation('rollback', 'rollback-prior-artifact-readback', [
-      'artifacts', 'docker', 'images', 'describe', previousImage,
-      `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
-    ]),
+    operation('rollback', 'rollback-prior-artifact-readback', artifactDescribeArgv(previousImage)),
     operation('rollback', 'rollback-public-iam-precheck', [
       'run', 'services', 'get-iam-policy', STABLE_SERVICE,
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
@@ -2327,7 +2329,12 @@ function normalizeCandidateService(value) {
       invokerIamDisabled,
       traffic: direct
         ? normalizeInternalTraffic(value.traffic, { service })
-        : normalizeCloudRunV1Traffic(rawTraffic, { service }),
+        : normalizeCloudRunV1Traffic(rawTraffic, {
+          service,
+          serviceUrls: normalizeCloudRunV1ServiceUrls(value, {
+            service, projectNumber: GCP_IDENTITY.projectNumber, region: REGION,
+          }).aliases,
+        }),
     };
   } catch { return null; }
 }
@@ -2438,10 +2445,13 @@ function validateCandidateRevisionReadback(value, plan) {
 }
 
 function validateCandidateArtifact(value, expectedImage) {
-  const image = value?.image ?? value?.image_summary?.fully_qualified_digest
-    ?? value?.imageSummary?.fullyQualifiedDigest;
-  const digest = value?.digest ?? value?.image_summary?.digest ?? value?.imageSummary?.digest;
-  if (image !== expectedImage && !(digest && expectedImage.endsWith(`@${digest}`))) {
+  if (!exactKeys(value, ['image_summary'])
+    || !exactKeys(value.image_summary, ['digest', 'fully_qualified_digest'])) {
+    throw new Error('Artifact Registry image readback is invalid');
+  }
+  const { digest, fully_qualified_digest: image } = value.image_summary;
+  if (!IMAGE_DIGEST.test(String(digest ?? ''))
+    || image !== expectedImage || !expectedImage.endsWith(`@${digest}`)) {
     throw new Error('Artifact Registry image readback is invalid');
   }
   return true;
@@ -5689,10 +5699,7 @@ async function readCandidateControlPlaneState(executor, plan) {
     'run', 'services', 'get-iam-policy', CANDIDATE_SERVICE,
     `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
   ]);
-  const artifact = await executor([
-    'artifacts', 'docker', 'images', 'describe', plan.image,
-    `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
-  ]);
+  const artifact = await executor(artifactDescribeArgv(plan.image));
   const readbacks = { service, revision, iam, artifact };
   validateCandidateControlPlaneReadbacks(readbacks, plan);
   return readbacks;
@@ -5727,10 +5734,7 @@ async function readStableStagedControlPlaneState(executor, plan, {
     `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
   ]);
   validateStableRevisionReadback(revision, plan);
-  const artifact = await executor([
-    'artifacts', 'docker', 'images', 'describe', plan.image,
-    `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
-  ]);
+  const artifact = await executor(artifactDescribeArgv(plan.image));
   validateCandidateArtifact(artifact, plan.image);
   const iam = await executor([
     'run', 'services', 'get-iam-policy', STABLE_SERVICE,
@@ -6863,10 +6867,7 @@ async function captureMobileControlPlaneState({ plan, executor }) {
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
     ]);
     validatePriorRevisionReadback(revision, plan);
-    const artifact = await executor([
-      'artifacts', 'docker', 'images', 'describe', plan.previousImage,
-      `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
-    ]);
+    const artifact = await executor(artifactDescribeArgv(plan.previousImage));
     validateCandidateArtifact(artifact, plan.previousImage);
     const iam = await executor([
       'run', 'services', 'get-iam-policy', STABLE_SERVICE,
@@ -8807,10 +8808,7 @@ export async function runGcpRelease({
         `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
       ]);
       validatePriorRevisionReadback(priorRevision, plan);
-      const priorArtifact = await executor([
-        'artifacts', 'docker', 'images', 'describe', plan.previousImage,
-        `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
-      ]);
+      const priorArtifact = await executor(artifactDescribeArgv(plan.previousImage));
       validateCandidateArtifact(priorArtifact, plan.previousImage);
     }
     if (selection.phase === 'collect') {
@@ -9281,10 +9279,7 @@ export async function runGcpRelease({
             `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
           ]);
           validateCandidateRevisionReadback(revision, plan);
-          const artifact = await executor([
-            'artifacts', 'docker', 'images', 'describe', plan.image,
-            `--project=${PROJECT}`, `--location=${REGION}`, '--format=json',
-          ]);
+          const artifact = await executor(artifactDescribeArgv(plan.image));
           validateCandidateArtifact(artifact, plan.image);
           const iam = await executor([
             'run', 'services', 'get-iam-policy', CANDIDATE_SERVICE,

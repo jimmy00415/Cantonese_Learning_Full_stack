@@ -764,7 +764,7 @@ test('config public status contains capability booleans rather than secret value
 });
 
 test('owner waiver never certifies real iPhone while provider-backed voice remains independently available', () => {
-  const now = new Date('2026-09-03T08:00:00.000Z');
+  const now = new Date();
   const asrConfig = {
     provider: 'google-stt-v2',
     settings: {
@@ -821,7 +821,7 @@ test('owner waiver never certifies real iPhone while provider-backed voice remai
     scope: 'real-iphone-safari',
     approvedBy: 'admin@motionexp.com',
     approvedAt: now.toISOString(),
-    expiresAt: '2026-09-10T08:00:00.000Z',
+    expiresAt: new Date(now.getTime() + (7 * 24 * 60 * 60 * 1_000)).toISOString(),
     reasonCode: 'product-owner-deferred-device-test',
     limitations: ['not-real-ios-tested'],
     result: 'waived',
