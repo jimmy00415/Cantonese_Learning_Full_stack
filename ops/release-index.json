@@ -2,7 +2,7 @@
   "schemaVersion": "hkbuddy-release-index-v1",
   "gcpProjectId": "motion-expert-hk-ltd-webpage",
   "gcpProjectNumber": "582852715831",
-  "generatedAt": "2026-09-02T01:47:06.4922582Z",
+  "generatedAt": "2026-09-03T03:34:31.9555752Z",
   "records": [
     {
       "releaseSha": "05726069d54a47600ef9b4344cd96a2c73f774e1",
@@ -12,6 +12,17 @@
       "localArchiveRelativePath": ".release-evidence/attempts/05726069d54a47600ef9b4344cd96a2c73f774e1/fec0902f-5017-40e0-8d2e-2828b35700c4",
       "inventorySha256": "3f459621c9878d52e8d710724f259b7717abba97c7c096ea35b8ea0c039ecee5",
       "imageDigest": null,
+      "productionTag": null,
+      "publicUrl": null
+    },
+    {
+      "releaseSha": "0ce6399791b393500cd393e41c1d340d8232518c",
+      "acceptanceRunId": "edd63b9f-95a3-47a2-9d1d-1971f2f1cfad",
+      "disposition": "superseded-release-operator-object-iam-contract",
+      "resumable": false,
+      "localArchiveRelativePath": ".release-evidence/attempts/0ce6399791b393500cd393e41c1d340d8232518c/edd63b9f-95a3-47a2-9d1d-1971f2f1cfad",
+      "inventorySha256": "01fd69fa9b61cbf594203dc781f79d90e72eb952853455bb4c38131ac1235c7c",
+      "imageDigest": "sha256:f96f6455a005c03631cc9710b37c520b9e89d49dae2b6aaff599e0cf1b8cf98a",
       "productionTag": null,
       "publicUrl": null
     },
