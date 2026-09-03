@@ -481,15 +481,17 @@ Permission errors, generic not-found text, and any command/resource mismatch
 fail closed. Promote only after privacy, real provider, iOS voice evidence or
 the exact release-scoped owner waiver, dependency,
 retention, readiness, mobile, latency, production-trace, and receipt gates all
-pass for the same frozen commit. A later promotion creates the accepted
-`hkbuddy-v1-api-<sha12>` revision untagged at 0% while the evidenced prior stable
-revision remains at 100%, validates image/config and public IAM, then atomically
-switches stable traffic to the new revision at 100%; public IAM is read-only.
-A first promotion creates and verifies that stable revision privately at 100%,
-then makes `allUsers:roles/run.invoker` the final mutation, followed only by an
-IAM readback. Ambiguous first-release IAM restores the exact private stable IAM
-and accepted private stable service; ambiguous later promotion restores the
-exact prior stable revision at 100% without changing public IAM.
+pass for the same frozen commit. A first promotion publishes a fresh candidate
+privacy proof, journals and deletes the private candidate, proves its canonical
+absence, then creates and verifies the stable revision privately at 100%. After
+that durable singleton handoff, fresh stable-private readbacks guard
+`allUsers:roles/run.invoker` as the final mutation, followed only by an IAM
+readback. The proof must be fresh before candidate deletion and remains
+historically authoritative afterward, so stable startup cannot strand the
+release when the short proof window expires. Confirmed later `candidate` and
+`promote` phases return `ROLLING_RELEASE_UNSUPPORTED_SINGLETON` without a cloud
+mutation until release-lane dispatch and separate worker leadership are
+implemented. Cleanup and rollback remain available.
 
 Rollback is separately confirmed. Before traffic mutation it validates the
 complete mobile receipt chain, the candidate receipt's prior revision/image
@@ -538,15 +540,21 @@ operator-owned local evidence directory. Node on Windows has no handle-relative
 `openat` primitive, so this is not a claim that an actively malicious same-user
 process cannot win every kernel pathname race.
 
-Promotion uses append-only, attempt-bound proof checkpoints. After stable
-staging, it publishes a fresh proof, then uses the current clock to validate the
-proof and reread every receipt/evidence predecessor plus candidate/stable
-service, revision, image/config, traffic, IAM, and authority state. The final
-intent is bound to the canonical digest of that complete promotion barrier.
-Expired pre-intent proofs are preserved and followed by a new proof; an expired,
-unperformed final intent with exact before-state is explicitly aborted before a
-new proof/intent. Mixed or ambiguous state blocks, and only reads plus durable
-local writes may follow the terminal public mutation.
+The enabled first-release promotion uses an append-only, attempt-bound proof
+checkpoint after candidate and stable-absence prechecks but before candidate
+deletion. It validates that proof with the current post-proof clock before the
+irreversible handoff. After stable staging, the final barrier validates the
+stored proof at its recorded gate and rereads every receipt/evidence predecessor
+plus candidate absence, stable service, revision, image/config, traffic, IAM,
+and authority state. The final intent binds the canonical digest of that
+complete barrier. Rolling promotion of an existing stable release is disabled.
+Expired pre-intent proofs are preserved and followed by a new proof. During the
+irreversible first-release handoff, a resumed delete, stable deploy, or public-IAM
+intent first revalidates owner authority and its exact durable before-state. Once
+the candidate is durably deleted, an open final-IAM intent adopts exact public
+state or retries only the same idempotent grant from exact private state; a new
+candidate proof is no longer possible. Mixed or ambiguous state blocks, and only
+reads plus durable local writes may follow the terminal public mutation.
 
 The controlled mobile producer is pinned to Playwright `1.62.1`, Chromium
 revision `1234` / browser `151.0.7922.34`, a `390x844` DPR-1 isolated context,

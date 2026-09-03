@@ -188,18 +188,17 @@ whether stable is absent or retains its genuine prior revision at 100%. The
 public `hkbuddy-v1-api` service is unchanged during candidate acceptance.
 
 Promotion freshly revalidates the private candidate, immutable image/config,
-complete receipt chain, Task 8 artifacts, and production traces before copying
-the accepted image/config into stable. A later release preserves the genuine
-prior stable revision at 100%, stages the accepted stable revision untagged at
-0%, verifies exact image/config and absence of every stable tag, then atomically
-switches the accepted stable revision to 100%; public stable IAM is exact
-read-only state throughout. A first release creates stable privately at 100%,
-verifies service/revision/image/config and private IAM, then makes
+complete receipt chain, Task 8 artifacts, and production traces. On the first
+release it then journals and deletes the receipt-proven private candidate,
+proves canonical candidate absence, creates stable privately at 100%, verifies
+service/revision/image/config and private IAM, and makes
 `allUsers:roles/run.invoker` the final mutation; only its IAM readback follows.
-Ambiguous candidate work restores or removes only a receipt-proven private
-candidate service. Later-promotion ambiguity restores the exact prior stable
-100% state without changing public IAM; first-promotion ambiguity restores the
-accepted stable service and exact private stable IAM.
+Confirmed later `candidate` and `promote` phases fail before any cloud mutation
+with `ROLLING_RELEASE_UNSUPPORTED_SINGLETON` until release-lane dispatch and
+separate worker leadership make overlapping runtimes safe. Candidate cleanup
+and rollback remain separately guarded. A lost public-IAM response is never
+automatically restored: exact public state is adopted, while ambiguity fails
+closed without a second IAM mutation.
 
 Promotion requires the existing production acceptance contract: real Vertex
 LLM, Cantonese/English/Mandarin ASR and TTS, governed HKBU answers and citations,
@@ -243,14 +242,21 @@ malicious same-user process because Windows Node has no handle-relative `openat`
 Historical proof-at-gate validity is distinct from current freshness. Workload
 start and end proofs are checked at their respective recorded gate clocks even
 when the valid workload lasts longer than five minutes. Fresh wrappers reject
-`current >= expiresAt`. After stable staging, promotion appends a fresh,
-attempt-bound proof, validates it with the current post-proof clock, and rereads
-the complete receipt/evidence chain plus candidate/stable service, revision,
-image/config, traffic, IAM, and authority state. Its final intent binds the
-canonical digest of that barrier. Expired pre-intent proofs are retained and
-followed by a new proof; an expired unperformed final intent requires an exact
-before-state abort before re-proof. Mixed/ambiguous state blocks, and no later
-cloud mutation is allowed after the terminal promotion mutation.
+`current >= expiresAt`. The enabled first-release promotion appends its fresh,
+attempt-bound proof after candidate and stable-absence prechecks but before
+candidate deletion, and validates it with the current post-proof clock before
+that irreversible handoff. After stable staging, the final barrier validates
+the stored proof at its recorded gate and rereads the complete receipt/evidence
+chain plus candidate absence and stable service, revision, image/config,
+traffic, IAM, and authority state. Its final intent binds the canonical digest
+of that barrier; rolling promotion of an existing stable release is disabled.
+Expired pre-intent proofs are retained and
+followed by a new proof before irreversible handoff. First-release mutation
+restarts revalidate owner authority and exact durable before-state. After
+candidate deletion, exact public IAM is adopted and exact private IAM retries
+only the journaled idempotent grant because re-proof is impossible.
+Mixed/ambiguous state blocks, and no later cloud mutation is allowed after the
+terminal promotion mutation.
 
 The mobile phase rejects prebuilt evidence and binds fresh privacy boundaries,
 before/after candidate and stable readbacks, and the real local Production V1

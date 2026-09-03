@@ -919,6 +919,28 @@ function promotionAttemptPrivacyProofPath(plan, attemptId) {
   );
 }
 
+function promotionPrivacyReferenceFromJournal(plan, records, attemptId, {
+  now,
+  validatePrivacyProof,
+}) {
+  const intents = records.filter(({ recordType, operationId, attemptId: recordAttemptId }) => (
+    recordType === 'intent'
+    && operationId === 'promote-privacy-publish'
+    && recordAttemptId === attemptId
+  ));
+  if (intents.length !== 1) throw new Error('Promotion privacy publication is unavailable');
+  const publication = intents[0]?.payload?.publication;
+  const proofRecord = JSON.parse(Buffer.from(
+    publication.artifacts[0].contentsBase64, 'base64',
+  ).toString('utf8'));
+  return privacyArtifactFromPublication(
+    plan,
+    { filePath: promotionAttemptPrivacyProofPath(plan, attemptId) },
+    publication,
+    { now: now ?? new Date(proofRecord.occurredAt), validatePrivacyProof },
+  ).reference;
+}
+
 async function writePromotionIamRestorePolicyFile(plan, policy, { attemptId } = {}) {
   const filePath = promotionIamRestorePolicyPath(plan, attemptId);
   const contents = `${JSON.stringify(policy, null, 2)}\n`;
@@ -1384,6 +1406,11 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     `--project=${PROJECT}`, '--format=json',
   ]));
   operations.push(
+    ...(previousRevision === null ? [operation('candidate', 'candidate-stable-service-precheck', [
+      'run', 'services', 'describe', STABLE_SERVICE,
+      `--project=${PROJECT}`, `--region=${REGION}`,
+      '--format=json',
+    ])] : []),
     operation('candidate', 'candidate-service-precheck', [
       'run', 'services', 'describe', CANDIDATE_SERVICE,
       `--project=${PROJECT}`, `--region=${REGION}`,
@@ -1494,6 +1521,20 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       'run', 'services', 'replace', stableServiceSpecPath,
       `--project=${PROJECT}`, `--region=${REGION}`, '--dry-run', '--format=json',
     ]),
+    ...(previousRevision === null ? [
+      operation('promote', 'promote-privacy-publish', [
+        'local-artifact-create', promotionPrivacyProofPath,
+      ]),
+      operation('promote', 'candidate-cleanup-delete', [
+        'run', 'services', 'delete', CANDIDATE_SERVICE, '--quiet',
+        `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+      ]),
+      operation('promote', 'candidate-cleanup-absence-readback', [
+        'run', 'services', 'describe', CANDIDATE_SERVICE,
+        `--project=${PROJECT}`, `--region=${REGION}`,
+        '--format=json',
+      ]),
+    ] : []),
     operation('promote', 'promote-stable-deploy', [
       'run', 'services', 'replace', stableServiceSpecPath,
       `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
@@ -1517,8 +1558,10 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
         `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
       ]),
     ] : []),
-    operation('promote', 'promote-privacy-publish', [
-      'local-artifact-create', promotionPrivacyProofPath,
+    ...(previousRevision === null ? [] : [
+      operation('promote', 'promote-privacy-publish', [
+        'local-artifact-create', promotionPrivacyProofPath,
+      ]),
     ]),
     ...(previousRevision === null ? [
       operation('promote', 'promote-public-service', [
@@ -5655,7 +5698,25 @@ async function readCandidateControlPlaneState(executor, plan) {
   return readbacks;
 }
 
-async function readStableStagedControlPlaneState(executor, plan, { publicIam = false } = {}) {
+async function assertCloudRunServiceAbsent(executor, service) {
+  try {
+    await executor([
+      'run', 'services', 'describe', service,
+      `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
+    ]);
+  } catch (error) {
+    if (error?.code === 'CLOUD_RUN_SERVICE_NOT_FOUND') {
+      return Object.freeze({ service, state: 'absent' });
+    }
+    throw error;
+  }
+  throw new Error('Cloud Run Service remains present');
+}
+
+async function readStableStagedControlPlaneState(executor, plan, {
+  publicIam = false,
+  allowPrivateOrPublicIam = false,
+} = {}) {
   const service = await executor([
     'run', 'services', 'describe', STABLE_SERVICE,
     `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
@@ -5675,9 +5736,23 @@ async function readStableStagedControlPlaneState(executor, plan, { publicIam = f
     'run', 'services', 'get-iam-policy', STABLE_SERVICE,
     `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
   ]);
-  validateServiceIamReceipt(iam, {
-    policy: publicIam ? 'stable-public' : 'stable-private', requireEtag: true,
-  });
+  if (allowPrivateOrPublicIam) {
+    let valid = false;
+    for (const policy of ['stable-private', 'stable-public']) {
+      try {
+        validateServiceIamReceipt(iam, { policy, requireEtag: true });
+        valid = true;
+        break;
+      } catch {
+        // The open final-IAM intent may authoritatively be either before or after.
+      }
+    }
+    if (!valid) throw new Error('Stable IAM is neither the intended private nor public state');
+  } else {
+    validateServiceIamReceipt(iam, {
+      policy: publicIam ? 'stable-public' : 'stable-private', requireEtag: true,
+    });
+  }
   return Object.freeze({ service, revision, artifact, iam });
 }
 
@@ -5726,27 +5801,39 @@ async function validatePromotionFinalBarrier({
     || authority[0]?.account !== PROMOTION_AUTHORITY || authority[0]?.status !== 'ACTIVE') {
     throw new Error('Public promotion authority is not approved');
   }
-  const candidate = await readCandidateControlPlaneState(executor, plan);
+  const candidate = plan.previousRevision === null
+    ? await assertCloudRunServiceAbsent(executor, CANDIDATE_SERVICE)
+    : await readCandidateControlPlaneState(executor, plan);
   const stable = await readStableStagedControlPlaneState(executor, plan, {
     publicIam: plan.previousRevision !== null,
   });
   let current = null;
   try {
-    await verifyReleasePrivacyArtifact(
-      promotionPrivacyReference,
-      plan,
-      () => {
+    const verificationClock = plan.previousRevision === null
+      ? new Date(promotionPrivacyReference.observedAt)
+      : () => {
         current = now();
         if (!(current instanceof Date) || !Number.isFinite(current.getTime())) {
           throw new Error('Promotion final barrier clock is invalid');
         }
         return current;
-      },
+      };
+    if (plan.previousRevision === null) {
+      current = now();
+      if (!(current instanceof Date) || !Number.isFinite(current.getTime())) {
+        throw new Error('Promotion final barrier clock is invalid');
+      }
+    }
+    await verifyReleasePrivacyArtifact(
+      promotionPrivacyReference,
+      plan,
+      verificationClock,
       'Promotion privacy proof is invalid',
       validateReleasePrivacyProof,
     );
   } catch (error) {
-    if (current !== null && promotionProofExpired(promotionPrivacyReference, current)) {
+    if (plan.previousRevision !== null
+      && current !== null && promotionProofExpired(promotionPrivacyReference, current)) {
       error.code = 'PROMOTION_REPROOF_REQUIRED';
     }
     throw error;
@@ -7478,6 +7565,7 @@ export async function runGcpRelease({
   now = () => new Date(),
   environment = process.env,
   writeOutput = (line) => process.stdout.write(line),
+  unsafeTestOnlyAllowSingletonRollingRelease = false,
 } = {}) {
   const selection = parseArguments(argv, input?.releaseSha);
   if (!RELEASE_SHA.test(String(input?.releaseSha ?? ''))) {
@@ -7511,6 +7599,17 @@ export async function runGcpRelease({
       status: 'dry-run', code: 'GCP_RELEASE_DRY_RUN', mutationPerformed: false,
       releaseSha: plan.releaseSha, phase: selection.phase,
       plannedOperations: selected.map(({ id }) => id),
+    });
+  }
+  const testOnlyRollingRelease = unsafeTestOnlyAllowSingletonRollingRelease === true
+    && process.env.NODE_TEST_CONTEXT !== undefined;
+  if (plan.previousRevision !== null
+    && ['candidate', 'promote'].includes(selection.phase)
+    && !testOnlyRollingRelease) {
+    return publish(writeOutput, 1, {
+      status: 'failed', code: 'ROLLING_RELEASE_UNSUPPORTED_SINGLETON',
+      mutationPerformed: false, releaseSha: plan.releaseSha,
+      phase: selection.phase, completed: [],
     });
   }
   if (selection.phase === 'build') {
@@ -8321,6 +8420,7 @@ export async function runGcpRelease({
   let candidateCleanupState = null;
   let activeOperationId = null;
   let resumeBoundaryReached = !hasOpenJournalAttempt;
+  const restartMutationsToRetry = new Set();
   const responseLossRecoveries = [];
   const restartAdoptions = new Set();
   if (task8Attestations.workload && task8Attestations.workload !== true) {
@@ -8575,7 +8675,111 @@ export async function runGcpRelease({
       && resumeOperationId === 'candidate-privacy-publish') {
       Object.assign(candidateReadbacks, await readCandidateControlPlaneState(executor, plan));
     }
-    if (selection.phase === 'promote'
+    if (selection.phase === 'promote' && plan.previousRevision === null
+      && ['candidate-cleanup-delete', 'promote-stable-deploy', 'promote-public-service']
+        .includes(resumeOperationId)) {
+      const authority = await executor([
+        'auth', 'list', '--filter=status:ACTIVE', '--format=json',
+      ]);
+      if (!Array.isArray(authority) || authority.length !== 1
+        || authority[0]?.account !== PROMOTION_AUTHORITY
+        || authority[0]?.status !== 'ACTIVE') {
+        throw new Error('Public promotion authority is not approved');
+      }
+      promotionPrivacyReference = promotionPrivacyReferenceFromJournal(
+        plan, openJournalRecords, releaseJournalAttemptId, {
+          validatePrivacyProof: validateReleasePrivacyProof,
+        },
+      );
+      if (resumeOperationId === 'candidate-cleanup-delete') {
+        await assertCloudRunServiceAbsent(executor, STABLE_SERVICE);
+        if (existingJournalIntent?.operationId === 'candidate-cleanup-delete') {
+          try {
+            const candidate = await readCandidateControlPlaneState(executor, plan);
+            const proofNow = now();
+            if (promotionProofExpired(promotionPrivacyReference, proofNow)) {
+              await closePromotionAttemptForReproof(stateStore);
+              const error = new Error('Promotion privacy proof expired before candidate handoff');
+              error.code = 'PROMOTION_REPROOF_REQUIRED';
+              throw error;
+            }
+            await verifyReleasePrivacyArtifact(
+              promotionPrivacyReference,
+              plan,
+              proofNow,
+              'Promotion privacy proof is invalid',
+              validateReleasePrivacyProof,
+            );
+            mutationBeforeObservations.set('candidate-cleanup-delete', candidate.service);
+            restartMutationsToRetry.add('candidate-cleanup-delete');
+          } catch (error) {
+            if (error?.code !== 'CLOUD_RUN_SERVICE_NOT_FOUND') throw error;
+          }
+        } else {
+          const proofNow = now();
+          if (promotionProofExpired(promotionPrivacyReference, proofNow)) {
+            await closePromotionAttemptForReproof(stateStore);
+            const error = new Error('Promotion privacy proof expired before candidate handoff');
+            error.code = 'PROMOTION_REPROOF_REQUIRED';
+            throw error;
+          }
+          await verifyReleasePrivacyArtifact(
+            promotionPrivacyReference,
+            plan,
+            proofNow,
+            'Promotion privacy proof is invalid',
+            validateReleasePrivacyProof,
+          );
+          const candidate = await readCandidateControlPlaneState(executor, plan);
+          mutationBeforeObservations.set('candidate-cleanup-delete', candidate.service);
+        }
+      } else if (resumeOperationId === 'promote-stable-deploy') {
+        await assertCloudRunServiceAbsent(executor, CANDIDATE_SERVICE);
+        if (existingJournalIntent?.operationId === 'promote-stable-deploy') {
+          try {
+            await readStableStagedControlPlaneState(executor, plan);
+          } catch (error) {
+            if (error?.code !== 'CLOUD_RUN_SERVICE_NOT_FOUND') throw error;
+            await assertCloudRunServiceAbsent(executor, STABLE_SERVICE);
+            if (typeof writeStableSpec !== 'function' || await writeStableSpec(plan) !== true) {
+              throw new Error('Stable Service YAML is unavailable');
+            }
+            mutationBeforeObservations.set('promote-stable-deploy', { state: 'absent' });
+            restartMutationsToRetry.add('promote-stable-deploy');
+          }
+        } else {
+          await assertCloudRunServiceAbsent(executor, STABLE_SERVICE);
+          if (typeof writeStableSpec !== 'function' || await writeStableSpec(plan) !== true) {
+            throw new Error('Stable Service YAML is unavailable');
+          }
+          mutationBeforeObservations.set('promote-stable-deploy', { state: 'absent' });
+        }
+      } else {
+        await assertCloudRunServiceAbsent(executor, CANDIDATE_SERVICE);
+        const stable = await readStableStagedControlPlaneState(executor, plan, {
+          allowPrivateOrPublicIam:
+            existingJournalIntent?.operationId === 'promote-public-service',
+        });
+        if (existingJournalIntent?.operationId === 'promote-public-service') {
+          let stableRemainsPrivate = false;
+          try {
+            validateServiceIamReceipt(
+              stable.iam, { policy: 'stable-private', requireEtag: true },
+            );
+            stableRemainsPrivate = true;
+          } catch {
+            // Exact public IAM is the already-landed state and is adopted read-only below.
+          }
+          if (stableRemainsPrivate) {
+            // Candidate deletion is already durable, so a fresh proof cannot be produced.
+            // Retry only the exact journaled idempotent grant from its hash-bound before state.
+            mutationBeforeObservations.set('promote-public-service', stable.iam);
+            restartMutationsToRetry.add('promote-public-service');
+          }
+        }
+      }
+    }
+    if (selection.phase === 'promote' && plan.previousRevision !== null
       && resumeOperationId === 'promote-public-service') {
       await readCandidateControlPlaneState(executor, plan);
       await readStableStagedControlPlaneState(executor, plan, { publicIam: true });
@@ -8640,7 +8844,11 @@ export async function runGcpRelease({
       });
     }
     for (const member of selected) {
-      if (hasOpenJournalAttempt && !resumeBoundaryReached) {
+      const mandatoryFirstReleaseStableAbsenceRead = selection.phase === 'candidate'
+        && plan.previousRevision === null
+        && member.id === 'candidate-stable-service-precheck';
+      if (hasOpenJournalAttempt && !resumeBoundaryReached
+        && !mandatoryFirstReleaseStableAbsenceRead) {
         if (resumeOperationId !== null && member.id === resumeOperationId) {
           resumeBoundaryReached = true;
         } else {
@@ -8648,7 +8856,8 @@ export async function runGcpRelease({
           continue;
         }
       }
-      if (hasOpenJournalAttempt && resumeOperationId === null) {
+      if (hasOpenJournalAttempt && resumeOperationId === null
+        && !mandatoryFirstReleaseStableAbsenceRead) {
         completed.push(member.id);
         continue;
       }
@@ -8662,6 +8871,8 @@ export async function runGcpRelease({
       let executionBaseline = null;
       let finalPublicMutation = false;
       const restartingMutation = existingJournalIntent?.operationId === member.id;
+      const retryingRestartMutation = restartingMutation
+        && restartMutationsToRetry.has(member.id);
       const resumingCheckpointedJobExecution = hasOpenJournalAttempt
         && !restartingMutation && resumeOperationId === member.id
         && member.id.endsWith('-execute');
@@ -8720,9 +8931,11 @@ export async function runGcpRelease({
               }
             }
             await readCandidateControlPlaneState(executor, plan);
-            await readStableStagedControlPlaneState(executor, plan, {
-              publicIam: plan.previousRevision !== null,
-            });
+            if (plan.previousRevision === null) {
+              await assertCloudRunServiceAbsent(executor, STABLE_SERVICE);
+            } else {
+              await readStableStagedControlPlaneState(executor, plan, { publicIam: true });
+            }
           }
           let artifact;
           if (restartingMutation) {
@@ -8807,6 +9020,15 @@ export async function runGcpRelease({
         finalPublicMutation = finalPublicMutations.some(({ operationId }) => (
           operationId === member.id
         ));
+        if (selection.phase === 'promote' && plan.previousRevision === null
+          && member.id === 'candidate-cleanup-delete'
+          && (!restartingMutation || retryingRestartMutation)
+          && promotionProofExpired(promotionPrivacyReference, now())) {
+          await closePromotionAttemptForReproof(stateStore);
+          const error = new Error('Promotion privacy proof expired before candidate handoff');
+          error.code = 'PROMOTION_REPROOF_REQUIRED';
+          throw error;
+        }
         if (selection.phase === 'promote' && finalPublicMutation && !restartingMutation) {
           if (promotionPrivacyReference === null) {
             const proofIntent = openJournalRecords.find(({ recordType, operationId }) => (
@@ -8829,7 +9051,8 @@ export async function runGcpRelease({
             ).reference;
           }
           const preBarrierNow = now();
-          if (promotionProofExpired(promotionPrivacyReference, preBarrierNow)) {
+          if (plan.previousRevision !== null
+            && promotionProofExpired(promotionPrivacyReference, preBarrierNow)) {
             await closePromotionAttemptForReproof(stateStore);
             const error = new Error('Promotion privacy proof expired before final mutation');
             error.code = 'PROMOTION_REPROOF_REQUIRED';
@@ -8889,6 +9112,10 @@ export async function runGcpRelease({
           'before', mutationBeforeObservations.get(member.id),
         );
         const afterState = mutationAdapter.expectedAfter;
+        if (retryingRestartMutation
+          && canonicalSha256(beforeState) !== existingJournalIntent.payload.beforeSha256) {
+          throw new Error('Release restart before-state differs from the durable intent');
+        }
         journalAfterSha256 = restartingMutation
           ? existingJournalIntent.payload.afterSha256 : canonicalSha256(afterState);
         if (restartingMutation) {
@@ -8926,6 +9153,7 @@ export async function runGcpRelease({
           intent: journalIntent,
           operationId: member.id,
           restarting: restartingMutation,
+          retried: retryingRestartMutation,
         };
       }
       let receipt;
@@ -8970,7 +9198,8 @@ export async function runGcpRelease({
       if (mutationAdapter !== null && !restartingMutation
         && selection.phase === 'promote' && finalPublicMutation) {
         const postIntentNow = now();
-        if (promotionProofExpired(promotionPrivacyReference, postIntentNow)) {
+        if (plan.previousRevision !== null
+          && promotionProofExpired(promotionPrivacyReference, postIntentNow)) {
           journalMutationCount = mutationOrdinal;
           await closePromotionAttemptForReproof(stateStore);
           const error = new Error('Promotion privacy proof expired while publishing final intent');
@@ -8978,9 +9207,20 @@ export async function runGcpRelease({
           throw error;
         }
       }
+      if (mutationAdapter !== null
+        && selection.phase === 'promote' && plan.previousRevision === null
+        && member.id === 'candidate-cleanup-delete'
+        && (!restartingMutation || retryingRestartMutation)
+        && promotionProofExpired(promotionPrivacyReference, now())) {
+        journalMutationCount = mutationOrdinal;
+        await closePromotionAttemptForReproof(stateStore);
+        const error = new Error('Promotion privacy proof expired while publishing delete intent');
+        error.code = 'PROMOTION_REPROOF_REQUIRED';
+        throw error;
+      }
       try {
         try {
-          if (!restartingMutation) {
+          if (!restartingMutation || retryingRestartMutation) {
             if (mutationAdapter === null) {
               receipt = await executor(operationArgv, operationOptions);
             } else {
@@ -9103,6 +9343,7 @@ export async function runGcpRelease({
         } else {
           canonicalServiceAbsence = error?.code === 'CLOUD_RUN_SERVICE_NOT_FOUND';
           const absenceRead = member.id === 'candidate-service-precheck'
+            || member.id === 'candidate-stable-service-precheck'
             || member.id === 'candidate-cleanup-service-precheck'
             || member.id === 'candidate-cleanup-absence-readback'
             || (member.id === 'promote-stable-service-precheck' && plan.previousRevision === null);
@@ -9203,6 +9444,9 @@ export async function runGcpRelease({
       } else if (member.id === 'promote-candidate-artifact-readback') {
         promotionReadbacks.artifact = receipt;
         validateCandidateControlPlaneReadbacks(promotionReadbacks, plan);
+        if (plan.previousRevision === null) {
+          mutationBeforeObservations.set('candidate-cleanup-delete', promotionReadbacks.service);
+        }
       } else if (member.id === 'promote-stable-service-precheck') {
         if (plan.previousRevision === null) {
           if (receipt !== null || !canonicalServiceAbsence) {
@@ -9271,6 +9515,10 @@ export async function runGcpRelease({
             || !exact(iamPolicyState(normalizeServiceIamPolicy(receipt, { requireEtag: true })),
               iamPolicyState(stablePublicIamBaseline)))) {
           throw new Error('Stable public IAM changed during promotion');
+        }
+      } else if (member.id === 'candidate-stable-service-precheck') {
+        if (receipt !== null || !canonicalServiceAbsence) {
+          throw new Error('First release requires authoritative stable service absence');
         }
       } else if (member.id === 'candidate-service-precheck') {
         if (receipt !== null || !canonicalServiceAbsence) {
@@ -9503,9 +9751,10 @@ export async function runGcpRelease({
           await stateStore.appendCheckpoint({
             intentRecordSha256: pendingJournal.intent.recordSha256,
             classification: 'after',
-            outcome: pendingJournal.restarting ? 'adopted-restart'
-              : (responseLossRecoveries.includes(pendingJournal.operationId)
-                ? 'adopted-response-loss' : 'applied'),
+            outcome: responseLossRecoveries.includes(pendingJournal.operationId)
+              ? 'adopted-response-loss'
+              : (pendingJournal.restarting && !pendingJournal.retried
+                ? 'adopted-restart' : 'applied'),
             observationSha256,
             safeResult: pendingJournal.adapter.safeResult(observedAfter),
           });

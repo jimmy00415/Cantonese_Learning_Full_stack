@@ -1558,7 +1558,7 @@ function cloudRunJobSafeResult(plan, operationId, job) {
 
 async function appendTestMutationIntent(store, {
   operationId, mutationOrdinal, reconcileKind, plan = buildReleasePlan(releaseInput()),
-  executionBaseline,
+  executionBaseline, beforeObservation,
 }) {
   const digit = String((mutationOrdinal % 9) + 1);
   const member = plan.operations.find(({ id }) => id === operationId)
@@ -1567,12 +1567,18 @@ async function appendTestMutationIntent(store, {
   const stateSha256 = (value) => createHash('sha256')
     .update(JSON.stringify(canonicalFixture(value))).digest('hex');
   assert.equal(identity.reconcileKind, reconcileKind);
+  const expectedBefore = beforeObservation === undefined
+    ? identity.expectedBefore
+    : {
+      ...identity.expectedBefore,
+      observationSha256: stateSha256(beforeObservation),
+    };
   return store.appendIntent({
     mutationOrdinal,
     operationAttemptId: digit.repeat(32),
     commandSha256: digit.repeat(64),
     reconcileKind,
-    beforeSha256: stateSha256(identity.expectedBefore),
+    beforeSha256: stateSha256(expectedBefore),
     afterSha256: stateSha256(identity.expectedAfter),
     ...(executionBaseline === undefined ? {} : { executionBaseline }),
   }, { operationId });
@@ -1692,6 +1698,7 @@ function runGcpRelease(options) {
     ),
     writeReleasePrivacyArtifact: async () => true,
     openStateStore: async () => createTestStateStore(),
+    unsafeTestOnlyAllowSingletonRollingRelease: true,
     ...options,
   });
 }
@@ -4653,7 +4660,7 @@ test('all-checkpoint collect restart reconstructs generation-bound local evidenc
 });
 
 test('all-checkpoint candidate restart reconstructs exact private Service and IAM without mutation', async () => {
-  const input = releaseInput();
+  const input = releaseInput({ previousRevision: null, previousImageDigest: null });
   const plan = buildReleasePlan(input, { phase: 'candidate' });
   const service = candidateServiceReadback(plan);
   const iam = candidatePrivateIam();
@@ -4728,7 +4735,12 @@ test('all-checkpoint candidate restart reconstructs exact private Service and IA
       if (argv.includes('replace') || argv.includes('add-iam-policy-binding')) {
         throw new Error(`recovery attempted a mutation: ${argv.join(' ')}`);
       }
-      if (argv[1] === 'services' && argv[2] === 'describe') return structuredClone(service);
+      if (argv[1] === 'services' && argv[2] === 'describe') {
+        if (argv[3] === STABLE_SERVICE) {
+          throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+        }
+        return structuredClone(service);
+      }
       if (argv[1] === 'revisions' && argv[2] === 'describe') {
         return structuredClone(plan.expectedCandidate);
       }
@@ -4743,9 +4755,111 @@ test('all-checkpoint candidate restart reconstructs exact private Service and IA
   assert.equal(result.publicReport.mutationPerformed, false);
   assert.equal(calls.some((argv) => argv.includes('replace')
     || argv.includes('add-iam-policy-binding')), false);
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length, 5);
+  assert.equal(calls.some((argv) => argv[1] === 'services'
+    && argv[2] === 'describe' && argv[3] === STABLE_SERVICE), true);
   assert.equal(persisted.outputs.candidateService, CANDIDATE_SERVICE);
   assert.equal(store.records.at(-1).recordType, 'terminal');
+});
+
+test('all-checkpoint first-release candidate restart still rejects a live stable service', async () => {
+  const input = releaseInput({ previousRevision: null, previousImageDigest: null });
+  const plan = buildReleasePlan(input, { phase: 'candidate' });
+  const service = candidateServiceReadback(plan);
+  const iam = candidatePrivateIam();
+  const revision = {
+    revision: plan.expectedCandidate.revision,
+    image: plan.expectedCandidate.image,
+    serviceAccount: plan.expectedCandidate.serviceAccount,
+    executionEnvironment: plan.expectedCandidate.executionEnvironment,
+    cpu: plan.expectedCandidate.cpu,
+    memory: plan.expectedCandidate.memory,
+    concurrency: plan.expectedCandidate.concurrency,
+    minInstances: plan.expectedCandidate.minInstances,
+    maxInstances: plan.expectedCandidate.maxInstances,
+    cpuThrottling: plan.expectedCandidate.cpuThrottling,
+    startupCpuBoost: plan.expectedCandidate.startupCpuBoost,
+    timeoutSeconds: plan.expectedCandidate.timeoutSeconds,
+    network: plan.expectedCandidate.network,
+    subnet: plan.expectedCandidate.subnet,
+    vpcEgress: plan.expectedCandidate.vpcEgress,
+    environment: plan.expectedCandidate.environment,
+    secretEnvironment: plan.expectedCandidate.secretEnvironment,
+    secretMounts: plan.expectedCandidate.secretMounts,
+    probes: plan.expectedCandidate.probes,
+  };
+  const store = createTestStateStore();
+  for (const [index, [operationId, reconcileKind, semanticObservation]] of [
+    ['candidate-deploy', 'cloud-run-service-replace', {
+      artifact: plan.image,
+      kind: 'cloud-run-service',
+      revision,
+      service,
+    }],
+    ['candidate-private-iam-grant', 'cloud-run-service-iam', {
+      bindings: [{
+        members: [`serviceAccount:${ACCEPTANCE_SA}`], role: 'roles/run.servicesInvoker',
+      }],
+      kind: 'cloud-run-service-iam',
+      service: CANDIDATE_SERVICE,
+    }],
+  ].entries()) {
+    const member = plan.operations.find(({ id }) => id === operationId);
+    await appendTestMutationCheckpoint(store, {
+      operationId,
+      mutationOrdinal: index + 1,
+      reconcileKind,
+      plan,
+      safeResult: {
+        kind: 'resource',
+        state: 'present',
+        identitySha256: releaseMutationPlanIdentity(plan, member).specSha256,
+        valueSha256: createHash('sha256')
+          .update(JSON.stringify(canonicalFixture(semanticObservation))).digest('hex'),
+      },
+    });
+  }
+  await appendTestPrivacyCheckpoint(store, {
+    operationId: 'candidate-privacy-publish', mutationOrdinal: 3, plan,
+  });
+  const calls = [];
+  let persisted = false;
+  const result = await runGcpRelease({
+    argv: ['--phase=candidate', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    openStateStore: async () => store,
+    loadPhaseReceipt: async () => null,
+    persistReceipt: async () => { persisted = true; return true; },
+    execute: async (argv) => {
+      calls.push(argv);
+      if (argv[1] === 'services' && argv[2] === 'describe') {
+        if (argv[3] === STABLE_SERVICE) {
+          return {
+            service: STABLE_SERVICE,
+            invokerIamDisabled: false,
+            traffic: [],
+          };
+        }
+        return structuredClone(service);
+      }
+      if (argv[1] === 'revisions' && argv[2] === 'describe') {
+        return structuredClone(plan.expectedCandidate);
+      }
+      if (argv.includes('get-iam-policy')) return structuredClone(iam);
+      if (argv[0] === 'artifacts') return { image: plan.image };
+      throw new Error(`recovery continued past live stable precheck: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+
+  assert.equal(result.exitCode, 1, JSON.stringify(result.publicReport));
+  assert.equal(result.publicReport.code, 'RELEASE_PHASE_FAILED');
+  assert.equal(result.publicReport.mutationPerformed, false);
+  assert.equal(calls.length, 5);
+  assert.equal(calls.some((argv) => argv[1] === 'services'
+    && argv[2] === 'describe' && argv[3] === STABLE_SERVICE), true);
+  assert.equal(persisted, false);
+  assert.equal(store.records.at(-1).recordType, 'checkpoint');
 });
 
 test('candidate receipt-write crash hashes authoritative readbacks and ignores only Service resourceVersion drift', async () => {
@@ -5035,7 +5149,12 @@ test('candidate IAM restart reconstructs exact candidate readbacks and never rep
       if (argv.includes('replace') || argv.includes('add-iam-policy-binding')) {
         throw new Error('restart attempted a duplicate candidate mutation');
       }
-      if (argv[1] === 'services' && argv[2] === 'describe') return candidateServiceReadback(plan);
+      if (argv[1] === 'services' && argv[2] === 'describe') {
+        if (argv[3] === STABLE_SERVICE) {
+          throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+        }
+        return candidateServiceReadback(plan);
+      }
       if (argv[1] === 'revisions' && argv[2] === 'describe') {
         return structuredClone(plan.expectedCandidate);
       }
@@ -5083,7 +5202,12 @@ test('candidate deploy restart adopts exact service state before the one untouch
         iamGranted = true;
         return candidatePrivateIam('candidate-granted');
       }
-      if (argv[1] === 'services' && argv[2] === 'describe') return candidateServiceReadback(plan);
+      if (argv[1] === 'services' && argv[2] === 'describe') {
+        if (argv[3] === STABLE_SERVICE) {
+          throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+        }
+        return candidateServiceReadback(plan);
+      }
       if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
       if (argv[0] === 'artifacts') return { image: plan.image };
       if (argv.includes('get-iam-policy')) {
@@ -5204,6 +5328,40 @@ test('promotion requires the reviewed owner identity before its first mutation',
   assert.equal(validateTrafficReceipt(stablePromotedReadback(buildReleasePlan(releaseInput())), {
     revision: STABLE_REVISION,
   }), true);
+});
+
+test('later singleton candidate and promotion remain inert until rollout lanes exist', async () => {
+  for (const phase of ['candidate', 'promote']) {
+    const calls = [];
+    const result = await runGcpRelease({
+      argv: [`--phase=${phase}`, `--confirm-release=${RELEASE_SHA}`],
+      input: releaseInput(),
+      unsafeTestOnlyAllowSingletonRollingRelease: false,
+      execute: async (argv) => { calls.push(argv); return {}; },
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1, phase);
+    assert.equal(result.publicReport.code, 'ROLLING_RELEASE_UNSUPPORTED_SINGLETON', phase);
+    assert.equal(result.publicReport.mutationPerformed, false, phase);
+    assert.deepEqual(calls, [], phase);
+  }
+});
+
+test('later singleton candidate and promotion remain previewable before confirmation', async () => {
+  for (const phase of ['candidate', 'promote']) {
+    const calls = [];
+    const result = await runGcpReleaseImpl({
+      argv: [`--phase=${phase}`],
+      input: releaseInput(),
+      execute: async (argv) => { calls.push(argv); throw new Error('dry run must remain inert'); },
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 0, phase);
+    assert.equal(result.publicReport.code, 'GCP_RELEASE_DRY_RUN', phase);
+    assert.equal(result.publicReport.mutationPerformed, false, phase);
+    assert.equal(result.publicReport.plannedOperations.length > 0, true, phase);
+    assert.deepEqual(calls, [], phase);
+  }
 });
 
 test('later promotion rejects every stable-service tag before its first stable mutation', async () => {
@@ -5408,6 +5566,7 @@ async function runPromotionExpiryCrossing({ firstRelease, crossing }) {
   const appendIntent = store.appendIntent;
   let current = new Date('2026-08-27T08:04:59.999Z');
   let proofProduced = false;
+  let candidateExists = true;
   let stableExists = !firstRelease;
   let stableState = firstRelease ? null : stablePriorReadback(plan);
   let stablePolicy = firstRelease ? stablePrivateIam() : stablePublicIam();
@@ -5416,6 +5575,14 @@ async function runPromotionExpiryCrossing({ firstRelease, crossing }) {
     store.appendIntent = async (payload, options) => {
       const record = await appendIntent(payload, options);
       if (['promote-public-service', 'promote-traffic'].includes(options?.operationId)) {
+        current = new Date('2026-08-27T08:05:00.000Z');
+      }
+      return record;
+    };
+  } else if (crossing === 'delete-intent') {
+    store.appendIntent = async (payload, options) => {
+      const record = await appendIntent(payload, options);
+      if (options?.operationId === 'candidate-cleanup-delete') {
         current = new Date('2026-08-27T08:05:00.000Z');
       }
       return record;
@@ -5459,10 +5626,22 @@ async function runPromotionExpiryCrossing({ firstRelease, crossing }) {
         if (argv.includes('--dry-run')) return structuredClone(plan.stableServiceSpec);
         stableExists = true;
         stableState = stableStagedReadback(plan);
+        if (firstRelease && crossing === 'after-handoff') {
+          current = new Date('2026-08-27T08:05:00.000Z');
+        }
         return structuredClone(stableState);
       }
+      if (argv[1] === 'services' && argv[2] === 'delete') {
+        candidateExists = false;
+        return null;
+      }
       if (argv[1] === 'services' && argv[2] === 'describe') {
-        if (argv[3] === CANDIDATE_SERVICE) return candidateServiceReadback(plan);
+        if (argv[3] === CANDIDATE_SERVICE) {
+          if (!candidateExists) {
+            throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+          }
+          return candidateServiceReadback(plan);
+        }
         if (!stableExists) {
           throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
         }
@@ -5481,46 +5660,61 @@ async function runPromotionExpiryCrossing({ firstRelease, crossing }) {
     },
     writeOutput: () => undefined,
   });
-  return { result, store, finalMutations };
+  return { result, store, finalMutations, candidateExists };
 }
 
-test('promotion proof exact-expiry during the final authoritative read creates no unsafe intent', async (t) => {
-  for (const firstRelease of [true, false]) {
-    await t.test(firstRelease ? 'first public IAM' : 'later public traffic', async () => {
-      const { result, store, finalMutations } = await runPromotionExpiryCrossing({
-        firstRelease, crossing: 'read',
-      });
-      assert.equal(result.exitCode, 1, JSON.stringify({ report: result.publicReport, records: store.records }));
-      assert.equal(result.publicReport.code, 'PROMOTION_REPROOF_REQUIRED', JSON.stringify(store.records));
-      assert.equal(finalMutations, 0);
-      const operationId = firstRelease ? 'promote-public-service' : 'promote-traffic';
-      assert.equal(store.records.some(({ recordType, operationId: id }) => (
-        recordType === 'intent' && id === operationId
-      )), false);
-      assert.equal(store.records.at(-1).recordType, 'terminal');
-    });
-  }
+test('later promotion proof exact-expiry during the final read creates no unsafe intent', async () => {
+  const { result, store, finalMutations } = await runPromotionExpiryCrossing({
+    firstRelease: false, crossing: 'read',
+  });
+  assert.equal(result.exitCode, 1, JSON.stringify({ report: result.publicReport, records: store.records }));
+  assert.equal(result.publicReport.code, 'PROMOTION_REPROOF_REQUIRED', JSON.stringify(store.records));
+  assert.equal(finalMutations, 0);
+  assert.equal(store.records.some(({ recordType, operationId }) => (
+    recordType === 'intent' && operationId === 'promote-traffic'
+  )), false);
+  assert.equal(store.records.at(-1).recordType, 'terminal');
 });
 
-test('promotion proof exact-expiry while appending final intent aborts it before public mutation', async (t) => {
-  for (const firstRelease of [true, false]) {
-    await t.test(firstRelease ? 'first public IAM' : 'later public traffic', async () => {
-      const { result, store, finalMutations } = await runPromotionExpiryCrossing({
-        firstRelease, crossing: 'intent',
-      });
-      assert.equal(result.exitCode, 1, JSON.stringify({ report: result.publicReport, records: store.records }));
-      assert.equal(result.publicReport.code, 'PROMOTION_REPROOF_REQUIRED', JSON.stringify(store.records));
-      assert.equal(finalMutations, 0);
-      const operationId = firstRelease ? 'promote-public-service' : 'promote-traffic';
-      const finalIntentIndex = store.records.findIndex(({ recordType, operationId: id }) => (
-        recordType === 'intent' && id === operationId
-      ));
-      assert.equal(finalIntentIndex >= 0, true);
-      assert.equal(store.records[finalIntentIndex + 1].recordType, 'abort');
-      assert.equal(store.records[finalIntentIndex + 1].payload.reason, 'expired-before-final-mutation');
-      assert.equal(store.records.at(-1).recordType, 'terminal');
-    });
-  }
+test('later promotion proof exact-expiry while appending final intent aborts before traffic', async () => {
+  const { result, store, finalMutations } = await runPromotionExpiryCrossing({
+    firstRelease: false, crossing: 'intent',
+  });
+  assert.equal(result.exitCode, 1, JSON.stringify({ report: result.publicReport, records: store.records }));
+  assert.equal(result.publicReport.code, 'PROMOTION_REPROOF_REQUIRED', JSON.stringify(store.records));
+  assert.equal(finalMutations, 0);
+  const finalIntentIndex = store.records.findIndex(({ recordType, operationId }) => (
+    recordType === 'intent' && operationId === 'promote-traffic'
+  ));
+  assert.equal(finalIntentIndex >= 0, true);
+  assert.equal(store.records[finalIntentIndex + 1].recordType, 'abort');
+  assert.equal(store.records[finalIntentIndex + 1].payload.reason, 'expired-before-final-mutation');
+  assert.equal(store.records.at(-1).recordType, 'terminal');
+});
+
+test('first promotion keeps a fresh-at-handoff proof authoritative after candidate deletion', async () => {
+  const { result, finalMutations } = await runPromotionExpiryCrossing({
+    firstRelease: true, crossing: 'after-handoff',
+  });
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  assert.equal(finalMutations, 1);
+  assert.equal(result.publicReport.candidateCleanupState, 'deleted');
+});
+
+test('first promotion proof expiry while journaling candidate deletion aborts before deletion', async () => {
+  const { result, store, finalMutations, candidateExists } = await runPromotionExpiryCrossing({
+    firstRelease: true, crossing: 'delete-intent',
+  });
+  assert.equal(result.exitCode, 1, JSON.stringify(result.publicReport));
+  assert.equal(result.publicReport.code, 'PROMOTION_REPROOF_REQUIRED');
+  assert.equal(candidateExists, true);
+  assert.equal(finalMutations, 0);
+  const deleteIntentIndex = store.records.findIndex(({ recordType, operationId }) => (
+    recordType === 'intent' && operationId === 'candidate-cleanup-delete'
+  ));
+  assert.equal(deleteIntentIndex >= 0, true);
+  assert.equal(store.records[deleteIntentIndex + 1].recordType, 'abort');
+  assert.equal(store.records.at(-1).recordType, 'terminal');
 });
 
 test('promotion proof expires at the exact boundary before the final intent', async () => {
@@ -5946,6 +6140,7 @@ test('first promotion IAM response loss never triggers an automatic restore muta
     dirname(plan.sourceArchive), `${plan.stableRevision}.iam-restore.${attemptId}.json`,
   );
   let stableExists = false;
+  let candidateExists = true;
   let stablePolicy = stablePrivateIam('stable-private-baseline');
   let stablePublicReads = 0;
   let restorePolicy = null;
@@ -5989,6 +6184,10 @@ test('first promotion IAM response loss never triggers an automatic restore muta
         stablePolicy = stablePublicIam('stable-public-landed');
         throw new Error('public IAM response was lost');
       }
+      if (argv[1] === 'services' && argv[2] === 'delete') {
+        candidateExists = false;
+        return null;
+      }
       if (argv.includes('set-iam-policy')) {
         assert.equal(argv[3], STABLE_SERVICE);
         assert.equal(argv[4], restorePath);
@@ -6004,7 +6203,12 @@ test('first promotion IAM response loss never triggers an automatic restore muta
         return stableStagedReadback(plan);
       }
       if (argv[1] === 'services' && argv[2] === 'describe') {
-        if (argv[3] === CANDIDATE_SERVICE) return candidateServiceReadback(plan);
+        if (argv[3] === CANDIDATE_SERVICE) {
+          if (!candidateExists) {
+            throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+          }
+          return candidateServiceReadback(plan);
+        }
         if (!stableExists) {
           throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
         }
@@ -6031,18 +6235,30 @@ test('first public-IAM restart rereads exact staged service state without repeat
   const input = releaseInput({ previousRevision: null, previousImageDigest: null });
   const plan = buildReleasePlan(input);
   const store = createTestStateStore();
+  await appendTestPrivacyCheckpoint(store, {
+    operationId: 'promote-privacy-publish', mutationOrdinal: 1, plan,
+  });
+  const cleanupIdentity = releaseMutationPlanIdentity(
+    plan, plan.operations.find(({ id }) => id === 'candidate-cleanup-delete'),
+  );
+  await appendTestMutationCheckpoint(store, {
+    operationId: 'candidate-cleanup-delete', mutationOrdinal: 2,
+    reconcileKind: 'cloud-run-service-delete', plan,
+    safeResult: {
+      kind: 'resource', state: 'absent', identitySha256: cleanupIdentity.specSha256,
+      valueSha256: createHash('sha256')
+        .update(JSON.stringify(canonicalFixture(cleanupIdentity.expectedAfter.observation))).digest('hex'),
+    },
+  });
   await appendTestMutationCheckpoint(store, {
     operationId: 'promote-stable-deploy',
-    mutationOrdinal: 1,
+    mutationOrdinal: 3,
     reconcileKind: 'cloud-run-service-replace',
     plan,
   });
-  await appendTestPrivacyCheckpoint(store, {
-    operationId: 'promote-privacy-publish', mutationOrdinal: 2, plan,
-  });
   await appendTestMutationIntent(store, {
     operationId: 'promote-public-service',
-    mutationOrdinal: 3,
+    mutationOrdinal: 4,
     reconcileKind: 'cloud-run-service-iam',
     plan,
   });
@@ -6054,12 +6270,15 @@ test('first public-IAM restart rereads exact staged service state without repeat
     openStateStore: async () => store,
     execute: async (argv) => {
       calls.push(argv);
+      if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
       if (argv.includes('add-iam-policy-binding')) {
         throw new Error('restart attempted a duplicate public grant');
       }
       if (argv[1] === 'services' && argv[2] === 'describe') {
-        return argv[3] === CANDIDATE_SERVICE
-          ? candidateServiceReadback(plan) : stableStagedReadback(plan);
+        if (argv[3] === CANDIDATE_SERVICE) {
+          throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+        }
+        return stableStagedReadback(plan);
       }
       if (argv[1] === 'revisions') {
         return argv[3] === plan.candidateRevision
@@ -6081,6 +6300,606 @@ test('first public-IAM restart rereads exact staged service state without repeat
     && argv[3] === STABLE_SERVICE), true);
   assert.equal(calls.some((argv) => argv[1] === 'revisions' && argv[3] === plan.stableRevision), true);
   assert.equal(calls.some((argv) => argv[0] === 'artifacts' && argv.includes(plan.image)), true);
+});
+
+test('first public-IAM restart retries an unperformed grant and completes the original handoff', async () => {
+  const input = releaseInput({ previousRevision: null, previousImageDigest: null });
+  const plan = buildReleasePlan(input);
+  const store = createTestStateStore();
+  let candidateExists = true;
+  let stableExists = false;
+  let stablePolicy = stablePrivateIam('stable-private-before-public');
+  let publicGrantAttempts = 0;
+  const calls = [];
+  const execute = async (argv) => {
+    calls.push(argv);
+    if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
+    if (argv[0] === 'artifacts') return { image: plan.image };
+    if (argv[1] === 'revisions') return argv[3] === plan.candidateRevision
+      ? structuredClone(plan.expectedCandidate) : structuredClone(plan.expectedStable);
+    if (argv.includes('get-iam-policy')) return argv[3] === CANDIDATE_SERVICE
+      ? candidatePrivateIam() : structuredClone(stablePolicy);
+    if (argv[1] === 'services' && argv[2] === 'delete') {
+      candidateExists = false;
+      return null;
+    }
+    if (argv[1] === 'services' && argv[2] === 'replace') {
+      if (argv.includes('--dry-run')) return structuredClone(plan.stableServiceSpec);
+      stableExists = true;
+      return stableStagedReadback(plan);
+    }
+    if (argv.includes('add-iam-policy-binding')) {
+      publicGrantAttempts += 1;
+      if (publicGrantAttempts === 1) {
+        throw new Error('public grant request was not performed');
+      }
+      stablePolicy = stablePublicIam('stable-public-after-retry');
+      return structuredClone(stablePolicy);
+    }
+    if (argv[1] === 'services' && argv[2] === 'describe') {
+      if (argv[3] === CANDIDATE_SERVICE) {
+        if (!candidateExists) {
+          throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+        }
+        return candidateServiceReadback(plan);
+      }
+      if (!stableExists) {
+        throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+      }
+      return stableStagedReadback(plan);
+    }
+    throw new Error(`unexpected operation: ${argv.join(' ')}`);
+  };
+  const options = {
+    argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    openStateStore: async () => store,
+    writeStableSpec: async () => true,
+    execute,
+    writeOutput: () => undefined,
+  };
+
+  const interrupted = await runGcpRelease(options);
+  assert.equal(interrupted.exitCode, 1, JSON.stringify(interrupted.publicReport));
+  assert.equal(interrupted.publicReport.code, 'RELEASE_PHASE_FAILED');
+  assert.equal(candidateExists, false);
+  assert.equal(stableExists, true);
+  assert.deepEqual(stablePolicy.bindings, []);
+  assert.equal(store.records.at(-1).recordType, 'intent');
+  assert.equal(store.records.at(-1).operationId, 'promote-public-service');
+
+  const resumeCallOffset = calls.length;
+  const resumed = await runGcpRelease(options);
+  assert.equal(resumed.exitCode, 0, JSON.stringify(resumed.publicReport));
+  assert.equal(resumed.publicReport.mutationPerformed, true);
+  assert.equal(calls.slice(resumeCallOffset).some((argv) => argv[0] === 'auth'
+    && argv[1] === 'list'), true);
+  assert.equal(publicGrantAttempts, 2);
+  assert.deepEqual(stablePolicy.bindings,
+    stablePublicIam('stable-public-after-retry').bindings);
+  assert.equal(store.records.findLast((record) => record.recordType === 'checkpoint'
+    && record.operationId === 'promote-public-service').payload.outcome, 'applied');
+  assert.equal(store.records.at(-1).recordType, 'terminal');
+  assert.deepEqual(store.records.at(-1).payload.responseLossOperationIds, []);
+});
+
+test('first-release mutation retries require fresh approved promotion authority', async (t) => {
+  for (const operationId of [
+    'candidate-cleanup-delete',
+    'promote-stable-deploy',
+    'promote-public-service',
+  ]) {
+    await t.test(operationId, async () => {
+      const input = releaseInput({ previousRevision: null, previousImageDigest: null });
+      const plan = buildReleasePlan(input);
+      const store = createTestStateStore();
+      await appendTestPrivacyCheckpoint(store, {
+        operationId: 'promote-privacy-publish', mutationOrdinal: 1, plan,
+      });
+      const cleanupIdentity = releaseMutationPlanIdentity(
+        plan, plan.operations.find(({ id }) => id === 'candidate-cleanup-delete'),
+      );
+      if (operationId !== 'candidate-cleanup-delete') {
+        await appendTestMutationCheckpoint(store, {
+          operationId: 'candidate-cleanup-delete', mutationOrdinal: 2,
+          reconcileKind: 'cloud-run-service-delete', plan,
+          safeResult: {
+            kind: 'resource', state: 'absent', identitySha256: cleanupIdentity.specSha256,
+            valueSha256: createHash('sha256')
+              .update(JSON.stringify(canonicalFixture(cleanupIdentity.expectedAfter.observation)))
+              .digest('hex'),
+          },
+        });
+      }
+      if (operationId === 'promote-public-service') {
+        await appendTestMutationCheckpoint(store, {
+          operationId: 'promote-stable-deploy', mutationOrdinal: 3,
+          reconcileKind: 'cloud-run-service-replace', plan,
+        });
+      }
+      const mutationOrdinal = {
+        'candidate-cleanup-delete': 2,
+        'promote-stable-deploy': 3,
+        'promote-public-service': 4,
+      }[operationId];
+      const reconcileKind = {
+        'candidate-cleanup-delete': 'cloud-run-service-delete',
+        'promote-stable-deploy': 'cloud-run-service-replace',
+        'promote-public-service': 'cloud-run-service-iam',
+      }[operationId];
+      const beforeObservation = operationId === 'candidate-cleanup-delete'
+        ? candidateServiceReadback(plan)
+        : (operationId === 'promote-stable-deploy'
+          ? { state: 'absent' }
+          : stablePrivateIam('stable-private-before-authority-check'));
+      await appendTestMutationIntent(store, {
+        operationId,
+        mutationOrdinal,
+        reconcileKind,
+        plan,
+        beforeObservation,
+      });
+      const calls = [];
+      const result = await runGcpRelease({
+        argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`],
+        input,
+        openStateStore: async () => store,
+        execute: async (argv) => {
+          calls.push(argv);
+          if (argv[0] === 'auth') {
+            return [{ account: 'wrong-account@example.com', status: 'ACTIVE' }];
+          }
+          throw new Error(`authority failure continued to operation: ${argv.join(' ')}`);
+        },
+        writeOutput: () => undefined,
+      });
+
+      assert.equal(result.exitCode, 1, JSON.stringify(result.publicReport));
+      assert.equal(result.publicReport.code, 'RELEASE_PHASE_FAILED');
+      assert.equal(result.publicReport.mutationPerformed, false);
+      assert.deepEqual(calls, [[
+        'auth', 'list', '--filter=status:ACTIVE', '--format=json',
+      ]]);
+      assert.equal(store.records.at(-1).recordType, 'intent');
+      assert.equal(store.records.at(-1).operationId, operationId);
+    });
+  }
+});
+
+test('first promotion adopts landed candidate deletion and completes without repeating delete', async () => {
+  const input = releaseInput({ previousRevision: null, previousImageDigest: null });
+  const plan = buildReleasePlan(input);
+  const store = createTestStateStore();
+  await appendTestPrivacyCheckpoint(store, {
+    operationId: 'promote-privacy-publish', mutationOrdinal: 1, plan,
+  });
+  await appendTestMutationIntent(store, {
+    operationId: 'candidate-cleanup-delete', mutationOrdinal: 2,
+    reconcileKind: 'cloud-run-service-delete', plan,
+    beforeObservation: candidateServiceReadback(plan),
+  });
+  let stableExists = false;
+  let stablePolicy = stablePrivateIam('stable-private-after-deploy');
+  const calls = [];
+  const result = await runGcpRelease({
+    argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`], input,
+    openStateStore: async () => store,
+    writeStableSpec: async () => true,
+    execute: async (argv) => {
+      calls.push(argv);
+      if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
+      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv[1] === 'revisions') return structuredClone(plan.expectedStable);
+      if (argv.includes('get-iam-policy')) return structuredClone(stablePolicy);
+      if (argv[1] === 'services' && argv[2] === 'delete') {
+        throw new Error('landed candidate deletion must not be repeated');
+      }
+      if (argv[1] === 'services' && argv[2] === 'replace') {
+        stableExists = true;
+        return stableStagedReadback(plan);
+      }
+      if (argv[1] === 'services' && argv[2] === 'describe') {
+        if (argv[3] === CANDIDATE_SERVICE || !stableExists) {
+          throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+        }
+        return stableStagedReadback(plan);
+      }
+      if (argv.includes('add-iam-policy-binding')) {
+        stablePolicy = stablePublicIam('stable-public-after-landed-delete');
+        return structuredClone(stablePolicy);
+      }
+      throw new Error(`unexpected operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  assert.equal(calls.some((argv) => argv[1] === 'services'
+    && argv[2] === 'delete'), false);
+  assert.equal(calls.some((argv) => argv[1] === 'services'
+    && argv[2] === 'replace'), true);
+});
+
+test('first promotion retries an unperformed journaled candidate deletion exactly once', async () => {
+  const input = releaseInput({ previousRevision: null, previousImageDigest: null });
+  const plan = buildReleasePlan(input);
+  const store = createTestStateStore();
+  await appendTestPrivacyCheckpoint(store, {
+    operationId: 'promote-privacy-publish', mutationOrdinal: 1, plan,
+  });
+  await appendTestMutationIntent(store, {
+    operationId: 'candidate-cleanup-delete', mutationOrdinal: 2,
+    reconcileKind: 'cloud-run-service-delete', plan,
+    beforeObservation: candidateServiceReadback(plan),
+  });
+  let candidateExists = true;
+  let stableExists = false;
+  let stablePolicy = stablePrivateIam('stable-private-after-delete-retry');
+  let deleteCount = 0;
+  const result = await runGcpRelease({
+    argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`], input,
+    openStateStore: async () => store,
+    writeStableSpec: async () => true,
+    execute: async (argv) => {
+      if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
+      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv[1] === 'revisions') return argv[3] === plan.candidateRevision
+        ? structuredClone(plan.expectedCandidate) : structuredClone(plan.expectedStable);
+      if (argv.includes('get-iam-policy')) return argv[3] === CANDIDATE_SERVICE
+        ? candidatePrivateIam() : structuredClone(stablePolicy);
+      if (argv[1] === 'services' && argv[2] === 'delete') {
+        deleteCount += 1;
+        candidateExists = false;
+        return null;
+      }
+      if (argv[1] === 'services' && argv[2] === 'replace') {
+        stableExists = true;
+        return stableStagedReadback(plan);
+      }
+      if (argv[1] === 'services' && argv[2] === 'describe') {
+        if (argv[3] === CANDIDATE_SERVICE) {
+          if (!candidateExists) {
+            throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+          }
+          return candidateServiceReadback(plan);
+        }
+        if (!stableExists) {
+          throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+        }
+        return stableStagedReadback(plan);
+      }
+      if (argv.includes('add-iam-policy-binding')) {
+        stablePolicy = stablePublicIam('stable-public-after-delete-retry');
+        return structuredClone(stablePolicy);
+      }
+      throw new Error(`unexpected operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  assert.equal(deleteCount, 1);
+  assert.equal(result.publicReport.mutationPerformed, true);
+  assert.equal(store.records.findLast((record) => record.recordType === 'checkpoint'
+    && record.operationId === 'candidate-cleanup-delete').payload.outcome, 'applied');
+  assert.deepEqual(store.records.at(-1).payload.responseLossOperationIds, []);
+});
+
+test('first promotion adopts a landed stable deployment without replacing it', async () => {
+  const input = releaseInput({ previousRevision: null, previousImageDigest: null });
+  const plan = buildReleasePlan(input);
+  const store = createTestStateStore();
+  await appendTestPrivacyCheckpoint(store, {
+    operationId: 'promote-privacy-publish', mutationOrdinal: 1, plan,
+  });
+  const cleanupIdentity = releaseMutationPlanIdentity(
+    plan, plan.operations.find(({ id }) => id === 'candidate-cleanup-delete'),
+  );
+  await appendTestMutationCheckpoint(store, {
+    operationId: 'candidate-cleanup-delete', mutationOrdinal: 2,
+    reconcileKind: 'cloud-run-service-delete', plan,
+    safeResult: {
+      kind: 'resource', state: 'absent', identitySha256: cleanupIdentity.specSha256,
+      valueSha256: createHash('sha256')
+        .update(JSON.stringify(canonicalFixture(cleanupIdentity.expectedAfter.observation))).digest('hex'),
+    },
+  });
+  await appendTestMutationIntent(store, {
+    operationId: 'promote-stable-deploy', mutationOrdinal: 3,
+    reconcileKind: 'cloud-run-service-replace', plan,
+    beforeObservation: { state: 'absent' },
+  });
+  let stablePolicy = stablePrivateIam('stable-private-landed');
+  const calls = [];
+  const result = await runGcpRelease({
+    argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`], input,
+    openStateStore: async () => store,
+    execute: async (argv) => {
+      calls.push(argv);
+      if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
+      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv[1] === 'revisions') return structuredClone(plan.expectedStable);
+      if (argv.includes('get-iam-policy')) return structuredClone(stablePolicy);
+      if (argv[1] === 'services' && argv[2] === 'replace') {
+        throw new Error('landed stable deployment must not be repeated');
+      }
+      if (argv[1] === 'services' && argv[2] === 'describe') {
+        if (argv[3] === CANDIDATE_SERVICE) {
+          throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+        }
+        return stableStagedReadback(plan);
+      }
+      if (argv.includes('add-iam-policy-binding')) {
+        stablePolicy = stablePublicIam('stable-public-after-landed-stable');
+        return structuredClone(stablePolicy);
+      }
+      throw new Error(`unexpected operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  assert.equal(calls.some((argv) => argv[1] === 'services'
+    && argv[2] === 'replace'), false);
+  assert.equal(calls.some((argv) => argv.includes('add-iam-policy-binding')), true);
+});
+
+test('first promotion retries an unperformed journaled stable deployment exactly once', async () => {
+  const input = releaseInput({ previousRevision: null, previousImageDigest: null });
+  const plan = buildReleasePlan(input);
+  const store = createTestStateStore();
+  await appendTestPrivacyCheckpoint(store, {
+    operationId: 'promote-privacy-publish', mutationOrdinal: 1, plan,
+  });
+  const cleanupIdentity = releaseMutationPlanIdentity(
+    plan, plan.operations.find(({ id }) => id === 'candidate-cleanup-delete'),
+  );
+  await appendTestMutationCheckpoint(store, {
+    operationId: 'candidate-cleanup-delete', mutationOrdinal: 2,
+    reconcileKind: 'cloud-run-service-delete', plan,
+    safeResult: {
+      kind: 'resource', state: 'absent', identitySha256: cleanupIdentity.specSha256,
+      valueSha256: createHash('sha256')
+        .update(JSON.stringify(canonicalFixture(cleanupIdentity.expectedAfter.observation))).digest('hex'),
+    },
+  });
+  await appendTestMutationIntent(store, {
+    operationId: 'promote-stable-deploy', mutationOrdinal: 3,
+    reconcileKind: 'cloud-run-service-replace', plan,
+    beforeObservation: { state: 'absent' },
+  });
+  let stableExists = false;
+  let stablePolicy = stablePrivateIam('stable-private-after-deploy-retry');
+  let replaceCount = 0;
+  const result = await runGcpRelease({
+    argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`], input,
+    openStateStore: async () => store,
+    writeStableSpec: async () => true,
+    execute: async (argv) => {
+      if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
+      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv[1] === 'revisions') return structuredClone(plan.expectedStable);
+      if (argv.includes('get-iam-policy')) return structuredClone(stablePolicy);
+      if (argv[1] === 'services' && argv[2] === 'replace') {
+        replaceCount += 1;
+        stableExists = true;
+        return stableStagedReadback(plan);
+      }
+      if (argv[1] === 'services' && argv[2] === 'describe') {
+        if (argv[3] === CANDIDATE_SERVICE || !stableExists) {
+          throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+        }
+        return stableStagedReadback(plan);
+      }
+      if (argv.includes('add-iam-policy-binding')) {
+        stablePolicy = stablePublicIam('stable-public-after-deploy-retry');
+        return structuredClone(stablePolicy);
+      }
+      throw new Error(`unexpected operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  assert.equal(replaceCount, 1);
+  assert.equal(result.publicReport.mutationPerformed, true);
+  assert.equal(store.records.findLast((record) => record.recordType === 'checkpoint'
+    && record.operationId === 'promote-stable-deploy').payload.outcome, 'applied');
+  assert.deepEqual(store.records.at(-1).payload.responseLossOperationIds, []);
+});
+
+test('first-promotion retries reject a durable before-state mismatch before delete or replace', async (t) => {
+  await t.test('candidate deletion', async () => {
+    const input = releaseInput({ previousRevision: null, previousImageDigest: null });
+    const plan = buildReleasePlan(input);
+    const store = createTestStateStore();
+    await appendTestPrivacyCheckpoint(store, {
+      operationId: 'promote-privacy-publish', mutationOrdinal: 1, plan,
+    });
+    await appendTestMutationIntent(store, {
+      operationId: 'candidate-cleanup-delete', mutationOrdinal: 2,
+      reconcileKind: 'cloud-run-service-delete', plan,
+      beforeObservation: {
+        ...candidateServiceReadback(plan),
+        resourceVersion: 'durable-intent-version',
+      },
+    });
+    const calls = [];
+    const result = await runGcpRelease({
+      argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`], input,
+      openStateStore: async () => store,
+      execute: async (argv) => {
+        calls.push(argv);
+        if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
+        if (argv[1] === 'services' && argv[2] === 'delete') {
+          throw new Error('before-state drift must block candidate deletion');
+        }
+        if (argv[1] === 'services' && argv[2] === 'describe') {
+          if (argv[3] === STABLE_SERVICE) {
+            throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+          }
+          return {
+            ...candidateServiceReadback(plan),
+            resourceVersion: 'current-version',
+          };
+        }
+        if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
+        if (argv.includes('get-iam-policy')) return candidatePrivateIam();
+        if (argv[0] === 'artifacts') return { image: plan.image };
+        throw new Error(`unexpected operation: ${argv.join(' ')}`);
+      },
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1, JSON.stringify(result.publicReport));
+    assert.equal(result.publicReport.code, 'RELEASE_PHASE_FAILED');
+    assert.equal(result.publicReport.mutationPerformed, false);
+    assert.equal(calls.some((argv) => argv[1] === 'services'
+      && argv[2] === 'describe' && argv[3] === CANDIDATE_SERVICE), true);
+    assert.equal(calls.some((argv) => argv[1] === 'services'
+      && argv[2] === 'delete'), false);
+  });
+
+  await t.test('stable deployment', async () => {
+    const input = releaseInput({ previousRevision: null, previousImageDigest: null });
+    const plan = buildReleasePlan(input);
+    const store = createTestStateStore();
+    await appendTestPrivacyCheckpoint(store, {
+      operationId: 'promote-privacy-publish', mutationOrdinal: 1, plan,
+    });
+    const cleanupIdentity = releaseMutationPlanIdentity(
+      plan, plan.operations.find(({ id }) => id === 'candidate-cleanup-delete'),
+    );
+    await appendTestMutationCheckpoint(store, {
+      operationId: 'candidate-cleanup-delete', mutationOrdinal: 2,
+      reconcileKind: 'cloud-run-service-delete', plan,
+      safeResult: {
+        kind: 'resource', state: 'absent', identitySha256: cleanupIdentity.specSha256,
+        valueSha256: createHash('sha256')
+          .update(JSON.stringify(canonicalFixture(cleanupIdentity.expectedAfter.observation)))
+          .digest('hex'),
+      },
+    });
+    await appendTestMutationIntent(store, {
+      operationId: 'promote-stable-deploy', mutationOrdinal: 3,
+      reconcileKind: 'cloud-run-service-replace', plan,
+      beforeObservation: { state: 'absent', witness: 'durable-intent-version' },
+    });
+    const calls = [];
+    const result = await runGcpRelease({
+      argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`], input,
+      openStateStore: async () => store,
+      writeStableSpec: async () => true,
+      execute: async (argv) => {
+        calls.push(argv);
+        if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
+        if (argv[1] === 'services' && argv[2] === 'replace') {
+          throw new Error('before-state drift must block stable deployment');
+        }
+        if (argv[1] === 'services' && argv[2] === 'describe') {
+          throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+        }
+        throw new Error(`unexpected operation: ${argv.join(' ')}`);
+      },
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1, JSON.stringify(result.publicReport));
+    assert.equal(result.publicReport.code, 'RELEASE_PHASE_FAILED');
+    assert.equal(result.publicReport.mutationPerformed, false);
+    assert.equal(calls.some((argv) => argv[1] === 'services'
+      && argv[2] === 'describe' && argv[3] === STABLE_SERVICE), true);
+    assert.equal(calls.some((argv) => argv[1] === 'services'
+      && argv[2] === 'replace'), false);
+  });
+});
+
+test('expired first-promotion proof checkpoint closes for re-proof before candidate deletion', async () => {
+  const input = releaseInput({ previousRevision: null, previousImageDigest: null });
+  const plan = buildReleasePlan(input);
+  const store = createTestStateStore();
+  await appendTestPrivacyCheckpoint(store, {
+    operationId: 'promote-privacy-publish', mutationOrdinal: 1, plan,
+  });
+  const calls = [];
+  const result = await runGcpRelease({
+    argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`], input,
+    openStateStore: async () => store,
+    now: () => new Date('2026-08-27T08:05:00.000Z'),
+    execute: async (argv) => {
+      calls.push(argv);
+      if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
+      if (argv[1] === 'services' && argv[2] === 'delete') {
+        throw new Error('expired proof must not delete candidate');
+      }
+      if (argv[1] === 'services' && argv[2] === 'describe') {
+        if (argv[3] === STABLE_SERVICE) {
+          throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+        }
+        return candidateServiceReadback(plan);
+      }
+      if (argv[1] === 'revisions') return structuredClone(plan.expectedCandidate);
+      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv.includes('get-iam-policy')) return candidatePrivateIam();
+      throw new Error(`unexpected operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 1, JSON.stringify(result.publicReport));
+  assert.equal(result.publicReport.code, 'PROMOTION_REPROOF_REQUIRED');
+  assert.equal(result.publicReport.mutationPerformed, false);
+  assert.equal(calls.some((argv) => argv[1] === 'services' && argv[2] === 'delete'), false);
+  assert.equal(store.records.at(-1).recordType, 'terminal');
+});
+
+test('first promotion resumes after durable candidate absence without recreating candidate', async () => {
+  const input = releaseInput({ previousRevision: null, previousImageDigest: null });
+  const plan = buildReleasePlan(input);
+  const store = createTestStateStore();
+  await appendTestPrivacyCheckpoint(store, {
+    operationId: 'promote-privacy-publish', mutationOrdinal: 1, plan,
+  });
+  const cleanupIdentity = releaseMutationPlanIdentity(
+    plan, plan.operations.find(({ id }) => id === 'candidate-cleanup-delete'),
+  );
+  await appendTestMutationCheckpoint(store, {
+    operationId: 'candidate-cleanup-delete', mutationOrdinal: 2,
+    reconcileKind: 'cloud-run-service-delete', plan,
+    safeResult: {
+      kind: 'resource', state: 'absent', identitySha256: cleanupIdentity.specSha256,
+      valueSha256: createHash('sha256')
+        .update(JSON.stringify(canonicalFixture(cleanupIdentity.expectedAfter.observation))).digest('hex'),
+    },
+  });
+  let stableExists = false;
+  let stablePolicy = stablePrivateIam();
+  const calls = [];
+  const result = await runGcpRelease({
+    argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`], input,
+    openStateStore: async () => store,
+    now: () => new Date('2026-08-27T08:06:00.000Z'),
+    writeStableSpec: async () => true,
+    execute: async (argv) => {
+      calls.push(argv);
+      if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
+      if (argv[0] === 'artifacts') return { image: plan.image };
+      if (argv[1] === 'revisions') return structuredClone(plan.expectedStable);
+      if (argv.includes('get-iam-policy')) return structuredClone(stablePolicy);
+      if (argv[1] === 'services' && argv[2] === 'describe') {
+        if (argv[3] === CANDIDATE_SERVICE || !stableExists) {
+          throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+        }
+        return stableStagedReadback(plan);
+      }
+      if (argv[1] === 'services' && argv[2] === 'replace') {
+        stableExists = true;
+        return stableStagedReadback(plan);
+      }
+      if (argv.includes('add-iam-policy-binding')) {
+        stablePolicy = stablePublicIam('public-after-resume');
+        return structuredClone(stablePolicy);
+      }
+      throw new Error(`unexpected operation: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  assert.equal(calls.some((argv) => argv[1] === 'services' && argv[2] === 'delete'), false);
+  assert.equal(calls.some((argv) => argv[1] === 'services' && argv[2] === 'replace'), true);
 });
 
 test('first promotion blocks on foreign staged state without compensation', async () => {
@@ -6274,7 +7093,7 @@ test('empty-host bootstrap is allowed only on canonical NOT_FOUND and creates a 
     subjectSha256: QA_SUBJECT_SHA256,
     taggedUrl: CANDIDATE_ORIGIN,
   });
-  let serviceDescribeCount = 0;
+  let candidateServiceDescribeCount = 0;
   let iamGranted = false;
   const calls = [];
   const result = await runGcpRelease({
@@ -6283,8 +7102,11 @@ test('empty-host bootstrap is allowed only on canonical NOT_FOUND and creates a 
     execute: async (argv) => {
       calls.push(argv);
       if (argv[1] === 'services' && argv[2] === 'describe') {
-        serviceDescribeCount += 1;
-        if (serviceDescribeCount === 1) {
+        if (argv[3] === STABLE_SERVICE) {
+          throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+        }
+        candidateServiceDescribeCount += 1;
+        if (candidateServiceDescribeCount === 1) {
           throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
         }
         return { service: CANDIDATE_SERVICE, invokerIamDisabled: false, traffic: [
@@ -6871,6 +7693,36 @@ test('partial Job deploy checkpoints are revalidated before a resumed execute in
       )), false);
     });
   }
+});
+
+test('first-release candidate rejects a live stable service before any mutation', async () => {
+  const input = releaseInput({ previousRevision: null, previousImageDigest: null });
+  const plan = buildReleasePlan(input, { phase: 'candidate' });
+  const candidate = plan.operations.filter(({ phase }) => phase === 'candidate');
+  assert.equal(candidate[0].id, 'candidate-stable-service-precheck');
+  const calls = [];
+  const result = await runGcpRelease({
+    argv: ['--phase=candidate', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    execute: async (argv) => {
+      calls.push(argv);
+      if (argv[1] === 'services' && argv[2] === 'describe'
+        && argv[3] === STABLE_SERVICE) {
+        return {
+          service: STABLE_SERVICE,
+          invokerIamDisabled: false,
+          traffic: [{ revision: `${STABLE_SERVICE}-existing0000`, tag: null, percent: 100 }],
+        };
+      }
+      throw new Error(`mutation became reachable: ${argv.join(' ')}`);
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.publicReport.mutationPerformed, false);
+  assert.equal(calls.length, 1);
+  assert.equal(calls.some((argv) => argv.includes('replace')
+    || argv.includes('add-iam-policy-binding')), false);
 });
 
 test('an exact partial Job deploy checkpoint resumes execute only after fresh authority', async () => {
@@ -7794,10 +8646,19 @@ test('candidate and promotion privacy proof operations fence their phase boundar
     const privacyIndex = promotion.findIndex(({ id }) => id === 'promote-privacy-publish');
     const finalId = previousRevision === null ? 'promote-public-service' : 'promote-traffic';
     assert.ok(privacyIndex > 0);
-    assert.equal(promotion[privacyIndex + 1].id, finalId);
-    assert.deepEqual(promotion.slice(privacyIndex + 1).filter(({ id }) => (
-      ['promote-public-service', 'promote-traffic', 'promote-stable-deploy'].includes(id)
-    )).map(({ id }) => id), [finalId]);
+    if (previousRevision === null) {
+      assert.equal(promotion[privacyIndex + 1].id, 'candidate-cleanup-delete');
+      assert.deepEqual(promotion.slice(privacyIndex + 1).filter(({ id }) => (
+        ['candidate-cleanup-delete', 'promote-stable-deploy', 'promote-public-service'].includes(id)
+      )).map(({ id }) => id), [
+        'candidate-cleanup-delete', 'promote-stable-deploy', 'promote-public-service',
+      ]);
+    } else {
+      assert.equal(promotion[privacyIndex + 1].id, finalId);
+      assert.deepEqual(promotion.slice(privacyIndex + 1).filter(({ id }) => (
+        ['promote-public-service', 'promote-traffic', 'promote-stable-deploy'].includes(id)
+      )).map(({ id }) => id), [finalId]);
+    }
   }
 });
 
@@ -9160,5 +10021,6 @@ test('operator docs require the complete receipt sequence and manifest refresh b
   ]) assert.equal(operator.includes(text), true, text);
   assert.match(readme, /candidate -> readiness -> workload -> mobile -> promote/);
   assert.match(readme, /hkbuddy-v1-api-candidate/);
-  assert.match(readme, /public IAM is read-only/);
+  assert.match(readme, /ROLLING_RELEASE_UNSUPPORTED_SINGLETON/);
+  assert.match(readme, /candidate(?:-service)? absence/);
 });

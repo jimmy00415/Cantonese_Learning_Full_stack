@@ -689,6 +689,10 @@ test('the executable contract fixes the isolated GCP topology and least-privileg
       && role === 'roles/storage.objectUser'
   )), true);
   assert.equal(contract.iam.bindings.some(({ scope, member, role }) => (
+    scope === `bucket:${GCP_IDENTITY.bucket}` && member === runtime
+      && role === ACCEPTANCE_BUCKET_METADATA_ROLE.name
+  )), true, 'the serving runtime must read fixed media-bucket metadata during startup and readiness');
+  assert.equal(contract.iam.bindings.some(({ scope, member, role }) => (
     scope === `bucket:${GCP_IDENTITY.bucket}`
       && member === `serviceAccount:${GCP_IDENTITY.serviceAccounts.acceptance}`
       && role === ACCEPTANCE_BUCKET_METADATA_ROLE.name
@@ -3954,7 +3958,10 @@ const DEFAULT_UNIFORM_BUCKET_TUPLES = Object.freeze([
 const EXPECTED_MEDIA_BUCKET_BINDINGS = Object.freeze([
   {
     role: `projects/${PROJECT}/roles/hkbuddyV1AcceptanceBucketMetadataReader`,
-    members: [`serviceAccount:${GCP_IDENTITY.serviceAccounts.acceptance}`],
+    members: [
+      `serviceAccount:${GCP_IDENTITY.serviceAccounts.acceptance}`,
+      `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`,
+    ],
   },
   {
     role: 'roles/storage.objectUser',

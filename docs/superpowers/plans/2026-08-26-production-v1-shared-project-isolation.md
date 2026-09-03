@@ -362,18 +362,20 @@ on the exact service-describe `CLOUD_RUN_SERVICE_NOT_FOUND`; every other
 create-or-readback family treats absence only when the exact describe command,
 project/location, resource identity, and canonical error agree, while generic
 stderr remains ambiguous. Promotion copies only the accepted image/config into
-stable: a later release preserves the genuine prior stable revision at 100%,
-stages the accepted stable revision untagged at 0%, verifies it is tag-free, and
-then switches it to 100%; a first release creates stable privately at 100% and
-makes `allUsers:roles/run.invoker` the final mutation after exact verification.
+stable on the first release: it journals and deletes the receipt-proven private
+candidate, proves canonical candidate absence, creates stable privately at
+100%, and makes `allUsers:roles/run.invoker` the final mutation after exact
+verification.
 Receipt-bound cleanup validates and deletes only the candidate service. An
 exact candidate-specific already-absent precheck skips revision, artifact, IAM,
 and delete operations but still repeats canonical absence readback before a
 no-mutation success; raw null, generic 404, wrong identity, and ambiguous
-transport fail closed. Later
-rollback accepts only the exact prior stable revision plus paired immutable
-image and mutates only stable traffic; first-release rollback is unavailable
-with zero calls.
+transport fail closed. Confirmed later `candidate` and `promote` phases fail
+before any cloud mutation with `ROLLING_RELEASE_UNSUPPORTED_SINGLETON` until
+release-lane dispatch and separate worker leadership make overlapping runtimes
+safe. Later rollback accepts only the exact prior stable revision plus paired
+immutable image and mutates only stable traffic; first-release rollback is
+unavailable with zero calls.
 
 - [ ] **Step 4: Run release/acceptance tests and verify green**
 
@@ -526,18 +528,19 @@ on TTS failure.
 - [ ] **Step 5: Promote, verify rollback, and deliver**
 
 Freshly revalidate the private candidate service/revision/IAM/image/config,
-acceptance artifact, Task 8 bindings, and 200 production traces. On a later
-release, preserve the genuine prior stable revision at 100%, stage the accepted
-stable revision untagged at 0%, verify exact image/config and no stable tag, then
-atomically switch it to 100% without changing public IAM. On the first release,
-create stable privately at 100%, verify service/revision/image/config and
-private IAM, then add `allUsers:roles/run.invoker` as the final mutation and
-perform only IAM readback afterward. Verify stable health, readiness, text,
+acceptance artifact, Task 8 bindings, and 200 production traces. On the first
+release, journal and delete the receipt-proven private candidate, prove
+canonical candidate absence, create stable privately at 100%, verify
+service/revision/image/config and private IAM, then add
+`allUsers:roles/run.invoker` as the final mutation and perform only IAM readback
+afterward. Confirmed later `candidate` and `promote` phases fail before any
+cloud mutation with `ROLLING_RELEASE_UNSUPPORTED_SINGLETON` until release-lane
+dispatch and separate worker leadership are implemented. Verify stable health, readiness, text,
 voice, sources, mobile safe area, and no autoplay. Execute the non-destructive
 stable-only rollback drill required by the release contract and return to the
-accepted revision. On any ambiguous first-release IAM/service/readback, restore
-the accepted private stable state and exact private IAM before reporting
-compensation. Candidate cleanup separately validates its receipt, deletes only
+accepted revision. Never automatically restore IAM after a lost public-grant
+response: adopt exact public readback, or fail closed on ambiguity without a
+second IAM mutation. Candidate cleanup separately validates its receipt, deletes only
 `hkbuddy-v1-api-candidate`, and verifies canonical absence.
 If its initial exact candidate-specific precheck is already-absent, it skips
 revision/artifact/IAM/delete, repeats canonical absence readback, and reports no
@@ -576,9 +579,11 @@ known shared-project boundary, URL, and QR artifact.
   gate clocks while fresh wrappers reject the exact expiry boundary. Promotion
   appends an attempt-bound proof, validates it with the current post-proof clock,
   rereads all predecessors and candidate/stable/IAM/authority sources, and binds
-  the canonical barrier digest to final intent. Expired safe-before paths abort
-  and re-proof; mixed/ambiguous paths block. Forbid every cloud mutation after
-  the terminal promotion mutation.
+  the canonical barrier digest to final intent. Pre-handoff expired paths re-proof.
+  Each resumed first-release mutation revalidates owner authority and durable
+  before-state; after candidate deletion, exact public IAM is adopted or exact
+  private IAM retries only the journaled idempotent grant. Mixed/ambiguous paths
+  block. Forbid every cloud mutation after the terminal promotion mutation.
 - [ ] Execute live shared-project/candidate/provider/real-iOS/promotion/public
   acceptance. The Stage D checkpoint is local-only and authorizes no GCP,
   provider, legacy, Azure, or public-IAM operation.

@@ -54,7 +54,8 @@ The Tasks 1–2 operator boundary uses only these executable V1 identities:
   `hkbuddyV1AcceptanceBucketMetadataReader`, with only
   `storage.buckets.get`, and `hkbuddyV1BucketIamPolicyOperator`, with only
   `storage.buckets.get`, `storage.buckets.getIamPolicy`, and
-  `storage.buckets.setIamPolicy`
+  `storage.buckets.setIamPolicy`. The metadata-reader role is bound on the fixed
+  media bucket to both the runtime and dependency-acceptance identities.
 - generated/bootstrap Secret containers: `hkbuddy-v1-db-app-url`,
   `hkbuddy-v1-db-migrator-url`, `hkbuddy-v1-session-secret`, and
   `hkbuddy-v1-db-bootstrap-state`
@@ -417,8 +418,15 @@ The complete guarded order is `build`, `migration`, `inventory`, `acceptance`,
 `promote`. `candidate-cleanup` is the pre-promotion recovery phase and
 `rollback` is the separately confirmed post-promotion recovery phase. Every
 phase is first inspected without confirmation and then repeated with the exact
-`--confirm-release=40_HEX_SHA`; no phase may be skipped. Build
-completion requires the custom build identity; a fresh production-only install;
+`--confirm-release=40_HEX_SHA`; no phase may be skipped.
+For an empty-host first release, `promote` includes the audited singleton
+handoff: it publishes a fresh candidate privacy proof, journals deletion of the
+private candidate, proves canonical candidate absence, and only then starts the
+stable service. Confirmed `candidate` and `promote` phases for a later release
+return `ROLLING_RELEASE_UNSUPPORTED_SINGLETON` without a control-plane call
+until durable candidate/stable workload lanes and separate worker leadership
+are implemented; `candidate-cleanup` and `rollback` remain available.
+Build completion requires the custom build identity; a fresh production-only install;
 an exact `DEPENDENCY_SECURITY_EXCEPTION_REVIEWED` gate receipt before the image
 step; verified provenance backed by the required Container Analysis API and the
 Google-managed Cloud Build service agent; successful image/corpus and OCI-label checks; one
@@ -426,7 +434,7 @@ Build ID; the archive hash; and the final digest. A missing, failed, expired, or
 drifted dependency gate is a failed build receipt. `inventory` accepts the
 legacy inventory with `secretVersion: null`, publishes it once, and treats the
 numeric version in Secret Manager's add response as authoritative. It describes
-and accesses that exact version before recording it in the phase receipt; refresh
+ and accesses that exact version before recording it in the phase receipt; refresh
 the manifest from that receipt before `acceptance`.
 `acceptance` runs the `hkbuddy-v1-dependency-acceptance`
 Job as
@@ -673,6 +681,11 @@ Separately, the human operator's release-evidence role permits list on the fixed
 media bucket and get/delete only below `release-evidence/`; it grants no create
 permission and no access to build-source objects. These two human-operator
 contracts are independent and must not be merged or widened.
+The runtime identity has `roles/storage.objectUser` plus the existing
+`hkbuddyV1AcceptanceBucketMetadataReader` role on the fixed media bucket. The
+single `storage.buckets.get` permission lets startup and readiness verify the
+bucket name, uniform bucket-level access, and public-access prevention; it does
+not grant bucket listing, IAM-policy access, or Storage administration.
 The acceptance identity is DB/GCS-only: it can read the app and migrator URL
 Secret containers plus the exact release-bound legacy inventory mounted by the
 dependency Job, exercise and clean up private bucket objects, and write platform
@@ -710,10 +723,9 @@ inside the protected existing project. It does not build an image,
 run migration 001, create a Cloud Run candidate, or route traffic. Those actions
 belong to the frozen-release tasks after this contract and its independent
 review are green. The Cloud Run template in the JSON is the binding input for
-that later two-service deployment: the private candidate is always 100% during
-acceptance; a later stable promotion stages the accepted untagged stable
-revision at 0% beside the prior stable revision at 100%; a first stable
-promotion creates the accepted stable revision privately at 100%. Both services
+the first-release two-service acceptance: the private candidate is always 100%
+during acceptance, then the controller proves its canonical absence before it
+creates the accepted stable revision privately at 100%. Both services
 use one instance, always-allocated CPU, Direct VPC, and separate live/ready
 probes. That later task also supplies the six accepted evidence versions; this
 base task deliberately leaves those containers versionless.
@@ -750,16 +762,19 @@ Candidate, readiness, workload, mobile, trace, and phase receipts bind
 `stable-absent` or `stable-prior-100`. Old percent-only and same-service states
 fail closed.
 
-On a later promotion, the evidenced prior stable revision stays untagged at
-100% while `hkbuddy-v1-api-<sha12>` is created untagged at 0%. Exact stable
-service/revision/image/config and pre-existing public IAM are read back before
-an atomic switch to the accepted stable revision at 100%; public IAM is never
-mutated. On a first promotion, exact stable-service absence and null prior
-fields are required. The accepted stable revision is created privately at 100%
-and fully verified; `allUsers:roles/run.invoker` is the final mutation and only
-its IAM readback may follow. Permission errors, ambiguous absence, an existing
-stable service with null prior fields, or a missing stable service with non-null
-prior fields fail closed.
+On a first promotion, exact stable-service absence and null prior fields are
+required. After all candidate/mobile evidence is validated, the controller
+publishes a fresh candidate privacy proof, deletes the private candidate, and
+proves its canonical absence before creating the accepted stable revision
+privately at 100%. It then freshly verifies the stable service, revision,
+image/config, traffic, and private IAM. `allUsers:roles/run.invoker` is the final
+mutation and only its IAM readback may follow. The handoff proof must be fresh
+before deletion; after durable deletion it is validated at its recorded instant
+while fresh candidate-absence and stable-private readbacks guard publication.
+Later candidate/promotion execution is intentionally fail-closed under the
+current global singleton runtime. Permission errors, ambiguous absence, an
+existing stable service with null prior fields, or a missing stable service with
+non-null prior fields fail closed.
 
 The manifest-driven release phases are dry-run unless the exact frozen SHA is
 confirmed:
@@ -785,10 +800,11 @@ Promotion freshly validates candidate service/revision/private IAM/image,
 immutable readiness/workload/mobile artifacts, the complete receipt chain, and
 200 candidate-service production traces before stable mutation. Every lost
 mutation response is followed by an exact fresh readback and an explicit
-`responseLossRecoveries` result. A failed later promotion restores and verifies
-the exact prior stable revision/image/config at 100% while preserving its exact
-public IAM. A first-promotion IAM ambiguity restores and verifies the accepted
-private stable service and empty private IAM before reporting failure.
+`responseLossRecoveries` result. Confirmed later promotion is blocked before
+control-plane access while the singleton runtime remains in force, so no later
+promotion restoration path is invoked. A lost first-promotion public-IAM response is never followed by an
+automatic restore: exact public IAM is adopted, while ambiguous state fails
+closed without a second IAM mutation.
 
 Rollback loads the complete mobile receipt chain and operates only on a genuine
 receipt-proven prior stable revision; it never depends on candidate existence or
@@ -832,14 +848,17 @@ does not eliminate every actively malicious same-user kernel pathname race.
 Mobile accepts no prebuilt evidence. It produces fresh privacy-start, exact
 candidate/stable before readbacks, the pinned browser run, exact after readbacks,
 privacy-end, four screenshots, and a terminal receipt. Promotion then appends an
-attempt-bound proof checkpoint after stable staging. Using the current
-post-proof clock, it rereads all evidence/receipt predecessors and authoritative
-candidate/stable service, revision, image/config, traffic, IAM, and authority
-state. The final intent binds the canonical promotion-barrier digest. An expired
-open proof is preserved and followed by another proof; an expired unperformed
-final intent is explicitly aborted only when exact before-state is proved.
-Mixed/ambiguous state blocks. No cloud mutation is permitted after the terminal
-promotion mutation.
+attempt-bound proof checkpoint before the first-release handoff. It rereads all
+evidence/receipt predecessors and candidate authority before deletion, then
+requires canonical candidate absence and authoritative stable service,
+revision, image/config, traffic, IAM, and owner authority state before public
+IAM. The final intent binds the canonical promotion-barrier digest. An expired
+open proof is preserved and followed by another proof before irreversible
+handoff. Every resumed first-release mutation revalidates owner authority and
+its durable before-state. After candidate deletion, an open final-IAM intent
+adopts exact public state or retries only the same idempotent grant from exact
+private state because re-proof is no longer possible. Mixed/ambiguous state
+blocks. No cloud mutation is permitted after the terminal promotion mutation.
 
 The deterministic browser contract is Playwright `1.62.1`, Chromium revision
 `1234` / `151.0.7922.34`, `390x844` at DPR 1, four fully opaque PNGs with unique

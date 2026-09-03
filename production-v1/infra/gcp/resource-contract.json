@@ -569,6 +569,11 @@
         "role": "roles/storage.objectUser"
       },
       {
+        "scope": "bucket:hkbuddy-v1-582852715831-media",
+        "member": "serviceAccount:hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
+        "role": "projects/motion-expert-hk-ltd-webpage/roles/hkbuddyV1AcceptanceBucketMetadataReader"
+      },
+      {
         "scope": "secret:hkbuddy-v1-db-app-url",
         "member": "serviceAccount:hkbuddy-v1-runtime@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com",
         "role": "roles/secretmanager.secretAccessor"

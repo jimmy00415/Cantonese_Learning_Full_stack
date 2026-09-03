@@ -172,6 +172,7 @@ const REQUIRED_IAM_BINDINGS = Object.freeze([
   { scope: 'project', member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`, role: 'roles/speech.client' },
   { scope: 'project', member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`, role: 'roles/serviceusage.serviceUsageConsumer' },
   { scope: `bucket:${GCP_IDENTITY.bucket}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`, role: 'roles/storage.objectUser' },
+  { scope: `bucket:${GCP_IDENTITY.bucket}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`, role: `projects/${PROJECT}/roles/hkbuddyV1AcceptanceBucketMetadataReader` },
   { scope: `secret:${GCP_IDENTITY.secrets.dbAppUrl}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`, role: 'roles/secretmanager.secretAccessor' },
   { scope: `secret:${GCP_IDENTITY.secrets.session}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`, role: 'roles/secretmanager.secretAccessor' },
   { scope: `secret:${GCP_IDENTITY.secrets.legacy}`, member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`, role: 'roles/secretmanager.secretAccessor' },
@@ -428,6 +429,9 @@ export function assertResourceContract(contract) {
   if (!contract.iam.bindings.some(({ scope, member, role }) => (
     scope === `bucket:${GCP_IDENTITY.bucket}` && member === runtime
       && role === 'roles/storage.objectUser'
+  )) || !contract.iam.bindings.some(({ scope, member, role }) => (
+    scope === `bucket:${GCP_IDENTITY.bucket}` && member === runtime
+      && role === `projects/${PROJECT}/roles/hkbuddyV1AcceptanceBucketMetadataReader`
   )) || contract.iam.bindings.some(({ scope, member }) => (
     scope === `secret:${GCP_IDENTITY.secrets.dbMigratorUrl}` && member === runtime
   ))) throw contractError();
@@ -2737,7 +2741,7 @@ const STATIC_EXPECTED_STEPS = [
   `secret-version:${GCP_IDENTITY.secrets.dbAppUrl}`, `secret-version:${GCP_IDENTITY.secrets.dbMigratorUrl}`,
   `secret-version:${GCP_IDENTITY.secrets.session}`, 'db-user:hkbuddy_app',
   'db-user:hkbuddy_migrator', `secret-version:${GCP_IDENTITY.secrets.bootstrap}`,
-  ...Array.from({ length: 37 }, (_, index) => `iam:${String(index + 1).padStart(2, '0')}`),
+  ...Array.from({ length: 38 }, (_, index) => `iam:${String(index + 1).padStart(2, '0')}`),
 ];
 
 export const EXPECTED_PROVISION_STEPS = Object.freeze(STATIC_EXPECTED_STEPS);

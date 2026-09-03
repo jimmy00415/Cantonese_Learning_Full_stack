@@ -410,10 +410,10 @@ Singapore STT, and TTS latency are measured rather than assumed.
    `hkbuddy-v1-*` resource island. Project creation, billing-link changes,
    default-VPC changes, unrelated IAM changes, and resource adoption are
    forbidden.
-   The dependency-acceptance identity receives object access plus one fixed GA
-   custom role containing only `storage.buckets.get`, bound only on the media
-   bucket, so it can attest the exact bucket project without gaining bucket
-   listing or administration.
+   The runtime and dependency-acceptance identities each receive object access
+   plus one fixed GA custom role containing only `storage.buckets.get`, bound
+   only on the media bucket. This lets runtime startup/readiness and dependency
+   acceptance attest the exact bucket without bucket listing or administration.
    The fixed human operator uses a separate GA custom role containing only
    `storage.objects.get`, `storage.objects.list`, and `storage.objects.delete`.
    Its version-3 project condition permits bucket-scoped listing only on the
@@ -468,17 +468,17 @@ Singapore STT, and TTS latency are measured rather than assumed.
 8. Run candidate-specific mobile, retention, readiness, and latency acceptance
    against the same resource identities, image digest, and frozen commit.
 9. Promote only after fresh candidate service/revision/IAM/image/config and
-   immutable readiness/workload/mobile/trace validation. On a later release,
-   keep the genuine prior stable revision at 100%, stage the accepted stable
-   revision untagged at 0%, verify exact image/config and a tag-free stable
-   service, then atomically switch the accepted stable revision to 100%; stable
-   public IAM is read-only. Every stable readback revalidates the same Invoker
-   IAM enabled truth. On the first release, create stable privately at
-   100%, verify its service/revision/image/config and private IAM, then add
+   immutable readiness/workload/mobile/trace validation. On the first release,
+   journal and delete the receipt-proven private candidate, prove canonical
+   candidate absence, create stable privately at 100%, verify its
+   service/revision/image/config and private IAM, then add
    `allUsers:roles/run.invoker` as the final mutation, followed only by IAM
-   readback. Response-loss compensation restores the exact prior stable state
-   on a later release or the accepted private stable state and private IAM on a
-   first release. It never makes an unaccepted candidate public.
+   readback. A lost public-IAM response is never followed by an automatic IAM
+   restore: exact public readback is adopted, while ambiguous state fails closed
+   without a second IAM mutation. Confirmed later `candidate` and `promote` phases fail
+   before any cloud mutation with `ROLLING_RELEASE_UNSUPPORTED_SINGLETON` until
+   release-lane dispatch and separate worker leadership make overlapping
+   runtimes safe. It never makes an unaccepted candidate public.
 10. Return the exact stable origin
     `https://hkbuddy-v1-api-582852715831.asia-east2.run.app` and generate a
     decode-verified QR code from that URL outside tracked source.
@@ -529,15 +529,20 @@ This is a portable defense for a trusted operator-owned local evidence
 directory, not a native no-TOCTOU guarantee against an actively malicious
 same-user process; Node on Windows exposes no handle-relative `openat` API.
 
-Promotion uses append-only attempt-bound proof checkpoints. After stable staging
-it produces a fresh privacy proof, validates it using the current post-proof
-clock, and rereads every evidence/receipt predecessor and authoritative
-candidate/stable service, revision, image/config, traffic, IAM, and authority
-source. A canonical digest of that full promotion barrier is stored in the final
-intent. Expired pre-intent proof checkpoints are preserved and followed by a new
-proof; an expired unperformed final intent requires exact before-state, an abort,
-and a new proof/intent. Mixed or ambiguous state blocks. No cloud mutation may
-follow the terminal promotion mutation.
+The enabled first-release promotion uses an append-only attempt-bound privacy
+proof after candidate and stable-absence prechecks but before candidate deletion.
+It validates the proof with the current post-proof clock before that irreversible
+handoff. After stable staging, the final barrier validates the stored proof at
+its recorded gate and rereads every evidence/receipt predecessor plus candidate
+absence and authoritative stable service, revision, image/config, traffic, IAM,
+and authority state. Its canonical digest is stored in the final intent. Rolling
+promotion of an existing stable release is disabled. Expired pre-intent proof
+checkpoints are preserved and followed by a new
+proof before irreversible handoff. First-release mutation restarts revalidate
+owner authority and exact durable before-state. After candidate deletion, exact
+public IAM is adopted and exact private IAM retries only the journaled
+idempotent grant because re-proof is impossible. Mixed or ambiguous state
+blocks. No cloud mutation may follow the terminal promotion mutation.
 
 The controlled browser evidence contract is Playwright `1.62.1`, Chromium
 revision `1234` / browser `151.0.7922.34`, isolated `390x844` DPR-1 mobile web,

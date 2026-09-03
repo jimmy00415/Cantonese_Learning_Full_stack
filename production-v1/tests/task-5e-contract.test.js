@@ -193,11 +193,19 @@ test('every release candidate is private 100 percent on only the candidate servi
   assert.equal(JSON.stringify(plan.expectedStable.stagedTraffic).includes(CANDIDATE_TAG), false);
 });
 
-test('first promotion creates stable privately and public IAM is its final mutation', () => {
+test('first promotion hands the singleton from private candidate to stable before public IAM', () => {
   const plan = buildReleasePlan(releaseInput({ first: true }));
   const operations = phaseOperations(plan, 'promote');
+  const ids = operations.map(({ id }) => id);
   const mutationIds = operations.filter(mutatingOperation).map(({ id }) => id);
-  assert.deepEqual(mutationIds, ['promote-stable-deploy', 'promote-public-service']);
+  assert.deepEqual(mutationIds, [
+    'candidate-cleanup-delete', 'promote-stable-deploy', 'promote-public-service',
+  ]);
+  assert.equal(ids.indexOf('promote-privacy-publish') < ids.indexOf('candidate-cleanup-delete'), true);
+  assert.equal(ids.indexOf('candidate-cleanup-delete')
+    < ids.indexOf('candidate-cleanup-absence-readback'), true);
+  assert.equal(ids.indexOf('candidate-cleanup-absence-readback')
+    < ids.indexOf('promote-stable-deploy'), true);
   assert.equal(operations.at(-2).id, 'promote-public-service');
   assert.equal(operations.at(-1).id, 'promote-public-iam-readback');
   assert.equal(operations.at(-1).argv.includes(STABLE_SERVICE), true);
@@ -633,9 +641,19 @@ test('active operator design and plan documents describe only the separate priva
   for (const document of documents) {
     assert.match(document, /hkbuddy-v1-api-candidate/);
     assert.match(document, /candidate-service-private-100/);
-    assert.match(document, /untagged at\s+0%/);
-    assert.match(document, /final mutation/);
+    assert.match(document, /ROLLING_RELEASE_UNSUPPORTED_SINGLETON/);
+    assert.match(document, /final\s+mutation/);
     for (const obsolete of obsoleteStates) assert.equal(document.includes(obsolete), false);
     for (const obsolete of obsoleteSameServicePatterns) assert.doesNotMatch(document, obsolete);
   }
+});
+
+test('active launch design grants the one-permission bucket metadata role to runtime and acceptance', async () => {
+  const document = await readFile(
+    new URL('../../docs/superpowers/specs/2026-08-26-production-v1-gcp-launch-design.md', import.meta.url),
+    'utf8',
+  );
+  assert.match(document, /runtime and dependency-acceptance identities each receive object access/);
+  assert.match(document, /only `storage\.buckets\.get`/);
+  assert.match(document, /without bucket listing or administration/);
 });
