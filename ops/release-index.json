@@ -1,0 +1,107 @@
+{
+  "schemaVersion": "hkbuddy-release-index-v1",
+  "gcpProjectId": "motion-expert-hk-ltd-webpage",
+  "gcpProjectNumber": "582852715831",
+  "generatedAt": "2026-09-02T01:47:06.4922582Z",
+  "records": [
+    {
+      "releaseSha": "05726069d54a47600ef9b4344cd96a2c73f774e1",
+      "acceptanceRunId": "fec0902f-5017-40e0-8d2e-2828b35700c4",
+      "disposition": "archived-uncertain",
+      "resumable": false,
+      "localArchiveRelativePath": ".release-evidence/attempts/05726069d54a47600ef9b4344cd96a2c73f774e1/fec0902f-5017-40e0-8d2e-2828b35700c4",
+      "inventorySha256": "3f459621c9878d52e8d710724f259b7717abba97c7c096ea35b8ea0c039ecee5",
+      "imageDigest": null,
+      "productionTag": null,
+      "publicUrl": null
+    },
+    {
+      "releaseSha": "29fd22b3dfe2b05283ec521484734097eb10d8cf",
+      "acceptanceRunId": "10d22770-d567-43f4-96c2-fe6ee051d31a",
+      "disposition": "archived-uncertain",
+      "resumable": false,
+      "localArchiveRelativePath": ".release-evidence/attempts/29fd22b3dfe2b05283ec521484734097eb10d8cf/10d22770-d567-43f4-96c2-fe6ee051d31a",
+      "inventorySha256": "67efca80ca41cbb4ec33ebda2427d53c5e67da162449c0a9912d706efdadbab3",
+      "imageDigest": null,
+      "productionTag": null,
+      "publicUrl": null
+    },
+    {
+      "releaseSha": "61f3ee29e8daede6045c298fa8e52cb9e41734ed",
+      "acceptanceRunId": "8ca9ef54-cfc1-4de4-a2d0-1a371eac77cc",
+      "disposition": "archived-terminal",
+      "resumable": false,
+      "localArchiveRelativePath": ".release-evidence/attempts/61f3ee29e8daede6045c298fa8e52cb9e41734ed/8ca9ef54-cfc1-4de4-a2d0-1a371eac77cc",
+      "inventorySha256": "17ba8858f81d6efd4d9dbedb8cb1deb8ba0fd96b24c140598d3d66a994a5352b",
+      "imageDigest": "sha256:09b34e15f78302af1087648f12505313ed8ba5c255da2c58717922694eba10bd",
+      "productionTag": null,
+      "publicUrl": null
+    },
+    {
+      "releaseSha": "6374b5a6127931011a78f6c6b412955165338183",
+      "acceptanceRunId": "f42e88c4-d203-451f-8f67-569096645594",
+      "disposition": "archived-terminal",
+      "resumable": false,
+      "localArchiveRelativePath": ".release-evidence/attempts/6374b5a6127931011a78f6c6b412955165338183/f42e88c4-d203-451f-8f67-569096645594",
+      "inventorySha256": "fd93f22c71c81b1830ef205702ca79123cde610806a289c5645a6d925967c690",
+      "imageDigest": "sha256:565f1909743dd3eab143309168e1bedbab6fa1ef343ef79a0973673034f0f163",
+      "productionTag": null,
+      "publicUrl": null
+    },
+    {
+      "releaseSha": "6ceaaf5a655c220dafec6e2402469b44725d11f9",
+      "acceptanceRunId": "c4f23c1e-15d8-4993-87d1-7fed3b94e109",
+      "disposition": "archived-terminal",
+      "resumable": false,
+      "localArchiveRelativePath": ".release-evidence/attempts/6ceaaf5a655c220dafec6e2402469b44725d11f9/c4f23c1e-15d8-4993-87d1-7fed3b94e109",
+      "inventorySha256": "1f1e400e39440c99f16b497553952625535d8010de627aeb7b4e213f6b439af0",
+      "imageDigest": "sha256:7abceda2b9f3eaf72ed5e85c3eafac01d76b98742263474e287294166d2ead4b",
+      "productionTag": null,
+      "publicUrl": null
+    },
+    {
+      "releaseSha": "6e099ef2ca595dbc8334161f78ad483735f2b325",
+      "acceptanceRunId": "bf7cf83e-15d3-48be-8022-0e82df96a073",
+      "disposition": "archived-terminal",
+      "resumable": false,
+      "localArchiveRelativePath": ".release-evidence/attempts/6e099ef2ca595dbc8334161f78ad483735f2b325/bf7cf83e-15d3-48be-8022-0e82df96a073",
+      "inventorySha256": "d18d238e44f872696384a5ac02a3a08ff8efab4641ae68d92d970c559625fd35",
+      "imageDigest": "sha256:fe96455bbde1fd7d1d5aa6b81704b8f1e17d8f3ef2c58307abaaca00348a0957",
+      "productionTag": null,
+      "publicUrl": null
+    },
+    {
+      "releaseSha": "7c32f6d6bc0fbc41c5a2a6381c520cfd033f10f3",
+      "acceptanceRunId": "09657378-a601-4b24-be51-4cd5422f5b89",
+      "disposition": "superseded-path-migration",
+      "resumable": false,
+      "localArchiveRelativePath": ".release-evidence/attempts/7c32f6d6bc0fbc41c5a2a6381c520cfd033f10f3/09657378-a601-4b24-be51-4cd5422f5b89",
+      "inventorySha256": "cdd274668e992ca19b2ccf2376295e4b5c9136fbdd946753cc30a01fd81ac76f",
+      "imageDigest": "sha256:e81965fe5d9e6a2c83a5537e40ddcc6e1b8a2bec351d3b855d0f2c3ac4479589",
+      "productionTag": null,
+      "publicUrl": null
+    },
+    {
+      "releaseSha": "8e58cc52d37b32d3999ddc6872e79d98c93882b9",
+      "acceptanceRunId": "a78ed0e6-1790-41dc-b24e-c0afd3bba548",
+      "disposition": "archived-uncertain",
+      "resumable": false,
+      "localArchiveRelativePath": ".release-evidence/attempts/8e58cc52d37b32d3999ddc6872e79d98c93882b9/a78ed0e6-1790-41dc-b24e-c0afd3bba548",
+      "inventorySha256": "9078da60c600a5658ded82ac0ee12db62907ddde7e04430ddd59661646f7ca3c",
+      "imageDigest": "sha256:d7a43af1dd590612e54cadee7e884dc7cddc788e52f7d185bd75079e83228436",
+      "productionTag": null,
+      "publicUrl": null
+    },
+    {
+      "releaseSha": "f5674e8e46b738f04d86b4baf428f85042f7a593",
+      "acceptanceRunId": "e5092c00-40aa-40d2-855b-9c4cf03b0237",
+      "disposition": "archived-uncertain",
+      "resumable": false,
+      "localArchiveRelativePath": ".release-evidence/attempts/f5674e8e46b738f04d86b4baf428f85042f7a593/e5092c00-40aa-40d2-855b-9c4cf03b0237",
+      "inventorySha256": "492eeba290e858b9368b639ace189feb350ed5a73426f39578d0f67ca95576cd",
+      "imageDigest": null,
+      "productionTag": null,
+      "publicUrl": null
+    }
+  ]
+}
