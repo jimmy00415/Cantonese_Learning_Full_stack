@@ -2345,6 +2345,31 @@ function canonicalPositiveInt64(value) {
     && BigInt(value) <= 9_223_372_036_854_775_807n;
 }
 
+function exactCloudRunExecutionLabels(labels, jobName) {
+  const allowedKeys = new Set([
+    'client.knative.dev/nonce',
+    'cloud.googleapis.com/location',
+    'run.googleapis.com/job',
+    'run.googleapis.com/jobGeneration',
+    'run.googleapis.com/jobResourceVersion',
+    'run.googleapis.com/jobUid',
+    'run.googleapis.com/satisfiesPzs',
+    'simplify-release-sha',
+  ]);
+  return labels && typeof labels === 'object' && !Array.isArray(labels)
+    && Object.keys(labels).every((key) => allowedKeys.has(key))
+    && /^[a-z]{3}(?:_[a-z]{3}){2}$/.test(labels['client.knative.dev/nonce'] ?? '')
+    && labels['cloud.googleapis.com/location'] === 'asia-east2'
+    && labels['run.googleapis.com/job'] === jobName
+    && canonicalPositiveInt64(labels['run.googleapis.com/jobGeneration'])
+    && canonicalPositiveInt64(labels['run.googleapis.com/jobResourceVersion'])
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(labels['run.googleapis.com/jobUid'] ?? '')
+    && (!Object.hasOwn(labels, 'run.googleapis.com/satisfiesPzs')
+      || labels['run.googleapis.com/satisfiesPzs'] === 'true')
+    && (!Object.hasOwn(labels, 'simplify-release-sha')
+      || /^[0-9a-f]{40}$/.test(labels['simplify-release-sha']));
+}
+
 function exactTopLevelManagedAsset(asset, projectNumber) {
   const repositoryPath = `projects/${PROJECT}/locations/asia-east2/repositories/${GCP_IDENTITY.repository}`;
   const repositoryDisplayNames = new Set([GCP_IDENTITY.repository, repositoryPath]);
@@ -2415,6 +2440,21 @@ function exactManagedDescendantAsset(asset) {
         === `//iam.googleapis.com/projects/${PROJECT}/serviceAccounts/${email}`
       && asset.parentAssetType === 'iam.googleapis.com/ServiceAccount'
     ));
+  }
+  if (asset.assetType === 'run.googleapis.com/Execution') {
+    return Object.values(GCP_IDENTITY.jobs).some((jobName) => {
+      const executionName = asset.name.startsWith(`//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/executions/`)
+        ? asset.name.slice(`//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/executions/`.length)
+        : '';
+      return executionName.startsWith(`${jobName}-`)
+        && /^[a-z0-9]{5}$/.test(executionName.slice(jobName.length + 1))
+        && asset.location === 'asia-east2'
+        && asset.parentFullResourceName
+          === `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/jobs/${jobName}`
+        && asset.parentAssetType === 'run.googleapis.com/Job'
+        && (asset.displayName === undefined || asset.displayName === executionName)
+        && exactCloudRunExecutionLabels(asset.labels, jobName);
+    });
   }
   if (asset.assetType === 'run.googleapis.com/Revision') {
     return [GCP_IDENTITY.service, GCP_IDENTITY.candidateService].some((serviceName) => {

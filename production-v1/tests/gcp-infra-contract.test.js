@@ -7509,6 +7509,141 @@ test('Cloud Asset rejects the complete obsolete executable identity set in every
   }
 });
 
+test('Cloud Asset accepts exact managed Cloud Run Execution descendants for every fixed job', async () => {
+  const contract = await contractFixture();
+  const releaseSha = '7c32f6d6bc0fbc41c5a2a6381c520cfd033f10f3';
+  const executions = Object.values(GCP_IDENTITY.jobs).map((job, index) => {
+    const executionName = `${job}-8l9jc`;
+    const labels = {
+      'client.knative.dev/nonce': 'dox_suj_jac',
+      'cloud.googleapis.com/location': 'asia-east2',
+      'run.googleapis.com/job': job,
+      'run.googleapis.com/jobGeneration': String(index + 1),
+      'run.googleapis.com/jobResourceVersion': String(1788253773770562 + index),
+      'run.googleapis.com/jobUid': '991d9b4e-cd40-4367-8f05-26d6daaf3ddc',
+      'run.googleapis.com/satisfiesPzs': 'true',
+      'simplify-release-sha': releaseSha,
+    };
+    if (index === 1) delete labels['run.googleapis.com/satisfiesPzs'];
+    if (index === 2) delete labels['simplify-release-sha'];
+    const asset = {
+      name: `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/executions/${executionName}`,
+      assetType: 'run.googleapis.com/Execution',
+      project: ASSET_PROJECT,
+      displayName: executionName,
+      location: 'asia-east2',
+      labels,
+      parentFullResourceName: `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/jobs/${job}`,
+      parentAssetType: 'run.googleapis.com/Job',
+    };
+    if (index === 3) delete asset.displayName;
+    return asset;
+  });
+  const fixture = assetAuditControlPlane({ contract, assets: executions });
+
+  assert.equal(await fixture.plane.auditPreMutationState(), true);
+  assert.equal(fixture.gcloudCalls.some((args) => args.includes('enable') || args.includes('create')), false);
+  assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+});
+
+test('Cloud Asset rejects malformed or contradictory managed Cloud Run Execution descendants', async (t) => {
+  const contract = await contractFixture();
+  const job = GCP_IDENTITY.jobs.llm;
+  const executionName = `${job}-8l9jc`;
+  const parent = `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/jobs/${job}`;
+  const exactExecution = {
+    name: `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/executions/${executionName}`,
+    assetType: 'run.googleapis.com/Execution',
+    project: ASSET_PROJECT,
+    displayName: executionName,
+    location: 'asia-east2',
+    labels: {
+      'client.knative.dev/nonce': 'dox_suj_jac',
+      'cloud.googleapis.com/location': 'asia-east2',
+      'run.googleapis.com/job': job,
+      'run.googleapis.com/jobGeneration': '3',
+      'run.googleapis.com/jobResourceVersion': '1788253726355256',
+      'run.googleapis.com/jobUid': '30cb8fae-099b-4ef6-89ba-bbdfea6496c3',
+      'run.googleapis.com/satisfiesPzs': 'true',
+      'simplify-release-sha': '7c32f6d6bc0fbc41c5a2a6381c520cfd033f10f3',
+    },
+    parentFullResourceName: parent,
+    parentAssetType: 'run.googleapis.com/Job',
+  };
+  const withLabels = (overrides) => ({
+    ...exactExecution,
+    labels: { ...exactExecution.labels, ...overrides },
+  });
+  const withoutDisplayName = { ...exactExecution };
+  delete withoutDisplayName.displayName;
+  const invalid = [
+    ['wrong asset type', { ...exactExecution, assetType: 'run.googleapis.com/Job' }],
+    ['wrong parent job', { ...exactExecution, parentFullResourceName: parent.replace(job, GCP_IDENTITY.jobs.asr) }],
+    ['foreign job name', {
+      ...withoutDisplayName,
+      name: exactExecution.name.replace(job, 'hkbuddy-v1-foreign'),
+    }],
+    ['foreign project in name', {
+      ...withoutDisplayName,
+      name: exactExecution.name.replace(`/projects/${PROJECT}/`, '/projects/foreign/'),
+    }],
+    ['foreign project in parent', {
+      ...exactExecution,
+      parentFullResourceName: parent.replace(`/projects/${PROJECT}/`, '/projects/foreign/'),
+    }],
+    ['foreign region in name', {
+      ...withoutDisplayName,
+      name: exactExecution.name.replace('asia-east2', 'us-central1'),
+    }],
+    ['foreign region in parent', {
+      ...exactExecution,
+      parentFullResourceName: parent.replace('asia-east2', 'us-central1'),
+    }],
+    ['wrong location', { ...exactExecution, location: 'us-central1' }],
+    ['four-character suffix', {
+      ...exactExecution,
+      name: exactExecution.name.replace('8l9jc', '8l9j'), displayName: `${job}-8l9j`,
+    }],
+    ['six-character suffix', {
+      ...exactExecution,
+      name: exactExecution.name.replace('8l9jc', '8l9jca'), displayName: `${job}-8l9jca`,
+    }],
+    ['uppercase suffix', {
+      ...exactExecution,
+      name: exactExecution.name.replace('8l9jc', '8L9JC'), displayName: `${job}-8L9JC`,
+    }],
+    ['hyphenated suffix', {
+      ...exactExecution,
+      name: exactExecution.name.replace('8l9jc', '8l-9j'), displayName: `${job}-8l-9j`,
+    }],
+    ['wrong display name', { ...exactExecution, displayName: `${executionName}-foreign` }],
+    ['wrong parent asset type', { ...exactExecution, parentAssetType: 'run.googleapis.com/Service' }],
+    ['missing labels', { ...exactExecution, labels: {} }],
+    ['contradictory job label', withLabels({ 'run.googleapis.com/job': GCP_IDENTITY.jobs.asr })],
+    ['contradictory location label', withLabels({ 'cloud.googleapis.com/location': 'us-central1' })],
+    ['noncanonical job generation', withLabels({ 'run.googleapis.com/jobGeneration': '03' })],
+    ['noncanonical job resource version', withLabels({ 'run.googleapis.com/jobResourceVersion': '0' })],
+    ['malformed job uid', withLabels({ 'run.googleapis.com/jobUid': 'not-a-uuid' })],
+    ['malformed client nonce', withLabels({ 'client.knative.dev/nonce': 'not canonical' })],
+    ['contradictory PZS label', withLabels({ 'run.googleapis.com/satisfiesPzs': 'false' })],
+    ['uppercase release SHA', withLabels({ 'simplify-release-sha': '7C32F6D6BC0FBC41C5A2A6381C520CFD033F10F3' })],
+    ['short release SHA', withLabels({ 'simplify-release-sha': '7c32f6d6' })],
+    ['foreign project marker label', withLabels({ 'example.googleapis.com/project': 'foreign' })],
+  ];
+
+  for (const [name, asset] of invalid) {
+    await t.test(name, async () => {
+      const fixture = assetAuditControlPlane({ contract, assets: [asset] });
+      await assert.rejects(
+        () => fixture.plane.auditPreMutationState(),
+        (error) => error.code === 'RESOURCE_COLLISION',
+      );
+      assert.equal(fixture.gcloudCalls.some((args) => args.includes('enable') || args.includes('create')), false);
+      assert.equal(fixture.restCalls.some(({ method }) => method !== 'GET'), false);
+    });
+  }
+});
+
 test('post-deployment Cloud Run revision and Docker image descendants remain preflight-idempotent only under exact ancestors', async (t) => {
   const contract = await contractFixture();
   const serviceName = `//run.googleapis.com/projects/${PROJECT}/locations/asia-east2/services/${GCP_IDENTITY.service}`;
