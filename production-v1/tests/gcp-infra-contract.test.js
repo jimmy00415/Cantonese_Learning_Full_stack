@@ -72,6 +72,29 @@ const BUCKET_IAM_OPERATOR_BINDING = Object.freeze({
   role: BUCKET_IAM_OPERATOR_ROLE.name,
   condition: BUCKET_IAM_OPERATOR_CONDITION,
 });
+const RELEASE_EVIDENCE_OPERATOR_ROLE = Object.freeze({
+  id: 'hkbuddyV1ReleaseEvidenceObjectOperator',
+  name: `projects/${PROJECT}/roles/hkbuddyV1ReleaseEvidenceObjectOperator`,
+  title: 'HK Buddy V1 release evidence object operator',
+  description: 'Collect and clean release evidence in the fixed media bucket',
+  includedPermissions: [
+    'storage.objects.delete',
+    'storage.objects.get',
+    'storage.objects.list',
+  ],
+  stage: 'GA',
+});
+const RELEASE_EVIDENCE_OPERATOR_CONDITION = Object.freeze({
+  title: 'HK Buddy V1 release evidence object boundary',
+  description: 'List the media bucket and collect or clean only release-evidence objects',
+  expression: `resource.service == "storage.googleapis.com" && ((resource.type == "storage.googleapis.com/Bucket" && resource.name == "projects/_/buckets/${GCP_IDENTITY.bucket}") || (resource.type == "storage.googleapis.com/Object" && resource.name.startsWith("projects/_/buckets/${GCP_IDENTITY.bucket}/objects/release-evidence/")))`,
+});
+const RELEASE_EVIDENCE_OPERATOR_BINDING = Object.freeze({
+  scope: 'project',
+  member: 'user:admin@motionexp.com',
+  role: RELEASE_EVIDENCE_OPERATOR_ROLE.name,
+  condition: RELEASE_EVIDENCE_OPERATOR_CONDITION,
+});
 
 const AUTOMATIC_PROJECT_BINDINGS = Object.freeze([
   { member: 'user:admin@motionexp.com', role: 'roles/owner', required: true },
@@ -137,7 +160,7 @@ function protectedProjectPolicy(contract) {
   };
 }
 
-function recoveredPreflightProjectPolicy() {
+function recoveredPreflightProjectPolicy({ includeReleaseEvidence = true } = {}) {
   return {
     version: 3,
     etag: 'BwYAAAAAAAQ=',
@@ -150,14 +173,19 @@ function recoveredPreflightProjectPolicy() {
         members: [BUCKET_IAM_OPERATOR_BINDING.member],
         condition: clone(BUCKET_IAM_OPERATOR_BINDING.condition),
       },
+      ...(includeReleaseEvidence ? [{
+        role: RELEASE_EVIDENCE_OPERATOR_BINDING.role,
+        members: [RELEASE_EVIDENCE_OPERATOR_BINDING.member],
+        condition: clone(RELEASE_EVIDENCE_OPERATOR_BINDING.condition),
+      }] : []),
     ],
   };
 }
 
-function preflightReadRequest(channelHandler = null) {
+function preflightReadRequest(channelHandler = null, { includeReleaseEvidence = true } = {}) {
   return async (input) => {
     if (input.url === `https://cloudresourcemanager.googleapis.com/v1/projects/${PROJECT}:getIamPolicy`) {
-      return recoveredPreflightProjectPolicy();
+      return recoveredPreflightProjectPolicy({ includeReleaseEvidence });
     }
     if (channelHandler) return channelHandler(input);
     throw new Error(`unexpected preflight REST read ${input.url}`);
@@ -516,8 +544,13 @@ test('the executable contract fixes the isolated GCP topology and least-privileg
   assert.deepEqual(contract.resources.customRoles, [
     ACCEPTANCE_BUCKET_METADATA_ROLE,
     BUCKET_IAM_OPERATOR_ROLE,
+    RELEASE_EVIDENCE_OPERATOR_ROLE,
   ]);
   assert.deepEqual(contract.iam.operatorBucketIamBinding, BUCKET_IAM_OPERATOR_BINDING);
+  assert.deepEqual(
+    contract.iam.operatorReleaseEvidenceIamBinding,
+    RELEASE_EVIDENCE_OPERATOR_BINDING,
+  );
   assert.equal(
     EXPECTED_PROVISION_STEPS.includes('custom-role:hkbuddyV1AcceptanceBucketMetadataReader'),
     true,
@@ -530,6 +563,16 @@ test('the executable contract fixes the isolated GCP topology and least-privileg
   assert.equal(
     EXPECTED_PROVISION_STEPS.indexOf('custom-role:hkbuddyV1BucketIamPolicyOperator')
       < EXPECTED_PROVISION_STEPS.indexOf('operator-bucket-iam-binding'),
+    true,
+  );
+  assert.equal(
+    EXPECTED_PROVISION_STEPS.indexOf('custom-role:hkbuddyV1ReleaseEvidenceObjectOperator')
+      < EXPECTED_PROVISION_STEPS.indexOf('operator-release-evidence-iam-binding'),
+    true,
+  );
+  assert.equal(
+    EXPECTED_PROVISION_STEPS.indexOf('operator-release-evidence-iam-binding')
+      < EXPECTED_PROVISION_STEPS.indexOf('bucket-iam-baseline'),
     true,
   );
   assert.equal(
@@ -706,8 +749,9 @@ test('custom roles are definition-exact and reject permission, stage, deletion, 
   const contract = await contractFixture();
   const exactRole = { ...ACCEPTANCE_BUCKET_METADATA_ROLE, deleted: false };
   const operatorRole = { ...BUCKET_IAM_OPERATOR_ROLE, deleted: false };
+  const releaseEvidenceRole = { ...RELEASE_EVIDENCE_OPERATOR_ROLE, deleted: false };
   assert.doesNotThrow(() => assertExactCustomRoleDefinitions({
-    contract, roles: [exactRole, operatorRole],
+    contract, roles: [exactRole, operatorRole, releaseEvidenceRole],
   }));
 
   for (const [name, mutate] of [
@@ -718,7 +762,7 @@ test('custom roles are definition-exact and reject permission, stage, deletion, 
   ]) {
     await t.test(name, () => {
       const role = clone(exactRole);
-      const roles = [role, clone(operatorRole)];
+      const roles = [role, clone(operatorRole), clone(releaseEvidenceRole)];
       mutate(role, roles);
       assert.throws(
         () => assertExactCustomRoleDefinitions({ contract, roles }),
@@ -2900,6 +2944,11 @@ function exactManagedIamPolicies(contract) {
     members: [contract.iam.operatorBucketIamBinding.member],
     condition: clone(contract.iam.operatorBucketIamBinding.condition),
   });
+  policies.project.bindings.push({
+    role: contract.iam.operatorReleaseEvidenceIamBinding.role,
+    members: [contract.iam.operatorReleaseEvidenceIamBinding.member],
+    condition: clone(contract.iam.operatorReleaseEvidenceIamBinding.condition),
+  });
   for (const binding of contract.iam.automaticProjectBindings) {
     policies.project.bindings.push({
       role: binding.role,
@@ -3786,6 +3835,10 @@ test('pre-sensitive managed IAM audit accepts the live list projection and descr
       'iam', 'roles', 'describe', BUCKET_IAM_OPERATOR_ROLE.id,
       `--project=${PROJECT}`, '--format=json',
     ],
+    [
+      'iam', 'roles', 'describe', RELEASE_EVIDENCE_OPERATOR_ROLE.id,
+      `--project=${PROJECT}`, '--format=json',
+    ],
   ])));
   assertNoSensitiveGcloudMutation(fixture.gcloudCalls);
 });
@@ -3794,16 +3847,17 @@ test('pre-sensitive managed IAM audit rejects non-exact role inventories before 
   const contract = await contractFixture();
   const exact = liveCustomRoleListRow();
   const operator = liveCustomRoleListRow(BUCKET_IAM_OPERATOR_ROLE);
+  const releaseEvidence = liveCustomRoleListRow(RELEASE_EVIDENCE_OPERATOR_ROLE);
   const invalidInventories = [
-    ['missing expected role', [operator]],
-    ['duplicate expected role', [exact, { ...exact }, operator]],
-    ['extra project role', [exact, operator, { ...exact, name: `projects/${PROJECT}/roles/unexpected` }]],
-    ['foreign-project role', [{ ...exact, name: 'projects/foreign-project/roles/hkbuddyV1AcceptanceBucketMetadataReader' }, operator]],
-    ['hidden deleted extra role', [exact, operator, {
+    ['missing expected role', [operator, releaseEvidence]],
+    ['duplicate expected role', [exact, { ...exact }, operator, releaseEvidence]],
+    ['extra project role', [exact, operator, releaseEvidence, { ...exact, name: `projects/${PROJECT}/roles/unexpected` }]],
+    ['foreign-project role', [{ ...exact, name: 'projects/foreign-project/roles/hkbuddyV1AcceptanceBucketMetadataReader' }, operator, releaseEvidence]],
+    ['hidden deleted extra role', [exact, operator, releaseEvidence, {
       ...exact, name: `projects/${PROJECT}/roles/deletedUnexpected`, deleted: true,
     }]],
-    ['deleted expected role', [{ ...exact, deleted: true }, operator]],
-    ['ambiguous expected deleted state', [{ ...exact, deleted: 'false' }, operator]],
+    ['deleted expected role', [{ ...exact, deleted: true }, operator, releaseEvidence]],
+    ['ambiguous expected deleted state', [{ ...exact, deleted: 'false' }, operator, releaseEvidence]],
   ];
 
   for (const [name, listedRoles] of invalidInventories) {
@@ -3938,10 +3992,11 @@ function defaultUniformBucketBindings() {
 }
 
 function operatorProjectPolicy(contract, {
-  includeOperator = false, etag = 'BwYAAAAAAAQ=', extraBindings = [],
+  includeOperator = false, includeReleaseEvidence = false,
+  etag = 'BwYAAAAAAAQ=', extraBindings = [], auditConfigs,
 } = {}) {
   return {
-    version: includeOperator ? 3 : 1,
+    version: includeOperator || includeReleaseEvidence ? 3 : 1,
     etag,
     bindings: [
       ...contract.project.protectedBindings.map(({ role, member }) => ({
@@ -3952,13 +4007,22 @@ function operatorProjectPolicy(contract, {
         members: [contract.iam.operatorBucketIamBinding.member],
         condition: clone(contract.iam.operatorBucketIamBinding.condition),
       }] : []),
+      ...(includeReleaseEvidence ? [{
+        role: contract.iam.operatorReleaseEvidenceIamBinding.role,
+        members: [contract.iam.operatorReleaseEvidenceIamBinding.member],
+        condition: clone(contract.iam.operatorReleaseEvidenceIamBinding.condition),
+      }] : []),
       ...extraBindings,
     ],
+    ...(auditConfigs === undefined ? {} : { auditConfigs: clone(auditConfigs) }),
   };
 }
 
 function operatorBindingPlane({
   contract, policies, setResponse, permissionResponses = {}, bucketPolicies = {},
+  enabledServices = [
+    'cloudresourcemanager.googleapis.com', 'iam.googleapis.com', 'storage.googleapis.com',
+  ],
   now = Date.now, sleep = async () => undefined,
 }) {
   const gcloudCalls = [];
@@ -3973,7 +4037,7 @@ function operatorBindingPlane({
     gcloud: async (args) => {
       gcloudCalls.push(args);
       if (args[0] === 'services' && args[1] === 'list') {
-        return enabledServiceRows(['cloudresourcemanager.googleapis.com', 'iam.googleapis.com', 'storage.googleapis.com']);
+        return enabledServiceRows(enabledServices);
       }
       throw new Error(`unexpected gcloud ${args.join(' ')}`);
     },
@@ -4199,6 +4263,255 @@ test('lost project IAM set response recovers only from exact readback and suppor
     id: 'operator-bucket-iam-binding', status: 'unchanged',
   });
   assert.equal(resumed.restCalls.some(({ url }) => url.endsWith(':setIamPolicy')), false);
+});
+
+test('release-evidence operator binding preserves the existing condition in one version-3 etag transaction', async () => {
+  const contract = await contractFixture();
+  const observed = operatorProjectPolicy(contract, {
+    includeOperator: true, etag: 'BwYAAAAAAAQ=',
+  });
+  const final = operatorProjectPolicy(contract, {
+    includeOperator: true, includeReleaseEvidence: true, etag: 'BwYAAAAAAAg=',
+  });
+  const fixture = operatorBindingPlane({
+    contract, policies: [observed, final], setResponse: final,
+  });
+
+  assert.deepEqual(await fixture.plane.read('operator-release-evidence-iam-binding'), {
+    status: 'absent',
+  });
+  await fixture.plane.create('operator-release-evidence-iam-binding');
+  const setCall = fixture.restCalls.find(({ url }) => url.endsWith(':setIamPolicy'));
+  assert.deepEqual(setCall.body, {
+    policy: {
+      ...observed,
+      version: 3,
+      bindings: [
+        ...observed.bindings,
+        {
+          role: RELEASE_EVIDENCE_OPERATOR_BINDING.role,
+          members: [RELEASE_EVIDENCE_OPERATOR_BINDING.member],
+          condition: clone(RELEASE_EVIDENCE_OPERATOR_BINDING.condition),
+        },
+      ],
+    },
+    updateMask: 'bindings,etag,version',
+  });
+  const readback = await fixture.plane.read('operator-release-evidence-iam-binding');
+  assert.equal(readback.status, 'present');
+  assert.equal(fixture.plane.compare('operator-release-evidence-iam-binding', readback.value), true);
+});
+
+test('operator conditional IAM allowlist accepts either known binding as the only repair gap', async (t) => {
+  const contract = await contractFixture();
+  for (const [name, policy, step, expectedStatus] of [
+    ['both absent', operatorProjectPolicy(contract), 'operator-release-evidence-iam-binding', 'absent'],
+    ['release absent', operatorProjectPolicy(contract, { includeOperator: true }), 'operator-release-evidence-iam-binding', 'absent'],
+    ['bucket absent', operatorProjectPolicy(contract, { includeReleaseEvidence: true }), 'operator-bucket-iam-binding', 'absent'],
+    ['both present', operatorProjectPolicy(contract, {
+      includeOperator: true, includeReleaseEvidence: true,
+    }), 'operator-release-evidence-iam-binding', 'present'],
+  ]) {
+    await t.test(name, async () => {
+      const fixture = operatorBindingPlane({ contract, policies: [policy], setResponse: policy });
+      const state = await fixture.plane.read(step);
+      assert.equal(state.status, expectedStatus);
+      assert.equal(fixture.restCalls.some(({ url }) => url.endsWith(':setIamPolicy')), false);
+    });
+  }
+});
+
+test('release-evidence conditional IAM rejects widened or malformed grants before policy write', async (t) => {
+  const contract = await contractFixture();
+  const exactPolicy = operatorProjectPolicy(contract, {
+    includeOperator: true, includeReleaseEvidence: true,
+  });
+  const cases = [
+    ['wrong member', (binding) => { binding.members = ['user:foreign@example.test']; }],
+    ['wrong role', (binding) => { binding.role = 'roles/storage.objectAdmin'; }],
+    ['wrong service', (binding) => { binding.condition.expression = binding.condition.expression.replace('storage.googleapis.com', 'run.googleapis.com'); }],
+    ['wrong bucket type', (binding) => { binding.condition.expression = binding.condition.expression.replace('storage.googleapis.com/Bucket', 'storage.googleapis.com/Object'); }],
+    ['wrong object type', (binding) => { binding.condition.expression = binding.condition.expression.replace('storage.googleapis.com/Object', 'storage.googleapis.com/Bucket'); }],
+    ['foreign bucket', (binding) => { binding.condition.expression = binding.condition.expression.replaceAll(GCP_IDENTITY.bucket, 'foreign-bucket'); }],
+    ['sibling prefix', (binding) => { binding.condition.expression = binding.condition.expression.replace('/objects/release-evidence/', '/objects/release-evidence-evil/'); }],
+    ['missing trailing slash', (binding) => { binding.condition.expression = binding.condition.expression.replace('/objects/release-evidence/', '/objects/release-evidence'); }],
+    ['duplicate binding', (_binding, policy) => { policy.bindings.push(clone(policy.bindings.at(-1))); }],
+    ['unknown condition', (_binding, policy) => { policy.bindings.push({ role: 'roles/viewer', members: ['user:admin@motionexp.com'], condition: { title: 'unknown', description: 'unknown', expression: 'true' } }); }],
+  ];
+  for (const [name, mutate] of cases) {
+    await t.test(name, async () => {
+      const policy = clone(exactPolicy);
+      const binding = policy.bindings.find(({ role }) => role === RELEASE_EVIDENCE_OPERATOR_ROLE.name);
+      mutate(binding, policy);
+      const fixture = operatorBindingPlane({ contract, policies: [policy], setResponse: policy });
+      await assert.rejects(
+        () => fixture.plane.read('operator-release-evidence-iam-binding'),
+        (error) => error.code === 'IAM_ALLOWLIST_MISMATCH',
+      );
+      assert.equal(fixture.restCalls.some(({ url }) => url.endsWith(':setIamPolicy')), false);
+    });
+  }
+});
+
+test('lost release-evidence IAM write response requires full-policy readback preserving prior bindings', async (t) => {
+  const contract = await contractFixture();
+  const enabledServices = [
+    'cloudresourcemanager.googleapis.com', 'containerregistry.googleapis.com',
+    'iam.googleapis.com', 'storage.googleapis.com',
+  ];
+  const configuredBinding = clone(contract.iam.bindings.find(({ scope }) => scope === 'project'));
+  delete configuredBinding.scope;
+  const automaticDefinition = contract.iam.automaticProjectBindings.find(
+    ({ role }) => role === 'roles/containerregistry.ServiceAgent',
+  );
+  const automaticBinding = {
+    role: automaticDefinition.role,
+    members: [automaticDefinition.member.replace('__PROJECT_NUMBER__', PROJECT_NUMBER)],
+  };
+  const auditConfigs = [{
+    service: 'allServices',
+    auditLogConfigs: [{ logType: 'DATA_READ', exemptedMembers: ['user:auditor@motionexp.com'] }],
+  }];
+  const preservedBindings = [
+    { role: configuredBinding.role, members: [configuredBinding.member] },
+    automaticBinding,
+  ];
+  const observed = operatorProjectPolicy(contract, {
+    includeOperator: true, extraBindings: preservedBindings, auditConfigs,
+  });
+  const final = operatorProjectPolicy(contract, {
+    includeOperator: true, includeReleaseEvidence: true, etag: 'BwYAAAAAAAg=',
+    extraBindings: preservedBindings, auditConfigs,
+  });
+  const responseLost = Object.assign(new Error('response lost'), { code: 'TRANSPORT_AMBIGUOUS' });
+
+  await t.test('exact full-policy recovery', async () => {
+    const fixture = operatorBindingPlane({
+      contract, policies: [observed], setResponse: responseLost, enabledServices,
+    });
+    let setApplied = false;
+    const baseRequest = fixture.plane.request;
+    fixture.plane.request = async (input) => {
+      if (input.url.endsWith(':setIamPolicy')) {
+        fixture.restCalls.push(clone(input));
+        setApplied = true;
+        throw responseLost;
+      }
+      if (input.url.endsWith(':getIamPolicy') && setApplied) return clone(final);
+      return baseRequest(input);
+    };
+    const result = await ensureExactResource({
+      id: 'operator-release-evidence-iam-binding', mutate: true,
+      read: () => fixture.plane.read('operator-release-evidence-iam-binding'),
+      create: () => fixture.plane.create('operator-release-evidence-iam-binding'),
+      compare: (value) => fixture.plane.compare('operator-release-evidence-iam-binding', value),
+    });
+    assert.equal(result.status, 'created-readback-recovered');
+  });
+
+  await t.test('dropped prior condition is ambiguous', async () => {
+    const droppedPrior = operatorProjectPolicy(contract, {
+      includeReleaseEvidence: true, etag: 'BwYAAAAAAAg=',
+      extraBindings: preservedBindings, auditConfigs,
+    });
+    const fixture = operatorBindingPlane({
+      contract, policies: [observed], setResponse: responseLost, enabledServices,
+    });
+    let setApplied = false;
+    const baseRequest = fixture.plane.request;
+    fixture.plane.request = async (input) => {
+      if (input.url.endsWith(':setIamPolicy')) {
+        fixture.restCalls.push(clone(input));
+        setApplied = true;
+        throw responseLost;
+      }
+      if (input.url.endsWith(':getIamPolicy') && setApplied) return clone(droppedPrior);
+      return baseRequest(input);
+    };
+    await assert.rejects(() => ensureExactResource({
+      id: 'operator-release-evidence-iam-binding', mutate: true,
+      read: () => fixture.plane.read('operator-release-evidence-iam-binding'),
+      create: () => fixture.plane.create('operator-release-evidence-iam-binding'),
+      compare: (value) => fixture.plane.compare('operator-release-evidence-iam-binding', value),
+    }), (error) => error.code === 'CREATE_RESULT_AMBIGUOUS');
+  });
+
+  for (const [name, mutate] of [
+    ['dropped configured binding', (policy) => {
+      policy.bindings = policy.bindings.filter(({ role }) => role !== configuredBinding.role);
+    }],
+    ['dropped allowed automatic binding', (policy) => {
+      policy.bindings = policy.bindings.filter(({ role }) => role !== automaticBinding.role);
+    }],
+    ['dropped audit config', (policy) => { delete policy.auditConfigs; }],
+  ]) {
+    await t.test(`${name} is ambiguous after a lost response`, async () => {
+      const incomplete = clone(final);
+      mutate(incomplete);
+      const fixture = operatorBindingPlane({
+        contract, policies: [observed], setResponse: responseLost, enabledServices,
+      });
+      let setApplied = false;
+      const baseRequest = fixture.plane.request;
+      fixture.plane.request = async (input) => {
+        if (input.url.endsWith(':setIamPolicy')) {
+          fixture.restCalls.push(clone(input));
+          setApplied = true;
+          throw responseLost;
+        }
+        if (input.url.endsWith(':getIamPolicy') && setApplied) return clone(incomplete);
+        return baseRequest(input);
+      };
+      await assert.rejects(() => ensureExactResource({
+        id: 'operator-release-evidence-iam-binding', mutate: true,
+        read: () => fixture.plane.read('operator-release-evidence-iam-binding'),
+        create: () => fixture.plane.create('operator-release-evidence-iam-binding'),
+        compare: (value) => fixture.plane.compare('operator-release-evidence-iam-binding', value),
+      }), (error) => error.code === 'CREATE_RESULT_AMBIGUOUS');
+    });
+  }
+
+  await t.test('incomplete successful response is transport-ambiguous', async () => {
+    const incomplete = clone(final);
+    incomplete.bindings = incomplete.bindings.filter(({ role }) => role !== configuredBinding.role);
+    const fixture = operatorBindingPlane({
+      contract, policies: [observed], setResponse: incomplete, enabledServices,
+    });
+    assert.deepEqual(await fixture.plane.read('operator-release-evidence-iam-binding'), {
+      status: 'absent',
+    });
+    await assert.rejects(
+      () => fixture.plane.create('operator-release-evidence-iam-binding'),
+      (error) => error.code === 'TRANSPORT_AMBIGUOUS',
+    );
+  });
+});
+
+test('release-evidence propagation proves exact media-bucket list authority', async () => {
+  const contract = await contractFixture();
+  let clock = 0;
+  const fixture = operatorBindingPlane({
+    contract,
+    policies: [operatorProjectPolicy(contract, {
+      includeOperator: true, includeReleaseEvidence: true,
+    })],
+    setResponse: operatorProjectPolicy(contract, {
+      includeOperator: true, includeReleaseEvidence: true,
+    }),
+    permissionResponses: {
+      [GCP_IDENTITY.bucket]: [
+        { kind: 'storage#testIamPermissionsResponse' },
+        { kind: 'storage#testIamPermissionsResponse', permissions: ['storage.objects.list'] },
+      ],
+    },
+    now: () => clock,
+    sleep: async (milliseconds) => { clock += milliseconds; },
+  });
+  await fixture.plane.waitForOperatorReleaseEvidenceAccess();
+  const calls = fixture.restCalls.filter(({ url }) => url.includes('/iam/testPermissions?'));
+  assert.equal(calls.length, 2);
+  assert.equal(calls.every(({ url }) => new URL(url).searchParams.toString() === 'permissions=storage.objects.list'), true);
+  assert.equal(clock > 0, true);
 });
 
 function operatorRecoveryAuditFixture({
@@ -6550,7 +6863,7 @@ test('pre-mutation PSA audit accepts only exact scoped installed-gcloud connecti
 function preflightGcloud({
   projectPresent = true, forbidden = false, billingCurrency = 'HKD',
   activeAccount = 'admin@motionexp.com', organizationResponse, billingAccountResponse,
-  projectResponse, billingLinkResponse,
+  projectResponse, billingLinkResponse, releaseEvidenceRolePresent = true,
 } = {}) {
   const calls = [];
   const gcloud = async (args) => {
@@ -6582,7 +6895,15 @@ function preflightGcloud({
     if (args[0] === 'compute' && args[1] === 'networks' && args[2] === 'subnets') return [];
     if (args[0] === 'compute' && ['routes', 'addresses'].includes(args[1])) return [];
     if (args[0] === 'services' && args[1] === 'vpc-peerings') return [];
-    if (args[0] === 'iam' && ['service-accounts', 'roles'].includes(args[1]) && args.includes('list')) return [];
+    if (args[0] === 'iam' && args[1] === 'service-accounts' && args.includes('list')) return [];
+    if (args[0] === 'iam' && args[1] === 'roles' && args.includes('list')) {
+      return releaseEvidenceRolePresent ? [{ name: RELEASE_EVIDENCE_OPERATOR_ROLE.name }] : [];
+    }
+    if (args[0] === 'iam' && args[1] === 'roles' && args[2] === 'describe'
+      && args[3] === RELEASE_EVIDENCE_OPERATOR_ROLE.id) {
+      if (releaseEvidenceRolePresent) return { ...RELEASE_EVIDENCE_OPERATOR_ROLE, deleted: false };
+      throw notFound();
+    }
     if (args[0] === 'compute' && args[1] === 'networks') return {
       name: 'default', autoCreateSubnetworks: true,
     };
@@ -6628,6 +6949,90 @@ test('preflight is read-only, project-explicit, and requires the existing shared
   assert.equal(fixture.calls.every((args) => args.includes(`--project=${PROJECT}`)), true);
   assert.equal(fixture.calls.some((args) => args.includes('create') || args.includes('enable') || args.includes('link')), false);
   assert.deepEqual(output, [`${JSON.stringify(result.publicReport)}\n`]);
+});
+
+test('preflight distinguishes a known release-evidence IAM repair from reconciled or drifted state', async (t) => {
+  const contract = await contractFixture();
+  await t.test('missing exact role and binding is a named non-mutating repair requirement', async () => {
+    const fixture = preflightGcloud({ releaseEvidenceRolePresent: false });
+    const result = await runGcpPreflight({
+      contract,
+      gcloud: fixture.gcloud,
+      request: preflightReadRequest(null, { includeReleaseEvidence: false }),
+      getRestPrincipal: async () => 'admin@motionexp.com',
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1);
+    assert.deepEqual(result.publicReport, {
+      status: 'failed',
+      code: 'RELEASE_EVIDENCE_IAM_REPAIR_REQUIRED',
+      projectId: PROJECT,
+      mutationPerformed: false,
+      projectState: 'present',
+      missingResources: [
+        'custom-role:hkbuddyV1ReleaseEvidenceObjectOperator',
+        'operator-release-evidence-iam-binding',
+      ],
+    });
+    assert.equal(fixture.calls.some((args) => args.includes('create')), false);
+  });
+
+  for (const [name, releaseEvidenceRolePresent, includeReleaseEvidence, missingResource] of [
+    [
+      'missing exact role only reports that role',
+      false,
+      true,
+      'custom-role:hkbuddyV1ReleaseEvidenceObjectOperator',
+    ],
+    [
+      'missing exact binding only reports that binding',
+      true,
+      false,
+      'operator-release-evidence-iam-binding',
+    ],
+  ]) {
+    await t.test(name, async () => {
+      const fixture = preflightGcloud({ releaseEvidenceRolePresent });
+      const result = await runGcpPreflight({
+        contract,
+        gcloud: fixture.gcloud,
+        request: preflightReadRequest(null, { includeReleaseEvidence }),
+        getRestPrincipal: async () => 'admin@motionexp.com',
+        writeOutput: () => undefined,
+      });
+      assert.equal(result.exitCode, 1);
+      assert.deepEqual(result.publicReport, {
+        status: 'failed',
+        code: 'RELEASE_EVIDENCE_IAM_REPAIR_REQUIRED',
+        projectId: PROJECT,
+        mutationPerformed: false,
+        projectState: 'present',
+        missingResources: [missingResource],
+      });
+      assert.equal(fixture.calls.some((args) => args.includes('create')), false);
+    });
+  }
+
+  await t.test('unknown conditional drift stays fatal', async () => {
+    const fixture = preflightGcloud();
+    const drifted = recoveredPreflightProjectPolicy();
+    drifted.bindings.at(-1).condition.expression = 'true';
+    const result = await runGcpPreflight({
+      contract,
+      gcloud: fixture.gcloud,
+      request: async (input) => {
+        if (input.url === `https://cloudresourcemanager.googleapis.com/v1/projects/${PROJECT}:getIamPolicy`) {
+          return drifted;
+        }
+        throw new Error(`unexpected request ${input.url}`);
+      },
+      getRestPrincipal: async () => 'admin@motionexp.com',
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.publicReport.code, 'IAM_ALLOWLIST_MISMATCH');
+    assert.equal(result.publicReport.mutationPerformed, false);
+  });
 });
 
 test('preflight and real control plane reject every noncanonical authority shape before inventory or mutation', async (t) => {
@@ -6792,6 +7197,8 @@ test('real control plane completes narrow IAM recovery before no-channel API dis
   let apisEnabled = false;
   let operatorRoleCreated = false;
   let operatorBindingCreated = false;
+  let releaseEvidenceRoleCreated = false;
+  let releaseEvidenceBindingCreated = false;
   const notFound = () => Object.assign(new Error('not found'), { code: 'NOT_FOUND' });
   const plane = new GcpControlPlane({
     contract, notificationChannel: null,
@@ -6812,18 +7219,30 @@ test('real control plane completes narrow IAM recovery before no-channel API dis
         billingEnabled: true, billingAccountName: `billingAccounts/${GCP_IDENTITY.billingAccountId}`,
       };
       if (args[0] === 'projects' && args[1] === 'get-iam-policy') {
-        return operatorProjectPolicy(contract, { includeOperator: operatorBindingCreated });
+        return operatorProjectPolicy(contract, {
+          includeOperator: operatorBindingCreated,
+          includeReleaseEvidence: releaseEvidenceBindingCreated,
+        });
       }
       if (args[0] === 'asset' && args[1] === 'search-all-resources') return [];
       if (args[0] === 'iam' && args.includes('list')) return [];
       if (args[0] === 'iam' && args[1] === 'roles' && args[2] === 'describe') {
-        if (!operatorRoleCreated || args[3] !== BUCKET_IAM_OPERATOR_ROLE.id) throw notFound();
-        return { ...BUCKET_IAM_OPERATOR_ROLE, deleted: false };
+        if (args[3] === BUCKET_IAM_OPERATOR_ROLE.id && operatorRoleCreated) {
+          return { ...BUCKET_IAM_OPERATOR_ROLE, deleted: false };
+        }
+        if (args[3] === RELEASE_EVIDENCE_OPERATOR_ROLE.id && releaseEvidenceRoleCreated) {
+          return { ...RELEASE_EVIDENCE_OPERATOR_ROLE, deleted: false };
+        }
+        throw notFound();
       }
       if (args[0] === 'iam' && args[1] === 'roles' && args[2] === 'create') {
-        assert.equal(args[3], BUCKET_IAM_OPERATOR_ROLE.id);
-        operatorRoleCreated = true;
-        return { ...BUCKET_IAM_OPERATOR_ROLE, deleted: false };
+        if (args[3] === BUCKET_IAM_OPERATOR_ROLE.id) {
+          operatorRoleCreated = true;
+          return { ...BUCKET_IAM_OPERATOR_ROLE, deleted: false };
+        }
+        assert.equal(args[3], RELEASE_EVIDENCE_OPERATOR_ROLE.id);
+        releaseEvidenceRoleCreated = true;
+        return { ...RELEASE_EVIDENCE_OPERATOR_ROLE, deleted: false };
       }
       if (args[0] === 'services' && args[1] === 'list') {
         return enabledServiceRows(apisEnabled ? allApis : enabledBefore);
@@ -6833,12 +7252,22 @@ test('real control plane completes narrow IAM recovery before no-channel API dis
     },
     request: async (input) => {
       if (input.url.endsWith(':getIamPolicy')) {
-        return operatorProjectPolicy(contract, { includeOperator: operatorBindingCreated });
+        return operatorProjectPolicy(contract, {
+          includeOperator: operatorBindingCreated,
+          includeReleaseEvidence: releaseEvidenceBindingCreated,
+        });
       }
       if (input.url.endsWith(':setIamPolicy')) {
-        operatorBindingCreated = true;
+        operatorBindingCreated = input.body.policy.bindings.some(({ role }) => (
+          role === BUCKET_IAM_OPERATOR_BINDING.role
+        ));
+        releaseEvidenceBindingCreated = input.body.policy.bindings.some(({ role }) => (
+          role === RELEASE_EVIDENCE_OPERATOR_BINDING.role
+        ));
         return operatorProjectPolicy(contract, {
-          includeOperator: true, etag: 'BwYAAAAAAAg=',
+          includeOperator: operatorBindingCreated,
+          includeReleaseEvidence: releaseEvidenceBindingCreated,
+          etag: 'BwYAAAAAAAg=',
         });
       }
       throw new Error('unexpected REST before channel');
@@ -6859,7 +7288,10 @@ test('real control plane completes narrow IAM recovery before no-channel API dis
   assert.deepEqual(calls.filter((args) => args.includes('enable')).map((args) => args.slice(0, 2)), [['services', 'enable']]);
   assert.deepEqual(
     calls.filter((args) => args.includes('create')).map((args) => args.slice(0, 4)),
-    [['iam', 'roles', 'create', BUCKET_IAM_OPERATOR_ROLE.id]],
+    [
+      ['iam', 'roles', 'create', BUCKET_IAM_OPERATOR_ROLE.id],
+      ['iam', 'roles', 'create', RELEASE_EVIDENCE_OPERATOR_ROLE.id],
+    ],
   );
   assert.equal(calls.some((args) => args.includes('add-iam-policy-binding')), false);
 });
@@ -8827,7 +9259,7 @@ class MemoryControlPlane {
     existing = [], unverifiedChannel = false, userManagedKey = false,
     finalReadbackFailure = null, iamSubsetFailure = null,
     preMutationFailure = null, operatorRecoveryFailure = null,
-    operatorPropagationFailure = null,
+    operatorPropagationFailure = null, releaseEvidencePropagationFailure = null,
   } = {}) {
     this.resources = new Map([...new Set(['project', 'billing', ...existing])].map((id) => {
       const value = { id, exact: true };
@@ -8844,6 +9276,7 @@ class MemoryControlPlane {
     this.preMutationFailure = preMutationFailure;
     this.operatorRecoveryFailure = operatorRecoveryFailure;
     this.operatorPropagationFailure = operatorPropagationFailure;
+    this.releaseEvidencePropagationFailure = releaseEvidencePropagationFailure;
     this.secrets = [];
   }
 
@@ -8872,6 +9305,17 @@ class MemoryControlPlane {
     if (this.operatorPropagationFailure) {
       const error = new Error(this.operatorPropagationFailure);
       error.code = this.operatorPropagationFailure;
+      throw error;
+    }
+  }
+
+  async waitForOperatorReleaseEvidenceAccess() {
+    this.calls.push([
+      'wait', 'operator-release-evidence-propagation', GCP_IDENTITY.bucket,
+    ]);
+    if (this.releaseEvidencePropagationFailure) {
+      const error = new Error(this.releaseEvidencePropagationFailure);
+      error.code = this.releaseEvidencePropagationFailure;
       throw error;
     }
   }
@@ -9026,6 +9470,8 @@ test('confirmed provisioning creates every fixed step, performs post-create read
   const created = plane.calls.filter(([kind]) => kind === 'create').map(([, id]) => id);
   const recoverySteps = [
     'custom-role:hkbuddyV1BucketIamPolicyOperator', 'operator-bucket-iam-binding',
+    'custom-role:hkbuddyV1ReleaseEvidenceObjectOperator',
+    'operator-release-evidence-iam-binding',
   ];
   assert.deepEqual(created, [
     ...recoverySteps,
@@ -9057,7 +9503,7 @@ test('confirmed provisioning creates every fixed step, performs post-create read
   assert.equal(plane.calls.some(([kind]) => kind === 'final-readback'), true);
 });
 
-test('confirmed provisioning repairs operator bucket IAM before the full audit and every ordinary mutation', async () => {
+test('confirmed provisioning repairs both operator IAM contracts before the full audit and every ordinary mutation', async () => {
   const plane = new MemoryControlPlane();
   const result = await runGcpProvision({
     argv: [`--confirm-project=${PROJECT}`, `--notification-channel=${CHANNEL}`],
@@ -9068,6 +9514,8 @@ test('confirmed provisioning repairs operator bucket IAM before the full audit a
   assert.equal(result.exitCode, 0);
   const operatorRole = 'custom-role:hkbuddyV1BucketIamPolicyOperator';
   const operatorBinding = 'operator-bucket-iam-binding';
+  const releaseEvidenceRole = 'custom-role:hkbuddyV1ReleaseEvidenceObjectOperator';
+  const releaseEvidenceBinding = 'operator-release-evidence-iam-binding';
   const recoveryAuditIndex = plane.calls.findIndex(([kind, id]) => (
     kind === 'audit' && id === 'operator-bucket-iam-recovery'
   ));
@@ -9077,21 +9525,39 @@ test('confirmed provisioning repairs operator bucket IAM before the full audit a
   const bindingCreateIndex = plane.calls.findIndex(([kind, id]) => (
     kind === 'create' && id === operatorBinding
   ));
-  const propagationIndex = plane.calls.findIndex(([kind]) => kind === 'wait');
+  const releaseEvidenceRoleCreateIndex = plane.calls.findIndex(([kind, id]) => (
+    kind === 'create' && id === releaseEvidenceRole
+  ));
+  const releaseEvidenceBindingCreateIndex = plane.calls.findIndex(([kind, id]) => (
+    kind === 'create' && id === releaseEvidenceBinding
+  ));
+  const propagationIndex = plane.calls.findIndex(([kind, id]) => (
+    kind === 'wait' && id === 'operator-bucket-iam-propagation'
+  ));
+  const releaseEvidencePropagationIndex = plane.calls.findIndex(([kind, id]) => (
+    kind === 'wait' && id === 'operator-release-evidence-propagation'
+  ));
   const fullAuditIndex = plane.calls.findIndex(([kind, id]) => (
     kind === 'audit' && id === 'pre-mutation-state'
   ));
   const firstOtherCreateIndex = plane.calls.findIndex(([kind, id]) => (
-    kind === 'create' && ![operatorRole, operatorBinding].includes(id)
+    kind === 'create' && ![
+      operatorRole, operatorBinding, releaseEvidenceRole, releaseEvidenceBinding,
+    ].includes(id)
   ));
   assert.equal(recoveryAuditIndex < roleCreateIndex, true);
   assert.equal(roleCreateIndex < bindingCreateIndex, true);
   assert.equal(bindingCreateIndex < propagationIndex, true);
-  assert.equal(propagationIndex < fullAuditIndex, true);
+  assert.equal(propagationIndex < releaseEvidenceRoleCreateIndex, true);
+  assert.equal(releaseEvidenceRoleCreateIndex < releaseEvidenceBindingCreateIndex, true);
+  assert.equal(releaseEvidenceBindingCreateIndex < releaseEvidencePropagationIndex, true);
+  assert.equal(releaseEvidencePropagationIndex < fullAuditIndex, true);
   assert.equal(fullAuditIndex < firstOtherCreateIndex, true);
   assert.equal(plane.calls.filter(([kind, id]) => (
-    kind === 'create' && [operatorRole, operatorBinding].includes(id)
-  )).length, 2);
+    kind === 'create' && [
+      operatorRole, operatorBinding, releaseEvidenceRole, releaseEvidenceBinding,
+    ].includes(id)
+  )).length, 4);
   assert.equal(plane.calls.some(([kind, id]) => kind === 'create' && (
     id.startsWith('secret-version:') || id.startsWith('db-user:')
   )), true);
@@ -9131,10 +9597,31 @@ test('operator IAM recovery failures are resumable and precede secrets, database
     )), false);
   });
 
+  await t.test('release-evidence list propagation timeout preserves both exact bindings', async () => {
+    const plane = new MemoryControlPlane({
+      releaseEvidencePropagationFailure: 'OPERATOR_RELEASE_EVIDENCE_IAM_PROPAGATION_TIMEOUT',
+    });
+    const result = await runGcpProvision({
+      argv: [`--confirm-project=${PROJECT}`, `--notification-channel=${CHANNEL}`],
+      contract: await contractFixture(), controlPlane: plane,
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.publicReport.resumeBoundary, 'operator-release-evidence-iam-propagation');
+    assert.equal(result.publicReport.mutationPerformed, true);
+    assert.equal(plane.resources.has('operator-bucket-iam-binding'), true);
+    assert.equal(plane.resources.has('operator-release-evidence-iam-binding'), true);
+    assert.equal(plane.calls.some(([kind, id]) => (
+      kind === 'audit' && id === 'pre-mutation-state'
+    )), false);
+  });
+
   await t.test('crash resume adopts the exact role and binding without another IAM write', async () => {
     const existing = [
       'custom-role:hkbuddyV1BucketIamPolicyOperator',
       'operator-bucket-iam-binding',
+      'custom-role:hkbuddyV1ReleaseEvidenceObjectOperator',
+      'operator-release-evidence-iam-binding',
     ];
     const plane = new MemoryControlPlane({ existing });
     const result = await runGcpProvision({
@@ -9195,7 +9682,11 @@ test('exhaustive pre-mutation audit rejects managed collisions and network overl
       assert.equal(result.publicReport.mutationPerformed, true);
       assert.deepEqual(
         plane.calls.filter(([kind]) => kind === 'create').map(([, id]) => id),
-        ['custom-role:hkbuddyV1BucketIamPolicyOperator', 'operator-bucket-iam-binding'],
+        [
+          'custom-role:hkbuddyV1BucketIamPolicyOperator', 'operator-bucket-iam-binding',
+          'custom-role:hkbuddyV1ReleaseEvidenceObjectOperator',
+          'operator-release-evidence-iam-binding',
+        ],
       );
       assert.deepEqual(plane.calls.filter(([kind]) => kind === 'audit'), [
         ['audit', 'operator-bucket-iam-recovery'], ['audit', 'pre-mutation-state'],
@@ -9226,6 +9717,8 @@ test('service-account key and mandatory final-readback gates prevent a false pro
         [
           'custom-role:hkbuddyV1BucketIamPolicyOperator',
           'operator-bucket-iam-binding',
+          'custom-role:hkbuddyV1ReleaseEvidenceObjectOperator',
+          'operator-release-evidence-iam-binding',
           'apis',
         ],
       );

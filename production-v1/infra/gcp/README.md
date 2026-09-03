@@ -108,6 +108,13 @@ billing link, and the three protected baseline IAM bindings. It never creates,
 links, patches, or deletes the project, billing link, default network, or any
 unrelated IAM policy.
 
+Known absence of only the exact release-evidence operator role and/or its exact
+conditional binding is reported as
+`RELEASE_EVIDENCE_IAM_REPAIR_REQUIRED` with `mutationPerformed=false` and the
+missing fixed resource IDs. A fully reconciled state passes. Unknown,
+malformed, widened, duplicate, or otherwise drifted conditional IAM remains a
+fatal allowlist failure rather than a repair suggestion.
+
 Organization, billing account, project parent, and project billing link are
 accepted only in the explicitly enumerated canonical API shapes with exact
 case, delimiter, segment count, and required fields. The project-wide CIDR
@@ -208,12 +215,11 @@ Every confirmed run first proves the fixed CLI/REST operator, immutable project,
 organization and billing parent, Cloud Asset resource identities, existing V1
 bucket ownership, and the complete version-3 project IAM policy. It may then
 create or adopt the exact bucket-policy operator custom role and add its one
-conditioned project binding before the ordinary complete collision and
-network-CIDR audit. This narrow early recovery is necessary because removing a
-Cloud Storage convenience binding can otherwise remove the same operator's
-ability to read the resulting bucket policy. It is the only permitted mutation
-before the full audit; unknown role state, alternate conditions, duplicate or
-extra members, project-policy drift, or an unprovable response blocks it.
+conditioned project binding, then create or adopt the distinct release-evidence
+object operator role and binding, before the ordinary complete collision and
+network-CIDR audit. These are the only permitted mutations before the full
+audit; unknown role state, alternate conditions, duplicate or extra members,
+project-policy drift, or an unprovable response blocks them.
 
 The fixed binding grants `user:admin@motionexp.com` only the three custom-role
 permissions above and only when all of these are true: service is
@@ -226,6 +232,21 @@ full-policy readback. Propagation is bounded and verified by exact effective
 permission probes plus real bucket-policy GETs. A timeout preserves the desired
 narrow binding and reports `operator-bucket-iam-propagation` for an idempotent
 rerun; it never falls back to project-wide Storage Admin or legacy grants.
+
+The second role contains exactly `storage.objects.get`,
+`storage.objects.list`, and `storage.objects.delete`. Its separate binding is
+for `user:admin@motionexp.com` and the fixed media bucket only. The Bucket
+condition branch exists solely because object listing is evaluated at bucket
+scope. The Object branch restricts get/delete to resource names beginning
+exactly with
+`projects/_/buckets/hkbuddy-v1-582852715831-media/objects/release-evidence/`.
+The trailing slash is contractual: sibling prefixes such as
+`release-evidence-evil/` fail closed. This role does not grant object creation,
+does not apply to the build-source bucket, and does not change its existing
+creator-only operator binding. The policy uses the same requested version 3,
+authoritative `etag`, exact full-policy response-loss recovery, and a bounded
+effective `storage.objects.list` propagation gate. Its timeout boundary is
+`operator-release-evidence-iam-propagation`.
 
 After that recovery and its readback, the script restarts the complete ordinary
 pre-mutation audit. The operator creates the real email channel in that project
@@ -253,18 +274,17 @@ readback. A separate exact post-write readback is mandatory. Both bucket
 baselines complete before any Secret version or database-user credential write,
 and the terminal IAM readback still requires the final configured allowlist.
 
-### 2026-09-01 cross-machine resume note
+### 2026-09-03 release-evidence recovery note
 
-The last confirmed live attempt accepted the media-bucket policy write and then
-stopped at `bucket-iam-baseline` because the old implementation had removed its
-own effective readback authority. It did not reach a Secret-version or database-
-user write. The build-source bucket retained its generated convenience policy.
-The recovery role/binding and early gate described above are committed code, not
-an assertion that the recovery has already run in GCP. The original workstation
-subsequently required gcloud reauthentication, so the next operator must follow
-the authentication, preflight, and exact resume commands in the top-level
-`production-v1/README.md`, then treat the returned JSON as the new live truth.
-Do not manually repair either bucket policy.
+The last confirmed release attempt on
+`0ce6399791b393500cd393e41c1d340d8232518c` passed build, migration, inventory,
+and all four acceptance Jobs but stopped before collection because the fixed
+operator lacked media object get/list/delete. The new release-evidence
+role/binding and early gate described above are committed source, not an
+assertion that they have run in GCP. Any new source commit supersedes that
+attempt and requires a fresh SHA-bound build/evidence chain. Follow the
+authentication, preflight, and exact resume commands in the top-level README;
+do not manually widen Storage IAM or reuse old acceptance outputs.
 
 Database absence is determined from the successful, project- and
 instance-scoped `gcloud sql databases list` JSON response with one exact
@@ -411,7 +431,11 @@ path, and independently derives the semantic artifact and exact object-byte
 SHA-256 values. Evidence publication then accepts only the planned numeric
 version returned and described by Secret Manager. Only after all versions read
 back does it delete those exact GCS generations and require zero SHA-scoped
-output residue. Neither workload identity can publish Secret versions; that
+output residue. Before any release command is selected or executed, the
+controller reconstructs all 17 storage operations and rejects any foreign
+bucket, sibling prefix, different release SHA, widened residue listing, missing
+generation, invalid generation, or extra storage operation. Neither workload
+identity can publish Secret versions; that
 authority remains with the reviewed deployer. Candidate deployment is
 digest-pinned on the separate `hkbuddy-v1-api-candidate` service, always tagged
 and private at 100%; it never mutates `hkbuddy-v1-api`. `/api/health/ready` is
@@ -625,6 +649,10 @@ build-source bucket so `gcloud builds submit` can stage one frozen archive; it
 cannot read, list, overwrite, or delete staged objects, and the bucket removes
 them through its one-day lifecycle. The deployer reads only that repository and
 has `roles/run.developer`.
+Separately, the human operator's release-evidence role permits list on the fixed
+media bucket and get/delete only below `release-evidence/`; it grants no create
+permission and no access to build-source objects. These two human-operator
+contracts are independent and must not be merged or widened.
 The acceptance identity is DB/GCS-only: it can read the app and migrator URL
 Secret containers plus the exact release-bound legacy inventory mounted by the
 dependency Job, exercise and clean up private bucket objects, and write platform

@@ -122,6 +122,18 @@ const REQUIRED_CUSTOM_ROLES = Object.freeze([
     ],
     stage: 'GA',
   },
+  {
+    id: 'hkbuddyV1ReleaseEvidenceObjectOperator',
+    name: `projects/${PROJECT}/roles/hkbuddyV1ReleaseEvidenceObjectOperator`,
+    title: 'HK Buddy V1 release evidence object operator',
+    description: 'Collect and clean release evidence in the fixed media bucket',
+    includedPermissions: [
+      'storage.objects.delete',
+      'storage.objects.get',
+      'storage.objects.list',
+    ],
+    stage: 'GA',
+  },
 ]);
 const REQUIRED_OPERATOR_BUCKET_IAM_BINDING = Object.freeze({
   scope: 'project',
@@ -141,6 +153,20 @@ const OPERATOR_BUCKET_IAM_PERMISSIONS = Object.freeze([
   'storage.buckets.setIamPolicy',
 ]);
 const OPERATOR_BUCKET_IAM_PROPAGATION_TIMEOUT_MS = 120_000;
+const REQUIRED_OPERATOR_RELEASE_EVIDENCE_IAM_BINDING = Object.freeze({
+  scope: 'project',
+  member: `user:${REQUIRED_OPERATOR_ACCOUNT}`,
+  role: `projects/${PROJECT}/roles/hkbuddyV1ReleaseEvidenceObjectOperator`,
+  condition: {
+    title: 'HK Buddy V1 release evidence object boundary',
+    description: 'List the media bucket and collect or clean only release-evidence objects',
+    expression: `resource.service == "storage.googleapis.com" && ((resource.type == "storage.googleapis.com/Bucket" && resource.name == "projects/_/buckets/${GCP_IDENTITY.bucket}") || (resource.type == "storage.googleapis.com/Object" && resource.name.startsWith("projects/_/buckets/${GCP_IDENTITY.bucket}/objects/release-evidence/")))`,
+  },
+});
+const OPERATOR_RELEASE_EVIDENCE_IAM_STEP = 'operator-release-evidence-iam-binding';
+const OPERATOR_RELEASE_EVIDENCE_ROLE_ID = 'hkbuddyV1ReleaseEvidenceObjectOperator';
+const OPERATOR_RELEASE_EVIDENCE_PERMISSIONS = Object.freeze(['storage.objects.list']);
+const OPERATOR_RELEASE_EVIDENCE_IAM_PROPAGATION_TIMEOUT_MS = 120_000;
 const REQUIRED_IAM_BINDINGS = Object.freeze([
   { scope: 'project', member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`, role: 'roles/aiplatform.user' },
   { scope: 'project', member: `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`, role: 'roles/speech.client' },
@@ -389,6 +415,7 @@ export function assertResourceContract(contract) {
     forbiddenWorkloadRoles: REQUIRED_FORBIDDEN_WORKLOAD_ROLES,
     automaticProjectBindings: REQUIRED_AUTOMATIC_PROJECT_BINDINGS,
     operatorBucketIamBinding: REQUIRED_OPERATOR_BUCKET_IAM_BINDING,
+    operatorReleaseEvidenceIamBinding: REQUIRED_OPERATOR_RELEASE_EVIDENCE_IAM_BINDING,
     bindings: REQUIRED_IAM_BINDINGS,
   });
   const runtime = `serviceAccount:${GCP_IDENTITY.serviceAccounts.runtime}`;
@@ -1451,6 +1478,81 @@ function analyzeBucketIamBaselinePolicy({ contract, bucket, policy }) {
   };
 }
 
+function operatorConditionalIamBindings(contract) {
+  return [
+    {
+      step: OPERATOR_BUCKET_IAM_STEP,
+      binding: contract.iam.operatorBucketIamBinding,
+    },
+    {
+      step: OPERATOR_RELEASE_EVIDENCE_IAM_STEP,
+      binding: contract.iam.operatorReleaseEvidenceIamBinding,
+    },
+  ];
+}
+
+function operatorConditionalIamBinding(contract, step) {
+  const definition = operatorConditionalIamBindings(contract).find(({ step: id }) => id === step);
+  if (!definition) throw commandError('UNKNOWN_PROVISION_STEP');
+  return definition.binding;
+}
+
+function normalizedProjectAuditConfigs(policy) {
+  const rawAuditConfigs = policy.auditConfigs ?? [];
+  const auditConfigs = rawAuditConfigs.map((config) => {
+    if (!plainComputeRow(config) || !exact(Object.keys(config).sort(), ['auditLogConfigs', 'service'])
+      || typeof config.service !== 'string' || config.service.length === 0
+      || config.service.length > 256 || /[\u0000\r\n]/u.test(config.service)
+      || !Array.isArray(config.auditLogConfigs)) {
+      throw commandError('IAM_ALLOWLIST_MISMATCH');
+    }
+    const auditLogConfigs = config.auditLogConfigs.map((entry) => {
+      const keys = Object.hasOwn(entry ?? {}, 'exemptedMembers')
+        ? ['exemptedMembers', 'logType'] : ['logType'];
+      const exemptedMembers = entry?.exemptedMembers ?? [];
+      if (!plainComputeRow(entry) || !exact(Object.keys(entry).sort(), keys)
+        || !['ADMIN_READ', 'DATA_READ', 'DATA_WRITE'].includes(entry.logType)
+        || !Array.isArray(exemptedMembers)
+        || exemptedMembers.some((member) => typeof member !== 'string' || member.length === 0
+          || member.length > 512 || /[\u0000\r\n]/u.test(member))
+        || new Set(exemptedMembers).size !== exemptedMembers.length) {
+        throw commandError('IAM_ALLOWLIST_MISMATCH');
+      }
+      return { logType: entry.logType, exemptedMembers: [...exemptedMembers].sort() };
+    }).sort((left, right) => canonicalJson(left).localeCompare(canonicalJson(right)));
+    if (new Set(auditLogConfigs.map(({ logType }) => logType)).size !== auditLogConfigs.length) {
+      throw commandError('IAM_ALLOWLIST_MISMATCH');
+    }
+    return { service: config.service, auditLogConfigs };
+  }).sort((left, right) => left.service.localeCompare(right.service));
+  if (new Set(auditConfigs.map(({ service }) => service)).size !== auditConfigs.length) {
+    throw commandError('IAM_ALLOWLIST_MISMATCH');
+  }
+  return auditConfigs;
+}
+
+function normalizedOperatorProjectPolicy(policy) {
+  const bindings = policy.bindings.flatMap((binding) => binding.members.map((member) => ({
+    role: binding.role,
+    member,
+    ...(Object.hasOwn(binding, 'condition')
+      ? { condition: canonicalValue(binding.condition) }
+      : {}),
+  }))).sort((left, right) => canonicalJson(left).localeCompare(canonicalJson(right)));
+  return {
+    version: policy.version,
+    bindings,
+    auditConfigs: normalizedProjectAuditConfigs(policy),
+  };
+}
+
+function sameOperatorProjectPolicy(expected, observed) {
+  return exact(
+    normalizedOperatorProjectPolicy(expected),
+    normalizedOperatorProjectPolicy(observed),
+  );
+}
+
 function analyzeOperatorProjectIamPolicy({ contract, projectNumber, policy, enabledApis }) {
   if (!contract || !plainComputeRow(policy)
     || Object.keys(policy).some((key) => !['version', 'bindings', 'auditConfigs', 'etag'].includes(key))
@@ -1460,24 +1562,36 @@ function analyzeOperatorProjectIamPolicy({ contract, projectNumber, policy, enab
     || (Object.hasOwn(policy, 'auditConfigs') && !Array.isArray(policy.auditConfigs))) {
     throw commandError('IAM_ALLOWLIST_MISMATCH');
   }
+  normalizedProjectAuditConfigs(policy);
   assertManagedIamPoliciesSubset({
     contract, projectNumber,
     policiesByScope: { project: policy }, scopes: ['project'],
     requireProtectedBaseline: true, enabledApis,
   });
-  const expected = contract.iam.operatorBucketIamBinding;
-  const matches = policy.bindings.filter(({ role }) => role === expected.role);
-  if (matches.length > 1) throw commandError('IAM_ALLOWLIST_MISMATCH');
-  if (matches.length === 0) {
-    if (policy.bindings.some((binding) => Object.hasOwn(binding, 'condition')) || policy.version === 3) {
-      throw commandError('IAM_ALLOWLIST_MISMATCH');
+  const presentSteps = [];
+  const missingSteps = [];
+  for (const { step, binding: expected } of operatorConditionalIamBindings(contract)) {
+    const matches = policy.bindings.filter(({ role }) => role === expected.role);
+    if (matches.length > 1) throw commandError('IAM_ALLOWLIST_MISMATCH');
+    if (matches.length === 0) {
+      missingSteps.push(step);
+      continue;
     }
-    return { exact: false, writePolicy: structuredClone(policy) };
+    if (!exact(matches[0], {
+      role: expected.role, members: [expected.member], condition: expected.condition,
+    })) throw commandError('IAM_ALLOWLIST_MISMATCH');
+    presentSteps.push(step);
   }
-  if (policy.version !== 3 || !exact(matches[0], {
-    role: expected.role, members: [expected.member], condition: expected.condition,
-  })) throw commandError('IAM_ALLOWLIST_MISMATCH');
-  return { exact: true, writePolicy: null };
+  if ((presentSteps.length === 0 && policy.version !== 1)
+    || (presentSteps.length > 0 && policy.version !== 3)) {
+    throw commandError('IAM_ALLOWLIST_MISMATCH');
+  }
+  return {
+    exact: missingSteps.length === 0,
+    presentSteps,
+    missingSteps,
+    writePolicy: missingSteps.length > 0 ? structuredClone(policy) : null,
+  };
 }
 
 function assertManagedIamPolicies({
@@ -1500,12 +1614,12 @@ function assertManagedIamPolicies({
   const configured = contract.iam.bindings.map(({ scope, member, role }) => ({
     scope, member: member.replace('__PROJECT_NUMBER__', String(projectNumber)), role,
   }));
-  const operatorBucketIam = {
-    scope: contract.iam.operatorBucketIamBinding.scope,
-    member: contract.iam.operatorBucketIamBinding.member,
-    role: contract.iam.operatorBucketIamBinding.role,
-    condition: structuredClone(contract.iam.operatorBucketIamBinding.condition),
-  };
+  const operatorConditionalIam = operatorConditionalIamBindings(contract).map(({ binding }) => ({
+    scope: binding.scope,
+    member: binding.member,
+    role: binding.role,
+    condition: structuredClone(binding.condition),
+  }));
   const automatic = contract.iam.automaticProjectBindings.map(({ member, role, required }) => ({
     scope: 'project', member: member.replace('__PROJECT_NUMBER__', String(projectNumber)),
     role, required,
@@ -1536,7 +1650,7 @@ function assertManagedIamPolicies({
   const required = [
     ...baseline,
     ...configured,
-    operatorBucketIam,
+    ...operatorConditionalIam,
     ...permittedAutomatic.filter((binding) => binding.required).map(({ required: ignored, ...binding }) => {
       void ignored;
       return binding;
@@ -1544,7 +1658,7 @@ function assertManagedIamPolicies({
   ];
   const allowedKeys = new Set([
     ...configured,
-    operatorBucketIam,
+    ...operatorConditionalIam,
     ...baseline,
     ...permittedAutomatic.map(({ required: ignored, ...binding }) => {
       void ignored;
@@ -1568,7 +1682,7 @@ function assertManagedIamPolicies({
       }
       const hasCondition = Object.hasOwn(binding, 'condition');
       if (hasCondition && (scope !== 'project'
-        || !exact(binding.condition, operatorBucketIam.condition))) {
+        || !operatorConditionalIam.some(({ condition }) => exact(binding.condition, condition)))) {
         throw commandError('IAM_ALLOWLIST_MISMATCH');
       }
       for (const member of binding.members) {
@@ -2571,6 +2685,7 @@ function provisionSteps(contract) {
     'vpc', 'subnet', 'psa-range', 'psa-connection', 'cloud-sql-instance', 'database',
     'bucket', 'build-source-bucket',
     OPERATOR_BUCKET_IAM_STEP,
+    OPERATOR_RELEASE_EVIDENCE_IAM_STEP,
     'bucket-iam-baseline', 'build-source-bucket-iam-baseline',
     ...contract.resources.secrets.map(({ id }) => `secret-container:${id}`),
     `secret-version:${GCP_IDENTITY.secrets.dbAppUrl}`,
@@ -2596,9 +2711,11 @@ const STATIC_EXPECTED_STEPS = [
   'service-account:hkbuddy-v1-acceptance',
   'custom-role:hkbuddyV1AcceptanceBucketMetadataReader',
   'custom-role:hkbuddyV1BucketIamPolicyOperator',
+  'custom-role:hkbuddyV1ReleaseEvidenceObjectOperator',
   'vpc', 'subnet', 'psa-range', 'psa-connection', 'cloud-sql-instance', 'database',
   'bucket', 'build-source-bucket',
   OPERATOR_BUCKET_IAM_STEP,
+  OPERATOR_RELEASE_EVIDENCE_IAM_STEP,
   'bucket-iam-baseline', 'build-source-bucket-iam-baseline',
   ...SECRET_CONTAINER_IDS.map((id) => `secret-container:${id}`),
   `secret-version:${GCP_IDENTITY.secrets.dbAppUrl}`, `secret-version:${GCP_IDENTITY.secrets.dbMigratorUrl}`,
@@ -2791,6 +2908,7 @@ export async function runGcpProvision({
     || typeof plane.compare !== 'function'
     || typeof plane.auditOperatorBucketIamRecovery !== 'function'
     || typeof plane.waitForOperatorBucketIamAccess !== 'function'
+    || typeof plane.waitForOperatorReleaseEvidenceAccess !== 'function'
     || typeof plane.auditUserManagedServiceAccountKeys !== 'function'
     || typeof plane.auditManagedIamPolicies !== 'function'
     || typeof plane.auditPreMutationState !== 'function'
@@ -2854,6 +2972,37 @@ export async function runGcpProvision({
       return publish(writeOutput, 1, safeFailureReport(
         error?.code ?? 'OPERATOR_BUCKET_IAM_PROPAGATION_TIMEOUT',
         completed, 'operator-bucket-iam-propagation', mutationPerformed,
+      ));
+    }
+  }
+  for (const id of [
+    `custom-role:${OPERATOR_RELEASE_EVIDENCE_ROLE_ID}`,
+    OPERATOR_RELEASE_EVIDENCE_IAM_STEP,
+  ]) {
+    try {
+      await ensureExactResource({
+        id, mutate: true,
+        read: () => plane.read(id),
+        create: () => {
+          mutationPerformed = true;
+          return plane.create(id);
+        },
+        compare: (value) => plane.compare(id, value),
+      });
+    } catch (error) {
+      return publish(writeOutput, 1, safeFailureReport(
+        error?.code ?? 'OPERATOR_RELEASE_EVIDENCE_IAM_RECOVERY_FAILED',
+        completed, id, mutationPerformed,
+      ));
+    }
+  }
+  if (operatorRecovery.existingBuckets.includes(GCP_IDENTITY.bucket)) {
+    try {
+      await plane.waitForOperatorReleaseEvidenceAccess();
+    } catch (error) {
+      return publish(writeOutput, 1, safeFailureReport(
+        error?.code ?? 'OPERATOR_RELEASE_EVIDENCE_IAM_PROPAGATION_TIMEOUT',
+        completed, 'operator-release-evidence-iam-propagation', mutationPerformed,
       ));
     }
   }
@@ -2968,6 +3117,16 @@ export async function runGcpProvision({
           return publish(writeOutput, 1, safeFailureReport(
             error?.code ?? 'OPERATOR_BUCKET_IAM_PROPAGATION_TIMEOUT',
             completed, 'operator-bucket-iam-propagation', mutationPerformed,
+          ));
+        }
+      }
+      if (id === OPERATOR_RELEASE_EVIDENCE_IAM_STEP) {
+        try {
+          await plane.waitForOperatorReleaseEvidenceAccess();
+        } catch (error) {
+          return publish(writeOutput, 1, safeFailureReport(
+            error?.code ?? 'OPERATOR_RELEASE_EVIDENCE_IAM_PROPAGATION_TIMEOUT',
+            completed, 'operator-release-evidence-iam-propagation', mutationPerformed,
           ));
         }
       }
@@ -3097,16 +3256,22 @@ export class GcpControlPlane {
     }
     await this.#auditManagedIdentityInventory(enabledApis);
 
-    const roleId = `custom-role:${OPERATOR_BUCKET_IAM_ROLE_ID}`;
-    const role = await this.read(roleId);
-    if (!['present', 'absent'].includes(role?.status)
-      || (role.status === 'present' && !this.compare(roleId, role.value))) {
-      throw commandError('CUSTOM_ROLE_ALLOWLIST_MISMATCH');
+    for (const roleId of [
+      `custom-role:${OPERATOR_BUCKET_IAM_ROLE_ID}`,
+      `custom-role:${OPERATOR_RELEASE_EVIDENCE_ROLE_ID}`,
+    ]) {
+      const role = await this.read(roleId);
+      if (!['present', 'absent'].includes(role?.status)
+        || (role.status === 'present' && !this.compare(roleId, role.value))) {
+        throw commandError('CUSTOM_ROLE_ALLOWLIST_MISMATCH');
+      }
     }
-    const binding = await this.read(OPERATOR_BUCKET_IAM_STEP);
-    if (!['present', 'absent'].includes(binding?.status)
-      || (binding.status === 'present' && !this.compare(OPERATOR_BUCKET_IAM_STEP, binding.value))) {
-      throw commandError('IAM_ALLOWLIST_MISMATCH');
+    for (const step of [OPERATOR_BUCKET_IAM_STEP, OPERATOR_RELEASE_EVIDENCE_IAM_STEP]) {
+      const binding = await this.read(step);
+      if (!['present', 'absent'].includes(binding?.status)
+        || (binding.status === 'present' && !this.compare(step, binding.value))) {
+        throw commandError('IAM_ALLOWLIST_MISMATCH');
+      }
     }
 
     const assetNames = new Set(assets.filter(({ assetType }) => (
@@ -3118,11 +3283,14 @@ export class GcpControlPlane {
     for (const bucket of existingBuckets) {
       await this.#operatorBucketPermissionState(bucket);
     }
+    if (existingBuckets.includes(GCP_IDENTITY.bucket)) {
+      await this.#operatorReleaseEvidencePermissionState();
+    }
     return { existingBuckets };
   }
 
-  async #readOperatorBucketIamBinding() {
-    const writeKey = `${OPERATOR_BUCKET_IAM_STEP}:write`;
+  async #readOperatorIamBinding(step) {
+    const writeKey = `${step}:write`;
     this.cache.delete(writeKey);
     const enabledBefore = await this.#enabledApis();
     const policy = await this.#rest({
@@ -3138,7 +3306,14 @@ export class GcpControlPlane {
       contract: this.contract, projectNumber: this.#projectNumber(),
       policy, enabledApis: enabledAfter,
     });
-    if (analysis.exact) return { status: 'present', value: { exact: true } };
+    if (analysis.presentSteps.includes(step)) {
+      const recoveryPolicyKey = `${step}:recovery-policy`;
+      const recoveryPolicy = this.cache.get(recoveryPolicyKey);
+      const recoveryExact = recoveryPolicy === undefined
+        || sameOperatorProjectPolicy(recoveryPolicy, policy);
+      if (recoveryPolicy !== undefined && recoveryExact) this.cache.delete(recoveryPolicyKey);
+      return { status: 'present', value: { exact: recoveryExact } };
+    }
     this.cache.set(writeKey, {
       policy: structuredClone(analysis.writePolicy),
       enabledApis: [...enabledAfter].sort(),
@@ -3146,21 +3321,24 @@ export class GcpControlPlane {
     return { status: 'absent' };
   }
 
-  async #createOperatorBucketIamBinding() {
-    const cached = this.cache.get(`${OPERATOR_BUCKET_IAM_STEP}:write`);
+  async #createOperatorIamBinding(step) {
+    const stateInvalidCode = step === OPERATOR_BUCKET_IAM_STEP
+      ? 'OPERATOR_BUCKET_IAM_STATE_INVALID'
+      : 'OPERATOR_RELEASE_EVIDENCE_IAM_STATE_INVALID';
+    const cached = this.cache.get(`${step}:write`);
     if (!plainComputeRow(cached) || !Array.isArray(cached.enabledApis)
       || cached.enabledApis.some((api) => typeof api !== 'string')) {
-      throw commandError('OPERATOR_BUCKET_IAM_STATE_INVALID');
+      throw commandError(stateInvalidCode);
     }
     const enabledApis = new Set(cached.enabledApis);
     const analysis = analyzeOperatorProjectIamPolicy({
       contract: this.contract, projectNumber: this.#projectNumber(),
       policy: cached.policy, enabledApis,
     });
-    if (analysis.exact || !exact(analysis.writePolicy, cached.policy)) {
-      throw commandError('OPERATOR_BUCKET_IAM_STATE_INVALID');
+    if (analysis.presentSteps.includes(step) || !exact(analysis.writePolicy, cached.policy)) {
+      throw commandError(stateInvalidCode);
     }
-    const binding = this.contract.iam.operatorBucketIamBinding;
+    const binding = operatorConditionalIamBinding(this.contract, step);
     const body = {
       policy: {
         ...structuredClone(cached.policy),
@@ -3175,6 +3353,7 @@ export class GcpControlPlane {
       },
       updateMask: 'bindings,etag,version',
     };
+    this.cache.set(`${step}:recovery-policy`, structuredClone(body.policy));
     const response = await this.#rest({
       method: 'POST',
       url: `https://cloudresourcemanager.googleapis.com/v1/projects/${PROJECT}:setIamPolicy`,
@@ -3185,7 +3364,10 @@ export class GcpControlPlane {
         contract: this.contract, projectNumber: this.#projectNumber(),
         policy: response, enabledApis,
       });
-      if (!responseAnalysis.exact) throw new Error('binding absent');
+      if (!responseAnalysis.presentSteps.includes(step)
+        || !sameOperatorProjectPolicy(body.policy, response)) {
+        throw new Error('binding absent or project policy changed');
+      }
     } catch {
       throw commandError('TRANSPORT_AMBIGUOUS');
     }
@@ -3230,6 +3412,33 @@ export class GcpControlPlane {
     return true;
   }
 
+  async #operatorReleaseEvidencePermissionState() {
+    const target = new URL(
+      `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(GCP_IDENTITY.bucket)}/iam/testPermissions`,
+    );
+    for (const permission of OPERATOR_RELEASE_EVIDENCE_PERMISSIONS) {
+      target.searchParams.append('permissions', permission);
+    }
+    const response = await this.#rest({ method: 'GET', url: target.href });
+    const responseKeys = plainComputeRow(response) ? Object.keys(response).sort() : [];
+    const hasPermissions = plainComputeRow(response) && Object.hasOwn(response, 'permissions');
+    const permissions = hasPermissions ? response.permissions : [];
+    if (!plainComputeRow(response)
+      || (!exact(responseKeys, ['kind']) && !exact(responseKeys, ['kind', 'permissions']))
+      || response.kind !== 'storage#testIamPermissionsResponse'
+      || !Array.isArray(permissions)
+      || permissions.some((permission) => typeof permission !== 'string')
+      || new Set(permissions).size !== permissions.length) {
+      throw commandError('OPERATOR_RELEASE_EVIDENCE_IAM_PERMISSION_INVALID');
+    }
+    const returned = new Set(permissions);
+    if (returned.size === 0) return false;
+    if (!sameStringSet(returned, new Set(OPERATOR_RELEASE_EVIDENCE_PERMISSIONS))) {
+      throw commandError('OPERATOR_RELEASE_EVIDENCE_IAM_PERMISSION_INVALID');
+    }
+    return true;
+  }
+
   async waitForOperatorBucketIamAccess({ buckets } = {}) {
     const allowedBuckets = new Set([GCP_IDENTITY.bucket, GCP_IDENTITY.buildSourceBucket]);
     if (!Array.isArray(buckets) || buckets.length === 0
@@ -3251,6 +3460,23 @@ export class GcpControlPlane {
       delay = Math.min(delay * 2, 10_000);
     }
     throw commandError('OPERATOR_BUCKET_IAM_PROPAGATION_TIMEOUT');
+  }
+
+  async waitForOperatorReleaseEvidenceAccess() {
+    const startedAt = this.now();
+    if (!Number.isFinite(startedAt)) {
+      throw commandError('OPERATOR_RELEASE_EVIDENCE_IAM_PROPAGATION_TIMEOUT');
+    }
+    const deadline = startedAt + OPERATOR_RELEASE_EVIDENCE_IAM_PROPAGATION_TIMEOUT_MS;
+    let delay = 1_000;
+    while (this.now() < deadline) {
+      if (await this.#operatorReleaseEvidencePermissionState()) return true;
+      await this.#waitWithinDeadline(
+        delay, deadline, 'OPERATOR_RELEASE_EVIDENCE_IAM_PROPAGATION_TIMEOUT',
+      );
+      delay = Math.min(delay * 2, 10_000);
+    }
+    throw commandError('OPERATOR_RELEASE_EVIDENCE_IAM_PROPAGATION_TIMEOUT');
   }
 
   async #readProjectWideCidrAudit(enabledApis) {
@@ -3771,7 +3997,9 @@ export class GcpControlPlane {
       }
       return { status: 'present', value };
     }
-    if (id === OPERATOR_BUCKET_IAM_STEP) return this.#readOperatorBucketIamBinding();
+    if ([OPERATOR_BUCKET_IAM_STEP, OPERATOR_RELEASE_EVIDENCE_IAM_STEP].includes(id)) {
+      return this.#readOperatorIamBinding(id);
+    }
     if (BUCKET_IAM_BASELINE_IDS.includes(id)) {
       const bucket = bucketForIamBaseline(id);
       const writeKey = `${id}:write`;
@@ -3947,7 +4175,9 @@ export class GcpControlPlane {
       },
       });
     }
-    if (id === OPERATOR_BUCKET_IAM_STEP) return this.#createOperatorBucketIamBinding();
+    if ([OPERATOR_BUCKET_IAM_STEP, OPERATOR_RELEASE_EVIDENCE_IAM_STEP].includes(id)) {
+      return this.#createOperatorIamBinding(id);
+    }
     if (BUCKET_IAM_BASELINE_IDS.includes(id)) {
       const bucket = bucketForIamBaseline(id);
       const writeKey = `${id}:write`;
@@ -4078,7 +4308,8 @@ export class GcpControlPlane {
     if (id === 'database') return value.name === GCP_IDENTITY.database && value.instance === GCP_IDENTITY.cloudSqlInstance
       && value.project === PROJECT && value.selfLink === cloudSqlDatabaseSelfLink(GCP_IDENTITY.database);
     if (id === 'bucket' || id === 'build-source-bucket') return this.#compareBucket(id, value);
-    if (id === OPERATOR_BUCKET_IAM_STEP || BUCKET_IAM_BASELINE_IDS.includes(id)) {
+    if ([OPERATOR_BUCKET_IAM_STEP, OPERATOR_RELEASE_EVIDENCE_IAM_STEP].includes(id)
+      || BUCKET_IAM_BASELINE_IDS.includes(id)) {
       return value.exact === true;
     }
     if (id.startsWith('secret-container:')) {

@@ -402,6 +402,16 @@ Singapore STT, and TTS latency are measured rather than assumed.
    custom role containing only `storage.buckets.get`, bound only on the media
    bucket, so it can attest the exact bucket project without gaining bucket
    listing or administration.
+   The fixed human operator uses a separate GA custom role containing only
+   `storage.objects.get`, `storage.objects.list`, and `storage.objects.delete`.
+   Its version-3 project condition permits bucket-scoped listing only on the
+   fixed media bucket and object get/delete only below the slash-terminated
+   `release-evidence/` prefix. It is independent of both the two-bucket
+   bucket-policy operator and the build-source creator-only grant. Provisioning
+   reconciles both known operator conditions through one exact allowlist with
+   authoritative ETag/readback, then proves list propagation before the full
+   audit; preflight reports exact known absence without mutation and rejects
+   every widened or unknown condition.
 4. Archive exactly that clean commit. In Cloud Build, install production
    dependencies without lifecycle scripts, run the time-boxed fail-closed
    dependency security gate, and require its exact reviewed PASS receipt before
@@ -418,7 +428,11 @@ Singapore STT, and TTS latency are measured rather than assumed.
    prefix. Describe and download one exact numeric generation, independently
    verify the semantic artifact SHA-256 and exact object-byte SHA-256, then
    publish and read back the accepted numeric Secret Manager versions. Delete
-   only those verified generations and prove zero release-output residue.
+   only those verified generations and prove zero release-output residue. The
+   release plan validates the complete storage-operation set before command
+   execution: every target must remain under the exact media-bucket
+   `release-evidence/<release-sha>/` boundary, collect/delete stay generation-
+   bound, and the final list cannot widen beyond that release SHA.
    Artifact SHA-256 values remain separate from Secret version numbers.
 7. Only after those evidence versions exist, boot digest-pinned revision
    `hkbuddy-v1-api-candidate-<12 lowercase hex>` on the separate

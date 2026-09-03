@@ -11,10 +11,10 @@ This directory is isolated from the legacy application. It has its own runtime,
 storage drivers, release evidence, reports, and deployment boundary. Do not point
 it at the legacy app, legacy PostgreSQL database, or legacy Blob container.
 
-## Cross-machine handoff — 2026-09-01
+## Cross-machine handoff — updated 2026-09-03
 
 This handoff separates code readiness from live GCP state. The branch to resume
-is `feat/production-v1-ai-senior`. Resolve and record its current commit with
+is `codex/gcp-production-v1-launch`. Resolve and record its current commit with
 `git rev-parse HEAD` after pulling; release artifacts must use that clean,
 committed SHA and must not use an older local checkout.
 
@@ -29,18 +29,20 @@ committed SHA and must not use an older local checkout.
   private HA PostgreSQL 16 instance and `hkbuddy_v1` database, both V1 buckets,
   and all ten empty Secret containers were created and read back in earlier
   guarded runs.
-- The latest confirmed provision attempt stopped with
-  `POST_CREATE_READBACK_FAILED` at `bucket-iam-baseline`. The media bucket had
-  accepted the IAM-policy write, after which the fixed operator lost effective
-  `storage.buckets.get`, `getIamPolicy`, and `setIamPolicy`; the build-source
-  bucket still had those three permissions through its generated convenience
-  bindings. No Secret version or `hkbuddy_app` / `hkbuddy_migrator` database
-  user was created.
-- The branch now contains a TDD-covered recovery: an exact three-permission
-  custom role plus one permanent project IAM binding whose condition is limited
-  to the two exact V1 bucket resource names. It runs before the full provision
-  audit, restores access without project-wide Storage Admin, then sanitizes both
-  local bucket policies. **That recovery code has not yet been executed live.**
+- A later release attempt on source `0ce6399791b393500cd393e41c1d340d8232518c`
+  passed build, migration, inventory, and all four acceptance Jobs, then stopped
+  at `collect`: the fixed operator could read bucket metadata but lacked object
+  get, list, and delete authority for the private acceptance outputs. That
+  attempt is superseded by this source change; none of its SHA-bound artifacts
+  or evidence may be adopted by the next release.
+- The branch now contains a second TDD-covered narrow recovery. The distinct
+  `hkbuddyV1ReleaseEvidenceObjectOperator` role contains only
+  `storage.objects.get`, `storage.objects.list`, and `storage.objects.delete`.
+  Its separate version-3 project binding lets `admin@motionexp.com` list only
+  the fixed media bucket and get/delete only objects below the slash-terminated
+  `release-evidence/` prefix. It does not extend the bucket-policy operator or
+  the build-source creator-only grant. **This new recovery has not yet been
+  executed live.**
 - No V1 Cloud Run Job, private candidate service, stable service, public V1 URL,
   or production QR code exists. The legacy Azure app
   `hkbuddy-pilot-0630` was not modified.
@@ -96,11 +98,12 @@ gcloud config get-value project
 
 Do not copy the old gcloud directory or reuse any pasted OAuth/verification
 code. Do not set impersonation, access-token-file, or credential-file overrides.
-Capture the read-only preflight first, but expect it may currently fail with
-`PREFLIGHT_INVENTORY_INVALID` when it reaches the known locked media-bucket IAM
-read. That expected failure is a snapshot, not permission to repair anything
-manually and not evidence that the rest of the inventory passed. Then use only
-the one exact confirmed resume command:
+Capture the read-only preflight first. If the live state still lacks only the
+new exact role and/or binding, it reports
+`RELEASE_EVIDENCE_IAM_REPAIR_REQUIRED`, `mutationPerformed=false`, and the exact
+missing resource IDs. Any unknown condition or drift remains fatal. That named
+repair result is not permission to edit IAM manually. Then use only the one
+exact confirmed resume command:
 
 ```powershell
 npm run gcp:preflight -- --notification-channel=projects/motion-expert-hk-ltd-webpage/notificationChannels/5363602469320935089
@@ -108,11 +111,14 @@ npm run gcp:preflight -- --notification-channel=projects/motion-expert-hk-ltd-we
 npm run gcp:provision -- --confirm-project=motion-expert-hk-ltd-webpage --notification-channel=projects/motion-expert-hk-ltd-webpage/notificationChannels/5363602469320935089
 ```
 
-The confirmed command may first create the narrow operator bucket-IAM role and
-conditioned binding, then wait for Google IAM propagation. If it returns
-`OPERATOR_BUCKET_IAM_PROPAGATION_TIMEOUT`, preserve the resources, wait, and run
-the same command again; do not add `roles/storage.admin`, restore legacy
-convenience bindings, delete either bucket, or create credentials manually.
+The confirmed command may first reconcile the narrow bucket-policy operator
+role/binding and then the distinct release-evidence role/binding, waiting for
+each permission contract before the full audit. If it returns
+`OPERATOR_BUCKET_IAM_PROPAGATION_TIMEOUT` or
+`OPERATOR_RELEASE_EVIDENCE_IAM_PROPAGATION_TIMEOUT`, preserve the resources,
+wait, and run the same command again; do not add `roles/storage.admin`, widen
+the object prefix, restore legacy convenience bindings, delete either bucket,
+or create credentials manually.
 For any other failure, record the JSON `code`, `mutationPerformed`, `completed`,
 and `resumeBoundary`, perform read-only inspection, and fix the proven cause
 before retrying.

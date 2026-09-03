@@ -335,3 +335,15 @@ Wire enums are exactly `en | yue-Hant-HK | cmn-Hans-CN` and `text | voice`.
   latency/workload, controlled `390x844` mobile, trace, ASR, and TTS gate. This
   local checkpoint authorizes none of those operations and makes no
   deployed-production claim; the owner waiver skips none of them.
+- [x] Task 8D codifies the missing human release-evidence authority as a
+  distinct three-permission custom role plus an exact version-3 project
+  condition. Known role/binding absence is a named non-mutating preflight
+  repair requirement; all unknown conditional IAM remains fatal. Provisioning
+  reconciles role before binding, proves media-bucket list propagation, and
+  repeats the full audit before ordinary mutations. Release planning rejects
+  every collect/delete/list target outside the exact
+  `release-evidence/<release-sha>/` boundary before command execution.
+- [ ] Run the Task 8D preflight/provision repair in the existing billed project,
+  then start a completely fresh frozen-SHA build and evidence chain. The
+  superseded `0ce6399791b393500cd393e41c1d340d8232518c` attempt and its outputs
+  must not be adopted.

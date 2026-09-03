@@ -27,6 +27,7 @@ import {
   finalizeLatencyAcceptanceRecord,
 } from '../scripts/production-latency-workload.js';
 import { candidatePrivacyBoundarySha256 } from '../scripts/candidate-privacy-proof.js';
+import * as gcpReleaseContract from '../scripts/gcp-release.js';
 import { finalizeTask8ReadinessRecord } from '../scripts/task8-readiness-producer.js';
 import {
   MOBILE_BROWSER_CONTRACT,
@@ -2232,6 +2233,68 @@ test('preboot acceptance jobs are digest-pinned, identity-exact, and produce evi
     assert.equal(copy.argv.includes(source), true, key);
     assert.equal(copy.argv.includes(output.filePath), true, key);
     assert.equal(remove.argv.includes(source), true, key);
+  }
+});
+
+test('release-evidence storage boundary rejects every widened collect cleanup or list target', () => {
+  const validate = gcpReleaseContract.validateReleaseEvidenceStorageOperations;
+  assert.equal(typeof validate, 'function');
+  const plan = buildReleasePlan(releaseInput());
+  assert.equal(validate(plan), true);
+  const exactPrefix = `gs://${GCP_IDENTITY.bucket}/release-evidence/${RELEASE_SHA}/`;
+  const storageOperations = plan.operations.filter(({ id }) => (
+    id.startsWith('evidence-collect-') || id.startsWith('evidence-output-')
+  ));
+  assert.equal(storageOperations.length, 17);
+  for (const member of storageOperations) {
+    const targets = member.argv.filter((value) => value.startsWith('gs://'));
+    assert.equal(targets.length, 1, member.id);
+    assert.equal(targets[0].startsWith(exactPrefix), true, member.id);
+  }
+
+  const cases = [
+    ['foreign bucket', (candidate) => {
+      candidate.acceptanceOutputs.dependencyAcceptance.bucket = 'foreign-bucket';
+      for (const member of candidate.operations.filter(({ id }) => id.endsWith(':dependencyAcceptance'))) {
+        member.argv = member.argv.map((value) => value.replace(GCP_IDENTITY.bucket, 'foreign-bucket'));
+      }
+    }],
+    ['sibling prefix', (candidate) => {
+      candidate.acceptanceOutputs.dependencyAcceptance.object = candidate.acceptanceOutputs.dependencyAcceptance.object
+        .replace('release-evidence/', 'release-evidence-evil/');
+      for (const member of candidate.operations.filter(({ id }) => id.endsWith(':dependencyAcceptance'))) {
+        member.argv = member.argv.map((value) => value.replace('release-evidence/', 'release-evidence-evil/'));
+      }
+    }],
+    ['another release SHA', (candidate) => {
+      const otherSha = 'f'.repeat(40);
+      candidate.acceptanceOutputs.dependencyAcceptance.object = candidate.acceptanceOutputs.dependencyAcceptance.object
+        .replace(RELEASE_SHA, otherSha);
+      for (const member of candidate.operations.filter(({ id }) => id.endsWith(':dependencyAcceptance'))) {
+        member.argv = member.argv.map((value) => value.replace(RELEASE_SHA, otherSha));
+      }
+    }],
+    ['widened residue list', (candidate) => {
+      const member = candidate.operations.find(({ id }) => id === 'evidence-output-zero-readback');
+      member.argv[3] = `gs://${GCP_IDENTITY.bucket}/release-evidence/**`;
+    }],
+    ['invalid generation', (candidate) => {
+      candidate.acceptanceOutputs.dependencyAcceptance.generation = 'latest';
+      for (const member of candidate.operations.filter(({ id }) => id.endsWith(':dependencyAcceptance'))) {
+        member.argv = member.argv.map((value) => value.replace('#101', '#latest'));
+      }
+    }],
+    ['ungenerated collect target', (candidate) => {
+      const member = candidate.operations.find(({ id }) => (
+        id === 'evidence-collect-copy:dependencyAcceptance'
+      ));
+      member.argv[2] = member.argv[2].replace('#101', '');
+    }],
+  ];
+  for (const [name, mutate] of cases) {
+    const candidate = structuredClone(plan);
+    mutate(candidate);
+    assert.throws(() => validate(candidate), /release evidence storage boundary/i, name);
   }
 });
 

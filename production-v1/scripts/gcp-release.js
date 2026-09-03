@@ -1635,7 +1635,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     })]),
     initialTrafficState: stableTrafficState,
   });
-  return Object.freeze({
+  const plan = Object.freeze({
     project: PROJECT,
     projectNumber: input.projectNumber,
     region: REGION,
@@ -1682,6 +1682,76 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     expectedCandidate,
     expectedStable,
   });
+  validateReleaseEvidenceStorageOperations(plan);
+  return plan;
+}
+
+export function validateReleaseEvidenceStorageOperations(plan) {
+  try {
+    if (!plan || typeof plan !== 'object' || Array.isArray(plan)
+      || !RELEASE_SHA.test(String(plan.releaseSha ?? ''))
+      || !ACCEPTANCE_RUN_ID.test(String(plan.acceptanceRunId ?? ''))
+      || !Array.isArray(plan.operations)) {
+      throw new Error('invalid release plan');
+    }
+    const outputs = assertAcceptanceOutputs(plan.acceptanceOutputs, {
+      releaseSha: plan.releaseSha,
+      runId: plan.acceptanceRunId,
+    });
+    const expectedOperations = [];
+    for (const [key, output] of Object.entries(outputs)) {
+      const generationBoundObject = `gs://${MEDIA_BUCKET}/${output.object}#${output.generation}`;
+      expectedOperations.push(
+        {
+          phase: 'collect', id: `evidence-collect-describe:${key}`,
+          argv: [
+            'storage', 'objects', 'describe', generationBoundObject,
+            `--project=${PROJECT}`, '--format=json',
+          ],
+        },
+        {
+          phase: 'collect', id: `evidence-collect-copy:${key}`,
+          argv: [
+            'storage', 'cp', generationBoundObject, output.filePath,
+            '--no-clobber', `--project=${PROJECT}`, '--format=json',
+          ],
+        },
+      );
+    }
+    for (const [key, output] of Object.entries(outputs)) {
+      expectedOperations.push(
+        {
+          phase: 'evidence', id: `evidence-output-delete:${key}`,
+          argv: [
+            'storage', 'rm', `gs://${MEDIA_BUCKET}/${output.object}#${output.generation}`,
+            `--project=${PROJECT}`, '--format=json',
+          ],
+        },
+        {
+          phase: 'evidence', id: `evidence-output-delete-readback:${key}`,
+          argv: [
+            'storage', 'objects', 'list', `gs://${MEDIA_BUCKET}/${output.object}`,
+            `--project=${PROJECT}`, '--format=json',
+          ],
+        },
+      );
+    }
+    expectedOperations.push({
+      phase: 'evidence', id: 'evidence-output-zero-readback',
+      argv: [
+        'storage', 'objects', 'list',
+        `gs://${MEDIA_BUCKET}/release-evidence/${plan.releaseSha}/**`,
+        `--project=${PROJECT}`, '--format=json',
+      ],
+    });
+    const actualOperations = plan.operations.filter(({ argv }) => (
+      Array.isArray(argv) && argv[0] === 'storage'
+    ));
+    if (!exact(actualOperations, expectedOperations)) throw new Error('storage operation drift');
+    return true;
+  } catch {
+    throw new Error('Release evidence storage boundary is invalid');
+  }
 }
 
 function expectedCloudBuildSteps({ releaseSha, sourceArchiveSha256, buildConfigSha256 }) {

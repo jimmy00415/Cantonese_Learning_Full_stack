@@ -20,6 +20,7 @@ const PROJECT = GCP_IDENTITY.projectId;
 const PROJECT_NUMBER = GCP_IDENTITY.projectNumber;
 const ORGANIZATION = GCP_IDENTITY.organizationId;
 const BILLING_ACCOUNT = GCP_IDENTITY.billingAccountId;
+const RELEASE_EVIDENCE_OPERATOR_ROLE_ID = 'hkbuddyV1ReleaseEvidenceObjectOperator';
 
 function publish(writeOutput, exitCode, publicReport) {
   writeOutput(`${JSON.stringify(publicReport)}\n`);
@@ -179,8 +180,9 @@ export async function runGcpPreflight({
     binding?.role === role && Array.isArray(binding.members) && binding.members.includes(member)
   )))) return publish(writeOutput, 1, safeFailure('SHARED_PROJECT_BASELINE_INVALID', { projectState }));
 
+  let auditPlane;
   try {
-    const auditPlane = new GcpControlPlane({
+    auditPlane = new GcpControlPlane({
       contract: selectedContract, notificationChannel: selection.notificationChannel,
       gcloud: runCommand, request: authenticatedRequest,
     });
@@ -191,6 +193,40 @@ export async function runGcpPreflight({
       'SHARED_PROJECT_BASELINE_INVALID', 'ALERT_CHANNEL_REQUIRED',
     ].includes(error?.code) ? error.code : 'PREFLIGHT_INVENTORY_INVALID';
     return publish(writeOutput, 1, safeFailure(code, { projectState }));
+  }
+
+  const repairResources = [
+    `custom-role:${RELEASE_EVIDENCE_OPERATOR_ROLE_ID}`,
+    'operator-release-evidence-iam-binding',
+  ];
+  const missingResources = [];
+  try {
+    for (const id of repairResources) {
+      const current = await auditPlane.read(id);
+      if (!['present', 'absent'].includes(current?.status)) {
+        throw Object.assign(new Error('release evidence IAM state unknown'), {
+          code: 'IAM_ALLOWLIST_MISMATCH',
+        });
+      }
+      if (current.status === 'present' && !auditPlane.compare(id, current.value)) {
+        throw Object.assign(new Error('release evidence IAM drift'), {
+          code: id.startsWith('custom-role:')
+            ? 'CUSTOM_ROLE_ALLOWLIST_MISMATCH'
+            : 'IAM_ALLOWLIST_MISMATCH',
+        });
+      }
+      if (current.status === 'absent') missingResources.push(id);
+    }
+  } catch (error) {
+    const code = ['CUSTOM_ROLE_ALLOWLIST_MISMATCH', 'IAM_ALLOWLIST_MISMATCH'].includes(error?.code)
+      ? error.code
+      : 'PREFLIGHT_INVENTORY_INVALID';
+    return publish(writeOutput, 1, safeFailure(code, { projectState }));
+  }
+  if (missingResources.length > 0) {
+    return publish(writeOutput, 1, safeFailure('RELEASE_EVIDENCE_IAM_REPAIR_REQUIRED', {
+      projectState, missingResources,
+    }));
   }
 
   // This is the single inventory gate shared with the mutating provisioner.

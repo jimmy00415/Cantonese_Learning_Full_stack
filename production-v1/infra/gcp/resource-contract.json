@@ -116,6 +116,18 @@
           "storage.buckets.setIamPolicy"
         ],
         "stage": "GA"
+      },
+      {
+        "id": "hkbuddyV1ReleaseEvidenceObjectOperator",
+        "name": "projects/motion-expert-hk-ltd-webpage/roles/hkbuddyV1ReleaseEvidenceObjectOperator",
+        "title": "HK Buddy V1 release evidence object operator",
+        "description": "Collect and clean release evidence in the fixed media bucket",
+        "includedPermissions": [
+          "storage.objects.delete",
+          "storage.objects.get",
+          "storage.objects.list"
+        ],
+        "stage": "GA"
       }
     ],
     "network": {
@@ -523,6 +535,16 @@
         "title": "HK Buddy V1 bucket IAM boundary",
         "description": "Limit operator bucket IAM access to the two Hong Kong Buddy V1 buckets",
         "expression": "resource.service == \"storage.googleapis.com\" && resource.type == \"storage.googleapis.com/Bucket\" && (resource.name == \"projects/_/buckets/hkbuddy-v1-582852715831-media\" || resource.name == \"projects/_/buckets/hkbuddy-v1-582852715831-build-source\")"
+      }
+    },
+    "operatorReleaseEvidenceIamBinding": {
+      "scope": "project",
+      "member": "user:admin@motionexp.com",
+      "role": "projects/motion-expert-hk-ltd-webpage/roles/hkbuddyV1ReleaseEvidenceObjectOperator",
+      "condition": {
+        "title": "HK Buddy V1 release evidence object boundary",
+        "description": "List the media bucket and collect or clean only release-evidence objects",
+        "expression": "resource.service == \"storage.googleapis.com\" && ((resource.type == \"storage.googleapis.com/Bucket\" && resource.name == \"projects/_/buckets/hkbuddy-v1-582852715831-media\") || (resource.type == \"storage.googleapis.com/Object\" && resource.name.startsWith(\"projects/_/buckets/hkbuddy-v1-582852715831-media/objects/release-evidence/\")))"
       }
     },
     "bindings": [
