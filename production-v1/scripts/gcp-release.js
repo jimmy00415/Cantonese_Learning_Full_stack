@@ -8,9 +8,15 @@ import { promisify } from 'node:util';
 import { createGzip } from 'node:zlib';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { createDefaultGcloudExecutor, resolveDefaultGcloudLaunch } from './gcp-provision.js';
 import {
+  createDefaultGcloudAuthenticatedRequest,
+  createDefaultGcloudExecutor,
+  resolveDefaultGcloudLaunch,
+} from './gcp-provision.js';
+import {
+  CANDIDATE_PRIVACY_SCHEMA_VERSION,
   candidatePrivacyBoundarySha256,
+  createCandidatePrivacyCommandPlan,
   createIdentityTokenExecutor,
   runCandidatePrivacyProof,
   validateCandidatePrivacyProof,
@@ -77,7 +83,17 @@ const ACCEPTANCE_SERVICE_ACCOUNT = GCP_IDENTITY.serviceAccounts.acceptance;
 const PROMOTION_AUTHORITY = 'admin@motionexp.com';
 const CANDIDATE_INVOKER_ROLE = 'roles/run.servicesInvoker';
 const OCI_SOURCE = 'https://github.com/jimmy00415/Cantonese_Learning_Full_stack';
+
+function createDefaultIdentityTokenExecutor(environment) {
+  return createIdentityTokenExecutor({
+    request: createDefaultGcloudAuthenticatedRequest({
+      environment, account: PROMOTION_AUTHORITY,
+    }),
+  });
+}
 const INVOKER_IAM_DISABLED_ANNOTATION = 'run.googleapis.com/invoker-iam-disabled';
+const SERVICE_MAX_SCALE_ANNOTATION = 'run.googleapis.com/maxScale';
+const SERVICE_MAX_SCALE = '1';
 const RELEASE_SHA = /^[0-9a-f]{40}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/;
@@ -329,14 +345,18 @@ function isAbsoluteFile(value) {
     && !/[\u0000\r\n]/.test(value);
 }
 
-function assertPrivacyProofReference(value) {
+function assertPrivacyProofReference(value, { allowLegacyUnresolved = false } = {}) {
   const observedAt = Date.parse(value?.observedAt);
   const expiresAt = Date.parse(value?.expiresAt);
+  const unresolved = [value?.artifactSha256, value?.objectSha256, value?.boundarySha256]
+    .every((member) => member === '0'.repeat(64));
+  const validSchema = value?.schemaVersion === CANDIDATE_PRIVACY_SCHEMA_VERSION
+    || (allowLegacyUnresolved && unresolved && value?.schemaVersion === 3);
   if (!exactKeys(value, [
     'artifactSha256', 'boundarySha256', 'expiresAt', 'filePath', 'objectSha256',
     'observedAt', 'schemaVersion',
   ])
-    || value.schemaVersion !== 3
+    || !validSchema
     || !isAbsoluteFile(value.filePath)
     || !DIGEST.test(String(value.artifactSha256 ?? ''))
     || !DIGEST.test(String(value.objectSha256 ?? ''))
@@ -363,8 +383,12 @@ export function assertTask8Evidence(value, { stableTrafficState, now = new Date(
       || entry.trafficState !== 'candidate-service-private-100'
       || entry.stableTrafficState !== stableTrafficState
       || !exactKeys(entry.privacyProofs, ['end', 'start'])) throw releaseContractError();
-    const start = assertPrivacyProofReference(entry.privacyProofs.start);
-    const end = assertPrivacyProofReference(entry.privacyProofs.end);
+    const start = assertPrivacyProofReference(entry.privacyProofs.start, {
+      allowLegacyUnresolved: true,
+    });
+    const end = assertPrivacyProofReference(entry.privacyProofs.end, {
+      allowLegacyUnresolved: true,
+    });
     const startObserved = Date.parse(start.observedAt);
     const endObserved = Date.parse(end.observedAt);
     const unresolvedPair = [start, end].every((reference) => (
@@ -372,8 +396,13 @@ export function assertTask8Evidence(value, { stableTrafficState, now = new Date(
         && reference.objectSha256 === '0'.repeat(64)
         && reference.boundarySha256 === '0'.repeat(64)
     ));
+    const partlyUnresolved = [start, end].some((reference) => (
+      [reference.artifactSha256, reference.objectSha256, reference.boundarySha256]
+        .every((member) => member === '0'.repeat(64))
+    ));
     if (endObserved <= startObserved
       || start.filePath === end.filePath
+      || (partlyUnresolved && !unresolvedPair)
       || (!unresolvedPair && (start.artifactSha256 === end.artifactSha256
         || start.objectSha256 === end.objectSha256))) throw releaseContractError();
     if (now !== null) {
@@ -811,6 +840,7 @@ function cloudRunServiceSpec({
       annotations: Object.freeze({
         'run.googleapis.com/ingress': 'all',
         [INVOKER_IAM_DISABLED_ANNOTATION]: 'false',
+        [SERVICE_MAX_SCALE_ANNOTATION]: SERVICE_MAX_SCALE,
       }),
     }),
     spec: Object.freeze({
@@ -2238,6 +2268,7 @@ function validateCandidateServiceSpecDryRun(value, plan) {
   if (value?.apiVersion !== 'serving.knative.dev/v1' || value?.kind !== 'Service'
     || !template || normalizedService?.service !== CANDIDATE_SERVICE
     || normalizedService?.invokerIamDisabled !== false
+    || normalizedService?.serviceMaxScale !== plan.expectedCandidate.maxInstances
     || !exact(normalizedService.traffic, [{
       revision: plan.candidateRevision,
       tag: plan.candidateTag,
@@ -2258,6 +2289,7 @@ function validateStableServiceSpecDryRun(value, plan) {
   if (value?.apiVersion !== 'serving.knative.dev/v1' || value?.kind !== 'Service'
     || !template || normalizedService?.service !== STABLE_SERVICE
     || normalizedService?.invokerIamDisabled !== false
+    || normalizedService?.serviceMaxScale !== plan.expectedStable.maxInstances
     || !exact(normalizedService.traffic, plan.expectedStable.stagedTraffic)
     || !exact(
       normalizeCandidateRevision({ metadata: template.metadata, spec: template.spec }, plan.expectedStable),
@@ -2273,8 +2305,9 @@ function normalizeControlledServiceSpec(value) {
     || typeof value?.metadata?.name !== 'string' || !Array.isArray(value?.spec?.traffic)) return null;
   const annotationsDefined = Object.hasOwn(value.metadata, 'annotations');
   const annotations = value.metadata.annotations;
-  if (annotationsDefined && (annotations === null || typeof annotations !== 'object'
-    || Array.isArray(annotations))) return null;
+  if (!annotationsDefined || annotations === null || typeof annotations !== 'object'
+    || Array.isArray(annotations)
+    || annotations[SERVICE_MAX_SCALE_ANNOTATION] !== SERVICE_MAX_SCALE) return null;
   if (annotationsDefined && Object.hasOwn(annotations, INVOKER_IAM_DISABLED_ANNOTATION)) {
     const annotation = annotations[INVOKER_IAM_DISABLED_ANNOTATION];
     if (typeof annotation !== 'string' || annotation !== annotation.trim()
@@ -2284,6 +2317,7 @@ function normalizeControlledServiceSpec(value) {
     return {
       service: value.metadata.name,
       invokerIamDisabled: false,
+      serviceMaxScale: Number(SERVICE_MAX_SCALE),
       traffic: normalizeControlledTraffic(value.spec.traffic, { service: value.metadata.name }),
     };
   } catch { return null; }
@@ -2311,22 +2345,29 @@ function normalizeCandidateService(value) {
   const rawAnnotationPresent = annotationsValid && annotationsDefined
     && Object.hasOwn(serviceAnnotations, INVOKER_IAM_DISABLED_ANNOTATION);
   let invokerIamDisabled;
+  let serviceMaxScale;
   if (direct) {
     if (rawAnnotationPresent || !Object.hasOwn(value, 'invokerIamDisabled')
-      || value.invokerIamDisabled !== false) return null;
+      || value.invokerIamDisabled !== false
+      || value.serviceMaxScale !== Number(SERVICE_MAX_SCALE)) return null;
     invokerIamDisabled = false;
+    serviceMaxScale = Number(SERVICE_MAX_SCALE);
   } else {
+    if (!annotationsDefined
+      || serviceAnnotations[SERVICE_MAX_SCALE_ANNOTATION] !== SERVICE_MAX_SCALE) return null;
     if (rawAnnotationPresent) {
       const annotation = serviceAnnotations[INVOKER_IAM_DISABLED_ANNOTATION];
       if (typeof annotation !== 'string' || annotation !== annotation.trim()
         || annotation.toLowerCase() !== 'false') return null;
     }
     invokerIamDisabled = false;
+    serviceMaxScale = Number(SERVICE_MAX_SCALE);
   }
   try {
     return {
       service,
       invokerIamDisabled,
+      serviceMaxScale,
       traffic: direct
         ? normalizeInternalTraffic(value.traffic, { service })
         : normalizeCloudRunV1Traffic(rawTraffic, {
@@ -2342,7 +2383,8 @@ function normalizeCandidateService(value) {
 function validateCandidateService(value, expected) {
   const normalized = normalizeCandidateService(value);
   if (!normalized || normalized.service !== expected.service
-    || normalized.invokerIamDisabled !== false) {
+    || normalized.invokerIamDisabled !== false
+    || normalized.serviceMaxScale !== expected.maxInstances) {
     throw new Error('Cloud Run candidate service readback is invalid');
   }
   if (!exact(normalized.traffic, expected.traffic)) {
@@ -2355,6 +2397,7 @@ function validateStableStagedService(value, plan) {
   const normalized = normalizeCandidateService(value);
   if (!normalized || normalized.service !== STABLE_SERVICE
     || normalized.invokerIamDisabled !== false
+    || normalized.serviceMaxScale !== plan.expectedStable.maxInstances
     || !exact(normalized.traffic, plan.expectedStable.stagedTraffic)
     || normalized.traffic.some(({ tag }) => tag !== null)) {
     throw new Error('Cloud Run staged stable service readback is invalid');
@@ -2373,7 +2416,8 @@ function validateStableRevisionReadback(value, plan) {
 function validateStableService(value, { previousRevision } = {}) {
   const normalized = normalizeCandidateService(value);
   if (!normalized || normalized.service !== STABLE_SERVICE
-    || normalized.invokerIamDisabled !== false) {
+    || normalized.invokerIamDisabled !== false
+    || normalized.serviceMaxScale !== Number(SERVICE_MAX_SCALE)) {
     throw new Error('Cloud Run stable service readback is invalid');
   }
   if (!exact(normalized.traffic, [{ revision: previousRevision, tag: null, percent: 100 }])) {
@@ -2390,7 +2434,8 @@ function validateCandidateCleanupService(value, plan) {
 function validatePromotedService(value, plan) {
   const normalized = normalizeCandidateService(value);
   if (!normalized || normalized.service !== STABLE_SERVICE
-    || normalized.invokerIamDisabled !== false) {
+    || normalized.invokerIamDisabled !== false
+    || normalized.serviceMaxScale !== plan.expectedStable.maxInstances) {
     throw new Error('Cloud Run promotion service readback is invalid');
   }
   validateTrafficReceipt(value, { revision: plan.stableRevision });
@@ -2403,7 +2448,8 @@ function validatePromotedService(value, plan) {
 function validatePromotionCompensationSource(value, plan) {
   const normalized = normalizeCandidateService(value);
   if (!normalized || normalized.service !== STABLE_SERVICE || normalized.traffic.length < 1
-    || normalized.traffic.length > 2 || normalized.invokerIamDisabled !== false) {
+    || normalized.traffic.length > 2 || normalized.invokerIamDisabled !== false
+    || normalized.serviceMaxScale !== plan.expectedStable.maxInstances) {
     throw new Error('Cloud Run promotion compensation source is invalid');
   }
   if (plan.previousRevision === null) {
@@ -2606,6 +2652,7 @@ export function validateTrafficReceipt(value, { revision } = {}) {
   const service = CANDIDATE_REVISION.test(revision) ? CANDIDATE_SERVICE : STABLE_SERVICE;
   const tag = service === CANDIDATE_SERVICE ? `candidate-${revision.slice(-12)}` : null;
   if (!normalized || normalized.service !== service
+    || normalized.serviceMaxScale !== Number(SERVICE_MAX_SCALE)
     || !exact(normalized.traffic, [{ revision, tag, percent: 100 }])) {
     throw new Error('Cloud Run traffic readback is invalid');
   }
@@ -4342,7 +4389,7 @@ function candidatePrivacyAuthority(reference, candidateReceiptSha256) {
   });
 }
 
-function candidatePrivacyAuthorityFromJournal(records, receipt, plan) {
+export function candidatePrivacyAuthorityFromJournal(records, receipt, plan) {
   if (!Array.isArray(records) || !DIGEST.test(String(receipt?.receiptSha256 ?? ''))) {
     throw new Error('Candidate privacy receipt authority is invalid');
   }
@@ -4375,8 +4422,23 @@ function candidatePrivacyAuthorityFromJournal(records, receipt, plan) {
   try { proof = JSON.parse(bytes.toString('utf8')); } catch {
     throw new Error('Candidate privacy receipt authority is invalid');
   }
+  if (proof?.schemaVersion !== CANDIDATE_PRIVACY_SCHEMA_VERSION) {
+    throw new Error('Candidate privacy receipt authority is invalid');
+  }
+  const historicalClock = new Date(proof.occurredAt);
+  if (!Number.isFinite(historicalClock.getTime())) {
+    throw new Error('Candidate privacy receipt authority is invalid');
+  }
+  try {
+    validateCandidatePrivacyProof(proof, {
+      binding: candidatePrivacyBinding(plan),
+      now: historicalClock,
+    });
+  } catch {
+    throw new Error('Candidate privacy receipt authority is invalid');
+  }
   const reference = {
-    schemaVersion: 3,
+    schemaVersion: proof.schemaVersion,
     filePath: artifacts[0].filePath,
     artifactSha256: proof.artifactSha256,
     objectSha256: artifacts[0].objectSha256,
@@ -4994,6 +5056,7 @@ function plannedMutationAfterObservation(plan, operationId) {
     revision: candidateRevisionContract(plan.expectedCandidate),
     service: Object.freeze({
       invokerIamDisabled: false,
+      serviceMaxScale: plan.expectedCandidate.maxInstances,
       service: CANDIDATE_SERVICE,
       traffic: plan.expectedCandidate.traffic,
     }),
@@ -5004,6 +5067,7 @@ function plannedMutationAfterObservation(plan, operationId) {
     revision: candidateRevisionContract(plan.expectedStable),
     service: Object.freeze({
       invokerIamDisabled: false,
+      serviceMaxScale: plan.expectedStable.maxInstances,
       service: STABLE_SERVICE,
       traffic: plan.expectedStable.stagedTraffic,
     }),
@@ -5151,7 +5215,7 @@ function canonicalMutationAfterObservation(plan, operationId, observed) {
       ? plan.expectedCandidate : plan.expectedStable;
     const service = normalizeCandidateService(observed?.service);
     // Service metadata.resourceVersion is server-managed; semantic service identity remains the
-    // exact invoker-IAM annotation and traffic tuple, paired with exact revision and image truth.
+    // exact invoker-IAM and max-scale annotations plus traffic, paired with revision and image truth.
     if (operationId === 'candidate-deploy') validateCandidateService(observed?.service, serviceExpected);
     else validateStableStagedService(observed?.service, plan);
     const revision = normalizeCandidateRevision(observed?.revision, serviceExpected);
@@ -6462,7 +6526,7 @@ async function executeCandidatePrivacyArtifact({
   validateCandidatePrivacyProof(proof, { binding, now: observedNow });
   const contents = `${JSON.stringify(proof, null, 2)}\n`;
   const reference = Object.freeze({
-    schemaVersion: 3,
+    schemaVersion: CANDIDATE_PRIVACY_SCHEMA_VERSION,
     filePath: locator.filePath,
     artifactSha256: proof.artifactSha256,
     objectSha256: createHash('sha256').update(contents).digest('hex'),
@@ -6513,7 +6577,7 @@ function privacyArtifactFromPublication(plan, locator, publication, {
     throw new Error('Privacy publication intent is invalid');
   }
   const reference = Object.freeze({
-    schemaVersion: 3,
+    schemaVersion: CANDIDATE_PRIVACY_SCHEMA_VERSION,
     filePath: locator.filePath,
     artifactSha256: proof.artifactSha256,
     objectSha256: artifact.objectSha256,
@@ -6664,7 +6728,7 @@ async function executeControlledReadiness(plan, {
   }
   let tokenExecutor = readinessTokenExecutor;
   if (tokenExecutor === undefined) {
-    tokenExecutor = createIdentityTokenExecutor(resolveDefaultGcloudLaunch(environment));
+    tokenExecutor = createDefaultIdentityTokenExecutor(environment);
   }
   if (typeof tokenExecutor !== 'function') throw new Error('Controlled readiness token transport is invalid');
   let result;
@@ -6974,15 +7038,11 @@ async function executeControlledMobile(plan, {
   }
   let tokenExecutor = mobileTokenExecutor;
   if (tokenExecutor === undefined) {
-    tokenExecutor = createIdentityTokenExecutor(resolveDefaultGcloudLaunch(environment));
+    tokenExecutor = createDefaultIdentityTokenExecutor(environment);
   }
   if (typeof tokenExecutor !== 'function') throw new Error('Controlled mobile token transport is invalid');
   const binding = candidatePrivacyBinding(plan);
-  const token = await tokenExecutor([
-    'auth', 'print-identity-token', binding.operator,
-    `--impersonate-service-account=${binding.acceptanceServiceAccount}`,
-    `--audiences=${binding.candidateAudience}`, '--include-email', '--quiet',
-  ]);
+  const token = await tokenExecutor(createCandidatePrivacyCommandPlan(binding).token);
   if (typeof token !== 'string' || token.length < 1 || token.length > 16_384 || /\s/u.test(token)) {
     throw new Error('Controlled mobile token transport is invalid');
   }
@@ -7969,7 +8029,7 @@ export async function runGcpRelease({
         workloadPrivacyExecutor = execute ?? createDefaultGcloudExecutor({ environment });
         let tokenExecutor = workloadPrivacyTokenExecutor;
         if (tokenExecutor === undefined) {
-          tokenExecutor = createIdentityTokenExecutor(resolveDefaultGcloudLaunch(environment));
+          tokenExecutor = createDefaultIdentityTokenExecutor(environment);
         }
         workloadStage = 'producer';
         workloadExecution = await executeControlledWorkload(plan, {
@@ -8958,7 +9018,7 @@ export async function runGcpRelease({
           } else {
             let tokenExecutor = releasePrivacyTokenExecutor;
             if (tokenExecutor === undefined) {
-              tokenExecutor = createIdentityTokenExecutor(resolveDefaultGcloudLaunch(environment));
+              tokenExecutor = createDefaultIdentityTokenExecutor(environment);
             }
             artifact = await produceReleasePrivacyArtifact({
               plan,

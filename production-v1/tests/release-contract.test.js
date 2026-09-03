@@ -26,7 +26,11 @@ import {
   LATENCY_ACCEPTANCE_CONTRACT,
   finalizeLatencyAcceptanceRecord,
 } from '../scripts/production-latency-workload.js';
-import { candidatePrivacyBoundarySha256 } from '../scripts/candidate-privacy-proof.js';
+import {
+  CANDIDATE_PRIVACY_SCHEMA_VERSION,
+  candidatePrivacyBoundarySha256,
+  finalizeCandidatePrivacyProof,
+} from '../scripts/candidate-privacy-proof.js';
 import * as gcpReleaseContract from '../scripts/gcp-release.js';
 import { finalizeTask8ReadinessRecord } from '../scripts/task8-readiness-producer.js';
 import {
@@ -37,6 +41,7 @@ import {
 } from '../scripts/task8-mobile-producer.js';
 import {
   buildReleasePlan,
+  candidatePrivacyAuthorityFromJournal,
   containsForbiddenPersistedSecret,
   createReleaseGcloudExecutor,
   inspectCollectedEvidenceArtifact,
@@ -174,7 +179,7 @@ function task8PrivacyProofReference(phase, boundary) {
   const expiresAt = boundary === 'start'
     ? '2026-08-26T08:05:00.000Z' : '2026-08-26T08:15:00.000Z';
   return {
-    schemaVersion: 3,
+    schemaVersion: CANDIDATE_PRIVACY_SCHEMA_VERSION,
     filePath: `C:\\release\\${phase}-${boundary}-privacy.json`,
     artifactSha256: digit.repeat(64),
     objectSha256: digit.repeat(64),
@@ -204,7 +209,7 @@ function task8Entry(phase, stableTrafficState) {
 
 function candidatePrivacyReference(plan) {
   return {
-    schemaVersion: 3,
+    schemaVersion: CANDIDATE_PRIVACY_SCHEMA_VERSION,
     filePath: plan.candidatePrivacyProofPath,
     artifactSha256: '1'.repeat(64),
     objectSha256: '2'.repeat(64),
@@ -925,6 +930,10 @@ function realV1JobReadback(expected) {
   };
 }
 
+function canonicalFixtureSha256(value) {
+  return createHash('sha256').update(JSON.stringify(canonicalFixture(value))).digest('hex');
+}
+
 function realV1ExecutionReadback(expected, name = `${expected.job}-release-001`) {
   return {
     apiVersion: 'run.googleapis.com/v1',
@@ -1097,7 +1106,7 @@ test('candidate receipt binds the complete exact privacy-proof reference', async
     ['missing artifact digest', (value) => { delete value.artifactSha256; }],
     ['artifact digest drift', (value) => { value.artifactSha256 = 'a'.repeat(64); }],
     ['object digest drift', (value) => { value.objectSha256 = 'b'.repeat(64); }],
-    ['schema drift', (value) => { value.schemaVersion = 4; }],
+    ['schema drift', (value) => { value.schemaVersion = 3; }],
     ['file path drift', (value) => { value.filePath = `${value.filePath}.other`; }],
     ['boundary drift', (value) => { value.boundarySha256 = 'c'.repeat(64); }],
     ['observed clock drift', (value) => { value.observedAt = '2026-08-26T08:00:01.000Z'; }],
@@ -1161,12 +1170,13 @@ function controlledReadinessExecution(plan) {
   const entry = plan.task8Evidence.readiness;
   const privacyArtifact = (boundary, digit, observedAt) => {
     const contents = `${JSON.stringify({
-      schemaVersion: 3, proofType: 'controlled-test-privacy', artifactSha256: digit.repeat(64),
+      schemaVersion: CANDIDATE_PRIVACY_SCHEMA_VERSION,
+      proofType: 'controlled-test-privacy', artifactSha256: digit.repeat(64),
     }, null, 2)}\n`;
     return {
       contents,
       reference: {
-        schemaVersion: 3,
+        schemaVersion: CANDIDATE_PRIVACY_SCHEMA_VERSION,
         filePath: entry.privacyProofs[boundary].filePath,
         artifactSha256: digit.repeat(64),
         objectSha256: createHash('sha256').update(contents).digest('hex'),
@@ -1261,13 +1271,16 @@ function controlledMobileExecution(plan) {
     expectedCandidate: plan.expectedCandidate,
   });
   const privacyArtifact = (boundary, digit, observedAt) => {
-    const proof = { schemaVersion: 3, artifactSha256: digit.repeat(64) };
+    const proof = {
+      schemaVersion: CANDIDATE_PRIVACY_SCHEMA_VERSION,
+      artifactSha256: digit.repeat(64),
+    };
     const contents = `${JSON.stringify(proof, null, 2)}\n`;
     return {
       filePath: entry.privacyProofs[boundary].filePath,
       contents,
       reference: {
-        schemaVersion: 3,
+        schemaVersion: CANDIDATE_PRIVACY_SCHEMA_VERSION,
         filePath: entry.privacyProofs[boundary].filePath,
         artifactSha256: proof.artifactSha256,
         objectSha256: createHash('sha256').update(contents).digest('hex'),
@@ -1388,7 +1401,7 @@ function controlledWorkloadPrivacyArtifact(plan, locator, boundary) {
     expectedCandidate: plan.expectedCandidate,
   });
   const record = {
-    schemaVersion: 3,
+    schemaVersion: CANDIDATE_PRIVACY_SCHEMA_VERSION,
     proofType: 'controlled-test-privacy',
     artifactSha256: digit.repeat(64),
     binding: { boundarySha256 },
@@ -1400,7 +1413,7 @@ function controlledWorkloadPrivacyArtifact(plan, locator, boundary) {
     filePath: locator.filePath,
     contents,
     reference: {
-      schemaVersion: 3,
+      schemaVersion: CANDIDATE_PRIVACY_SCHEMA_VERSION,
       filePath: locator.filePath,
       artifactSha256: record.artifactSha256,
       objectSha256: createHash('sha256').update(contents).digest('hex'),
@@ -1412,30 +1425,220 @@ function controlledWorkloadPrivacyArtifact(plan, locator, boundary) {
 }
 
 function controlledReleasePrivacyArtifact(plan, locator) {
-  const reference = candidatePrivacyReference(plan);
-  const proof = {
-    schemaVersion: 3,
-    proofType: 'controlled-release-test-privacy',
-    artifactSha256: createHash('sha256').update(locator.filePath).digest('hex'),
-    binding: { boundarySha256: reference.boundarySha256 },
+  const rawBinding = {
+    projectId: PROJECT,
+    projectNumber: PROJECT_NUMBER,
+    organizationId: GCP_IDENTITY.organizationId,
+    region: REGION,
+    releaseSha: plan.releaseSha,
+    imageDigest: plan.imageDigest,
+    image: plan.expectedCandidate.image,
+    candidateService: plan.candidateService,
+    candidateRevision: plan.candidateRevision,
+    candidateTag: plan.candidateTag,
+    candidateOrigin: plan.candidateOrigin,
+    candidateAudience: plan.candidateServiceOrigin,
+    acceptanceServiceAccount: ACCEPTANCE_SA,
+    operator: 'admin@motionexp.com',
+    expectedCandidate: plan.expectedCandidate,
+  };
+  const candidateResource = `//run.googleapis.com/projects/${PROJECT}/locations/${REGION}/services/${CANDIDATE_SERVICE}`;
+  const proofBindingPayload = {
+    projectId: PROJECT,
+    projectNumber: PROJECT_NUMBER,
+    organizationId: GCP_IDENTITY.organizationId,
+    region: REGION,
+    releaseSha: plan.releaseSha,
+    imageDigest: plan.imageDigest,
+    image: plan.expectedCandidate.image,
+    candidateContractSha256: canonicalFixtureSha256(plan.expectedCandidate),
+    candidateService: plan.candidateService,
+    candidateRevision: plan.candidateRevision,
+    candidateTag: plan.candidateTag,
+    candidateOrigin: plan.candidateOrigin,
+    candidateAudience: plan.candidateServiceOrigin,
+    candidateResource,
+  };
+  const proofBinding = {
+    ...proofBindingPayload,
+    boundarySha256: canonicalFixtureSha256(proofBindingPayload),
+  };
+  assert.equal(proofBinding.boundarySha256, candidatePrivacyBoundarySha256(rawBinding));
+  const hierarchyChain = [
+    candidateResource,
+    `projects/${PROJECT_NUMBER}`,
+    `organizations/${GCP_IDENTITY.organizationId}`,
+  ];
+  const effectivePolicyProjection = {
+    policyResults: [{
+      fullResourceName: candidateResource,
+      policies: [{
+        attachedResource: candidateResource,
+        policy: {
+          bindings: [{
+            role: 'roles/run.servicesInvoker',
+            members: [`serviceAccount:${ACCEPTANCE_SA}`],
+          }],
+          auditConfigs: [],
+        },
+      }],
+    }],
+  };
+  const roleDefinitions = [];
+  const denialPayload = {
+    method: 'effective-policy-role-definition-exclusion-v1',
+    permission: 'run.routes.invoke',
+    hierarchyChain,
+    effectivePolicyProjection,
+    sources: {
+      effectiveIamSha256: canonicalFixtureSha256(effectivePolicyProjection),
+      hierarchyChainSha256: canonicalFixtureSha256(hierarchyChain),
+      roleDefinitionsSha256: canonicalFixtureSha256(roleDefinitions),
+    },
+    roleDefinitions,
+    principals: {
+      allAuthenticatedUsers: { decision: 'DENIED', bindingCount: 0, bindings: [] },
+      allUsers: { decision: 'DENIED', bindingCount: 0, bindings: [] },
+    },
+  };
+  const proof = finalizeCandidatePrivacyProof({
+    schemaVersion: CANDIDATE_PRIVACY_SCHEMA_VERSION,
+    proofType: 'candidate-effective-privacy',
+    binding: proofBinding,
     occurredAt: '2026-08-27T08:00:00.000Z',
     expiresAt: '2026-08-27T08:05:00.000Z',
-  };
+    result: 'pass',
+    controlPlane: {
+      stable: true,
+      beforeSha256: canonicalFixtureSha256({ state: 'candidate-private' }),
+      afterSha256: canonicalFixtureSha256({ state: 'candidate-private' }),
+    },
+    identity: {
+      acceptanceServiceAccount: ACCEPTANCE_SA,
+      invokerMember: `serviceAccount:${ACCEPTANCE_SA}`,
+      invokerPermission: 'run.routes.invoke',
+      invokerRole: 'roles/run.servicesInvoker',
+      subjectSha256: canonicalFixtureSha256('acceptance-subject'),
+      tokenCreatorPrincipal: 'user:admin@motionexp.com',
+      tokenCreatorPrerequisite: 'roles/iam.serviceAccountOpenIdTokenCreator',
+      tokenPrerequisitePolicySha256: canonicalFixtureSha256({ prerequisite: 'present' }),
+    },
+    hierarchy: {
+      stable: true,
+      chainSha256: denialPayload.sources.hierarchyChainSha256,
+      firstReadSha256: canonicalFixtureSha256({ snapshot: 'stable' }),
+      secondReadSha256: canonicalFixtureSha256({ snapshot: 'stable' }),
+      policyRoleDefinitionsSha256: denialPayload.sources.roleDefinitionsSha256,
+      policyRoleDefinitionsSecondReadSha256: denialPayload.sources.roleDefinitionsSha256,
+    },
+    cloudAsset: {
+      quotaProject: GCP_IDENTITY.assetInventoryConsumerProjectId,
+      effectiveIamSha256: denialPayload.sources.effectiveIamSha256,
+      publicPrincipalDenial: {
+        ...denialPayload,
+        attestationSha256: canonicalFixtureSha256(denialPayload),
+      },
+    },
+    troubleshooter: {
+      decision: 'GRANTED',
+      responseSha256: canonicalFixtureSha256({ access: 'GRANTED' }),
+    },
+    edge: {
+      anonymous: {
+        status: 403,
+        logSha256: canonicalFixtureSha256('anonymous-log'),
+        traceSha256: canonicalFixtureSha256('anonymous-trace'),
+        userAgentSha256: canonicalFixtureSha256('anonymous-user-agent'),
+      },
+      authenticated: {
+        status: 200,
+        logSha256: canonicalFixtureSha256('authenticated-log'),
+        traceSha256: canonicalFixtureSha256('authenticated-trace'),
+        userAgentSha256: canonicalFixtureSha256('authenticated-user-agent'),
+      },
+    },
+  });
   const contents = `${JSON.stringify(proof, null, 2)}\n`;
   return {
     filePath: locator.filePath,
     contents,
     reference: {
-      schemaVersion: 3,
+      schemaVersion: CANDIDATE_PRIVACY_SCHEMA_VERSION,
       filePath: locator.filePath,
       artifactSha256: proof.artifactSha256,
       objectSha256: createHash('sha256').update(contents).digest('hex'),
-      boundarySha256: reference.boundarySha256,
+      boundarySha256: proof.binding.boundarySha256,
       observedAt: proof.occurredAt,
       expiresAt: proof.expiresAt,
     },
   };
 }
+
+function candidatePrivacyJournalFixture(plan, mutateProof = () => undefined) {
+  const locator = { filePath: plan.candidatePrivacyProofPath };
+  const source = controlledReleasePrivacyArtifact(plan, locator);
+  const proof = JSON.parse(source.contents);
+  mutateProof(proof);
+  const contents = `${JSON.stringify(proof, null, 2)}\n`;
+  const bytes = Buffer.from(contents);
+  const intentRecordSha256 = '4'.repeat(64);
+  const attemptId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const receipt = fixtureReceiptChain(plan, 'candidate').at(-1);
+  return {
+    receipt,
+    records: [
+      {
+        phase: 'candidate',
+        attemptId,
+        recordType: 'intent',
+        operationId: 'candidate-privacy-publish',
+        recordSha256: intentRecordSha256,
+        payload: {
+          publication: {
+            artifacts: [{
+              role: 'privacy-proof',
+              filePath: locator.filePath,
+              byteLength: bytes.length,
+              objectSha256: createHash('sha256').update(bytes).digest('hex'),
+              contentsBase64: bytes.toString('base64'),
+            }],
+          },
+        },
+      },
+      {
+        phase: 'candidate',
+        attemptId,
+        recordType: 'checkpoint',
+        operationId: 'candidate-privacy-publish',
+        payload: { intentRecordSha256 },
+      },
+      {
+        phase: 'candidate',
+        attemptId,
+        recordType: 'terminal',
+        operationId: null,
+        payload: { receiptSha256: receipt.receiptSha256 },
+      },
+    ],
+  };
+}
+
+test('candidate journal authority validates the complete historical schema-v4 privacy proof', () => {
+  const plan = buildReleasePlan(releaseInput(), { phase: 'candidate-cleanup' });
+  const valid = candidatePrivacyJournalFixture(plan);
+  const authority = candidatePrivacyAuthorityFromJournal(valid.records, valid.receipt, plan);
+  assert.equal(authority.candidateReceiptSha256, valid.receipt.receiptSha256);
+  assert.equal(authority.privacyProof.expiresAt, '2026-08-27T08:05:00.000Z');
+
+  const forged = candidatePrivacyJournalFixture(plan, (proof) => {
+    proof.troubleshooter.decision = 'DENIED';
+    proof.artifactSha256 = finalizeCandidatePrivacyProof(proof).artifactSha256;
+  });
+  assert.throws(
+    () => candidatePrivacyAuthorityFromJournal(forged.records, forged.receipt, plan),
+    /privacy receipt authority/i,
+  );
+});
 
 async function verifyControlledReleasePrivacyArtifact(reference, _plan, clock) {
   const instant = typeof clock === 'function' ? clock() : clock;
@@ -1718,6 +1921,7 @@ function candidateServiceReadback(plan) {
   return {
     service: CANDIDATE_SERVICE,
     invokerIamDisabled: false,
+    serviceMaxScale: 1,
     traffic: [{
       revision: plan.candidateRevision, tag: plan.candidateTag, percent: 100,
     }],
@@ -1728,6 +1932,7 @@ function stablePriorReadback(plan) {
   return {
     service: STABLE_SERVICE,
     invokerIamDisabled: false,
+    serviceMaxScale: 1,
     traffic: [{ revision: plan.previousRevision, tag: null, percent: 100 }],
   };
 }
@@ -1736,6 +1941,7 @@ function stableStagedReadback(plan) {
   return {
     service: STABLE_SERVICE,
     invokerIamDisabled: false,
+    serviceMaxScale: 1,
     traffic: plan.expectedStable.stagedTraffic.map(({ revision, tag, percent }) => ({
       revision, tag, percent,
     })),
@@ -1746,6 +1952,7 @@ function stablePromotedReadback(plan) {
   return {
     service: STABLE_SERVICE,
     invokerIamDisabled: false,
+    serviceMaxScale: 1,
     traffic: [{ revision: plan.stableRevision, tag: null, percent: 100 }],
   };
 }
@@ -2001,6 +2208,7 @@ test('release plan is archive-bound, digest-pinned, evidence-first, probe-exact,
   assert.equal(candidate.argv[3], plan.candidateServiceSpecPath);
   const serviceSpec = plan.candidateServiceSpec;
   assert.equal(serviceSpec.apiVersion, 'serving.knative.dev/v1');
+  assert.equal(serviceSpec.metadata.annotations['run.googleapis.com/maxScale'], '1');
   assert.equal(serviceSpec.spec.template.metadata.name, REVISION);
   assert.equal(serviceSpec.spec.template.spec.containers[0].image,
     `asia-east2-docker.pkg.dev/${PROJECT}/hkbuddy-v1/hkbuddy-v1-api@${IMAGE_DIGEST}`);
@@ -2112,6 +2320,90 @@ test('candidate deploy is fenced by the canonical gcloud Service v1 dry-run resu
   )), false);
 });
 
+test('candidate Service dry-run rejects missing or drifted service maxScale before mutation', async () => {
+  const cases = [
+    ['missing', (service) => { delete service.metadata.annotations['run.googleapis.com/maxScale']; }],
+    ['wrong value', (service) => { service.metadata.annotations['run.googleapis.com/maxScale'] = '10'; }],
+    ['wrong type', (service) => { service.metadata.annotations['run.googleapis.com/maxScale'] = 1; }],
+  ];
+  for (const [name, mutate] of cases) {
+    const input = releaseInput();
+    const plan = buildReleasePlan(input);
+    let deployReached = false;
+    const result = await runGcpRelease({
+      argv: ['--phase=candidate', `--confirm-release=${RELEASE_SHA}`],
+      input,
+      writeCandidateSpec: async () => true,
+      execute: async (argv) => {
+        if (argv[1] === 'services' && argv[2] === 'describe') {
+          throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+        }
+        if (argv.includes('--dry-run')) {
+          const response = structuredClone(plan.candidateServiceSpec);
+          mutate(response);
+          return response;
+        }
+        deployReached = true;
+        throw new Error('candidate deploy must remain inert after service maxScale drift');
+      },
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1, name);
+    assert.equal(result.publicReport.resumeBoundary, 'candidate-spec-dry-run', name);
+    assert.equal(deployReached, false, name);
+  }
+});
+
+test('stable Service dry-run rejects missing or drifted service maxScale before mutation', async () => {
+  const cases = [
+    ['missing', (service) => { delete service.metadata.annotations['run.googleapis.com/maxScale']; }],
+    ['wrong value', (service) => { service.metadata.annotations['run.googleapis.com/maxScale'] = '10'; }],
+    ['wrong type', (service) => { service.metadata.annotations['run.googleapis.com/maxScale'] = 1; }],
+  ];
+  for (const [name, mutate] of cases) {
+    const input = releaseInput();
+    const plan = buildReleasePlan(input);
+    let stableMutationReached = false;
+    const result = await runGcpRelease({
+      argv: ['--phase=promote', `--confirm-release=${RELEASE_SHA}`],
+      input,
+      writeStableSpec: async () => true,
+      execute: async (argv) => {
+        if (argv[0] === 'auth') return [{ account: 'admin@motionexp.com', status: 'ACTIVE' }];
+        if (argv[0] === 'artifacts') {
+          return artifactReadback(argv.includes(plan.previousImage) ? plan.previousImage : plan.image);
+        }
+        if (argv.includes('get-iam-policy')) {
+          return argv.includes(CANDIDATE_SERVICE) ? candidatePrivateIam() : stablePublicIam();
+        }
+        if (argv[1] === 'revisions') {
+          return argv[3] === plan.candidateRevision
+            ? structuredClone(plan.expectedCandidate)
+            : { revision: plan.previousRevision, image: plan.previousImage };
+        }
+        if (argv[1] === 'services' && argv[2] === 'describe') {
+          return argv[3] === CANDIDATE_SERVICE
+            ? candidateServiceReadback(plan) : stablePriorReadback(plan);
+        }
+        if (argv[1] === 'services' && argv[2] === 'replace') {
+          if (argv.includes('--dry-run')) {
+            const response = structuredClone(plan.stableServiceSpec);
+            mutate(response);
+            return response;
+          }
+          stableMutationReached = true;
+          throw new Error('stable deploy must remain inert after service maxScale drift');
+        }
+        throw new Error(`unexpected operation: ${argv.join(' ')}`);
+      },
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1, name);
+    assert.equal(result.publicReport.resumeBoundary, 'promote-stable-spec-dry-run', name);
+    assert.equal(stableMutationReached, false, name);
+  }
+});
+
 test('candidate dry-run accepts only an omitted or safely spelled enabled IAM check', async () => {
   const cases = [
     ['omitted', undefined, true],
@@ -2202,6 +2494,7 @@ test('candidate phase feeds raw Service JSON through gcloud 553-compatible secre
         return {
           service: CANDIDATE_SERVICE,
           invokerIamDisabled: false,
+          serviceMaxScale: 1,
           traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 100 }],
         };
       }
@@ -2234,6 +2527,7 @@ test('candidate phase feeds raw Service JSON through gcloud 553-compatible secre
     service: {
       service: CANDIDATE_SERVICE,
       invokerIamDisabled: false,
+      serviceMaxScale: 1,
       traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 100 }],
     },
     revision: structuredClone(plan.expectedCandidate),
@@ -4860,6 +5154,7 @@ test('all-checkpoint first-release candidate restart still rejects a live stable
           return {
             service: STABLE_SERVICE,
             invokerIamDisabled: false,
+            serviceMaxScale: 1,
             traffic: [],
           };
         }
@@ -4897,6 +5192,7 @@ test('candidate receipt-write crash hashes authoritative readbacks and ignores o
       resourceVersion,
       annotations: {
         'run.googleapis.com/invoker-iam-disabled': 'false',
+        'run.googleapis.com/maxScale': '1',
         'run.googleapis.com/urls': JSON.stringify([CANDIDATE_ROOT, opaqueRoot]),
       },
     },
@@ -5081,6 +5377,7 @@ test('confirmed candidate fails closed unless every control-plane readback match
     service: {
       service: CANDIDATE_SERVICE,
       invokerIamDisabled: false,
+      serviceMaxScale: 1,
       traffic: [{ revision: REVISION, tag: CANDIDATE_TAG, percent: 100 }],
     },
     revision: structuredClone(plan.expectedCandidate),
@@ -5279,8 +5576,8 @@ test('release orchestrator is dry-run first and executes only one exactly confir
     execute: async (argv) => {
       calls.push(argv);
       if (argv[1] === 'services' && argv[2] === 'describe') return rolledBack
-        ? { service: 'hkbuddy-v1-api', invokerIamDisabled: false, traffic: [{ revision: input.previousRevision, tag: null, percent: 100 }] }
-        : { service: 'hkbuddy-v1-api', invokerIamDisabled: false, traffic: [{ revision: STABLE_REVISION, tag: null, percent: 100 }] };
+        ? { service: 'hkbuddy-v1-api', invokerIamDisabled: false, serviceMaxScale: 1, traffic: [{ revision: input.previousRevision, tag: null, percent: 100 }] }
+        : { service: 'hkbuddy-v1-api', invokerIamDisabled: false, serviceMaxScale: 1, traffic: [{ revision: STABLE_REVISION, tag: null, percent: 100 }] };
       if (argv[1] === 'revisions') return argv[3] === input.previousRevision
         ? { revision: input.previousRevision, image: plan.previousImage }
         : structuredClone(plan.expectedStable);
@@ -5325,6 +5622,7 @@ test('rollback rejects a zero-percent candidate tag that remains reachable', asy
   const staleTaggedService = {
     service: 'hkbuddy-v1-api',
     invokerIamDisabled: false,
+    serviceMaxScale: 1,
     traffic: [
       { revision: input.previousRevision, tag: null, percent: 100 },
       { revision: REVISION, tag: CANDIDATE_TAG, percent: 0 },
@@ -6157,6 +6455,7 @@ test('later promotion blocks on staged drift without a recovery mutation', async
         return {
           service: STABLE_SERVICE,
           invokerIamDisabled: false,
+          serviceMaxScale: 1,
           traffic: [{ revision: `${STABLE_SERVICE}-foreign000000`, percent: 100 }],
         };
       }
@@ -6966,6 +7265,7 @@ test('first promotion blocks on foreign staged state without compensation', asyn
         return {
           service: STABLE_SERVICE,
           invokerIamDisabled: false,
+          serviceMaxScale: 1,
           traffic: [{ revision: `${STABLE_SERVICE}-foreign000000`, percent: 100 }],
         };
       }
@@ -7145,7 +7445,7 @@ test('empty-host bootstrap is allowed only on canonical NOT_FOUND and creates a 
         if (candidateServiceDescribeCount === 1) {
           throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
         }
-        return { service: CANDIDATE_SERVICE, invokerIamDisabled: false, traffic: [
+        return { service: CANDIDATE_SERVICE, invokerIamDisabled: false, serviceMaxScale: 1, traffic: [
           { revision: REVISION, tag: CANDIDATE_TAG, percent: 100 },
         ] };
       }
@@ -7201,6 +7501,7 @@ test('first-release Service API traffic requires explicit percent and an exact t
     metadata: {
       name: CANDIDATE_SERVICE,
       annotations: {
+        'run.googleapis.com/maxScale': '1',
         'run.googleapis.com/urls': JSON.stringify([CANDIDATE_ROOT, opaqueRoot]),
       },
     },
@@ -7219,6 +7520,9 @@ test('first-release Service API traffic requires explicit percent and an exact t
     artifact: artifactReadback(plan.expectedCandidate.image),
   }, plan));
   const rejects = [
+    (service) => { delete service.metadata.annotations['run.googleapis.com/maxScale']; },
+    (service) => { service.metadata.annotations['run.googleapis.com/maxScale'] = '10'; },
+    (service) => { service.metadata.annotations['run.googleapis.com/maxScale'] = 1; },
     (service) => { service.status.traffic[0].percent = 0; },
     (service) => { delete service.status.traffic[0].percent; },
     (service) => {
@@ -7238,6 +7542,39 @@ test('first-release Service API traffic requires explicit percent and an exact t
       iam: candidatePrivateIam(),
     artifact: artifactReadback(plan.expectedCandidate.image),
     }, plan), /candidate service readback/i);
+  }
+});
+
+test('authoritative stable Service traffic readback rejects missing or drifted maxScale', () => {
+  const opaqueRoot = 'https://provider-opaque-stable-identifier.run.app';
+  const serviceReadback = () => ({
+    apiVersion: 'serving.knative.dev/v1',
+    kind: 'Service',
+    metadata: {
+      name: STABLE_SERVICE,
+      annotations: {
+        'run.googleapis.com/maxScale': '1',
+        'run.googleapis.com/urls': JSON.stringify([STABLE_ORIGIN, opaqueRoot]),
+      },
+    },
+    status: {
+      address: { url: opaqueRoot },
+      url: opaqueRoot,
+      traffic: [{ revisionName: STABLE_REVISION, percent: 100 }],
+    },
+  });
+  assert.equal(validateTrafficReceipt(serviceReadback(), { revision: STABLE_REVISION }), true);
+  for (const mutate of [
+    (service) => { delete service.metadata.annotations['run.googleapis.com/maxScale']; },
+    (service) => { service.metadata.annotations['run.googleapis.com/maxScale'] = '10'; },
+    (service) => { service.metadata.annotations['run.googleapis.com/maxScale'] = 1; },
+  ]) {
+    const service = serviceReadback();
+    mutate(service);
+    assert.throws(
+      () => validateTrafficReceipt(service, { revision: STABLE_REVISION }),
+      /traffic readback/i,
+    );
   }
 });
 
@@ -7264,7 +7601,7 @@ test('later rollback validates immutable receipts and fresh revision/image/servi
     execute: async (argv) => {
       calls.push(argv);
       if (argv[1] === 'services' && argv[2] === 'describe') {
-        return { service: 'hkbuddy-v1-api', invokerIamDisabled: false, traffic: [{ revision: REVISION, percent: 100 }] };
+        return { service: 'hkbuddy-v1-api', invokerIamDisabled: false, serviceMaxScale: 1, traffic: [{ revision: REVISION, percent: 100 }] };
       }
       if (argv[1] === 'revisions' && argv[3] === REVISION) {
         return structuredClone(plan.expectedCandidate);
@@ -7287,7 +7624,7 @@ test('later rollback validates immutable receipts and fresh revision/image/servi
     execute: async (argv) => {
       staleImageCalls.push(argv);
       if (argv[1] === 'services' && argv[2] === 'describe') {
-        return { service: 'hkbuddy-v1-api', invokerIamDisabled: false, traffic: [{ revision: REVISION, percent: 100 }] };
+        return { service: 'hkbuddy-v1-api', invokerIamDisabled: false, serviceMaxScale: 1, traffic: [{ revision: REVISION, percent: 100 }] };
       }
       if (argv[1] === 'revisions') return argv[3] === input.previousRevision
         ? { revision: input.previousRevision, image: plan.previousImage }
@@ -7754,6 +8091,7 @@ test('first-release candidate rejects a live stable service before any mutation'
         return {
           service: STABLE_SERVICE,
           invokerIamDisabled: false,
+          serviceMaxScale: 1,
           traffic: [{ revision: `${STABLE_SERVICE}-existing0000`, tag: null, percent: 100 }],
         };
       }
@@ -8759,7 +9097,7 @@ test('historical Task 8 proofs are validated at their recorded gate instants, no
     ['end', '2026-08-26T08:10:00.000Z'],
   ]) {
     const proof = {
-      schemaVersion: 3,
+      schemaVersion: CANDIDATE_PRIVACY_SCHEMA_VERSION,
       artifactSha256: createHash('sha256').update(`privacy-${boundary}`).digest('hex'),
       binding: { boundarySha256 },
       occurredAt: observedAt,
@@ -8819,6 +9157,7 @@ test('readiness wrapper validates against a post-producer clock and rejects expi
     objectSha256: '0'.repeat(64),
     privacyProofs: Object.fromEntries(['start', 'end'].map((boundary) => [boundary, {
       ...base.task8Evidence.readiness.privacyProofs[boundary],
+      schemaVersion: 3,
       filePath: join(directory, `privacy-${boundary}.json`),
       artifactSha256: '0'.repeat(64),
       objectSha256: '0'.repeat(64),
@@ -9079,13 +9418,17 @@ test('mobile phase rejects prebuilt evidence and publishes only one controlled j
   let producerCalls = 0;
   let privacyCalls = 0;
   let controlPlaneCalls = 0;
+  const mobileTokenRequests = [];
   const result = await runGcpRelease({
     argv: ['--phase=mobile', `--confirm-release=${RELEASE_SHA}`],
     input,
     loadReceipts: async () => fixtureReceiptChain(initialPlan, 'workload'),
     openStateStore: async () => createTestStateStore({ records }),
     execute: async () => { throw new Error('injected mobile adapters own all live reads'); },
-    mobileTokenExecutor: async () => 't'.repeat(64),
+    mobileTokenExecutor: async (request) => {
+      mobileTokenRequests.push(structuredClone(request));
+      return 't'.repeat(64);
+    },
     produceMobilePrivacyArtifact: async ({ locator }) => {
       privacyCalls += 1;
       return locator.filePath.endsWith('start.json')
@@ -9120,6 +9463,12 @@ test('mobile phase rejects prebuilt evidence and publishes only one controlled j
   assert.equal(producerCalls, 1);
   assert.equal(privacyCalls, 2);
   assert.equal(controlPlaneCalls, 2);
+  assert.deepEqual(mobileTokenRequests, [{
+    generateIdToken: {
+      endpoint: `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${encodeURIComponent(GCP_IDENTITY.serviceAccounts.acceptance)}:generateIdToken`,
+      body: { audience: CANDIDATE_ROOT, includeEmail: true },
+    },
+  }]);
   assert.equal(records[0].operationId, 'mobile-evidence-publish');
   assert.equal(records[0].payload.reconcileKind, 'local-artifact-create');
   assert.equal(records[0].payload.publication.artifacts.length, 7);

@@ -9,6 +9,7 @@ import test from 'node:test';
 import { createGcloudExecutor } from '../scripts/gcp-provision.js';
 import * as provisionContract from '../scripts/gcp-provision.js';
 import * as releaseContract from '../scripts/gcp-release.js';
+import { CANDIDATE_PRIVACY_SCHEMA_VERSION } from '../scripts/candidate-privacy-proof.js';
 import { GCP_IDENTITY } from '../src/gcp-identity.js';
 
 const PROJECT = GCP_IDENTITY.projectId;
@@ -280,8 +281,18 @@ test('authoritative traffic receipt rejects coercion and hidden zero-percent rev
   assert.equal(validateTrafficReceipt({
     service: GCP_IDENTITY.service,
     invokerIamDisabled: false,
+    serviceMaxScale: 1,
     traffic: [{ revision: STABLE_REVISION, tag: null, percent: 100 }],
   }, { revision: STABLE_REVISION }), true);
+
+  for (const serviceMaxScale of [undefined, '1', 0, 10]) {
+    assert.throws(() => validateTrafficReceipt({
+      service: GCP_IDENTITY.service,
+      invokerIamDisabled: false,
+      ...(serviceMaxScale === undefined ? {} : { serviceMaxScale }),
+      traffic: [{ revision: STABLE_REVISION, tag: null, percent: 100 }],
+    }, { revision: STABLE_REVISION }));
+  }
 
   for (const traffic of [
     [{ revision: STABLE_REVISION, tag: null, percent: '100' }],
@@ -294,6 +305,7 @@ test('authoritative traffic receipt rejects coercion and hidden zero-percent rev
   ]) assert.throws(() => validateTrafficReceipt({
     service: GCP_IDENTITY.service,
     invokerIamDisabled: false,
+    serviceMaxScale: 1,
     traffic,
   }, { revision: STABLE_REVISION }));
 });
@@ -566,7 +578,7 @@ test('release archive freezes the exact raw Cloud Build Git blob beside the arch
 function privacyProofReference(id, observedAt) {
   const expiresAt = new Date(Date.parse(observedAt) + 5 * 60_000).toISOString();
   return {
-    schemaVersion: 3,
+    schemaVersion: CANDIDATE_PRIVACY_SCHEMA_VERSION,
     filePath: `C:\\release\\privacy-${id}.json`,
     artifactSha256: id.repeat(64),
     objectSha256: id.repeat(64),
@@ -595,7 +607,7 @@ function task8V3Entry(phase) {
   };
 }
 
-test('Task 8 schema v3 locators bind exact start and end privacy proofs', () => {
+test('Task 8 schema v3 locators bind exact candidate-privacy schema references', () => {
   const { assertTask8Evidence } = releaseContract;
   assert.equal(typeof assertTask8Evidence, 'function');
   const valid = {
@@ -761,6 +773,7 @@ function privacyServiceReadback(binding) {
         'run.googleapis.com/ingress': 'all',
         'run.googleapis.com/ingress-status': 'all',
         'run.googleapis.com/invoker-iam-disabled': 'false',
+        'run.googleapis.com/maxScale': '1',
         'run.googleapis.com/urls': JSON.stringify([
           binding.candidateAudience,
           CANDIDATE_CANONICAL_URL,
@@ -800,6 +813,14 @@ function privacyRevisionReadback(binding) {
       name: binding.candidateRevision,
       namespace: binding.projectNumber,
       generation: 11,
+      ownerReferences: [{
+        apiVersion: 'serving.knative.dev/v1',
+        blockOwnerDeletion: true,
+        controller: true,
+        kind: 'Configuration',
+        name: binding.candidateService,
+        uid: 'ee358907-e7e0-4104-957c-709ba9c9259c',
+      }],
       labels: {
         'cloud.googleapis.com/location': binding.region,
         'serving.knative.dev/configuration': binding.candidateService,
@@ -813,7 +834,6 @@ function privacyRevisionReadback(binding) {
       imageDigest: binding.image,
       desiredReplicas: 1,
       observedGeneration: 11,
-      serviceName: binding.candidateService,
     },
   };
 }
@@ -843,7 +863,7 @@ function fakeHeaders(entries = {}) {
 function privacyFixtures(binding = basePrivacyBinding()) {
   const servicePolicy = {
     version: 1,
-    etag: 'BwYAAA==',
+    etag: 'BwZakB-7zbk=',
     bindings: [{
       role: 'roles/run.servicesInvoker',
       members: [`serviceAccount:${binding.acceptanceServiceAccount}`],
@@ -855,7 +875,7 @@ function privacyFixtures(binding = basePrivacyBinding()) {
     name: `organizations/${binding.organizationId}`,
     displayName: 'motionexp.com',
     lifecycleState: 'ACTIVE',
-    creationTime: '2020-01-01T00:00:00.000Z',
+    creationTime: '2020-01-01T00:00:00.123456Z',
   };
   const project = {
     projectId: binding.projectId,
@@ -881,34 +901,46 @@ function privacyFixtures(binding = basePrivacyBinding()) {
     policyResults: [{
       fullResourceName: CANDIDATE_RESOURCE,
       policies: [
-        { attachedResource: CANDIDATE_RESOURCE, policy: servicePolicy },
+        {
+          attachedResource: CANDIDATE_RESOURCE,
+          policy: { bindings: structuredClone(servicePolicy.bindings) },
+        },
       ],
     }],
   };
-  const analysis = (kind) => ({
-    fullyExplored: true,
-    serviceAccountImpersonationAnalysis: [],
-    mainAnalysis: {
-      analysisQuery: {
-        scope: `organizations/${binding.organizationId}`,
-        identitySelector: { identity: 'allUsers' },
-        resourceSelector: { fullResourceName: CANDIDATE_RESOURCE },
-        ...(kind === 'permission'
-          ? { accessSelector: { permissions: ['run.routes.invoke'] } }
-          : { options: { expandRoles: true } }),
-      },
-      fullyExplored: true,
-      analysisResults: [],
-      nonCriticalErrors: [],
-    },
-  });
   const troubleshooter = {
     access: 'GRANTED',
+    errors: [{
+      code: 13,
+      details: [{
+        '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+        domain: 'policytroubleshooter.googleapis.com',
+        reason: 'ERROR_IAM_DENY',
+      }],
+      message: 'Failed to generate IAM deny explanation',
+    }],
     explainedPolicies: [{
       access: 'NOT_GRANTED',
       fullResourceName: `//cloudresourcemanager.googleapis.com/projects/${binding.projectNumber}`,
       relevance: 'HEURISTIC_RELEVANCE',
-      bindingExplanations: [],
+      bindingExplanations: [{
+        access: 'NOT_GRANTED',
+        condition: {
+          description: 'Limit operator bucket IAM access to the V1 buckets',
+          expression: 'resource.service == "storage.googleapis.com"',
+          title: 'HK Buddy V1 bucket IAM boundary',
+        },
+        conditionExplanation: {},
+        memberships: {
+          'user:admin@motionexp.com': {
+            membership: 'MEMBERSHIP_NOT_INCLUDED', relevance: 'NORMAL',
+          },
+        },
+        relevance: 'NORMAL',
+        role: `projects/${binding.projectId}/roles/hkbuddyV1BucketIamPolicyOperator`,
+        rolePermission: 'ROLE_PERMISSION_NOT_INCLUDED',
+        rolePermissionRelevance: 'NORMAL',
+      }],
     }, {
       access: 'GRANTED',
       fullResourceName: CANDIDATE_RESOURCE,
@@ -941,7 +973,6 @@ function privacyFixtures(binding = basePrivacyBinding()) {
     project, organization, servicePolicy, projectPolicy, organizationPolicy, role,
     roleDefinitions: { 'roles/run.servicesInvoker': role },
     folders: {}, tokenPrerequisite, effectivePolicy,
-    analyses: { permission: analysis('permission'), expandedRoles: analysis('expandedRoles') },
     troubleshooter, token,
     service: privacyServiceReadback(binding),
     revision: privacyRevisionReadback(binding),
@@ -952,11 +983,16 @@ function privacyFixtures(binding = basePrivacyBinding()) {
 }
 
 function effectivePolicyFor(fixtures, binding) {
+  const embedded = (policy) => ({
+    ...(policy.bindings === undefined ? {} : { bindings: structuredClone(policy.bindings) }),
+    ...(policy.auditConfigs === undefined
+      ? {} : { auditConfigs: structuredClone(policy.auditConfigs) }),
+  });
   const policies = [
-    { attachedResource: CANDIDATE_RESOURCE, policy: fixtures.servicePolicy },
+    { attachedResource: CANDIDATE_RESOURCE, policy: embedded(fixtures.servicePolicy) },
     {
-      attachedResource: `//cloudresourcemanager.googleapis.com/projects/${binding.projectNumber}`,
-      policy: fixtures.projectPolicy,
+      attachedResource: `//cloudresourcemanager.googleapis.com/projects/${binding.projectId}`,
+      policy: embedded(fixtures.projectPolicy),
     },
   ];
   let parent = `${fixtures.project.parent.type}s/${fixtures.project.parent.id}`;
@@ -966,13 +1002,13 @@ function effectivePolicyFor(fixtures, binding) {
     assert.ok(folder, `missing effective-policy folder ${folderId}`);
     policies.push({
       attachedResource: `//cloudresourcemanager.googleapis.com/folders/${folderId}`,
-      policy: folder.policy,
+      policy: embedded(folder.policy),
     });
     parent = folder.descriptor.parent;
   }
   policies.push({
     attachedResource: `//cloudresourcemanager.googleapis.com/organizations/${binding.organizationId}`,
-    policy: fixtures.organizationPolicy,
+    policy: embedded(fixtures.organizationPolicy),
   });
   const present = policies.filter(({ attachedResource, policy }) => (
     attachedResource === CANDIDATE_RESOURCE
@@ -1042,17 +1078,6 @@ function createPrivacyHarness({ mutate = () => undefined } = {}) {
       return structuredClone(definition);
     }
     if (command.startsWith('asset get-effective-iam-policy ')) return structuredClone(fixtures.effectivePolicy);
-    if (command.startsWith('asset analyze-iam-policy ')) {
-      const permission = argv.includes('--permissions=run.routes.invoke');
-      const expandedRoles = argv.includes('--expand-roles');
-      assert.equal(permission, true, 'every analysis must query the invoke permission');
-      const value = structuredClone(expandedRoles
-        ? fixtures.analyses.expandedRoles : fixtures.analyses.permission);
-      value.mainAnalysis.analysisQuery.identitySelector.identity = argv
-        .find((member) => member.startsWith('--identity='))
-        .slice('--identity='.length);
-      return value;
-    }
     if (command.startsWith('policy-troubleshoot iam ')) return structuredClone(fixtures.troubleshooter);
     if (command.startsWith(`run services describe ${binding.candidateService}`)) {
       return structuredClone(fixtures.service);
@@ -1114,13 +1139,16 @@ function createPrivacyHarness({ mutate = () => undefined } = {}) {
           responseSize: '456',
         },
       };
+      if (probe.kind === 'anonymous') {
+        entry.textPayload = 'The request was not authenticated. Either allow unauthenticated invocations or set the proper Authorization header.';
+      }
       fixtures.mutateLogEntry(entry, probe);
       return [entry];
     }
     throw new Error(`unexpected privacy command: ${command}`);
   };
-  const tokenExecutor = async (argv) => {
-    tokenCalls.push([...argv]);
+  const tokenExecutor = async (request) => {
+    tokenCalls.push(structuredClone(request));
     return fixtures.token;
   };
   const fetch = async (url, options) => {
@@ -1172,41 +1200,18 @@ test('privacy command plan is read-only and hard-gates exact live prerequisites'
     'iam', 'service-accounts', 'get-iam-policy', ACCEPTANCE_SERVICE_ACCOUNT,
     `--project=${PROJECT}`, '--format=json',
   ]);
-  assert.deepEqual(plan.token, [
-    'auth', 'print-identity-token', 'admin@motionexp.com',
-    `--impersonate-service-account=${ACCEPTANCE_SERVICE_ACCOUNT}`,
-    `--audiences=${binding.candidateAudience}`, '--include-email', '--quiet',
-  ]);
+  assert.deepEqual(plan.token, {
+    generateIdToken: {
+      endpoint: `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${encodeURIComponent(ACCEPTANCE_SERVICE_ACCOUNT)}:generateIdToken`,
+      body: { audience: binding.candidateAudience, includeEmail: true },
+    },
+  });
   assert.deepEqual(plan.assetEffectiveIam, [
     'asset', 'get-effective-iam-policy', `--scope=organizations/${GCP_IDENTITY.organizationId}`,
     `--names=${CANDIDATE_RESOURCE}`, '--billing-project=tech-demo-433408',
     '--format=json',
   ]);
-  assert.deepEqual(plan.assetAnalyses, Object.fromEntries(
-    ['allUsers', 'allAuthenticatedUsers'].map((principal) => [principal, {
-      permission: [
-        'asset', 'analyze-iam-policy', `--organization=${GCP_IDENTITY.organizationId}`,
-        `--full-resource-name=${CANDIDATE_RESOURCE}`, `--identity=${principal}`,
-        '--permissions=run.routes.invoke', '--show-response',
-        '--billing-project=tech-demo-433408', '--format=json', '--quiet',
-      ],
-      expandedRoles: [
-        'asset', 'analyze-iam-policy', `--organization=${GCP_IDENTITY.organizationId}`,
-        `--full-resource-name=${CANDIDATE_RESOURCE}`, `--identity=${principal}`,
-        '--permissions=run.routes.invoke', '--expand-roles', '--show-response',
-        '--billing-project=tech-demo-433408', '--format=json', '--quiet',
-      ],
-    }]),
-  ));
-  for (const pair of Object.values(plan.assetAnalyses)) {
-    assert.equal(pair.permission.includes('--expand-roles'), false);
-    assert.deepEqual(
-      pair.expandedRoles.filter((member) => member.startsWith('--permissions=')),
-      ['--permissions=run.routes.invoke'],
-    );
-    assert.equal(pair.permission.some((member) => member.startsWith('--project=')), false);
-    assert.equal(pair.expandedRoles.some((member) => member.startsWith('--project=')), false);
-  }
+  assert.equal(Object.hasOwn(plan, 'assetAnalyses'), false);
   assert.deepEqual(plan.controlPlane, {
     service: [
       'run', 'services', 'describe', binding.candidateService,
@@ -1231,11 +1236,12 @@ test('privacy command plan is read-only and hard-gates exact live prerequisites'
     `--project=${PROJECT}`, '--format=json',
   ]);
   const serialized = JSON.stringify(plan);
+  assert.equal(serialized.includes('analyze-iam-policy'), false);
   assert.equal(/\b(?:add|set|update|create|enable|disable|delete)-?iam-policy-binding\b/i.test(serialized), false);
   assert.equal(serialized.includes('serviceAccountTokenCreator'), false);
 });
 
-test('identity-token transport reads exactly one raw JWT line without using the JSON executor', async () => {
+test('identity-token transport delegates OAuth handling to the principal-verified bounded requester', async () => {
   const {
     createCandidatePrivacyCommandPlan,
     createIdentityTokenExecutor,
@@ -1243,56 +1249,79 @@ test('identity-token transport reads exactly one raw JWT line without using the 
   const binding = basePrivacyBinding();
   const plan = createCandidatePrivacyCommandPlan(binding);
   const token = privacyFixtures(binding).token;
-  const invocations = [];
-  const tokenExecutor = createIdentityTokenExecutor({
-    executable: 'python.exe',
-    prefixArgs: ['D:/gcloud/lib/gcloud.py'],
-    execFile: async (executable, argv, options) => {
-      invocations.push({ executable, argv, options });
-      return { stdout: `${token}\r\n`, stderr: '' };
-    },
+  let principalReads = 0;
+  const requests = [];
+  const request = async (input) => {
+    requests.push(structuredClone(input));
+    return { token };
+  };
+  Object.defineProperty(request, 'getPrincipal', {
+    value: async () => { principalReads += 1; return 'admin@motionexp.com'; },
   });
+  const tokenExecutor = createIdentityTokenExecutor({ request });
   assert.equal(await tokenExecutor(plan.token), token);
-  assert.deepEqual(invocations, [{
-    executable: 'python.exe',
-    argv: ['D:/gcloud/lib/gcloud.py', ...plan.token],
-    options: { encoding: 'utf8', maxBuffer: 64 * 1024, windowsHide: true },
+  assert.equal(principalReads, 1);
+  assert.deepEqual(requests, [{
+    method: 'POST',
+    url: plan.token.generateIdToken.endpoint,
+    body: plan.token.generateIdToken.body,
   }]);
 
-  const impersonationWarning = `WARNING: This command is using service account impersonation. All API calls will be executed as [${ACCEPTANCE_SERVICE_ACCOUNT}].\n`;
-  const warningExecutor = createIdentityTokenExecutor({
-    executable: 'python.exe',
-    execFile: async () => ({ stdout: `${token}\n`, stderr: impersonationWarning }),
-  });
-  assert.equal(await warningExecutor(plan.token), token);
-
-  for (const stdout of [token, ` ${token}\n`, `${token}\n\n`, `${token}\nextra\n`]) {
-    const invalid = createIdentityTokenExecutor({
-      executable: 'python.exe',
-      execFile: async () => ({ stdout, stderr: '' }),
-    });
-    await assert.rejects(() => invalid(plan.token), /Candidate privacy proof failed/);
+  const makeRequest = ({ principal = 'admin@motionexp.com', response = { token }, error } = {}) => {
+    const candidate = async () => {
+      if (error) throw error;
+      return structuredClone(response);
+    };
+    Object.defineProperty(candidate, 'getPrincipal', { value: async () => principal });
+    return candidate;
+  };
+  for (const candidate of [
+    makeRequest({ principal: 'foreign@example.test' }),
+    makeRequest({ response: null }),
+    makeRequest({ response: { token, extra: true } }),
+    makeRequest({ response: { token: 'not-a-jwt' } }),
+  ]) {
+    await assert.rejects(
+      () => createIdentityTokenExecutor({ request: candidate })(plan.token),
+      /Candidate privacy proof failed/,
+    );
   }
   const transportError = createIdentityTokenExecutor({
-    executable: 'python.exe',
-    execFile: async () => { throw new Error(`provider leaked ${token}`); },
+    request: makeRequest({ error: new Error(`provider leaked ${token}`) }),
   });
   await assert.rejects(() => transportError(plan.token), (error) => (
     error.message === 'Candidate privacy proof failed' && !error.message.includes(token)
   ));
-  for (const stderr of [
-    impersonationWarning.replace(ACCEPTANCE_SERVICE_ACCOUNT, 'foreign@example.com'),
-    `${impersonationWarning}extra warning\n`,
-    `WARNING: ${token}\n`,
-  ]) {
-    const invalidWarning = createIdentityTokenExecutor({
-      executable: 'python.exe',
-      execFile: async () => ({ stdout: `${token}\n`, stderr }),
-    });
-    await assert.rejects(() => invalidWarning(plan.token), (error) => (
-      error.message === 'Candidate privacy proof failed' && !error.message.includes(token)
-    ));
-  }
+
+  const foreignPlan = structuredClone(plan.token);
+  foreignPlan.generateIdToken.endpoint = 'https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/foreign%40example.com:generateIdToken';
+  await assert.rejects(() => tokenExecutor(foreignPlan), /Candidate privacy proof failed/);
+});
+
+test('privacy proof validates a delayed token against its mint-time clock', async () => {
+  const { runCandidatePrivacyProof } = await import('../scripts/candidate-privacy-proof.js');
+  const start = Date.parse(PRIVACY_NOW);
+  const harness = createPrivacyHarness({
+    mutate: (fixtures, binding) => {
+      fixtures.token = jwtFor({
+        iss: 'https://accounts.google.com', aud: binding.candidateAudience,
+        sub: '123456789012345678901', email: binding.acceptanceServiceAccount,
+        email_verified: true, iat: Math.floor((start + 40_000) / 1_000),
+        exp: Math.floor((start + 3_640_000) / 1_000),
+      });
+    },
+  });
+  let clockReads = 0;
+  const proof = await runCandidatePrivacyProof({
+    binding: harness.binding,
+    executor: harness.executor,
+    tokenExecutor: harness.tokenExecutor,
+    fetch: harness.fetch,
+    now: () => new Date(clockReads++ === 0 ? start : start + 45_000),
+    nonce: harness.nonce,
+    sleep: harness.sleep,
+  });
+  assert.equal(proof.result, 'pass');
 });
 
 test('controlled privacy producer proves inherited IAM, both edges, and exact logs without persisting credentials', async () => {
@@ -1311,7 +1340,7 @@ test('controlled privacy producer proves inherited IAM, both edges, and exact lo
     nonce: harness.nonce,
     sleep: harness.sleep,
   });
-  assert.equal(proof.schemaVersion, 3);
+  assert.equal(proof.schemaVersion, 4);
   assert.equal(proof.result, 'pass');
   assert.equal(proof.occurredAt, PRIVACY_NOW);
   assert.equal(proof.expiresAt, '2026-08-27T08:05:00.000Z');
@@ -1321,9 +1350,38 @@ test('controlled privacy producer proves inherited IAM, both edges, and exact lo
   assert.equal(proof.identity.tokenCreatorPrerequisite, 'roles/iam.serviceAccountOpenIdTokenCreator');
   assert.equal(proof.controlPlane.stable, true);
   assert.equal(proof.controlPlane.beforeSha256, proof.controlPlane.afterSha256);
-  assert.equal(proof.cloudAsset.analyses.allUsers.fullyExplored, true);
-  assert.equal(proof.cloudAsset.analyses.allUsers.resultCount, 0);
-  assert.equal(proof.cloudAsset.analyses.allAuthenticatedUsers.resultCount, 0);
+  assert.equal(
+    proof.cloudAsset.publicPrincipalDenial.method,
+    'effective-policy-role-definition-exclusion-v1',
+  );
+  assert.equal(proof.cloudAsset.publicPrincipalDenial.permission, 'run.routes.invoke');
+  assert.equal(proof.cloudAsset.publicPrincipalDenial.principals.allUsers.decision, 'DENIED');
+  assert.equal(proof.cloudAsset.publicPrincipalDenial.principals.allUsers.bindingCount, 0);
+  assert.equal(
+    proof.cloudAsset.publicPrincipalDenial.principals.allAuthenticatedUsers.bindingCount,
+    0,
+  );
+  assert.deepEqual(proof.cloudAsset.publicPrincipalDenial.roleDefinitions, []);
+  assert.equal(
+    proof.cloudAsset.publicPrincipalDenial.sources.effectiveIamSha256,
+    proof.cloudAsset.effectiveIamSha256,
+  );
+  assert.equal(
+    proof.cloudAsset.publicPrincipalDenial.sources.hierarchyChainSha256,
+    proof.hierarchy.chainSha256,
+  );
+  assert.equal(
+    sha256(JSON.stringify(proof.cloudAsset.publicPrincipalDenial.effectivePolicyProjection)),
+    proof.cloudAsset.effectiveIamSha256,
+  );
+  assert.equal(
+    proof.cloudAsset.publicPrincipalDenial.sources.roleDefinitionsSha256,
+    proof.hierarchy.policyRoleDefinitionsSha256,
+  );
+  assert.equal(
+    proof.hierarchy.policyRoleDefinitionsSha256,
+    proof.hierarchy.policyRoleDefinitionsSecondReadSha256,
+  );
   assert.equal(proof.edge.anonymous.status, 403);
   assert.equal(proof.edge.authenticated.status, 200);
   assert.notEqual(proof.edge.anonymous.traceSha256, proof.edge.authenticated.traceSha256);
@@ -1332,10 +1390,17 @@ test('controlled privacy producer proves inherited IAM, both edges, and exact lo
     now: new Date(PRIVACY_NOW),
   }), true);
   assert.deepEqual(finalizeCandidatePrivacyProof(proof), proof);
-  const nonzeroResultProof = structuredClone(proof);
-  nonzeroResultProof.cloudAsset.analyses.allUsers.resultCount = 1;
-  const refinalizedNonzeroResultProof = finalizeCandidatePrivacyProof(nonzeroResultProof);
-  assert.throws(() => validateCandidatePrivacyProof(refinalizedNonzeroResultProof, {
+  const forgedDenialProof = structuredClone(proof);
+  forgedDenialProof.cloudAsset.publicPrincipalDenial.principals.allUsers.decision = 'GRANTED';
+  const refinalizedForgedDenialProof = finalizeCandidatePrivacyProof(forgedDenialProof);
+  assert.throws(() => validateCandidatePrivacyProof(refinalizedForgedDenialProof, {
+    binding: harness.binding,
+    now: new Date(PRIVACY_NOW),
+  }), /Candidate privacy proof failed/);
+  const legacyAnalyzerProof = structuredClone(proof);
+  legacyAnalyzerProof.cloudAsset.analyses = {};
+  const refinalizedLegacyAnalyzerProof = finalizeCandidatePrivacyProof(legacyAnalyzerProof);
+  assert.throws(() => validateCandidatePrivacyProof(refinalizedLegacyAnalyzerProof, {
     binding: harness.binding,
     now: new Date(PRIVACY_NOW),
   }), /Candidate privacy proof failed/);
@@ -1353,7 +1418,94 @@ test('controlled privacy producer proves inherited IAM, both edges, and exact lo
   assert.equal(harness.logRequests.length, 2);
   assert.equal(harness.tokenCalls.length, 1);
   assert.equal(harness.calls.some((argv) => argv[0] === 'auth'), false);
+  assert.equal(harness.calls.some((argv) => argv.includes('analyze-iam-policy')), false);
   assert.equal([...harness.logPolls.values()].every((count) => count === 2), true);
+});
+
+test('privacy denial attestation schema and source bindings fail closed under forgery', async (t) => {
+  const {
+    finalizeCandidatePrivacyProof,
+    runCandidatePrivacyProof,
+    validateCandidatePrivacyProof,
+  } = await import('../scripts/candidate-privacy-proof.js');
+  const harness = createPrivacyHarness({ mutate: (fixtures, binding) => {
+    fixtures.projectPolicy.bindings = [{
+      role: 'roles/logging.viewer', members: ['allUsers'],
+    }];
+    fixtures.roleDefinitions['roles/logging.viewer'] = {
+      name: 'roles/logging.viewer', stage: 'GA', deleted: false,
+      includedPermissions: ['logging.logEntries.list'],
+    };
+    fixtures.effectivePolicy = effectivePolicyFor(fixtures, binding);
+  } });
+  const proof = await runCandidatePrivacyProof({
+    binding: harness.binding, executor: harness.executor, tokenExecutor: harness.tokenExecutor,
+    fetch: harness.fetch, now: () => new Date(PRIVACY_NOW), nonce: harness.nonce,
+    sleep: harness.sleep,
+  });
+  const canonicalize = (value) => {
+    if (Array.isArray(value)) return value.map(canonicalize);
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalize(value[key])]));
+    }
+    return value;
+  };
+  const refinalize = (candidate) => {
+    const denial = candidate.cloudAsset.publicPrincipalDenial;
+    const { attestationSha256: ignored, ...payload } = denial;
+    void ignored;
+    denial.attestationSha256 = sha256(JSON.stringify(canonicalize(payload)));
+    return finalizeCandidatePrivacyProof(candidate);
+  };
+  const cases = [
+    ['unknown field', (denial) => { denial.unknown = true; }],
+    ['method drift', (denial) => { denial.method = 'provider-assertion'; }],
+    ['permission drift', (denial) => { denial.permission = 'run.jobs.run'; }],
+    ['effective-policy source drift', (denial) => {
+      denial.sources.effectiveIamSha256 = 'f'.repeat(64);
+    }],
+    ['unknown principal', (denial) => { denial.principals.everyone = { decision: 'DENIED' }; }],
+    ['forged grant decision', (denial) => { denial.principals.allUsers.decision = 'GRANTED'; }],
+    ['binding-count drift', (denial) => { denial.principals.allUsers.bindingCount += 1; }],
+    ['public binding witness omitted despite the persisted effective policy', (denial) => {
+      denial.principals.allUsers.bindings = [];
+      denial.principals.allUsers.bindingCount = 0;
+    }],
+    ['public binding witness digest is forged', (denial) => {
+      denial.principals.allUsers.bindings[0].bindingSha256 = 'f'.repeat(64);
+    }],
+    ['foreign attached resource', (denial) => {
+      denial.principals.allUsers.bindings[0].attachedResource =
+        '//cloudresourcemanager.googleapis.com/projects/foreign-project';
+    }],
+    ['effective policy injects a folder outside the exact hierarchy chain', (denial) => {
+      denial.effectivePolicyProjection.policyResults[0].policies.push({
+        attachedResource: '//cloudresourcemanager.googleapis.com/folders/999999999999',
+        policy: {
+          auditConfigs: [],
+          bindings: [{ role: 'roles/logging.viewer', members: ['allUsers'] }],
+        },
+      });
+    }],
+    ['invoke permission hidden in a public role', (denial) => {
+      denial.roleDefinitions[0].includedPermissions = ['run.routes.invoke'];
+    }],
+    ['unreferenced role definition', (denial) => {
+      denial.roleDefinitions.push({
+        role: 'roles/browser', includedPermissions: ['resourcemanager.projects.get'],
+      });
+    }],
+  ];
+  for (const [name, mutate] of cases) {
+    await t.test(name, () => {
+      const candidate = structuredClone(proof);
+      mutate(candidate.cloudAsset.publicPrincipalDenial);
+      assert.throws(() => validateCandidatePrivacyProof(refinalize(candidate), {
+        binding: harness.binding,
+        now: new Date(PRIVACY_NOW),
+      }), /Candidate privacy proof failed/);
+    });
+  }
 });
 
 test('privacy producer traverses two folders and resolves predefined, project, and organization roles exactly', async () => {
@@ -1401,10 +1553,6 @@ test('privacy producer traverses two folders and resolves predefined, project, a
       },
     };
     fixtures.effectivePolicy = effectivePolicyFor(fixtures, binding);
-    for (const analysis of Object.values(fixtures.analyses)) {
-      delete analysis.mainAnalysis.analysisResults;
-      delete analysis.mainAnalysis.nonCriticalErrors;
-    }
   } });
   const proof = await runCandidatePrivacyProof({
     binding: harness.binding, executor: harness.executor, tokenExecutor: harness.tokenExecutor,
@@ -1420,13 +1568,28 @@ test('privacy producer traverses two folders and resolves predefined, project, a
       `resource-manager folders get-iam-policy ${folderId}`,
     )).length, 2);
   }
-  assert.equal(harness.calls.some((argv) => argv.join(' ') === 'iam roles describe roles/logging.viewer --format=json'), true);
-  assert.equal(harness.calls.some((argv) => argv.join(' ') === (
+  assert.equal(harness.calls.filter((argv) => (
+    argv.join(' ') === 'iam roles describe roles/logging.viewer --format=json'
+  )).length, 2);
+  assert.equal(harness.calls.filter((argv) => argv.join(' ') === (
     `iam roles describe hkbuddyPublicMetadataReader --project=${PROJECT} --format=json`
-  )), true);
-  assert.equal(harness.calls.some((argv) => argv.join(' ') === (
+  )).length, 2);
+  assert.equal(harness.calls.filter((argv) => argv.join(' ') === (
     `iam roles describe hkbuddyPublicMetadataReader --organization=${GCP_IDENTITY.organizationId} --format=json`
-  )), true);
+  )).length, 2);
+  assert.deepEqual(
+    proof.cloudAsset.publicPrincipalDenial.roleDefinitions.map(({ role }) => role),
+    [
+      `organizations/${GCP_IDENTITY.organizationId}/roles/hkbuddyPublicMetadataReader`,
+      `projects/${PROJECT}/roles/hkbuddyPublicMetadataReader`,
+      'roles/logging.viewer',
+    ].sort(),
+  );
+  assert.equal(proof.cloudAsset.publicPrincipalDenial.principals.allUsers.bindingCount, 2);
+  assert.equal(
+    proof.cloudAsset.publicPrincipalDenial.principals.allAuthenticatedUsers.bindingCount,
+    1,
+  );
 });
 
 test('privacy producer accepts allowlisted IAM audit config and harmless server-managed readback drift', async () => {
@@ -1461,7 +1624,7 @@ test('privacy producer accepts allowlisted IAM audit config and harmless server-
   assert.equal(proof.controlPlane.beforeSha256, proof.controlPlane.afterSha256);
 });
 
-test('privacy producer accepts SDK 553 organization, folder, IAM, analysis, revision, and ingestion shapes', async () => {
+test('privacy producer accepts SDK 553 organization, folder, IAM, revision, and ingestion shapes', async () => {
   const { runCandidatePrivacyProof } = await import('../scripts/candidate-privacy-proof.js');
   const harness = createPrivacyHarness({ mutate: (fixtures, binding) => {
     fixtures.project.parent = { type: 'folder', id: '1001' };
@@ -1503,7 +1666,7 @@ test('privacy producer accepts SDK 553 organization, folder, IAM, analysis, revi
     sleep: harness.sleep,
   });
   assert.equal(proof.result, 'pass');
-  assert.equal(proof.cloudAsset.analyses.allUsers.resultCount, 0);
+  assert.equal(proof.cloudAsset.publicPrincipalDenial.principals.allUsers.bindingCount, 1);
   assert.equal(Math.max(...harness.logPolls.values()), 5);
 });
 
@@ -1565,24 +1728,44 @@ test('privacy producer fails closed on incomplete effective policy, inherited pu
         },
       };
     }],
-    ['inherited conditional public invoke', (fixtures) => {
+    ['inherited conditional public invoke', (fixtures, binding) => {
       fixtures.organizationPolicy.bindings = [{
         role: 'roles/run.servicesInvoker', members: ['allUsers'],
         condition: { title: 'still-public', expression: 'request.time < timestamp("2030-01-01T00:00:00Z")' },
       }];
+      fixtures.organizationPolicy.version = 3;
+      fixtures.effectivePolicy = effectivePolicyFor(fixtures, binding);
     }],
-    ['unresolvable custom role', (fixtures) => {
+    ['unresolvable custom role', (fixtures, binding) => {
       fixtures.projectPolicy.bindings = [{
         role: `projects/${PROJECT}/roles/unavailableRole`, members: ['allUsers'],
       }];
+      fixtures.effectivePolicy = effectivePolicyFor(fixtures, binding);
     }],
-    ['mismatched custom role response name', (fixtures) => {
+    ['mismatched custom role response name', (fixtures, binding) => {
       const roleName = `projects/${PROJECT}/roles/publicMetadataReader`;
       fixtures.projectPolicy.bindings = [{ role: roleName, members: ['allUsers'] }];
       fixtures.roleDefinitions[roleName] = {
         name: `projects/${PROJECT}/roles/foreignName`, stage: 'GA', deleted: false,
         includedPermissions: ['resourcemanager.projects.get'],
       };
+      fixtures.effectivePolicy = effectivePolicyFor(fixtures, binding);
+    }],
+    ['public role definition drifts between the two reads', (fixtures, binding) => {
+      fixtures.projectPolicy.bindings = [{
+        role: 'roles/logging.viewer', members: ['allUsers'],
+      }];
+      fixtures.effectivePolicy = effectivePolicyFor(fixtures, binding);
+      let reads = 0;
+      fixtures.roleDefinitions['roles/logging.viewer'] = {
+        name: 'roles/logging.viewer', stage: 'GA', deleted: false,
+      };
+      Object.defineProperty(fixtures.roleDefinitions['roles/logging.viewer'], 'includedPermissions', {
+        enumerable: true,
+        get: () => (++reads === 1
+          ? ['logging.logEntries.list']
+          : ['logging.logEntries.list', 'logging.logs.list']),
+      });
     }],
     ['effective IAM omits nonempty project policy', (fixtures) => {
       fixtures.projectPolicy.bindings = [{ role: 'roles/logging.viewer', members: ['user:a@example.com'] }];
@@ -1598,44 +1781,30 @@ test('privacy producer fails closed on incomplete effective policy, inherited pu
         structuredClone(fixtures.effectivePolicy.policyResults[0].policies[0]),
       );
     }],
+    ['effective IAM restores omitted policy envelope fields', (fixtures) => {
+      fixtures.effectivePolicy.policyResults[0].policies[0].policy.etag = 'BwYAAA==';
+      fixtures.effectivePolicy.policyResults[0].policies[0].policy.version = 1;
+    }],
+    ['effective IAM identifies the project by number instead of id', (fixtures, binding) => {
+      fixtures.projectPolicy.bindings = [{
+        role: 'roles/logging.viewer', members: ['user:a@example.com'],
+      }];
+      fixtures.effectivePolicy = effectivePolicyFor(fixtures, binding);
+      fixtures.effectivePolicy.policyResults[0].policies[1].attachedResource =
+        `//cloudresourcemanager.googleapis.com/projects/${binding.projectNumber}`;
+    }],
     ['effective IAM reorders nonempty direct policies', (fixtures, binding) => {
       fixtures.projectPolicy.bindings = [{ role: 'roles/logging.viewer', members: ['user:a@example.com'] }];
       fixtures.effectivePolicy = effectivePolicyFor(fixtures, binding);
       fixtures.effectivePolicy.policyResults[0].policies.reverse();
     }],
-    ['incomplete Asset analysis', (fixtures) => {
-      fixtures.analyses.permission.mainAnalysis.fullyExplored = false;
-    }],
-    ['permission Asset query scope drift', (fixtures) => {
-      fixtures.analyses.permission.mainAnalysis.analysisQuery.scope = 'organizations/999999999999';
-    }],
-    ['expanded-role Asset query lacks expansion', (fixtures) => {
-      fixtures.analyses.expandedRoles.mainAnalysis.analysisQuery.options.expandRoles = false;
-    }],
-    ['unrequested impersonation analysis result', (fixtures) => {
-      fixtures.analyses.permission.serviceAccountImpersonationAnalysis = {
-        fullyExplored: true, analysisResults: [{}], nonCriticalErrors: [],
-      };
-    }],
-    ['impersonation analysis object is not the repeated SDK field', (fixtures) => {
-      fixtures.analyses.permission.serviceAccountImpersonationAnalysis = {
-        fullyExplored: true,
-      };
-    }],
-    ['permission Asset analysis result', (fixtures) => {
-      fixtures.analyses.permission.mainAnalysis.analysisResults = [{}];
-    }],
-    ['expanded-role Asset invoke result', (fixtures) => {
-      fixtures.analyses.expandedRoles.mainAnalysis.analysisResults = [{
-        accessControlLists: [{ accesses: [{ permission: 'run.routes.invoke' }] }],
-      }];
-    }],
-    ['expanded-role Asset unrelated result', (fixtures) => {
-      fixtures.analyses.expandedRoles.mainAnalysis.analysisResults = [{
-        accessControlLists: [{ accesses: [{ permission: 'logging.logEntries.list' }] }],
-      }];
-    }],
     ['ambiguous Troubleshooter', (fixtures) => { fixtures.troubleshooter.access = 'UNKNOWN'; }],
+    ['unexpected Troubleshooter partial error', (fixtures) => {
+      fixtures.troubleshooter.errors[0].details[0].reason = 'ERROR_UNKNOWN';
+    }],
+    ['extra Troubleshooter partial error', (fixtures) => {
+      fixtures.troubleshooter.errors.push(structuredClone(fixtures.troubleshooter.errors[0]));
+    }],
     ['Troubleshooter lacks high-relevance grant witness', (fixtures) => {
       fixtures.troubleshooter.explainedPolicies[1].bindingExplanations[0].relevance = 'NORMAL';
     }],
@@ -1683,8 +1852,29 @@ test('privacy producer fails closed on incomplete effective policy, inherited pu
         entry.resource.labels.configuration_name = 'foreign-configuration';
       };
     }],
+    ['authenticated request log unexpectedly gains text payload', (fixtures) => {
+      fixtures.logEmptyPolls = 0;
+      fixtures.mutateLogEntry = (entry, probe) => {
+        if (probe.kind === 'authenticated') entry.textPayload = 'unexpected authenticated payload';
+      };
+    }],
+    ['anonymous request log text payload contains control characters', (fixtures) => {
+      fixtures.logEmptyPolls = 0;
+      fixtures.mutateLogEntry = (entry, probe) => {
+        if (probe.kind === 'anonymous') entry.textPayload = 'unsafe\nsecond line';
+      };
+    }],
+    ['anonymous request log text payload is unbounded', (fixtures) => {
+      fixtures.logEmptyPolls = 0;
+      fixtures.mutateLogEntry = (entry, probe) => {
+        if (probe.kind === 'anonymous') entry.textPayload = 'x'.repeat(4097);
+      };
+    }],
     ['candidate service ingress drift', (fixtures) => {
       fixtures.service.metadata.annotations['run.googleapis.com/ingress'] = 'internal';
+    }],
+    ['candidate service max-scale drift', (fixtures) => {
+      fixtures.service.metadata.annotations['run.googleapis.com/maxScale'] = '10';
     }],
     ['candidate service not ready', (fixtures) => {
       fixtures.service.status.conditions[0].status = 'False';
@@ -1807,7 +1997,7 @@ test('privacy producer refuses a proof when its original evidence window expires
     nonce: harness.nonce,
     sleep: harness.sleep,
   }), /Candidate privacy proof failed/);
-  assert.equal(clockCalls, 4, 'the producer must capture one final post-readback clock');
+  assert.equal(clockCalls, 5, 'the producer must capture one final post-readback clock');
 });
 
 function unresolvedReadinessEntry() {
@@ -1816,6 +2006,7 @@ function unresolvedReadinessEntry() {
   entry.artifactSha256 = '0'.repeat(64);
   entry.objectSha256 = '0'.repeat(64);
   for (const [boundary, reference] of Object.entries(entry.privacyProofs)) {
+    reference.schemaVersion = 3;
     reference.filePath = `C:\\release\\controlled-readiness-privacy-${boundary}.json`;
     reference.artifactSha256 = '0'.repeat(64);
     reference.objectSha256 = '0'.repeat(64);
@@ -1850,6 +2041,8 @@ test('readiness producer runs fresh privacy and authoritative live/ready evidenc
 
   const { harness, result } = await run();
   assert.equal(result.record.schemaVersion, 3);
+  assert.equal(result.record.privacyProofs.start.schemaVersion, CANDIDATE_PRIVACY_SCHEMA_VERSION);
+  assert.equal(result.record.privacyProofs.end.schemaVersion, CANDIDATE_PRIVACY_SCHEMA_VERSION);
   assert.equal(result.record.gate, 'readiness');
   assert.equal(result.record.result, 'pass');
   assert.equal(result.record.controlPlane.stable, true);

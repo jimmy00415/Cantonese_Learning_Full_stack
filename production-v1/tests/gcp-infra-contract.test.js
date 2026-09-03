@@ -589,7 +589,8 @@ test('the executable contract fixes the isolated GCP topology and least-privileg
   assert.deepEqual(contract.apis, [
     'cloudresourcemanager.googleapis.com', 'serviceusage.googleapis.com',
     'cloudbilling.googleapis.com', 'billingbudgets.googleapis.com',
-    'iam.googleapis.com', 'artifactregistry.googleapis.com',
+    'iam.googleapis.com', 'iamcredentials.googleapis.com',
+    'policytroubleshooter.googleapis.com', 'artifactregistry.googleapis.com',
     'cloudbuild.googleapis.com', 'containeranalysis.googleapis.com',
     'run.googleapis.com', 'compute.googleapis.com',
     'servicenetworking.googleapis.com', 'sqladmin.googleapis.com',
@@ -711,6 +712,16 @@ test('the executable contract fixes the isolated GCP topology and least-privileg
       && member === `serviceAccount:${GCP_IDENTITY.serviceAccounts.deployer}`
       && role === 'roles/iam.serviceAccountUser'
   )), true);
+  assert.equal(contract.iam.bindings.some(({ scope, member, role }) => (
+    scope === 'service-account:hkbuddy-v1-acceptance'
+      && member === 'user:admin@motionexp.com'
+      && role === 'roles/iam.serviceAccountOpenIdTokenCreator'
+  )), true, 'the fixed operator needs only OpenID token creation on the acceptance identity');
+  assert.equal(contract.iam.bindings.some(({ scope, member, role }) => (
+    scope === 'service-account:hkbuddy-v1-acceptance'
+      && member === 'user:admin@motionexp.com'
+      && role === 'roles/iam.serviceAccountTokenCreator'
+  )), false, 'the operator must not receive broad service-account token authority');
   assert.equal(contract.iam.bindings.some(({ scope, role }) => (
     scope === 'project' && contract.iam.forbiddenWorkloadRoles.includes(role)
   )), false);
@@ -7196,7 +7207,8 @@ test('real control plane completes narrow IAM recovery before no-channel API dis
   const enabledBefore = ['iam.googleapis.com', 'serviceusage.googleapis.com'];
   const allApis = [
     'cloudresourcemanager.googleapis.com', 'serviceusage.googleapis.com', 'cloudbilling.googleapis.com',
-    'billingbudgets.googleapis.com', 'iam.googleapis.com', 'artifactregistry.googleapis.com',
+    'billingbudgets.googleapis.com', 'iam.googleapis.com', 'iamcredentials.googleapis.com',
+    'policytroubleshooter.googleapis.com', 'artifactregistry.googleapis.com',
     'cloudbuild.googleapis.com', 'containeranalysis.googleapis.com',
     'run.googleapis.com', 'compute.googleapis.com', 'servicenetworking.googleapis.com',
     'sqladmin.googleapis.com', 'storage.googleapis.com', 'secretmanager.googleapis.com', 'aiplatform.googleapis.com',

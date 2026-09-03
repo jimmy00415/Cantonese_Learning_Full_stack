@@ -12,7 +12,10 @@ import {
   validateCandidateControlPlaneReadbacks,
 } from '../scripts/gcp-release.js';
 import { assertCidrAvailable } from '../scripts/gcp-provision.js';
-import { candidatePrivacyBoundarySha256 } from '../scripts/candidate-privacy-proof.js';
+import {
+  CANDIDATE_PRIVACY_SCHEMA_VERSION,
+  candidatePrivacyBoundarySha256,
+} from '../scripts/candidate-privacy-proof.js';
 import { GCP_IDENTITY } from '../src/gcp-identity.js';
 
 const PROJECT = GCP_IDENTITY.projectId;
@@ -28,6 +31,7 @@ const PREVIOUS_IMAGE_DIGEST = `sha256:${'d'.repeat(64)}`;
 const PREVIOUS_REVISION = `${STABLE_SERVICE}-111111111111`;
 const ACCEPTANCE_RUN_ID = '123e4567-e89b-42d3-a456-426614174000';
 const INVOKER_IAM_DISABLED = 'run.googleapis.com/invoker-iam-disabled';
+const SERVICE_MAX_SCALE = 'run.googleapis.com/maxScale';
 
 function artifactReadback(image) {
   return {
@@ -103,7 +107,7 @@ function task8Entry(phase, stableTrafficState) {
     candidateService: CANDIDATE_SERVICE, stableService: STABLE_SERVICE,
     trafficState: 'candidate-service-private-100', stableTrafficState,
     privacyProofs: Object.fromEntries(['start', 'end'].map((boundary, index) => [boundary, {
-      schemaVersion: 3,
+      schemaVersion: CANDIDATE_PRIVACY_SCHEMA_VERSION,
       filePath: `C:\\release\\${phase}-${boundary}-privacy.json`,
       artifactSha256: String(index + 1).repeat(64),
       objectSha256: String(index + 3).repeat(64),
@@ -149,7 +153,7 @@ function canonicalFixture(value) {
 
 function candidatePrivacyReference(plan) {
   return {
-    schemaVersion: 3,
+    schemaVersion: CANDIDATE_PRIVACY_SCHEMA_VERSION,
     filePath: plan.candidatePrivacyProofPath,
     artifactSha256: '1'.repeat(64),
     objectSha256: '2'.repeat(64),
@@ -346,6 +350,7 @@ function rawService({ service, traffic, annotation = 'false' }) {
       name: service,
       annotations: {
         'run.googleapis.com/ingress': 'all',
+        [SERVICE_MAX_SCALE]: '1',
         'run.googleapis.com/urls': JSON.stringify([serviceUrl]),
         ...(annotation === undefined ? {} : { [INVOKER_IAM_DISABLED]: annotation }),
       },
@@ -425,6 +430,8 @@ test('Cloud Run private truth binds the explicit Invoker IAM annotation before d
   await t.test('controlled candidate and stable Service specs pin lowercase semantic false', () => {
     assert.equal(plan.candidateServiceSpec.metadata.annotations[INVOKER_IAM_DISABLED], 'false');
     assert.equal(plan.stableServiceSpec.metadata.annotations[INVOKER_IAM_DISABLED], 'false');
+    assert.equal(plan.candidateServiceSpec.metadata.annotations[SERVICE_MAX_SCALE], '1');
+    assert.equal(plan.stableServiceSpec.metadata.annotations[SERVICE_MAX_SCALE], '1');
     assert.equal(plan.expectedCandidate.invokerIamDisabled, false);
     assert.equal(plan.expectedStable.invokerIamDisabled, false);
     assert.throws(() => validateCandidateReadback({
@@ -454,6 +461,7 @@ test('Cloud Run private truth binds the explicit Invoker IAM annotation before d
         service: CANDIDATE_SERVICE,
         traffic: structuredClone(plan.expectedCandidate.traffic),
         invokerIamDisabled: false,
+        serviceMaxScale: 1,
       },
     }, plan));
 

@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { chromium } from 'playwright';
 
+import { CANDIDATE_PRIVACY_SCHEMA_VERSION } from '../scripts/candidate-privacy-proof.js';
 import {
   MOBILE_BROWSER_CONTRACT,
   MOBILE_CHECK_IDS,
@@ -35,13 +36,16 @@ const BOUNDARY = 'd'.repeat(64);
 const FIXTURE_FILE = fileURLToPath(new URL('./fixtures/mobile-voice-en.wav', import.meta.url));
 
 function privacyArtifact(filePath, digit, observedAt) {
-  const proof = { schemaVersion: 3, artifactSha256: digit.repeat(64) };
+  const proof = {
+    schemaVersion: CANDIDATE_PRIVACY_SCHEMA_VERSION,
+    artifactSha256: digit.repeat(64),
+  };
   const contents = `${JSON.stringify(proof, null, 2)}\n`;
   return {
     filePath,
     contents,
     reference: {
-      schemaVersion: 3,
+      schemaVersion: CANDIDATE_PRIVACY_SCHEMA_VERSION,
       filePath,
       artifactSha256: proof.artifactSha256,
       objectSha256: createHash('sha256').update(contents).digest('hex'),

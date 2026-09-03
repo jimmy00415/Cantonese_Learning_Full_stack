@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 import { GCP_IDENTITY } from '../src/gcp-identity.js';
 import {
+  CANDIDATE_PRIVACY_SCHEMA_VERSION,
   candidatePrivacyBoundarySha256,
   readCandidateControlPlaneSnapshot,
   runCandidateAuthenticatedHealthProbe,
@@ -66,17 +67,21 @@ function isAbsoluteFile(value) {
 function normalizedPrivacyLocator(value, { unresolved = false } = {}) {
   const observedAt = Date.parse(value?.observedAt);
   const expiresAt = Date.parse(value?.expiresAt);
+  const unresolvedDigests = [
+    value?.artifactSha256, value?.objectSha256, value?.boundarySha256,
+  ].every((member) => member === ZERO_DIGEST);
+  const validSchema = value?.schemaVersion === CANDIDATE_PRIVACY_SCHEMA_VERSION
+    || (unresolved && unresolvedDigests && value?.schemaVersion === SCHEMA_VERSION);
   if (!exactKeys(value, [
     'artifactSha256', 'boundarySha256', 'expiresAt', 'filePath', 'objectSha256',
     'observedAt', 'schemaVersion',
-  ]) || value.schemaVersion !== SCHEMA_VERSION || !isAbsoluteFile(value.filePath)
+  ]) || !validSchema || !isAbsoluteFile(value.filePath)
     || !DIGEST.test(String(value.artifactSha256 ?? ''))
     || !DIGEST.test(String(value.objectSha256 ?? ''))
     || !DIGEST.test(String(value.boundarySha256 ?? ''))
     || !Number.isFinite(observedAt) || !Number.isFinite(expiresAt)
     || expiresAt - observedAt !== MAXIMUM_AGE_MS
-    || (unresolved && [value.artifactSha256, value.objectSha256, value.boundarySha256]
-      .some((member) => member !== ZERO_DIGEST))) fail();
+    || (unresolved && !unresolvedDigests)) fail();
   return deepFreeze({ ...value });
 }
 
@@ -136,7 +141,7 @@ function privacyArtifact(proof, locator, binding, observedNow) {
   validateCandidatePrivacyProof(proof, { binding, now: observedNow });
   const contents = `${JSON.stringify(proof, null, 2)}\n`;
   const reference = normalizedPrivacyLocator({
-    schemaVersion: SCHEMA_VERSION,
+    schemaVersion: CANDIDATE_PRIVACY_SCHEMA_VERSION,
     filePath: locator.filePath,
     artifactSha256: proof.artifactSha256,
     objectSha256: sha256Bytes(contents),

@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 import { chromium } from 'playwright';
 
+import { CANDIDATE_PRIVACY_SCHEMA_VERSION } from './candidate-privacy-proof.js';
 import { containsForbiddenPersistedSecret } from './persisted-secret-contract.js';
 import { validateUniqueScreenshots } from './png-evidence.js';
 import { validateCanonicalWav } from '../src/media/canonical-wav.js';
@@ -272,7 +273,8 @@ function assertPrivacyReference(value, boundarySha256) {
   if (!exactKeys(value, [
     'artifactSha256', 'boundarySha256', 'expiresAt', 'filePath', 'objectSha256',
     'observedAt', 'schemaVersion',
-  ]) || value.schemaVersion !== 3 || !DIGEST.test(value.artifactSha256)
+  ]) || value.schemaVersion !== CANDIDATE_PRIVACY_SCHEMA_VERSION
+    || !DIGEST.test(value.artifactSha256)
     || !DIGEST.test(value.objectSha256) || value.boundarySha256 !== boundarySha256
     || !Number.isFinite(observed) || expires - observed !== MAX_EVIDENCE_AGE_MS) fail();
   return value;

@@ -834,6 +834,20 @@ may exceed five minutes: its start proof is checked at workload start and its
 end proof at workload end, while promotion freshness is an independent current-
 clock check. Every fresh wrapper rejects `current >= expiresAt`.
 
+Privacy publication deliberately does not call Cloud Asset
+`analyze-iam-policy`. A complete release produces more policy proofs than the
+organization's daily free Policy Analyzer query allowance, so that API cannot
+be a reliable release dependency. Each proof instead reads the complete
+authoritative service/project/folder/organization IAM hierarchy twice, matches
+it to Cloud Asset effective-IAM output, resolves every role bound to
+`allUsers` or `allAuthenticatedUsers` twice, and rejects any such role that
+contains `run.routes.invoke`. The persisted schema-v4 denial attestation carries
+a bounded canonical effective-policy projection and hierarchy chain so later
+validation re-derives every public binding and source hash rather than trusting
+self-reported summaries. Exact private service IAM, an authenticated Policy
+Troubleshooter grant, an anonymous 401/403 edge probe, an authenticated 200 edge
+probe, and their Cloud Run request logs remain independently required.
+
 Candidate privacy, readiness, the journaled privacy-start/privacy-end/workload
 three-file bundle, and the seven-file mobile bundle use intent-before-create
 publication. Restart adopts only exact intended bytes and reconstructs the

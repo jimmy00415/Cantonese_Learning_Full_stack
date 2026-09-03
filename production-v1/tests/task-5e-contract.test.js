@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import { GCP_IDENTITY } from '../src/gcp-identity.js';
+import { CANDIDATE_PRIVACY_SCHEMA_VERSION } from '../scripts/candidate-privacy-proof.js';
 import {
   buildReleasePlan,
   validateServiceIamReceipt,
@@ -106,7 +107,7 @@ function task8Entry(phase, stableTrafficState = 'stable-prior-100') {
     trafficState: 'candidate-service-private-100',
     stableTrafficState,
     privacyProofs: Object.fromEntries(['start', 'end'].map((boundary, index) => [boundary, {
-      schemaVersion: 3,
+      schemaVersion: CANDIDATE_PRIVACY_SCHEMA_VERSION,
       filePath: `C:\\release\\${phase}-${boundary}-privacy.json`,
       artifactSha256: String(index + 1).repeat(64),
       objectSha256: String(index + 3).repeat(64),

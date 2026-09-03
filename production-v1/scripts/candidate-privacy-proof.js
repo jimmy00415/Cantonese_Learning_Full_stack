@@ -1,12 +1,10 @@
-import { execFile as execFileCallback } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { promisify } from 'node:util';
 
 import { GCP_IDENTITY } from '../src/gcp-identity.js';
 import { cloudRunTaggedUrl, normalizeCloudRunV1ServiceUrls } from '../src/cloud-run-urls.js';
 import { containsForbiddenPersistedSecret } from './persisted-secret-contract.js';
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const MAXIMUM_AGE_MS = 5 * 60_000;
 const QUOTA_PROJECT = 'tech-demo-433408';
 const OPERATOR = 'admin@motionexp.com';
@@ -18,10 +16,11 @@ const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/u;
 const DIGEST = /^[0-9a-f]{64}$/u;
 const TRACE_ID = /^[0-9a-f]{32}$/u;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
-const SAFE_ETAG = /^(?:[A-Za-z0-9+/]{4}){1,255}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
+const SAFE_ETAG = /^(?:(?:[A-Za-z0-9+/]{4}){1,255}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?|(?:[A-Za-z0-9_-]{4}){1,255}(?:[A-Za-z0-9_-]{2}==|[A-Za-z0-9_-]{3}=)?)$/u;
 const SAFE_ROLE = /^(?:roles\/[A-Za-z0-9_.-]{1,128}|(?:projects\/[a-z][a-z0-9-]{4,61}[a-z0-9]|organizations\/[1-9]\d*)\/roles\/[A-Za-z0-9_.-]{1,128})$/u;
 const PUBLIC_PRINCIPALS = new Set(['allUsers', 'allAuthenticatedUsers']);
-const execFileAsync = promisify(execFileCallback);
+const PUBLIC_DENIAL_METHOD = 'effective-policy-role-definition-exclusion-v1';
+const MAX_PUBLIC_DENIAL_BYTES = 1024 * 1024;
 const LOG_POLL_INTERVAL_MS = 5_000;
 const LOG_POLL_ATTEMPTS = Math.ceil(MAXIMUM_AGE_MS / LOG_POLL_INTERVAL_MS) + 1;
 const READINESS_COMPONENTS = Object.freeze([
@@ -242,33 +241,17 @@ export function createCandidatePrivacyCommandPlan(rawBinding) {
       `--names=${resource}`,
       `--billing-project=${QUOTA_PROJECT}`, '--format=json',
     ),
-    assetAnalyses: Object.fromEntries(['allUsers', 'allAuthenticatedUsers'].map((principal) => [
-      principal,
-      {
-        permission: frozenArgv(
-          'asset', 'analyze-iam-policy', `--organization=${binding.organizationId}`,
-          `--full-resource-name=${resource}`, `--identity=${principal}`,
-          `--permissions=${INVOKE_PERMISSION}`, '--show-response',
-          `--billing-project=${QUOTA_PROJECT}`, '--format=json', '--quiet',
-        ),
-        expandedRoles: frozenArgv(
-          'asset', 'analyze-iam-policy', `--organization=${binding.organizationId}`,
-          `--full-resource-name=${resource}`, `--identity=${principal}`,
-          `--permissions=${INVOKE_PERMISSION}`, '--expand-roles', '--show-response',
-          `--billing-project=${QUOTA_PROJECT}`, '--format=json', '--quiet',
-        ),
-      },
-    ])),
     troubleshooter: frozenArgv(
       'policy-troubleshoot', 'iam', resource,
       `--principal-email=${binding.acceptanceServiceAccount}`, `--permission=${INVOKE_PERMISSION}`,
       `--project=${binding.projectId}`, '--format=json',
     ),
-    token: frozenArgv(
-      'auth', 'print-identity-token', binding.operator,
-      `--impersonate-service-account=${binding.acceptanceServiceAccount}`,
-      `--audiences=${binding.candidateAudience}`, '--include-email', '--quiet',
-    ),
+    token: {
+      generateIdToken: {
+        endpoint: `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${encodeURIComponent(binding.acceptanceServiceAccount)}:generateIdToken`,
+        body: { audience: binding.candidateAudience, includeEmail: true },
+      },
+    },
   });
 }
 
@@ -412,6 +395,15 @@ function normalizedFolder(value, folderId) {
   });
 }
 
+function validGoogleTimestamp(value) {
+  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?Z$/u.exec(String(value ?? ''));
+  if (!match) return false;
+  const milliseconds = (match[2] ?? '').padEnd(3, '0').slice(0, 3);
+  const canonicalMilliseconds = `${match[1]}.${milliseconds}Z`;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === canonicalMilliseconds;
+}
+
 function normalizedOrganization(value, binding) {
   const allowedKeys = new Set([
     'createTime', 'creationTime', 'directoryCustomerId', 'displayName', 'lifecycleState', 'name',
@@ -422,8 +414,7 @@ function normalizedOrganization(value, binding) {
     || value.name !== `organizations/${binding.organizationId}`
     || value.lifecycleState !== 'ACTIVE'
     || (value.creationTime !== undefined && value.createTime !== undefined)
-    || (timestamp !== undefined && (!Number.isFinite(Date.parse(timestamp))
-      || new Date(Date.parse(timestamp)).toISOString() !== timestamp))) fail();
+    || (timestamp !== undefined && !validGoogleTimestamp(timestamp))) fail();
   return deepFreeze({
     name: value.name,
     lifecycleState: value.lifecycleState,
@@ -478,6 +469,20 @@ function publicRoleBindings(value, result = []) {
   return result;
 }
 
+function normalizeEmbeddedPolicy(value) {
+  if (!safeObject(value) || Object.keys(value).some((key) => (
+    !['auditConfigs', 'bindings'].includes(key)
+  ))) fail();
+  const rawBindings = value.bindings ?? [];
+  if (!Array.isArray(rawBindings)) fail();
+  const normalized = validatePolicy({
+    ...value,
+    etag: 'AAAA',
+    version: rawBindings.some((binding) => binding?.condition !== undefined) ? 3 : 1,
+  });
+  return { bindings: normalized.bindings, auditConfigs: normalized.auditConfigs };
+}
+
 function validateEffectivePolicy(value, binding, snapshot) {
   if (!exactKeys(value, ['policyResults']) || !Array.isArray(value.policyResults)
     || value.policyResults.length !== 1 || containsForbiddenPersistedSecret(value)) fail();
@@ -488,7 +493,7 @@ function validateEffectivePolicy(value, binding, snapshot) {
   const allExpected = [
     { attachedResource: candidateResource(binding), policy: snapshot.policies.service },
     {
-      attachedResource: `//cloudresourcemanager.googleapis.com/projects/${binding.projectNumber}`,
+      attachedResource: `//cloudresourcemanager.googleapis.com/projects/${binding.projectId}`,
       policy: snapshot.policies.project,
     },
     ...snapshot.policies.folders.map(({ name, policy }) => ({
@@ -507,9 +512,13 @@ function validateEffectivePolicy(value, binding, snapshot) {
   const policies = result.policies.map((member) => {
     if (!exactKeys(member, ['attachedResource', 'policy'])
       || typeof member.attachedResource !== 'string') fail();
-    return { attachedResource: member.attachedResource, policy: validatePolicy(member.policy) };
+    return { attachedResource: member.attachedResource, policy: normalizeEmbeddedPolicy(member.policy) };
   });
-  if (!exact(policies, expected)) fail();
+  const expectedEmbedded = expected.map(({ attachedResource, policy }) => ({
+    attachedResource,
+    policy: { bindings: policy.bindings, auditConfigs: policy.auditConfigs },
+  }));
+  if (!exact(policies, expectedEmbedded)) fail();
   return deepFreeze({
     policyResults: [{ fullResourceName: result.fullResourceName, policies }],
   });
@@ -553,65 +562,162 @@ function validateTokenPrerequisite(value, binding) {
   return policy;
 }
 
-function containsExactString(value, expected) {
-  if (value === expected) return true;
-  if (Array.isArray(value)) return value.some((member) => containsExactString(member, expected));
-  if (!value || typeof value !== 'object') return false;
-  return Object.values(value).some((member) => containsExactString(member, expected));
+function publicRoleDefinitionProjection(definitions) {
+  return definitions.map(({ role, includedPermissions }) => ({ role, includedPermissions }));
 }
 
-function validateAssetAnalysis(value, { principal, binding, kind }) {
-  const keys = Object.keys(value ?? {}).sort();
-  if (!['fullyExplored\0mainAnalysis', 'fullyExplored\0mainAnalysis\0serviceAccountImpersonationAnalysis']
-    .includes(keys.join('\0')) || value.fullyExplored !== true || containsForbiddenPersistedSecret(value)) fail();
-  const expectedQuery = {
-    scope: `organizations/${binding.organizationId}`,
-    identitySelector: { identity: principal },
-    resourceSelector: { fullResourceName: candidateResource(binding) },
-    ...(kind === 'permission'
-      ? { accessSelector: { permissions: [INVOKE_PERMISSION] } }
-      : { options: { expandRoles: true } }),
-  };
-  const validateAnalysis = (analysis, { requireQuery, allowResults }) => {
-    const allowedKeys = new Set([
-      'analysisQuery', 'analysisResults', 'fullyExplored', 'nonCriticalErrors',
-    ]);
-    const results = analysis?.analysisResults === undefined ? [] : analysis.analysisResults;
-    const errors = analysis?.nonCriticalErrors === undefined ? [] : analysis.nonCriticalErrors;
-    if (!safeObject(analysis) || Object.keys(analysis).some((key) => !allowedKeys.has(key))
-      || analysis.fullyExplored !== true
-      || !Array.isArray(results) || (!allowResults && results.length !== 0)
-      || !Array.isArray(errors) || errors.length !== 0
-      || (requireQuery && !exact(analysis.analysisQuery, expectedQuery))) fail();
-    if (allowResults && containsExactString(results, INVOKE_PERMISSION)) fail();
-    return results;
-  };
-  const mainResults = validateAnalysis(value.mainAnalysis, {
-    requireQuery: true, allowResults: false,
-  });
-  if (value.serviceAccountImpersonationAnalysis !== undefined) {
-    if (!Array.isArray(value.serviceAccountImpersonationAnalysis)
-      || value.serviceAccountImpersonationAnalysis.length !== 0) fail();
-  }
-  return deepFreeze({ response: canonical(value), resultCount: mainResults.length });
+function normalizedAttestedHierarchyChain(value, binding) {
+  if (!Array.isArray(value) || value.length < 3 || value.length > 19
+    || value[0] !== candidateResource(binding)
+    || value[1] !== `projects/${binding.projectNumber}`
+    || value.at(-1) !== `organizations/${binding.organizationId}`
+    || value.slice(2, -1).some((member) => !/^folders\/[1-9]\d*$/u.test(String(member ?? '')))
+    || new Set(value).size !== value.length) fail();
+  return [...value];
 }
 
-function validateAssetAnalysisPair(value, { principal, binding }) {
-  if (!exactKeys(value, ['expandedRoles', 'permission'])) fail();
-  const permission = validateAssetAnalysis(value.permission, {
-    principal, binding, kind: 'permission',
+function normalizedAttestedEffectivePolicy(value, binding, hierarchyChain) {
+  if (!exactKeys(value, ['policyResults']) || !Array.isArray(value.policyResults)
+    || value.policyResults.length !== 1
+    || Buffer.byteLength(JSON.stringify(value), 'utf8') > MAX_PUBLIC_DENIAL_BYTES
+    || containsForbiddenPersistedSecret(value)) fail();
+  const result = value.policyResults[0];
+  if (!exactKeys(result, ['fullResourceName', 'policies'])
+    || result.fullResourceName !== candidateResource(binding)
+    || !Array.isArray(result.policies) || result.policies.length < 1
+    || result.policies.length > hierarchyChain.length) fail();
+  const allowedResources = [
+    candidateResource(binding),
+    `//cloudresourcemanager.googleapis.com/projects/${binding.projectId}`,
+    ...hierarchyChain.slice(2, -1).map((name) => (
+      `//cloudresourcemanager.googleapis.com/${name}`
+    )),
+    `//cloudresourcemanager.googleapis.com/organizations/${binding.organizationId}`,
+  ];
+  let previousIndex = -1;
+  const policies = result.policies.map((member, index) => {
+    if (!exactKeys(member, ['attachedResource', 'policy'])) fail();
+    const resourceIndex = allowedResources.indexOf(member.attachedResource);
+    if (resourceIndex <= previousIndex || (index === 0 && resourceIndex !== 0)) fail();
+    previousIndex = resourceIndex;
+    const policy = normalizeEmbeddedPolicy(member.policy);
+    if (!exact(member.policy, policy)
+      || (index > 0 && policy.bindings.length === 0 && policy.auditConfigs.length === 0)) fail();
+    return { attachedResource: member.attachedResource, policy };
   });
-  const expandedRoles = validateAssetAnalysis(value.expandedRoles, {
-    principal, binding, kind: 'expandedRoles',
-  });
+  const servicePolicy = policies[0].policy;
+  if (servicePolicy.auditConfigs.length !== 0 || servicePolicy.bindings.length !== 1
+    || !exact(servicePolicy.bindings[0], {
+      role: INVOKER_ROLE,
+      members: [`serviceAccount:${binding.acceptanceServiceAccount}`],
+    })) fail();
   return deepFreeze({
-    fullyExplored: true,
-    resultCount: expandedRoles.resultCount,
-    nonCriticalErrorCount: 0,
-    responseSha256: canonicalSha256({
-      permission: permission.response, expandedRoles: expandedRoles.response,
-    }),
+    policyResults: [{ fullResourceName: result.fullResourceName, policies }],
   });
+}
+
+function derivePublicPrincipalResults(effectivePolicy, definitionsByRole) {
+  const effectivePolicies = effectivePolicy.policyResults[0].policies;
+  const principals = {};
+  const referencedRoles = new Set();
+  for (const principal of PUBLIC_PRINCIPALS) {
+    const bindings = [];
+    for (const { attachedResource, policy } of effectivePolicies) {
+      for (const iamBinding of policy.bindings) {
+        if (!iamBinding.members.includes(principal)) continue;
+        if (!definitionsByRole.has(iamBinding.role)) fail();
+        referencedRoles.add(iamBinding.role);
+        bindings.push({
+          attachedResource,
+          role: iamBinding.role,
+          bindingSha256: canonicalSha256(iamBinding),
+        });
+      }
+    }
+    bindings.sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+    principals[principal] = {
+      decision: 'DENIED', bindingCount: bindings.length, bindings,
+    };
+  }
+  return { principals, referencedRoles: [...referencedRoles].sort() };
+}
+
+function createPublicPrincipalDenial({ snapshot, effectivePolicy, roleDefinitions }) {
+  const projectedDefinitions = publicRoleDefinitionProjection(roleDefinitions);
+  const definitionsByRole = new Map(projectedDefinitions.map((definition) => (
+    [definition.role, definition]
+  )));
+  const hierarchyChain = [...snapshot.chain];
+  const effectivePolicyProjection = canonical(effectivePolicy);
+  const { principals, referencedRoles } = derivePublicPrincipalResults(
+    effectivePolicyProjection, definitionsByRole,
+  );
+  if (!exact(referencedRoles, projectedDefinitions.map(({ role }) => role))) fail();
+  const payload = {
+    method: PUBLIC_DENIAL_METHOD,
+    permission: INVOKE_PERMISSION,
+    hierarchyChain,
+    effectivePolicyProjection,
+    sources: {
+      effectiveIamSha256: canonicalSha256(effectivePolicyProjection),
+      hierarchyChainSha256: canonicalSha256(hierarchyChain),
+      roleDefinitionsSha256: canonicalSha256(projectedDefinitions),
+    },
+    roleDefinitions: projectedDefinitions,
+    principals,
+  };
+  return deepFreeze({ ...payload, attestationSha256: canonicalSha256(payload) });
+}
+
+function validatePublicPrincipalDenial(value, { binding, effectiveIamSha256, hierarchyChainSha256,
+  roleDefinitionsSha256 }) {
+  if (!exactKeys(value, [
+    'attestationSha256', 'effectivePolicyProjection', 'hierarchyChain', 'method', 'permission',
+    'principals', 'roleDefinitions', 'sources',
+  ])
+    || value.method !== PUBLIC_DENIAL_METHOD || value.permission !== INVOKE_PERMISSION
+    || !DIGEST.test(String(value.attestationSha256 ?? ''))
+    || Buffer.byteLength(JSON.stringify(value), 'utf8') > MAX_PUBLIC_DENIAL_BYTES
+    || !exactKeys(value.sources, [
+      'effectiveIamSha256', 'hierarchyChainSha256', 'roleDefinitionsSha256',
+    ])
+    || value.sources.effectiveIamSha256 !== effectiveIamSha256
+    || value.sources.hierarchyChainSha256 !== hierarchyChainSha256
+    || value.sources.roleDefinitionsSha256 !== roleDefinitionsSha256
+    || !Array.isArray(value.roleDefinitions)
+    || !exactKeys(value.principals, ['allAuthenticatedUsers', 'allUsers'])
+    || containsForbiddenPersistedSecret(value)) fail();
+
+  const hierarchyChain = normalizedAttestedHierarchyChain(value.hierarchyChain, binding);
+  if (canonicalSha256(hierarchyChain) !== hierarchyChainSha256) fail();
+  const effectivePolicy = normalizedAttestedEffectivePolicy(
+    value.effectivePolicyProjection, binding, hierarchyChain,
+  );
+  if (!exact(value.effectivePolicyProjection, effectivePolicy)
+    || canonicalSha256(effectivePolicy) !== effectiveIamSha256) fail();
+
+  const definitions = [];
+  for (const definition of value.roleDefinitions) {
+    if (!exactKeys(definition, ['includedPermissions', 'role'])
+      || !SAFE_ROLE.test(String(definition.role ?? ''))
+      || !Array.isArray(definition.includedPermissions)
+      || definition.includedPermissions.some((permission) => (
+        typeof permission !== 'string' || permission.length < 1 || permission.length > 256
+      ))
+      || !exact(definition.includedPermissions, [...new Set(definition.includedPermissions)].sort())
+      || definition.includedPermissions.includes(INVOKE_PERMISSION)) fail();
+    definitions.push(canonical(definition));
+  }
+  if (!exact(definitions, [...definitions].sort((left, right) => left.role.localeCompare(right.role)))
+    || new Set(definitions.map(({ role }) => role)).size !== definitions.length
+    || canonicalSha256(definitions) !== roleDefinitionsSha256) fail();
+  const definitionsByRole = new Map(definitions.map((definition) => [definition.role, definition]));
+  const derived = derivePublicPrincipalResults(effectivePolicy, definitionsByRole);
+  if (!exact(value.principals, derived.principals)
+    || !exact(derived.referencedRoles, definitions.map(({ role }) => role))) fail();
+  const { attestationSha256, ...payload } = value;
+  if (canonicalSha256(payload) !== attestationSha256) fail();
+  return deepFreeze(canonical(value));
 }
 
 function containsForbiddenTroubleshooterState(value) {
@@ -622,13 +728,25 @@ function containsForbiddenTroubleshooterState(value) {
   }
   if (Array.isArray(value)) return value.some(containsForbiddenTroubleshooterState);
   if (!value || typeof value !== 'object') return false;
-  return Object.entries(value).some(([key, member]) => (
-    key === 'condition' || containsForbiddenTroubleshooterState(member)
-  ));
+  return Object.values(value).some(containsForbiddenTroubleshooterState);
 }
 
 function validateTroubleshooter(value, binding) {
-  if (!exactKeys(value, ['access', 'explainedPolicies']) || value.access !== 'GRANTED'
+  const topLevelKeys = Object.keys(value ?? {}).sort().join('\0');
+  const partialErrors = value?.errors === undefined ? [] : value.errors;
+  const knownDenyExplanationGap = Array.isArray(partialErrors) && partialErrors.length === 1
+    && exactKeys(partialErrors[0], ['code', 'details', 'message'])
+    && partialErrors[0].code === 13
+    && partialErrors[0].message === 'Failed to generate IAM deny explanation'
+    && Array.isArray(partialErrors[0].details) && partialErrors[0].details.length === 1
+    && exactKeys(partialErrors[0].details[0], ['@type', 'domain', 'reason'])
+    && partialErrors[0].details[0]['@type'] === 'type.googleapis.com/google.rpc.ErrorInfo'
+    && partialErrors[0].details[0].domain === 'policytroubleshooter.googleapis.com'
+    && partialErrors[0].details[0].reason === 'ERROR_IAM_DENY';
+  if (!['access\0explainedPolicies', 'access\0errors\0explainedPolicies'].includes(topLevelKeys)
+    || !Array.isArray(partialErrors)
+    || (partialErrors.length !== 0 && !knownDenyExplanationGap)
+    || value.access !== 'GRANTED'
     || !Array.isArray(value.explainedPolicies)
     || containsForbiddenTroubleshooterState(value)) fail();
   let witness = false;
@@ -643,8 +761,11 @@ function validateTroubleshooter(value, binding) {
       || !Array.isArray(policy.bindingExplanations)) fail();
     if (policy.policy !== undefined) validatePolicy(policy.policy);
     for (const explanation of policy.bindingExplanations) {
+      const hasCondition = Object.hasOwn(explanation ?? {}, 'condition')
+        || Object.hasOwn(explanation ?? {}, 'conditionExplanation');
       const allowedKeys = new Set([
         'access', 'memberships', 'relevance', 'role', 'rolePermission', 'rolePermissionRelevance',
+        ...(hasCondition ? ['condition', 'conditionExplanation'] : []),
       ]);
       if (!safeObject(explanation) || Object.keys(explanation).some((key) => !allowedKeys.has(key))
         || !['GRANTED', 'NOT_GRANTED'].includes(explanation.access)
@@ -654,6 +775,19 @@ function validateTroubleshooter(value, binding) {
         || (explanation.rolePermissionRelevance !== undefined
           && !['HIGH', 'HEURISTIC_RELEVANCE', 'NORMAL'].includes(explanation.rolePermissionRelevance))
         || !safeObject(explanation.memberships)) fail();
+      if (hasCondition) {
+        const condition = explanation.condition;
+        if (explanation.access !== 'NOT_GRANTED'
+          || explanation.rolePermission !== 'ROLE_PERMISSION_NOT_INCLUDED'
+          || !safeObject(condition)
+          || !exactKeys(condition, ['description', 'expression', 'title'])
+          || ![condition.description, condition.expression, condition.title].every((member) => (
+            typeof member === 'string' && member.length >= 1 && member.length <= 4096
+              && !/[\u0000\r\n]/u.test(member)
+          ))
+          || !safeObject(explanation.conditionExplanation)
+          || Object.keys(explanation.conditionExplanation).length !== 0) fail();
+      }
       for (const [member, membership] of Object.entries(explanation.memberships)) {
         if (typeof member !== 'string' || member.length < 1 || member.length > 512
           || !exactKeys(membership, ['membership', 'relevance'])
@@ -710,40 +844,29 @@ function decodeTokenClaims(token, binding, now) {
   return deepFreeze({ subjectSha256: canonicalSha256(claims.sub) });
 }
 
-export function createIdentityTokenExecutor({
-  executable,
-  prefixArgs = [],
-  execFile = execFileAsync,
-} = {}) {
-  if (typeof executable !== 'string' || executable.length < 1 || /[\u0000\r\n]/u.test(executable)
-    || !Array.isArray(prefixArgs) || prefixArgs.some((member) => (
-      typeof member !== 'string' || /[\u0000\r\n]/u.test(member)
-    )) || typeof execFile !== 'function') fail();
-  return async (argv) => {
+export function createIdentityTokenExecutor({ request: authenticatedRequest } = {}) {
+  if (typeof authenticatedRequest !== 'function'
+    || typeof authenticatedRequest.getPrincipal !== 'function') fail();
+  return async (tokenRequest) => {
     try {
-      if (!Array.isArray(argv) || argv.length < 3 || argv[0] !== 'auth'
-        || argv[1] !== 'print-identity-token' || argv.some((member) => (
-          typeof member !== 'string' || /[\u0000\r\n]/u.test(member)
-        ))) fail();
-      const impersonationFlags = argv.filter((member) => (
-        member.startsWith('--impersonate-service-account=')
-      ));
-      if (impersonationFlags.length !== 1) fail();
-      const impersonatedServiceAccount = impersonationFlags[0]
-        .slice('--impersonate-service-account='.length);
-      if (impersonatedServiceAccount.length < 1 || impersonatedServiceAccount.length > 512
-        || /[\s\u0000]/u.test(impersonatedServiceAccount)) fail();
-      const result = await execFile(executable, [...prefixArgs, ...argv], {
-        encoding: 'utf8', maxBuffer: 64 * 1024, windowsHide: true,
+      const expectedEndpoint = `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${encodeURIComponent(GCP_IDENTITY.serviceAccounts.acceptance)}:generateIdToken`;
+      const expectedAudience = `https://${GCP_IDENTITY.candidateService}-${GCP_IDENTITY.projectNumber}.${GCP_IDENTITY.region}.run.app`;
+      if (!exactKeys(tokenRequest, ['generateIdToken'])
+        || !exactKeys(tokenRequest.generateIdToken, ['body', 'endpoint'])
+        || tokenRequest.generateIdToken.endpoint !== expectedEndpoint
+        || !exact(tokenRequest.generateIdToken.body, {
+          audience: expectedAudience, includeEmail: true,
+        })) fail();
+      if (await authenticatedRequest.getPrincipal() !== OPERATOR) fail();
+      const body = await authenticatedRequest({
+        method: 'POST',
+        url: tokenRequest.generateIdToken.endpoint,
+        body: tokenRequest.generateIdToken.body,
       });
-      const stderr = String(result?.stderr ?? '');
-      const warning = `WARNING: This command is using service account impersonation. All API calls will be executed as [${impersonatedServiceAccount}].`;
-      if (![ '', `${warning}\n`, `${warning}\r\n` ].includes(stderr)) fail();
-      const stdout = String(result?.stdout ?? '');
-      if (!stdout.endsWith('\n')) fail();
-      const token = stdout.slice(0, -1).endsWith('\r')
-        ? stdout.slice(0, -2) : stdout.slice(0, -1);
-      if (token.length < 64 || token.length > 16_384 || /\s/u.test(token)) fail();
+      if (!exactKeys(body, ['token'])) fail();
+      const token = body.token;
+      if (typeof token !== 'string' || token.length < 64 || token.length > 16_384
+        || /\s/u.test(token) || token.split('.').length !== 3) fail();
       return token;
     } catch { fail(); }
   };
@@ -868,7 +991,7 @@ function validateRequestLog(value, binding, probe, status, now, path) {
   const entry = value[0];
   const allowedEntryKeys = new Set([
     'httpRequest', 'insertId', 'labels', 'logName', 'receiveTimestamp', 'resource',
-    'severity', 'spanId', 'timestamp', 'trace', 'traceSampled',
+    'severity', 'spanId', 'textPayload', 'timestamp', 'trace', 'traceSampled',
   ]);
   const expectedLabels = {
     configuration_name: binding.candidateService,
@@ -896,6 +1019,11 @@ function validateRequestLog(value, binding, probe, status, now, path) {
     || http.requestMethod !== 'GET'
     || http.requestUrl !== `${binding.candidateOrigin}${path}`
     || http.status !== status || http.userAgent !== probe.userAgent
+    || (entry.textPayload !== undefined && (
+      ![401, 403].includes(status) || typeof entry.textPayload !== 'string'
+        || entry.textPayload.length < 1 || entry.textPayload.length > 4096
+        || /[\u0000\r\n]/u.test(entry.textPayload)
+    ))
     || !Number.isFinite(observed) || observed < Date.parse(window.start) || observed > Date.parse(window.end)
     || (received !== null && (!Number.isFinite(received) || received < observed
       || received > Date.parse(window.end)))
@@ -972,9 +1100,10 @@ function normalizeRawProbe(value) {
   };
 }
 
-function normalizeRuntime(metadata, spec, expected) {
+function normalizeRuntime(metadata, spec, expected, { allowOwnerReferences = false } = {}) {
   const metadataKeys = new Set([
     'annotations', 'creationTimestamp', 'generation', 'labels', 'name', 'namespace',
+    ...(allowOwnerReferences ? ['ownerReferences'] : []),
     'resourceVersion', 'selfLink', 'uid',
   ]);
   const specKeys = new Set([
@@ -1140,7 +1269,8 @@ function validateServiceReadback(value, binding) {
     'run.googleapis.com/client-name', 'run.googleapis.com/client-version',
     'run.googleapis.com/ingress', 'run.googleapis.com/ingress-status',
     'run.googleapis.com/invoker-iam-disabled', 'run.googleapis.com/operation-id',
-    'run.googleapis.com/urls', 'serving.knative.dev/creator', 'serving.knative.dev/lastModifier',
+    'run.googleapis.com/maxScale', 'run.googleapis.com/urls',
+    'serving.knative.dev/creator', 'serving.knative.dev/lastModifier',
   ]);
   if (!safeObject(labels) || labels['cloud.googleapis.com/location'] !== binding.region
     || !safeObject(annotations)
@@ -1151,6 +1281,9 @@ function validateServiceReadback(value, binding) {
   const invoker = annotations['run.googleapis.com/invoker-iam-disabled'];
   if (invoker !== undefined && (typeof invoker !== 'string'
     || invoker !== invoker.trim() || invoker.toLowerCase() !== 'false')) fail();
+  const serviceMaxScale = annotations['run.googleapis.com/maxScale'] === undefined
+    ? null : normalizedInteger(annotations['run.googleapis.com/maxScale'], { minimum: 1 });
+  if (serviceMaxScale !== binding.expectedCandidate.maxInstances) fail();
   if (!exactKeys(value.spec, ['template', 'traffic']) || !safeObject(value.spec.template)
     || !exactKeys(value.spec.template, ['metadata', 'spec'])
     || value.spec.template.metadata?.name !== binding.candidateRevision) fail();
@@ -1195,6 +1328,7 @@ function validateServiceReadback(value, binding) {
     urls: serviceUrls.aliases,
     invokerIamDisabled: false,
     ingress: 'all',
+    serviceMaxScale,
     revision: binding.candidateRevision,
     tag: binding.candidateTag,
     taggedUrl: value.status.traffic[0].url,
@@ -1208,7 +1342,7 @@ function validateRevisionReadback(value, binding) {
   const topKeys = new Set(['apiVersion', 'kind', 'metadata', 'spec', 'status']);
   const metadataKeys = new Set([
     'annotations', 'creationTimestamp', 'generation', 'labels', 'name', 'namespace',
-    'resourceVersion', 'selfLink', 'uid',
+    'ownerReferences', 'resourceVersion', 'selfLink', 'uid',
   ]);
   if (!safeObject(value) || Object.keys(value).some((key) => !topKeys.has(key))
     || value.apiVersion !== 'serving.knative.dev/v1' || value.kind !== 'Revision'
@@ -1217,11 +1351,28 @@ function validateRevisionReadback(value, binding) {
     || value.metadata.name !== binding.candidateRevision
     || String(value.metadata.namespace) !== binding.projectNumber) fail();
   const generation = normalizedInteger(value.metadata.generation, { minimum: 1 });
+  const ownerReferences = value.metadata.ownerReferences;
+  let ownerReference = null;
+  if (ownerReferences !== undefined) {
+    if (!Array.isArray(ownerReferences) || ownerReferences.length !== 1
+      || !exactKeys(ownerReferences[0], [
+        'apiVersion', 'blockOwnerDeletion', 'controller', 'kind', 'name', 'uid',
+      ])
+      || ownerReferences[0].apiVersion !== 'serving.knative.dev/v1'
+      || ownerReferences[0].kind !== 'Configuration'
+      || ownerReferences[0].name !== binding.candidateService
+      || ownerReferences[0].blockOwnerDeletion !== true
+      || ownerReferences[0].controller !== true
+      || !UUID.test(String(ownerReferences[0].uid ?? ''))) fail();
+    ownerReference = canonical(ownerReferences[0]);
+  }
   const labels = value.metadata.labels;
   if (!safeObject(labels) || labels['cloud.googleapis.com/location'] !== binding.region
     || labels['serving.knative.dev/configuration'] !== binding.candidateService
     || labels['serving.knative.dev/service'] !== binding.candidateService) fail();
-  const runtime = normalizeRuntime(value.metadata, value.spec, binding.expectedCandidate);
+  const runtime = normalizeRuntime(
+    value.metadata, value.spec, binding.expectedCandidate, { allowOwnerReferences: true },
+  );
   const statusKeys = new Set([
     'conditions', 'desiredReplicas', 'imageDigest', 'logUrl', 'observedGeneration', 'serviceName',
   ]);
@@ -1230,7 +1381,9 @@ function validateRevisionReadback(value, binding) {
   const observedGeneration = normalizedInteger(value.status.observedGeneration, { minimum: 1 });
   const desiredReplicas = normalizedInteger(value.status.desiredReplicas, { minimum: 1 });
   if (observedGeneration !== generation || desiredReplicas !== 1
-    || value.status.imageDigest !== binding.image || value.status.serviceName !== binding.candidateService
+    || value.status.imageDigest !== binding.image
+    || (value.status.serviceName !== undefined
+      && value.status.serviceName !== binding.candidateService)
     || (value.status.logUrl !== undefined && (typeof value.status.logUrl !== 'string'
       || !value.status.logUrl.startsWith('https://') || value.status.logUrl.length > 4096
       || /[\u0000\r\n]/u.test(value.status.logUrl)))) fail();
@@ -1241,6 +1394,7 @@ function validateRevisionReadback(value, binding) {
     revision: binding.candidateRevision,
     generation,
     desiredReplicas,
+    ownerReference,
     image: binding.image,
     ready: true,
     runtime,
@@ -1295,9 +1449,13 @@ export async function runCandidateAuthenticatedHealthProbe({
     const observedAt = now();
     if (!(observedAt instanceof Date) || !Number.isFinite(observedAt.getTime())) fail();
     const plan = createCandidatePrivacyCommandPlan(binding);
-    const token = await tokenExecutor([...plan.token]);
+    const token = await tokenExecutor(plan.token);
     if (typeof token !== 'string') fail();
-    decodeTokenClaims(token, binding, observedAt);
+    const tokenObservedAt = now();
+    if (!(tokenObservedAt instanceof Date) || !Number.isFinite(tokenObservedAt.getTime())
+      || tokenObservedAt.getTime() < observedAt.getTime()
+      || tokenObservedAt.getTime() >= observedAt.getTime() + MAXIMUM_AGE_MS) fail();
+    decodeTokenClaims(token, binding, tokenObservedAt);
     const probe = probeIdentity(nonce, path === '/api/health/live' ? 'readiness-live' : 'readiness-ready');
     const response = await authenticatedProbe(
       fetch, `${binding.candidateOrigin}${path}`, probe, token, path,
@@ -1379,22 +1537,29 @@ export function validateCandidatePrivacyProof(record, { binding: rawBinding, now
       || !DIGEST.test(String(record.identity.subjectSha256 ?? ''))
       || !DIGEST.test(String(record.identity.tokenPrerequisitePolicySha256 ?? ''))) fail();
     if (!exactKeys(record.hierarchy, [
-        'chainSha256', 'firstReadSha256', 'policyRoleDefinitionsSha256', 'secondReadSha256', 'stable',
+        'chainSha256', 'firstReadSha256', 'policyRoleDefinitionsSecondReadSha256',
+        'policyRoleDefinitionsSha256', 'secondReadSha256', 'stable',
       ])
       || record.hierarchy.stable !== true
-      || !['chainSha256', 'firstReadSha256', 'policyRoleDefinitionsSha256', 'secondReadSha256']
+      || ![
+        'chainSha256', 'firstReadSha256', 'policyRoleDefinitionsSecondReadSha256',
+        'policyRoleDefinitionsSha256', 'secondReadSha256',
+      ]
         .every((key) => DIGEST.test(String(record.hierarchy[key] ?? '')))
-      || record.hierarchy.firstReadSha256 !== record.hierarchy.secondReadSha256) fail();
-    if (!exactKeys(record.cloudAsset, ['analyses', 'effectiveIamSha256', 'quotaProject'])
+      || record.hierarchy.firstReadSha256 !== record.hierarchy.secondReadSha256
+      || record.hierarchy.policyRoleDefinitionsSha256
+        !== record.hierarchy.policyRoleDefinitionsSecondReadSha256) fail();
+    if (!exactKeys(record.cloudAsset, [
+      'effectiveIamSha256', 'publicPrincipalDenial', 'quotaProject',
+    ])
       || record.cloudAsset.quotaProject !== QUOTA_PROJECT
-      || !DIGEST.test(String(record.cloudAsset.effectiveIamSha256 ?? ''))
-      || !exactKeys(record.cloudAsset.analyses, ['allAuthenticatedUsers', 'allUsers'])
-      || !Object.values(record.cloudAsset.analyses).every((analysis) => (
-        exactKeys(analysis, ['fullyExplored', 'nonCriticalErrorCount', 'responseSha256', 'resultCount'])
-        && analysis.fullyExplored === true && analysis.nonCriticalErrorCount === 0
-        && analysis.resultCount === 0
-        && DIGEST.test(String(analysis.responseSha256 ?? ''))
-      ))) fail();
+      || !DIGEST.test(String(record.cloudAsset.effectiveIamSha256 ?? ''))) fail();
+    validatePublicPrincipalDenial(record.cloudAsset.publicPrincipalDenial, {
+      binding,
+      effectiveIamSha256: record.cloudAsset.effectiveIamSha256,
+      hierarchyChainSha256: record.hierarchy.chainSha256,
+      roleDefinitionsSha256: record.hierarchy.policyRoleDefinitionsSha256,
+    });
     if (!exactKeys(record.troubleshooter, ['decision', 'responseSha256'])
       || record.troubleshooter.decision !== 'GRANTED'
       || !DIGEST.test(String(record.troubleshooter.responseSha256 ?? ''))) fail();
@@ -1448,13 +1613,11 @@ export async function runCandidatePrivacyProof({
     const publicRoleDefinitions = await resolvePublicRoles({
       snapshot: firstSnapshot, effectivePolicy, binding, executor,
     });
-    const analyses = {};
-    for (const principal of ['allUsers', 'allAuthenticatedUsers']) {
-      analyses[principal] = validateAssetAnalysisPair({
-        permission: await execute(executor, plan.assetAnalyses[principal].permission),
-        expandedRoles: await execute(executor, plan.assetAnalyses[principal].expandedRoles),
-      }, { principal, binding });
-    }
+    const publicPrincipalDenial = createPublicPrincipalDenial({
+      snapshot: firstSnapshot,
+      effectivePolicy,
+      roleDefinitions: publicRoleDefinitions,
+    });
     const troubleshooter = validateTroubleshooter(
       await execute(executor, plan.troubleshooter), binding,
     );
@@ -1462,9 +1625,13 @@ export async function runCandidatePrivacyProof({
     const endpoint = `${binding.candidateOrigin}/api/health/live`;
     const anonymousIdentity = probeIdentity(nonce, 'anonymous');
     const anonymousStatus = await anonymousProbe(fetch, endpoint, anonymousIdentity);
-    const token = await tokenExecutor([...plan.token]);
+    const token = await tokenExecutor(plan.token);
     if (typeof token !== 'string') fail();
-    const tokenIdentity = decodeTokenClaims(token, binding, observedAt);
+    const tokenObservedAt = now();
+    if (!(tokenObservedAt instanceof Date) || !Number.isFinite(tokenObservedAt.getTime())
+      || tokenObservedAt.getTime() < observedAt.getTime()
+      || tokenObservedAt.getTime() >= observedAt.getTime() + MAXIMUM_AGE_MS) fail();
+    const tokenIdentity = decodeTokenClaims(token, binding, tokenObservedAt);
     const authenticatedIdentity = probeIdentity(nonce, 'authenticated');
     const authenticatedResponse = await authenticatedProbe(
       fetch, endpoint, authenticatedIdentity, token, '/api/health/live',
@@ -1482,6 +1649,10 @@ export async function runCandidatePrivacyProof({
     if (!exact(beforeControlPlane, afterControlPlane)) fail();
     const secondSnapshot = await readHierarchySnapshot(binding, plan, executor);
     if (!exact(firstSnapshot, secondSnapshot)) fail();
+    const secondPublicRoleDefinitions = await resolvePublicRoles({
+      snapshot: secondSnapshot, effectivePolicy, binding, executor,
+    });
+    if (!exact(publicRoleDefinitions, secondPublicRoleDefinitions)) fail();
     const completedAt = now();
     if (!(completedAt instanceof Date) || !Number.isFinite(completedAt.getTime())
       || completedAt.getTime() >= observedAt.getTime() + MAXIMUM_AGE_MS) fail();
@@ -1514,12 +1685,17 @@ export async function runCandidatePrivacyProof({
         chainSha256: canonicalSha256(firstSnapshot.chain),
         firstReadSha256: canonicalSha256(firstSnapshot),
         secondReadSha256: canonicalSha256(secondSnapshot),
-        policyRoleDefinitionsSha256: canonicalSha256(publicRoleDefinitions),
+        policyRoleDefinitionsSha256: canonicalSha256(
+          publicRoleDefinitionProjection(publicRoleDefinitions),
+        ),
+        policyRoleDefinitionsSecondReadSha256: canonicalSha256(
+          publicRoleDefinitionProjection(secondPublicRoleDefinitions),
+        ),
       },
       cloudAsset: {
         quotaProject: QUOTA_PROJECT,
         effectiveIamSha256: canonicalSha256(effectivePolicy),
-        analyses,
+        publicPrincipalDenial,
       },
       troubleshooter,
       edge: {

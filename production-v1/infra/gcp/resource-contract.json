@@ -44,6 +44,8 @@
     "cloudbilling.googleapis.com",
     "billingbudgets.googleapis.com",
     "iam.googleapis.com",
+    "iamcredentials.googleapis.com",
+    "policytroubleshooter.googleapis.com",
     "artifactregistry.googleapis.com",
     "cloudbuild.googleapis.com",
     "containeranalysis.googleapis.com",
@@ -732,6 +734,11 @@
         "scope": "service-account:hkbuddy-v1-build",
         "member": "serviceAccount:service-__PROJECT_NUMBER__@gcp-sa-cloudbuild.iam.gserviceaccount.com",
         "role": "roles/iam.serviceAccountTokenCreator"
+      },
+      {
+        "scope": "service-account:hkbuddy-v1-acceptance",
+        "member": "user:admin@motionexp.com",
+        "role": "roles/iam.serviceAccountOpenIdTokenCreator"
       },
       {
         "scope": "secret:hkbuddy-v1-legacy-inventory",
