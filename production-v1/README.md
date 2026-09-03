@@ -457,6 +457,10 @@ only the digest-pinned revision
 reviewed operator's Cloud Run Invoker binding: no public principal is accepted.
 Both controlled Service specs pin
 `run.googleapis.com/invoker-iam-disabled` to exact lowercase string `false`.
+Google's server-validated `services replace --dry-run` response may omit that
+safe-default annotation; after writing the exact pinned input, the controller
+accepts only omission or a no-whitespace case-insensitive `false` response
+before deployment.
 Every live candidate, stable, promotion, rollback, cleanup, response-loss, and
 compensation readback also proves the Invoker IAM check remains enabled: a raw
 Cloud Run v1 Service may omit the annotation because enabled is the safe

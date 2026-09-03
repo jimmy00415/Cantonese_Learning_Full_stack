@@ -722,7 +722,11 @@ policy contains only `user:admin@motionexp.com`; `allUsers` and
 candidate-service root as audience while requests target the tagged QA origin.
 The controlled candidate and stable Service specs pin
 `run.googleapis.com/invoker-iam-disabled` to exact lowercase string `false`.
-Raw Cloud Run v1 live readbacks accept only annotation absence (the enabled
+Google's server-validated `services replace --dry-run` response may elide that
+safe-default annotation even though the generated input pins it; the controller
+therefore applies the same strict enabled-IAM-check interpretation to that
+response before any deployment. Raw Cloud Run v1 live readbacks accept only
+annotation absence (the enabled
 default) or a present no-whitespace string whose case-folded value is `false`;
 malformed annotations, boolean values, semantic true, wrong apiVersion/kind,
 spec-only traffic, or drift fail before dependent mutation. This same proof is

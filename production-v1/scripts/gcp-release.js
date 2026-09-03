@@ -2186,7 +2186,7 @@ function validateCandidateServiceSpecDryRun(value, plan) {
   const normalizedService = normalizeControlledServiceSpec(value);
   if (value?.apiVersion !== 'serving.knative.dev/v1' || value?.kind !== 'Service'
     || !template || normalizedService?.service !== CANDIDATE_SERVICE
-    || value?.metadata?.annotations?.[INVOKER_IAM_DISABLED_ANNOTATION] !== 'false'
+    || normalizedService?.invokerIamDisabled !== false
     || !exact(normalizedService.traffic, [{
       revision: plan.candidateRevision,
       tag: plan.candidateTag,
@@ -2206,7 +2206,7 @@ function validateStableServiceSpecDryRun(value, plan) {
   const normalizedService = normalizeControlledServiceSpec(value);
   if (value?.apiVersion !== 'serving.knative.dev/v1' || value?.kind !== 'Service'
     || !template || normalizedService?.service !== STABLE_SERVICE
-    || value?.metadata?.annotations?.[INVOKER_IAM_DISABLED_ANNOTATION] !== 'false'
+    || normalizedService?.invokerIamDisabled !== false
     || !exact(normalizedService.traffic, plan.expectedStable.stagedTraffic)
     || !exact(
       normalizeCandidateRevision({ metadata: template.metadata, spec: template.spec }, plan.expectedStable),
@@ -2219,8 +2219,16 @@ function validateStableServiceSpecDryRun(value, plan) {
 
 function normalizeControlledServiceSpec(value) {
   if (value?.apiVersion !== 'serving.knative.dev/v1' || value?.kind !== 'Service'
-    || typeof value?.metadata?.name !== 'string' || !Array.isArray(value?.spec?.traffic)
-    || value.metadata.annotations?.[INVOKER_IAM_DISABLED_ANNOTATION] !== 'false') return null;
+    || typeof value?.metadata?.name !== 'string' || !Array.isArray(value?.spec?.traffic)) return null;
+  const annotationsDefined = Object.hasOwn(value.metadata, 'annotations');
+  const annotations = value.metadata.annotations;
+  if (annotationsDefined && (annotations === null || typeof annotations !== 'object'
+    || Array.isArray(annotations))) return null;
+  if (annotationsDefined && Object.hasOwn(annotations, INVOKER_IAM_DISABLED_ANNOTATION)) {
+    const annotation = annotations[INVOKER_IAM_DISABLED_ANNOTATION];
+    if (typeof annotation !== 'string' || annotation !== annotation.trim()
+      || annotation.toLowerCase() !== 'false') return null;
+  }
   try {
     return {
       service: value.metadata.name,

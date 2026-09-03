@@ -2082,6 +2082,49 @@ test('candidate deploy is fenced by the canonical gcloud Service v1 dry-run resu
   )), false);
 });
 
+test('candidate dry-run accepts only an omitted or safely spelled enabled IAM check', async () => {
+  const cases = [
+    ['omitted', undefined, true],
+    ['canonical false', 'false', true],
+    ['case-insensitive false', 'FALSE', true],
+    ['true', 'true', false],
+    ['whitespace', 'false ', false],
+    ['boolean', false, false],
+    ['null', null, false],
+  ];
+  for (const [name, annotation, accepted] of cases) {
+    const input = releaseInput();
+    const plan = buildReleasePlan(input);
+    let deployReached = false;
+    const result = await runGcpRelease({
+      argv: ['--phase=candidate', `--confirm-release=${RELEASE_SHA}`],
+      input,
+      writeCandidateSpec: async () => true,
+      execute: async (argv) => {
+        if (argv[1] === 'services' && argv[2] === 'describe') {
+          throw Object.assign(new Error('not found'), { code: 'CLOUD_RUN_SERVICE_NOT_FOUND' });
+        }
+        if (argv.includes('--dry-run')) {
+          const response = structuredClone(plan.candidateServiceSpec);
+          if (annotation === undefined) {
+            delete response.metadata.annotations['run.googleapis.com/invoker-iam-disabled'];
+          } else {
+            response.metadata.annotations['run.googleapis.com/invoker-iam-disabled'] = annotation;
+          }
+          return response;
+        }
+        deployReached = true;
+        throw new Error('stop before candidate mutation');
+      },
+      writeOutput: () => undefined,
+    });
+    assert.equal(result.exitCode, 1, name);
+    assert.equal(deployReached, accepted, name);
+    assert.equal(result.publicReport.resumeBoundary,
+      accepted ? 'candidate-deploy' : 'candidate-spec-dry-run', name);
+  }
+});
+
 test('candidate phase feeds raw Service JSON through gcloud 553-compatible secret-mount semantics', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'hkbuddy-candidate-service-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -2114,7 +2157,12 @@ test('candidate phase feeds raw Service JSON through gcloud 553-compatible secre
       if (argv[1] === 'services' && argv[2] === 'replace') {
         const raw = JSON.parse(await readFile(argv[3], 'utf8'));
         dryRun(raw);
-        return argv.includes('--dry-run') ? raw : candidateServiceReadback(plan);
+        if (argv.includes('--dry-run')) {
+          const serverValidated = structuredClone(raw);
+          delete serverValidated.metadata.annotations['run.googleapis.com/invoker-iam-disabled'];
+          return serverValidated;
+        }
+        return candidateServiceReadback(plan);
       }
       if (argv[1] === 'services' && argv[2] === 'describe') {
         describeCount += 1;
@@ -4885,7 +4933,11 @@ test('later promotion performs no cloud mutation after the final traffic mutatio
         if (argv[3] === plan.previousRevision) return structuredClone(priorRevision);
       }
       if (argv[1] === 'services' && argv[2] === 'replace') {
-        if (argv.includes('--dry-run')) return structuredClone(plan.stableServiceSpec);
+        if (argv.includes('--dry-run')) {
+          const serverValidated = structuredClone(plan.stableServiceSpec);
+          delete serverValidated.metadata.annotations['run.googleapis.com/invoker-iam-disabled'];
+          return serverValidated;
+        }
         stableState = stableStagedReadback(plan);
         return structuredClone(stableState);
       }
