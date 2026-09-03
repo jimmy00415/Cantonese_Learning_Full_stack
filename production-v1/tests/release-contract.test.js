@@ -1489,13 +1489,13 @@ async function appendTestMutationCheckpoint(store, {
   return intent;
 }
 
-function secretVersionSafeResult(expected) {
+function secretVersionSafeResult(expected, version = expected.secretVersion) {
   return {
     artifactSha256: expected.artifactSha256,
     kind: 'secret-version',
     name: `projects/${PROJECT}/secrets/${expected.secret}`,
     objectSha256: expected.objectSha256,
-    version: expected.secretVersion,
+    version,
   };
 }
 
@@ -2679,7 +2679,7 @@ test('evidence phase rejects invalid iOS semantics when the current clock is und
   assert.deepEqual(calls, []);
 });
 
-test('evidence phase accepts one current iOS voice v4 artifact and publishes planned versions', async (t) => {
+test('evidence phase accepts one current iOS voice v4 artifact and publishes assigned versions', async (t) => {
   const input = await materializedReleaseEvidenceInput(t);
   const versionsBySecret = Object.fromEntries(Object.values(input.evidence).map((value) => (
     [value.secret, value.secretVersion]
@@ -2712,7 +2712,7 @@ test('evidence phase accepts one current iOS voice v4 artifact and publishes pla
     && argv[1] === 'versions' && argv[2] === 'add'), true);
 });
 
-test('evidence phase accepts the exact current iOS owner waiver before publishing planned versions', async (t) => {
+test('evidence phase accepts the exact current iOS owner waiver before publishing assigned versions', async (t) => {
   const input = await materializedReleaseEvidenceInput(t, {
     iosPayload: validIosVoiceWaiverPayload(),
   });
@@ -3076,7 +3076,7 @@ test('collection restart adopts one exact local copy and leaves untouched destin
   assert.deepEqual(Object.keys(result.publicReport.collectedEvidence), Object.keys(outputs));
 });
 
-test('evidence publication accepts and reads back only the planned numeric versions', async (t) => {
+test('evidence publication validates explicit receipts and reads back assigned numeric versions', async (t) => {
   assert.equal(validateEvidenceVersionReceipt({
     name: `projects/${PROJECT}/secrets/hkbuddy-v1-llm-smoke/versions/13`,
     state: 'ENABLED',
@@ -3169,10 +3169,380 @@ test('evidence publication accepts and reads back only the planned numeric versi
   assert.equal(mismatched.publicReport.mutationPerformed, true);
 });
 
+test('evidence publication binds arbitrary assigned versions through readback, journal, and receipt', async (t) => {
+  const materialized = await materializedReleaseEvidenceInput(t);
+  const input = {
+    ...materialized,
+    evidence: Object.fromEntries(Object.entries(materialized.evidence).map(([key, value]) => [
+      key,
+      key === 'legacyInventory' ? value : { ...value, secretVersion: null },
+    ])),
+  };
+  const assignedVersions = {
+    dependencyAcceptance: '101',
+    llmSmoke: '203',
+    asrSmoke: '305',
+    ttsSmoke: '407',
+    iosVoiceAcceptance: '509',
+  };
+  const assignedBySecret = Object.fromEntries(Object.entries(assignedVersions).map(([key, version]) => (
+    [input.evidence[key].secret, version]
+  )));
+  const publishedBySecret = new Map();
+  const calls = [];
+  const store = createTestStateStore();
+  let persisted = null;
+  const result = await runGcpRelease({
+    argv: ['--phase=evidence', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    openStateStore: async () => store,
+    persistReceipt: async (_plan, receipt) => {
+      persisted = structuredClone(receipt);
+      return true;
+    },
+    verifyEvidence: undefined,
+    now: () => new Date('2026-08-29T08:00:00.000Z'),
+    execute: async (argv, { stdin } = {}) => {
+      calls.push([...argv]);
+      if (argv[0] === 'storage') {
+        return argv[1] === 'objects' && argv[2] === 'list' ? [] : { done: true };
+      }
+      const isPublish = argv[0] === 'secrets' && argv[1] === 'versions' && argv[2] === 'add';
+      const secret = isPublish
+        ? argv[3]
+        : argv.find((value) => value.startsWith('--secret=')).slice('--secret='.length);
+      const assignedVersion = assignedBySecret[secret];
+      assert.equal(typeof assignedVersion, 'string');
+      if (isPublish) {
+        publishedBySecret.set(secret, Buffer.from(stdin));
+        return {
+          name: `projects/${PROJECT_NUMBER}/secrets/${secret}/versions/${assignedVersion}`,
+          state: 'ENABLED',
+        };
+      }
+      assert.equal(argv[3], assignedVersion, `${argv[2]} must use the version returned by add`);
+      if (argv[2] === 'access') return publishedBySecret.get(secret).toString('base64url');
+      return {
+        name: `projects/${PROJECT}/secrets/${secret}/versions/${assignedVersion}`,
+        state: 'ENABLED',
+      };
+    },
+    writeOutput: () => undefined,
+  });
+
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  assert.deepEqual(result.publicReport.evidenceSecretVersions, assignedVersions);
+  assert.deepEqual(persisted.outputs.evidenceSecretVersions, {
+    legacyInventory: input.evidence.legacyInventory.secretVersion,
+    ...assignedVersions,
+  });
+  const publicationCheckpoints = store.records.filter((record) => (
+    record.recordType === 'checkpoint' && record.operationId.startsWith('evidence-publish:')
+  ));
+  assert.deepEqual(Object.fromEntries(publicationCheckpoints.map((record) => [
+    record.operationId.slice(record.operationId.indexOf(':') + 1),
+    record.payload.safeResult.version,
+  ])), assignedVersions);
+
+  const resolvedInput = {
+    ...input,
+    evidence: Object.fromEntries(Object.entries(input.evidence).map(([key, value]) => [
+      key,
+      key === 'legacyInventory' ? value : { ...value, secretVersion: assignedVersions[key] },
+    ])),
+  };
+  const resolvedPlan = buildReleasePlan(resolvedInput, { phase: 'candidate' });
+  const priorReceipts = fixtureReceiptChain(resolvedPlan, 'collect');
+  assert.equal(validateReleaseReceiptChain(
+    [...priorReceipts, persisted], resolvedPlan, { through: 'evidence' },
+  ), true);
+  assert.equal(calls.some((argv) => argv.includes('latest')), false);
+});
+
+test('inventory publication resolves its server-assigned version before acceptance', async (t) => {
+  const materialized = await materializedReleaseEvidenceInput(t);
+  const input = releaseInput({
+    legacyInventory: { ...materialized.legacyInventory, secretVersion: null },
+    evidence: null,
+    acceptanceOutputs: null,
+  });
+  const store = createTestStateStore();
+  let persisted = null;
+  let publishedBytes = null;
+  const calls = [];
+  const result = await runGcpRelease({
+    argv: ['--phase=inventory', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    openStateStore: async () => store,
+    persistReceipt: async (_plan, receipt) => {
+      persisted = structuredClone(receipt);
+      return true;
+    },
+    verifyEvidence: undefined,
+    execute: async (argv, { stdin } = {}) => {
+      calls.push([...argv]);
+      if (argv[2] === 'add') {
+        publishedBytes = Buffer.from(stdin);
+        return {
+          name: `projects/${PROJECT_NUMBER}/secrets/${materialized.legacyInventory.secret}/versions/87`,
+          state: 'ENABLED',
+        };
+      }
+      assert.equal(argv[3], '87');
+      if (argv[2] === 'access') return publishedBytes.toString('base64url');
+      return {
+        name: `projects/${PROJECT}/secrets/${materialized.legacyInventory.secret}/versions/87`,
+        state: 'ENABLED',
+      };
+    },
+    writeOutput: () => undefined,
+  });
+
+  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  assert.deepEqual(result.publicReport.evidenceSecretVersions, { legacyInventory: '87' });
+  assert.deepEqual(persisted.outputs.evidenceSecretVersions, { legacyInventory: '87' });
+  const checkpoint = store.records.find((record) => (
+    record.recordType === 'checkpoint' && record.operationId === 'inventory-publish:legacyInventory'
+  ));
+  assert.equal(checkpoint.payload.safeResult.version, '87');
+});
+
+test('inventory receipt-written terminal-missing restart recovers the assigned version before receipt validation', async (t) => {
+  const materialized = await materializedReleaseEvidenceInput(t);
+  const input = releaseInput({
+    legacyInventory: { ...materialized.legacyInventory, secretVersion: null },
+    evidence: null,
+    acceptanceOutputs: null,
+  });
+  const store = createTestStateStore();
+  const appendTerminal = store.appendTerminal;
+  let publishedBytes = null;
+  let persisted = null;
+  store.appendTerminal = async () => { throw new Error('simulated terminal write loss'); };
+  const first = await runGcpRelease({
+    argv: ['--phase=inventory', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    openStateStore: async () => store,
+    persistReceipt: async (_plan, receipt) => {
+      persisted = structuredClone(receipt);
+      return true;
+    },
+    verifyEvidence: undefined,
+    execute: async (argv, { stdin } = {}) => {
+      if (argv[2] === 'add') {
+        publishedBytes = Buffer.from(stdin);
+        return {
+          name: `projects/${PROJECT_NUMBER}/secrets/${materialized.legacyInventory.secret}/versions/87`,
+          state: 'ENABLED',
+        };
+      }
+      assert.equal(argv[3], '87');
+      if (argv[2] === 'access') return publishedBytes.toString('base64url');
+      return {
+        name: `projects/${PROJECT}/secrets/${materialized.legacyInventory.secret}/versions/87`,
+        state: 'ENABLED',
+      };
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(first.exitCode, 1);
+  assert.equal(first.publicReport.code, 'RELEASE_JOURNAL_WRITE_FAILED');
+  assert.equal(persisted.outputs.evidenceSecretVersions.legacyInventory, '87');
+
+  store.appendTerminal = appendTerminal;
+  const calls = [];
+  let recoveryCalls = 0;
+  const recovered = await runGcpRelease({
+    argv: ['--phase=inventory', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    openStateStore: async () => store,
+    loadPhaseReceipt: async () => structuredClone(persisted),
+    recoverTerminal: async ({ receipt, terminalState, appendTerminal: append }) => {
+      recoveryCalls += 1;
+      return append({
+        status: 'phase-complete',
+        checkpointRecordSha256: store.records.at(-1).recordSha256,
+        receiptSha256: receipt.receiptSha256,
+        terminalState,
+        mutationCount: 1,
+        responseLossOperationIds: [],
+      });
+    },
+    execute: async (argv) => {
+      calls.push([...argv]);
+      assert.deepEqual(argv.slice(0, 3), ['secrets', 'versions', argv[2]]);
+      assert.equal(argv[3], '87');
+      if (argv[2] === 'access') return publishedBytes.toString('base64url');
+      return {
+        name: `projects/${PROJECT}/secrets/${materialized.legacyInventory.secret}/versions/87`,
+        state: 'ENABLED',
+      };
+    },
+    persistReceipt: async () => { throw new Error('receipt recovery must not rewrite receipt'); },
+    writeOutput: () => undefined,
+  });
+
+  assert.equal(recovered.exitCode, 0, JSON.stringify(recovered.publicReport));
+  assert.equal(recovered.publicReport.recoveredTerminal, true);
+  assert.equal(recovered.publicReport.mutationPerformed, false);
+  assert.equal(recoveryCalls, 1);
+  assert.deepEqual(calls.map((argv) => argv[2]), ['describe', 'access']);
+  assert.equal(calls.some((argv) => argv[2] === 'add' || argv.includes('latest')), false);
+});
+
+test('evidence receipt-written terminal-missing restart recovers every assigned version before receipt validation', async (t) => {
+  const materialized = await materializedReleaseEvidenceInput(t);
+  const input = {
+    ...materialized,
+    evidence: Object.fromEntries(Object.entries(materialized.evidence).map(([key, value]) => [
+      key,
+      key === 'legacyInventory' ? value : { ...value, secretVersion: null },
+    ])),
+  };
+  const assignedVersions = {
+    dependencyAcceptance: '101',
+    llmSmoke: '203',
+    asrSmoke: '305',
+    ttsSmoke: '407',
+    iosVoiceAcceptance: '509',
+  };
+  const assignedBySecret = Object.fromEntries(Object.entries(assignedVersions).map(([key, version]) => (
+    [input.evidence[key].secret, version]
+  )));
+  const publishedBySecret = new Map();
+  const store = createTestStateStore();
+  const appendTerminal = store.appendTerminal;
+  let persisted = null;
+  store.appendTerminal = async () => { throw new Error('simulated terminal write loss'); };
+  const first = await runGcpRelease({
+    argv: ['--phase=evidence', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    openStateStore: async () => store,
+    persistReceipt: async (_plan, receipt) => {
+      persisted = structuredClone(receipt);
+      return true;
+    },
+    verifyEvidence: undefined,
+    now: () => new Date('2026-08-29T08:00:00.000Z'),
+    execute: async (argv, { stdin } = {}) => {
+      if (argv[0] === 'storage') {
+        return argv[1] === 'objects' && argv[2] === 'list' ? [] : null;
+      }
+      const isPublish = argv[0] === 'secrets' && argv[1] === 'versions' && argv[2] === 'add';
+      const secret = isPublish
+        ? argv[3]
+        : argv.find((value) => value.startsWith('--secret=')).slice('--secret='.length);
+      const assignedVersion = assignedBySecret[secret];
+      if (isPublish) {
+        publishedBySecret.set(secret, Buffer.from(stdin));
+        return {
+          name: `projects/${PROJECT_NUMBER}/secrets/${secret}/versions/${assignedVersion}`,
+          state: 'ENABLED',
+        };
+      }
+      assert.equal(argv[3], assignedVersion);
+      if (argv[2] === 'access') return publishedBySecret.get(secret).toString('base64url');
+      return {
+        name: `projects/${PROJECT}/secrets/${secret}/versions/${assignedVersion}`,
+        state: 'ENABLED',
+      };
+    },
+    writeOutput: () => undefined,
+  });
+  assert.equal(first.exitCode, 1);
+  assert.equal(first.publicReport.code, 'RELEASE_JOURNAL_WRITE_FAILED');
+  assert.deepEqual(persisted.outputs.evidenceSecretVersions, {
+    legacyInventory: input.evidence.legacyInventory.secretVersion,
+    ...assignedVersions,
+  });
+
+  store.appendTerminal = appendTerminal;
+  const calls = [];
+  let recoveryCalls = 0;
+  const recovered = await runGcpRelease({
+    argv: ['--phase=evidence', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    openStateStore: async () => store,
+    loadPhaseReceipt: async () => structuredClone(persisted),
+    recoverTerminal: async ({ receipt, terminalState, appendTerminal: append }) => {
+      recoveryCalls += 1;
+      return append({
+        status: 'phase-complete',
+        checkpointRecordSha256: store.records.at(-1).recordSha256,
+        receiptSha256: receipt.receiptSha256,
+        terminalState,
+        mutationCount: 9,
+        responseLossOperationIds: [],
+      });
+    },
+    execute: async (argv) => {
+      calls.push([...argv]);
+      assert.equal(argv[0], 'secrets');
+      assert.notEqual(argv[2], 'add');
+      const secret = argv.find((value) => value.startsWith('--secret='))
+        .slice('--secret='.length);
+      const assignedVersion = assignedBySecret[secret];
+      assert.equal(argv[3], assignedVersion);
+      if (argv[2] === 'access') return publishedBySecret.get(secret).toString('base64url');
+      return {
+        name: `projects/${PROJECT}/secrets/${secret}/versions/${assignedVersion}`,
+        state: 'ENABLED',
+      };
+    },
+    persistReceipt: async () => { throw new Error('receipt recovery must not rewrite receipt'); },
+    writeOutput: () => undefined,
+  });
+
+  assert.equal(recovered.exitCode, 0, JSON.stringify(recovered.publicReport));
+  assert.equal(recovered.publicReport.recoveredTerminal, true);
+  assert.equal(recovered.publicReport.mutationPerformed, false);
+  assert.equal(recoveryCalls, 1);
+  assert.equal(calls.length, 10);
+  assert.equal(calls.some((argv) => argv[2] === 'add' || argv.includes('latest')), false);
+});
+
+test('evidence publication restart with only an intent fails closed without guessing a version', async (t) => {
+  const input = await materializedReleaseEvidenceInput(t);
+  const plan = buildReleasePlan(input, { phase: 'evidence' });
+  const store = createTestStateStore();
+  await appendTestMutationIntent(store, {
+    operationId: 'evidence-publish:dependencyAcceptance',
+    mutationOrdinal: 1,
+    reconcileKind: 'secret-version-add',
+    plan,
+  });
+  store.appendIntent = async () => { throw new Error('restart must not add another version'); };
+  const calls = [];
+  const result = await runGcpRelease({
+    argv: ['--phase=evidence', `--confirm-release=${RELEASE_SHA}`],
+    input,
+    openStateStore: async () => store,
+    verifyEvidence: undefined,
+    now: () => new Date('2026-08-29T08:00:00.000Z'),
+    execute: async (argv) => {
+      calls.push(argv);
+      throw new Error('uncheckpointed Secret version has no authoritative correlation');
+    },
+    writeOutput: () => undefined,
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.publicReport.code, 'RELEASE_PHASE_FAILED');
+  assert.equal(result.publicReport.mutationPerformed, false);
+  assert.deepEqual(calls, []);
+});
+
 test('evidence deletion restart proves exact object absence before advancing without a duplicate delete', async (t) => {
   const input = await materializedReleaseEvidenceInput(t);
   const plan = buildReleasePlan(input);
   const store = createTestStateStore();
+  const assignedVersions = {
+    dependencyAcceptance: '101',
+    llmSmoke: '203',
+    asrSmoke: '305',
+    ttsSmoke: '407',
+    iosVoiceAcceptance: '509',
+  };
   const publishIds = plan.operations
     .filter(({ phase, id }) => phase === 'evidence' && id.startsWith('evidence-publish:'))
     .map(({ id }) => id);
@@ -3184,6 +3554,7 @@ test('evidence deletion restart proves exact object absence before advancing wit
       plan,
       safeResult: secretVersionSafeResult(
         plan.evidence[operationId.slice(operationId.indexOf(':') + 1)],
+        assignedVersions[operationId.slice(operationId.indexOf(':') + 1)],
       ),
     });
   }
@@ -3207,9 +3578,6 @@ test('evidence deletion restart proves exact object absence before advancing wit
     return appendCheckpoint(payload);
   };
   const calls = [];
-  const versionsBySecret = Object.fromEntries(Object.values(EVIDENCE).map((value) => (
-    [value.secret, value.secretVersion]
-  )));
   const result = await runGcpRelease({
     argv: ['--phase=evidence', `--confirm-release=${RELEASE_SHA}`],
     input,
@@ -3223,9 +3591,14 @@ test('evidence deletion restart proves exact object absence before advancing wit
         if (argv[1] === 'rm') return null;
       }
       if (argv[0] === 'secrets') {
+        if (argv[2] === 'add') throw new Error('restart must not add another version');
         const secret = argv.find((value) => value.startsWith('--secret='))
-          ?.slice('--secret='.length) ?? argv[3];
-        const version = argv[2] === 'add' ? versionsBySecret[secret] : argv[3];
+          ?.slice('--secret='.length);
+        const expected = Object.values(input.evidence).find((value) => value.secret === secret);
+        if (argv[2] === 'access') {
+          return (await readFile(expected.filePath)).toString('base64url');
+        }
+        const version = argv[3];
         return {
           name: `projects/${PROJECT}/secrets/${secret}/versions/${version}`,
           state: 'ENABLED',
@@ -3246,8 +3619,13 @@ test('evidence deletion restart proves exact object absence before advancing wit
   assert.equal(checkpoints[0].outcome, 'adopted-restart');
 });
 
-test('secret-version restart adopts only the exact planned numeric version without adding another', async (t) => {
-  const input = await materializedReleaseEvidenceInput(t);
+test('inventory publication restart with only an intent fails closed without guessing a version', async (t) => {
+  const materialized = await materializedReleaseEvidenceInput(t);
+  const input = releaseInput({
+    legacyInventory: { ...materialized.legacyInventory, secretVersion: null },
+    evidence: null,
+    acceptanceOutputs: null,
+  });
   const plan = buildReleasePlan(input, { phase: 'inventory' });
   const store = createTestStateStore();
   await appendTestMutationIntent(store, {
@@ -3257,12 +3635,6 @@ test('secret-version restart adopts only the exact planned numeric version witho
     plan,
   });
   store.appendIntent = async () => { throw new Error('restart must not add another version'); };
-  const checkpoints = [];
-  const appendCheckpoint = store.appendCheckpoint;
-  store.appendCheckpoint = async (payload) => {
-    checkpoints.push(payload);
-    return appendCheckpoint(payload);
-  };
   const calls = [];
   const result = await runGcpRelease({
     argv: ['--phase=inventory', `--confirm-release=${RELEASE_SHA}`],
@@ -3272,24 +3644,14 @@ test('secret-version restart adopts only the exact planned numeric version witho
     now: () => new Date('2026-08-29T08:00:00.000Z'),
     execute: async (argv) => {
       calls.push(argv);
-      assert.deepEqual(argv.slice(0, 2), ['secrets', 'versions']);
-      if (argv[2] === 'access') {
-        return (await readFile(input.evidence.legacyInventory.filePath)).toString('base64url');
-      }
-      assert.equal(argv[2], 'describe');
-      return {
-        name: `projects/${PROJECT_NUMBER}/secrets/${EVIDENCE.legacyInventory.secret}/versions/${EVIDENCE.legacyInventory.secretVersion}`,
-        state: 'ENABLED',
-      };
+      throw new Error('uncheckpointed Secret version has no authoritative correlation');
     },
     writeOutput: () => undefined,
   });
-  assert.equal(result.exitCode, 0, JSON.stringify(result.publicReport));
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.publicReport.code, 'RELEASE_PHASE_FAILED');
   assert.equal(result.publicReport.mutationPerformed, false);
-  assert.equal(calls.length, 3);
-  assert.equal(calls.some((argv) => argv[2] === 'add'), false);
-  assert.equal(checkpoints.length, 1);
-  assert.equal(checkpoints[0].outcome, 'adopted-restart');
+  assert.deepEqual(calls, []);
 });
 
 test('build receipt captures one successful verified build, source hash, and final image digest', () => {

@@ -423,9 +423,12 @@ an exact `DEPENDENCY_SECURITY_EXCEPTION_REVIEWED` gate receipt before the image
 step; verified provenance backed by the required Container Analysis API and the
 Google-managed Cloud Build service agent; successful image/corpus and OCI-label checks; one
 Build ID; the archive hash; and the final digest. A missing, failed, expired, or
-drifted dependency gate is a failed build receipt. `inventory` publishes and
-reads back the legacy inventory's one planned
-numeric Secret version. `acceptance` runs the `hkbuddy-v1-dependency-acceptance`
+drifted dependency gate is a failed build receipt. `inventory` accepts the
+legacy inventory with `secretVersion: null`, publishes it once, and treats the
+numeric version in Secret Manager's add response as authoritative. It describes
+and accesses that exact version before recording it in the phase receipt; refresh
+the manifest from that receipt before `acceptance`.
+`acceptance` runs the `hkbuddy-v1-dependency-acceptance`
 Job as
 `hkbuddy-v1-acceptance@motion-expert-hk-ltd-webpage.iam.gserviceaccount.com`
 and the `hkbuddy-v1-llm-smoke`, `hkbuddy-v1-asr-smoke`, and
@@ -437,9 +440,11 @@ Job creates one private, release/run-scoped GCS JSON object with an
 overwrite-preventing generation precondition. `collect` first describes one
 exact numeric generation, downloads only that generation to the planned local
 path, and independently derives the semantic artifact and exact object-byte
-SHA-256 values. Evidence publication then accepts only the planned numeric
-version returned and described by Secret Manager. Only after all versions read
-back does it delete those exact GCS generations and require zero SHA-scoped
+SHA-256 values. Evidence publication accepts `secretVersion: null` for each
+not-yet-published item. The numeric version returned by each Secret Manager add
+response is bound to that item's exact describe and payload readback, journal
+checkpoint, and phase receipt. It never predicts `latest + 1` or reads `latest`.
+Only after all versions read back does it delete those exact GCS generations and require zero SHA-scoped
 output residue. Before any release command is selected or executed, the
 controller reconstructs all 17 storage operations and rejects any foreign
 bucket, sibling prefix, different release SHA, widened residue listing, missing
@@ -453,6 +458,12 @@ as the liveness probe. Public IAM can
 be changed only after the active account reads back as the reviewed owner
 `admin@motionexp.com`; the deployer is deliberately not granted
 `roles/run.admin` or service-IAM administration.
+
+A checkpointed Secret-version publication can resume only by re-reading the
+exact numeric version captured in its safe result. An add intent without its
+checkpoint is correlation-ambiguous: the controller fails closed, never repeats
+the add, and the operator supersedes that release attempt under the release
+procedure.
 
 The manifest is deliberately refreshed between boundaries: `build` supplies
 the immutable image digest; successful Jobs supply numeric GCS generations;

@@ -77,6 +77,7 @@ const RELEASE_SHA = /^[0-9a-f]{40}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/;
 const NUMERIC_VERSION = /^[1-9]\d*$/;
+const ASSIGNED_SECRET_VERSION = '{assigned-secret-version}';
 const PROJECT_NUMBER = /^\d{6,20}$/;
 const STABLE_REVISION = /^hkbuddy-v1-api-[0-9a-f]{12}$/;
 const CANDIDATE_REVISION = /^hkbuddy-v1-api-candidate-[0-9a-f]{12}$/;
@@ -612,24 +613,27 @@ export async function runPrepareReleaseArchive({
   }
 }
 
-function assertEvidenceEntry(key, value) {
+function assertEvidenceEntry(key, value, { allowUnresolvedSecretVersion = false } = {}) {
   const expected = EVIDENCE_DEFINITIONS[key];
   if (!expected || !exactKeys(value, [
     'artifactSha256', 'filePath', 'objectSha256', 'secret', 'secretVersion',
   ])
     || value.secret !== expected.secret
-    || !NUMERIC_VERSION.test(String(value.secretVersion ?? ''))
+    || (!(allowUnresolvedSecretVersion && value.secretVersion === null)
+      && !NUMERIC_VERSION.test(String(value.secretVersion ?? '')))
     || !DIGEST.test(String(value.artifactSha256 ?? ''))
     || !DIGEST.test(String(value.objectSha256 ?? ''))
     || !isAbsoluteFile(value.filePath)) throw releaseContractError();
   return Object.freeze({ ...value });
 }
 
-function assertEvidence(evidence) {
+function assertEvidence(evidence, { allowUnresolvedSecretVersions = false } = {}) {
   const keys = Object.keys(EVIDENCE_DEFINITIONS);
   if (!exactKeys(evidence, keys)) throw releaseContractError();
   return Object.freeze(Object.fromEntries(keys.map((key) => [
-    key, assertEvidenceEntry(key, evidence[key]),
+    key, assertEvidenceEntry(key, evidence[key], {
+      allowUnresolvedSecretVersion: allowUnresolvedSecretVersions && key !== 'legacyInventory',
+    }),
   ])));
 }
 
@@ -973,7 +977,9 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
     throw releaseContractError();
   }
 
-  const legacyInventory = assertEvidenceEntry('legacyInventory', input.legacyInventory);
+  const legacyInventory = assertEvidenceEntry('legacyInventory', input.legacyInventory, {
+    allowUnresolvedSecretVersion: ['build', 'migration', 'inventory'].includes(phase),
+  });
   const evidence = unresolvedEvidence
     ? Object.freeze(Object.fromEntries(Object.entries(EVIDENCE_DEFINITIONS).map(([key, value]) => [
       key,
@@ -985,7 +991,7 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
         filePath: `/unresolved/${value.secret}.json`,
       }),
     ])))
-    : assertEvidence(input.evidence);
+    : assertEvidence(input.evidence, { allowUnresolvedSecretVersions: phase === 'evidence' });
   if (!exact(evidence.legacyInventory, legacyInventory)) throw releaseContractError();
   const databaseSecretVersions = unresolvedDatabase
     ? Object.freeze({ app: '1', migrator: '1', session: '1' })
@@ -1307,11 +1313,11 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       '--data-file=-', `--project=${PROJECT}`, '--format=json',
     ]),
     operation('inventory', 'inventory-readback:legacyInventory', [
-      'secrets', 'versions', 'describe', legacyInventory.secretVersion,
+      'secrets', 'versions', 'describe', ASSIGNED_SECRET_VERSION,
       `--secret=${EVIDENCE_DEFINITIONS.legacyInventory.secret}`, `--project=${PROJECT}`, '--format=json',
     ]),
     operation('inventory', 'inventory-payload-readback:legacyInventory', [
-      'secrets', 'versions', 'access', legacyInventory.secretVersion,
+      'secrets', 'versions', 'access', ASSIGNED_SECRET_VERSION,
       `--secret=${EVIDENCE_DEFINITIONS.legacyInventory.secret}`, `--project=${PROJECT}`,
       '--format=get(payload.data)',
     ]),
@@ -1353,11 +1359,11 @@ export function buildReleasePlan(input = {}, { phase = null } = {}) {
       '--data-file=-', `--project=${PROJECT}`, '--format=json',
     ]));
     operations.push(operation('evidence', `evidence-readback:${key}`, [
-      'secrets', 'versions', 'describe', evidence[key].secretVersion,
+      'secrets', 'versions', 'describe', ASSIGNED_SECRET_VERSION,
       `--secret=${definition.secret}`, `--project=${PROJECT}`, '--format=json',
     ]));
     operations.push(operation('evidence', `evidence-payload-readback:${key}`, [
-      'secrets', 'versions', 'access', evidence[key].secretVersion,
+      'secrets', 'versions', 'access', ASSIGNED_SECRET_VERSION,
       `--secret=${definition.secret}`, `--project=${PROJECT}`,
       '--format=get(payload.data)',
     ]));
@@ -3078,20 +3084,51 @@ export function validateReleaseJobExecutionReceipt(value, expected) {
   });
 }
 
-function normalizeEvidenceVersionReceipt(value, { secret, secretVersion } = {}) {
-  const expectedName = `projects/${PROJECT}/secrets/${secret}/versions/${secretVersion}`;
-  const numberedName = `projects/${GCP_IDENTITY.projectNumber}/secrets/${secret}/versions/${secretVersion}`;
-  if (typeof secret !== 'string' || !NUMERIC_VERSION.test(String(secretVersion ?? ''))
+function normalizeEvidenceVersionReceipt(value, { secret, secretVersion = null } = {}) {
+  if (typeof secret !== 'string' || !Object.values(EVIDENCE_DEFINITIONS)
+    .some((definition) => definition.secret === secret)
+    || !(secretVersion === null || NUMERIC_VERSION.test(String(secretVersion ?? '')))
     || !value || typeof value !== 'object' || Array.isArray(value)
-    || ![expectedName, numberedName].includes(value.name) || value.state !== 'ENABLED') {
+    || value.state !== 'ENABLED' || typeof value.name !== 'string') {
     throw new Error('Evidence version receipt is invalid');
   }
-  return Object.freeze({ name: expectedName, state: 'ENABLED' });
+  const prefixes = [PROJECT, GCP_IDENTITY.projectNumber].map(
+    (project) => `projects/${project}/secrets/${secret}/versions/`,
+  );
+  const prefix = prefixes.find((candidate) => value.name.startsWith(candidate));
+  const assignedVersion = prefix === undefined ? '' : value.name.slice(prefix.length);
+  if (!NUMERIC_VERSION.test(assignedVersion)
+    || (secretVersion !== null && assignedVersion !== secretVersion)) {
+    throw new Error('Evidence version receipt is invalid');
+  }
+  return Object.freeze({
+    name: `projects/${PROJECT}/secrets/${secret}/versions/${assignedVersion}`,
+    state: 'ENABLED',
+    version: assignedVersion,
+  });
 }
 
 export function validateEvidenceVersionReceipt(value, expected) {
   normalizeEvidenceVersionReceipt(value, expected);
   return true;
+}
+
+function bindAssignedSecretVersion(argv, assignedVersion) {
+  if (!Array.isArray(argv) || argv.length !== 7
+    || !['describe', 'access'].includes(argv[2])
+    || argv[3] !== ASSIGNED_SECRET_VERSION
+    || !NUMERIC_VERSION.test(String(assignedVersion ?? ''))) {
+    throw new Error('Assigned evidence Secret version is unavailable');
+  }
+  const bound = [...argv];
+  bound[3] = assignedVersion;
+  return bound;
+}
+
+function assignedSecretVersionOperationKey(operationId) {
+  const match = /^(?:inventory|evidence)-(?:readback|payload-readback):([A-Za-z][A-Za-z0-9]*)$/u
+    .exec(String(operationId ?? ''));
+  return match?.[1] ?? null;
 }
 
 export function validateEvidencePayloadReceipt(value, expected) {
@@ -4586,7 +4623,7 @@ function releasePhaseReceiptOutputs(phase, plan, context) {
   });
   if (phase === 'inventory') return Object.freeze({
     evidenceSecretVersions: Object.freeze({
-      legacyInventory: plan.evidence.legacyInventory.secretVersion,
+      legacyInventory: context.evidenceSecretVersions.legacyInventory,
     }),
   });
   if (phase === 'acceptance') return Object.freeze({
@@ -4599,7 +4636,11 @@ function releasePhaseReceiptOutputs(phase, plan, context) {
     ]))),
   });
   if (phase === 'evidence') return Object.freeze({
-    evidenceSecretVersions: expectedEvidenceVersions(plan), outputResidueCount: 0,
+    evidenceSecretVersions: Object.freeze({
+      legacyInventory: plan.evidence.legacyInventory.secretVersion,
+      ...context.evidenceSecretVersions,
+    }),
+    outputResidueCount: 0,
   });
   if (phase === 'candidate') return Object.freeze({
     access: plan.candidateAccess,
@@ -4731,6 +4772,20 @@ function mutationRetryPolicy(reconcileKind) {
     .includes(reconcileKind) ? 'never-repeat-without-correlation' : 'retry-exact-before-once';
 }
 
+function evidencePublicationContract(value) {
+  if (!value || !DIGEST.test(String(value.artifactSha256 ?? ''))
+    || !DIGEST.test(String(value.objectSha256 ?? ''))
+    || typeof value.secret !== 'string' || !isAbsoluteFile(value.filePath)) {
+    throw new Error('Evidence publication contract is invalid');
+  }
+  return Object.freeze({
+    artifactSha256: value.artifactSha256,
+    filePath: value.filePath,
+    objectSha256: value.objectSha256,
+    secret: value.secret,
+  });
+}
+
 function mutationSpec(plan, operationId) {
   if (operationId === 'build-submit') return Object.freeze({
     buildConfigSha256: plan.buildConfigSha256,
@@ -4759,7 +4814,7 @@ function mutationSpec(plan, operationId) {
   if (operationId.startsWith('inventory-publish:')
     || operationId.startsWith('evidence-publish:')) {
     const key = operationId.slice(operationId.indexOf(':') + 1);
-    return plan.evidence[key];
+    return evidencePublicationContract(plan.evidence[key]);
   }
   if (operationId.startsWith('evidence-collect-copy:')) {
     const key = operationId.slice(operationId.indexOf(':') + 1);
@@ -4848,14 +4903,14 @@ function plannedMutationAfterObservation(plan, operationId) {
   if (operationId.startsWith('inventory-publish:')
     || operationId.startsWith('evidence-publish:')) {
     const key = operationId.slice(operationId.indexOf(':') + 1);
-    const expected = plan.evidence[key];
+    const expected = evidencePublicationContract(plan.evidence[key]);
     return Object.freeze({
       artifactSha256: expected.artifactSha256,
-      kind: 'secret-version',
-      name: `projects/${PROJECT}/secrets/${expected.secret}/versions/${expected.secretVersion}`,
+      kind: 'secret-version-assignment',
+      name: `projects/${PROJECT}/secrets/${expected.secret}`,
       objectSha256: expected.objectSha256,
       state: 'ENABLED',
-      version: expected.secretVersion,
+      versionPolicy: 'server-assigned-numeric',
     });
   }
   if (operationId.startsWith('evidence-collect-copy:')) {
@@ -4996,8 +5051,10 @@ function canonicalMutationAfterObservation(plan, operationId, observed) {
   if (operationId.startsWith('inventory-publish:')
     || operationId.startsWith('evidence-publish:')) {
     const key = operationId.slice(operationId.indexOf(':') + 1);
-    const version = plan.evidence[key];
-    const metadata = normalizeEvidenceVersionReceipt(observed?.metadata, version);
+    const version = evidencePublicationContract(plan.evidence[key]);
+    const metadata = normalizeEvidenceVersionReceipt(observed?.metadata, {
+      secret: version.secret,
+    });
     const payload = observed?.payload;
     if (!exactKeys(payload, ['artifactSha256', 'byteLength', 'objectSha256'])
       || payload.artifactSha256 !== version.artifactSha256
@@ -5008,9 +5065,10 @@ function canonicalMutationAfterObservation(plan, operationId, observed) {
     }
     const actual = Object.freeze({
       artifactSha256: version.artifactSha256,
-      kind: 'secret-version', name: metadata.name,
+      kind: 'secret-version-assignment',
+      name: `projects/${PROJECT}/secrets/${version.secret}`,
       objectSha256: version.objectSha256, state: metadata.state,
-      version: version.secretVersion,
+      versionPolicy: 'server-assigned-numeric',
     });
     if (!exact(actual, expected)) throw new Error('Secret version after observation differs from plan');
     return actual;
@@ -5222,12 +5280,16 @@ function mutationSafeResult(plan, operationId, context) {
     || operationId.startsWith('evidence-publish:')) {
     const key = operationId.slice(operationId.indexOf(':') + 1);
     const expected = plan.evidence[key];
+    const assignedVersion = context.evidenceSecretVersions[key];
+    if (!NUMERIC_VERSION.test(String(assignedVersion ?? ''))) {
+      throw new Error('Secret version safe result is unavailable');
+    }
     return Object.freeze({
       artifactSha256: expected.artifactSha256,
       kind: 'secret-version',
       name: `projects/${PROJECT}/secrets/${expected.secret}`,
       objectSha256: expected.objectSha256,
-      version: expected.secretVersion,
+      version: assignedVersion,
     });
   }
   if (operationId.startsWith('evidence-collect-copy:')) {
@@ -5359,10 +5421,10 @@ function validateSecretVersionSafeResult(safeResult, expected) {
     || safeResult.name !== `projects/${PROJECT}/secrets/${expected.secret}`
     || safeResult.artifactSha256 !== expected.artifactSha256
     || safeResult.objectSha256 !== expected.objectSha256
-    || safeResult.version !== expected.secretVersion) {
+    || !NUMERIC_VERSION.test(String(safeResult.version ?? ''))) {
     throw new Error('Checkpointed Secret version identity is invalid');
   }
-  return true;
+  return safeResult.version;
 }
 
 function validateObjectSafeResult(safeResult, output, observed) {
@@ -5390,15 +5452,41 @@ async function reconstructCheckpointedEvidenceVersion({
   if (!expected || !readback || !payloadReadback) {
     throw new Error('Checkpointed Secret version is unavailable');
   }
-  validateSecretVersionSafeResult(
+  const assignedVersion = validateSecretVersionSafeResult(
     checkpointSafeResult(records, attemptId, operationId), expected,
   );
-  const receipt = await executor([...readback.argv]);
-  validateEvidenceVersionReceipt(receipt, expected);
-  validateEvidencePayloadReceipt(await executor([...payloadReadback.argv], {
+  const receipt = await executor(bindAssignedSecretVersion(readback.argv, assignedVersion));
+  validateEvidenceVersionReceipt(receipt, { ...expected, secretVersion: assignedVersion });
+  validateEvidencePayloadReceipt(await executor(
+    bindAssignedSecretVersion(payloadReadback.argv, assignedVersion), {
     maxBuffer: 2 * 1024 * 1024, text: true,
   }), expected);
-  return expected.secretVersion;
+  return assignedVersion;
+}
+
+function buildPlanWithAssignedEvidenceVersions(input, phase, evidenceSecretVersions) {
+  if (phase === 'inventory') {
+    return buildReleasePlan({
+      ...input,
+      legacyInventory: {
+        ...input.legacyInventory,
+        secretVersion: evidenceSecretVersions.legacyInventory,
+      },
+    }, { phase: 'inventory' });
+  }
+  if (phase === 'evidence') {
+    return buildReleasePlan({
+      ...input,
+      evidence: Object.fromEntries(Object.entries(input.evidence).map(([key, value]) => [
+        key,
+        key === 'legacyInventory' ? value : {
+          ...value,
+          secretVersion: evidenceSecretVersions[key],
+        },
+      ])),
+    }, { phase: 'candidate' });
+  }
+  throw new Error('Assigned evidence Secret version phase is invalid');
 }
 
 async function revalidateCheckpointedJobDeployment({
@@ -5491,17 +5579,7 @@ function journalRestartObservation(member, plan) {
     };
   }
   if (id.startsWith('inventory-publish:') || id.startsWith('evidence-publish:')) {
-    const key = id.slice(id.indexOf(':') + 1);
-    const expected = plan.evidence[key];
-    const definition = EVIDENCE_DEFINITIONS[key];
-    if (!expected || !definition) return { mode: 'blocked' };
-    return {
-      mode: 'read',
-      argv: [
-        'secrets', 'versions', 'describe', expected.secretVersion,
-        `--secret=${definition.secret}`, `--project=${PROJECT}`, '--format=json',
-      ],
-    };
+    return { mode: 'blocked' };
   }
   if (id.startsWith('evidence-collect-copy:')) return { mode: 'collected-local' };
   if (id.startsWith('evidence-output-delete:')) {
@@ -7982,22 +8060,53 @@ export async function runGcpRelease({
       });
     }
   }
+  const evidenceSecretVersions = {};
+  let executor;
+  let receiptValidationPlan = plan;
+  if (hasOpenJournalAttempt && resumeOperationId === null
+    && ['inventory', 'evidence'].includes(selection.phase)) {
+    try {
+      executor = execute ?? createReleaseGcloudExecutor({ environment });
+      const phaseKeys = selection.phase === 'inventory'
+        ? ['legacyInventory']
+        : Object.keys(plan.evidence).filter((key) => key !== 'legacyInventory');
+      for (const key of phaseKeys) {
+        evidenceSecretVersions[key] = await reconstructCheckpointedEvidenceVersion({
+          executor,
+          plan,
+          records: openJournalRecords,
+          attemptId: stateStore.attemptId,
+          key,
+          phase: selection.phase,
+        });
+      }
+      receiptValidationPlan = buildPlanWithAssignedEvidenceVersions(
+        input, selection.phase, evidenceSecretVersions,
+      );
+    } catch {
+      await stateStore?.close().catch(() => undefined);
+      return publish(writeOutput, 1, {
+        status: 'failed', code: 'RELEASE_PHASE_FAILED', mutationPerformed: false,
+        releaseSha: plan.releaseSha, phase: selection.phase, completed: [],
+      });
+    }
+  }
   let reconstructCheckpointedPhase = false;
   if (hasOpenJournalAttempt && resumeOperationId === null && receiptBackedPhase) {
     let phaseReceipt;
     try {
       phaseReceipt = typeof loadPhaseReceipt === 'function'
-        ? await loadPhaseReceipt(plan, selection.phase, priorReceipts, {
+        ? await loadPhaseReceipt(receiptValidationPlan, selection.phase, priorReceipts, {
           attemptId: stateStore.attemptId,
           records: stateStore.records,
         }) : null;
       if (phaseReceipt !== null) {
         if (ACTION_RECEIPT_PHASES.has(selection.phase)) {
           validateReleaseActionReceipt(
-            phaseReceipt, selection.phase, plan, priorReceipts, stateStore,
+            phaseReceipt, selection.phase, receiptValidationPlan, priorReceipts, stateStore,
           );
         } else {
-          validateReleaseReceiptChain([...priorReceipts, phaseReceipt], plan, {
+          validateReleaseReceiptChain([...priorReceipts, phaseReceipt], receiptValidationPlan, {
             through: selection.phase,
             candidatePrivacyAnchor: receiptChainAuthorities.get(priorReceipts)
               ?? priorReceipts.candidatePrivacyAnchor,
@@ -8080,9 +8189,8 @@ export async function runGcpRelease({
       releaseSha: plan.releaseSha, phase: selection.phase, completed: [],
     });
   }
-  let executor;
   try {
-    executor = readinessExecutor ?? mobileExecutor ?? workloadPrivacyExecutor ?? execute ?? (selected.length > 0 || task8Attestations.workload !== undefined
+    executor ??= readinessExecutor ?? mobileExecutor ?? workloadPrivacyExecutor ?? execute ?? (selected.length > 0 || task8Attestations.workload !== undefined
       ? createReleaseGcloudExecutor({ environment })
       : async () => { throw new Error('No control-plane operation is planned'); });
   } catch {
@@ -8184,7 +8292,6 @@ export async function runGcpRelease({
   }
   const completed = [];
   let evidencePublicationPayloads = Object.freeze({});
-  const evidenceSecretVersions = {};
   const evidenceVersionReadbacks = new Map();
   const collectedEvidence = {};
   const collectedObjectReceipts = new Map();
@@ -8237,6 +8344,27 @@ export async function runGcpRelease({
     }
   }
   try {
+    if (hasOpenJournalAttempt && !reconstructCheckpointedPhase
+      && ['inventory', 'evidence'].includes(selection.phase)) {
+      const phaseKeys = selection.phase === 'inventory'
+        ? ['legacyInventory']
+        : Object.keys(plan.evidence).filter((key) => key !== 'legacyInventory');
+      for (const key of phaseKeys) {
+        const operationId = `${selection.phase}-publish:${key}`;
+        const checkpointed = openJournalRecords.some((record) => (
+          record.recordType === 'checkpoint' && record.operationId === operationId
+        ));
+        if (!checkpointed) continue;
+        evidenceSecretVersions[key] = await reconstructCheckpointedEvidenceVersion({
+          executor,
+          plan,
+          records: openJournalRecords,
+          attemptId: stateStore.attemptId,
+          key,
+          phase: selection.phase,
+        });
+      }
+    }
     if (reconstructCheckpointedPhase) {
       const checkpoint = openJournalRecords.at(-1);
       if (ACTION_RECEIPT_PHASES.has(selection.phase)) {
@@ -8307,25 +8435,29 @@ export async function runGcpRelease({
           });
         }
       } else if (selection.phase === 'inventory' && checkpoint?.recordType === 'checkpoint') {
-        evidenceSecretVersions.legacyInventory = await reconstructCheckpointedEvidenceVersion({
-          executor,
-          plan,
-          records: openJournalRecords,
-          attemptId: stateStore.attemptId,
-          key: 'legacyInventory',
-          phase: 'inventory',
-        });
-      } else if (selection.phase === 'evidence' && checkpoint?.recordType === 'checkpoint') {
-        for (const key of Object.keys(plan.evidence)) {
-          if (key === 'legacyInventory') continue;
-          evidenceSecretVersions[key] = await reconstructCheckpointedEvidenceVersion({
+        if (!NUMERIC_VERSION.test(String(evidenceSecretVersions.legacyInventory ?? ''))) {
+          evidenceSecretVersions.legacyInventory = await reconstructCheckpointedEvidenceVersion({
             executor,
             plan,
             records: openJournalRecords,
             attemptId: stateStore.attemptId,
-            key,
-            phase: 'evidence',
+            key: 'legacyInventory',
+            phase: 'inventory',
           });
+        }
+      } else if (selection.phase === 'evidence' && checkpoint?.recordType === 'checkpoint') {
+        for (const key of Object.keys(plan.evidence)) {
+          if (key === 'legacyInventory') continue;
+          if (!NUMERIC_VERSION.test(String(evidenceSecretVersions[key] ?? ''))) {
+            evidenceSecretVersions[key] = await reconstructCheckpointedEvidenceVersion({
+              executor,
+              plan,
+              records: openJournalRecords,
+              attemptId: stateStore.attemptId,
+              key,
+              phase: 'evidence',
+            });
+          }
         }
         for (const key of Object.keys(plan.acceptanceOutputs)) {
           const operationId = `evidence-output-delete:${key}`;
@@ -8741,6 +8873,7 @@ export async function runGcpRelease({
           collectedEvidence,
           collectedObjectReceipts,
           candidateReadbacks,
+          evidenceSecretVersions,
           migrationExecutionReceipt,
           promotionStableReadbacks,
         }));
@@ -8799,6 +8932,7 @@ export async function runGcpRelease({
       let canonicalServiceAbsence = false;
       const restartObservation = restartingMutation
         ? journalRestartObservation(member, plan) : null;
+      const assignedVersionKey = assignedSecretVersionOperationKey(member.id);
       const operationArgv = member.id === 'build-readback'
         ? [
           'builds', 'describe', buildReceipt?.buildId,
@@ -8815,7 +8949,11 @@ export async function runGcpRelease({
               acceptanceExecutionNames[member.id.slice(0, -'-execution-readback'.length)],
               `--project=${PROJECT}`, `--region=${REGION}`, '--format=json',
             ]
-            : member.argv));
+            : (assignedVersionKey === null
+              ? member.argv
+              : bindAssignedSecretVersion(
+                member.argv, evidenceSecretVersions[assignedVersionKey],
+              ))));
       const publicationKey = member.id.startsWith('inventory-publish:')
         || member.id.startsWith('evidence-publish:')
         ? member.id.slice(member.id.indexOf(':') + 1) : null;
@@ -9197,6 +9335,7 @@ export async function runGcpRelease({
               collectedEvidence,
               collectedObjectReceipts,
               candidateReadbacks,
+              evidenceSecretVersions,
               migrationExecutionReceipt,
               promotionStableReadbacks,
             }));
@@ -9301,13 +9440,15 @@ export async function runGcpRelease({
       if (/^(?:inventory|evidence)-(?:publish|readback):/.test(member.id)) {
         const key = member.id.slice(member.id.indexOf(':') + 1);
         const expected = plan.evidence[key];
-        receipt = normalizeEvidenceVersionReceipt(receipt, expected);
         if (member.id.includes('-publish:')) {
-          evidenceSecretVersions[key] = expected.secretVersion;
+          receipt = normalizeEvidenceVersionReceipt(receipt, { secret: expected.secret });
+          evidenceSecretVersions[key] = receipt.version;
         } else {
-          if (evidenceSecretVersions[key] !== expected.secretVersion) {
-            throw new Error('Evidence version readback is not publication-bound');
-          }
+          const assignedVersion = evidenceSecretVersions[key];
+          receipt = normalizeEvidenceVersionReceipt(receipt, {
+            secret: expected.secret, secretVersion: assignedVersion,
+          });
+          if (receipt.version !== assignedVersion) throw new Error('Evidence version readback is not publication-bound');
           evidenceVersionReadbacks.set(key, receipt);
         }
       }
@@ -9414,6 +9555,11 @@ export async function runGcpRelease({
     });
 
   }
+  if (selection.phase === 'inventory') {
+    plan = buildPlanWithAssignedEvidenceVersions(input, selection.phase, evidenceSecretVersions);
+  } else if (selection.phase === 'evidence') {
+    plan = buildPlanWithAssignedEvidenceVersions(input, selection.phase, evidenceSecretVersions);
+  }
   const publicReport = {
     status: 'phase-complete', code: 'GCP_RELEASE_PHASE_COMPLETE', mutationPerformed: mutationAttempted,
     releaseSha: plan.releaseSha, phase: selection.phase, completed,
@@ -9449,6 +9595,7 @@ export async function runGcpRelease({
              acceptanceExecutionReceipts,
              collectedEvidence,
              candidatePrivacyReference,
+             evidenceSecretVersions,
              workloadExecution,
           },
           priorReceipts,
